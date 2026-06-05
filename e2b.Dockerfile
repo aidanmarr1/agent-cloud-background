@@ -36,7 +36,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
   && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash user \
+RUN id -u user >/dev/null 2>&1 || useradd -m -s /bin/bash user \
   && mkdir -p /home/user/agent-workspaces \
   && chown -R user:user /home/user
 

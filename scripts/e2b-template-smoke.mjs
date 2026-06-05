@@ -97,7 +97,7 @@ try {
     'test -f e2b-smoke.txt',
   ].join('\n')
 
-  const commandResult = await executeCommandInE2B(conversationId, `bash -lc ${JSON.stringify(command)}`)
+  const commandResult = await executeCommandInE2B(conversationId, command)
   if (commandResult.exitCode !== 0) {
     throw new Error(`E2B template command smoke failed: ${commandResult.stderr || commandResult.stdout || `exit ${commandResult.exitCode}`}`)
   }

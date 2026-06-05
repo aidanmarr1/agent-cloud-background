@@ -472,7 +472,7 @@ assert.match(packageJson, /"cloud:worker-shutdown-smoke":\s*"node scripts\/cloud
 assert.match(packageJson, /"cloud:worker-ready":\s*"node scripts\/prod-background-worker-ready\.mjs"/, 'package scripts must include the deployed worker readiness command')
 assert.match(packageJson, /"cloud:worker-smoke":\s*"node scripts\/prod-background-worker-smoke\.mjs"/, 'package scripts must include the deployed worker reconnect smoke command')
 assert.match(packageJson, /"cloud:worker-smoke:local":\s*"node scripts\/local-background-worker-smoke\.mjs"/, 'package scripts must include the local isolated-queue worker reconnect smoke command')
-assert.match(packageJson, /"e2b:template:build":\s*"npx @e2b\/cli template build --dockerfile e2b\.Dockerfile --name agent-cloud-browser"/, 'package scripts must include an E2B template build command')
+assert.match(packageJson, /"e2b:template:build":\s*"node scripts\/e2b-template-build-v2\.mjs --dockerfile e2b\.Dockerfile --name agent-cloud-browser"/, 'package scripts must include an E2B v2 template build command')
 assert.match(packageJson, /"engines":\s*\{\s*"node":\s*"22\.x"\s*\}/, 'package must pin Node 22 for cloud builds')
 assert.equal(nodeVersion.trim(), '22', '.node-version must pin Node 22 for cloud builds')
 assert.match(renderBlueprint, /type:\s*web[\s\S]*name:\s*agent-web/, 'Render blueprint must define the web service')

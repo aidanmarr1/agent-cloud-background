@@ -1,10 +1,14 @@
 import { constants } from 'fs'
 import { mkdir, open, rm } from 'fs/promises'
+import { createRequire } from 'module'
 import { dirname, join, relative, isAbsolute, basename, posix } from 'path'
 import type { FileResult } from '@/types'
 import { getTursoSetupStatus, tursoExecute } from '@/lib/db/turso'
 
-type E2BSandboxInstance = Awaited<ReturnType<typeof import('e2b').Sandbox.create>>
+const require = createRequire(import.meta.url)
+const { Sandbox } = require('e2b') as typeof import('e2b')
+
+type E2BSandboxInstance = Awaited<ReturnType<typeof Sandbox.create>>
 
 const SAFE_TASK_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const DEFAULT_E2B_TIMEOUT_MS = 60 * 60 * 1000
@@ -174,13 +178,16 @@ async function createSandbox(conversationId: string): Promise<E2BSandboxInstance
     throw new Error('E2B is not configured. Missing: E2B_API_KEY')
   }
 
-  const { Sandbox } = await import('e2b')
   const sandbox = await Sandbox.create({
     template: envString('E2B_TEMPLATE_ID') || undefined,
     apiKey: envString('E2B_API_KEY'),
     timeoutMs: envPositiveInt('AGENT_E2B_SANDBOX_TIMEOUT_MS', DEFAULT_E2B_TIMEOUT_MS),
     allowInternetAccess: envBool('AGENT_E2B_ALLOW_INTERNET', true),
     secure: true,
+    network: {
+      allowPublicTraffic: true,
+      maskRequestHost: 'localhost:${PORT}',
+    },
     metadata: {
       app: 'agent',
       conversationId,
@@ -193,7 +200,6 @@ async function createSandbox(conversationId: string): Promise<E2BSandboxInstance
 
 async function connectSandbox(conversationId: string, sandboxId: string): Promise<E2BSandboxInstance | null> {
   try {
-    const { Sandbox } = await import('e2b')
     const sandbox = await Sandbox.connect(sandboxId, {
       apiKey: envString('E2B_API_KEY'),
       timeoutMs: envPositiveInt('AGENT_E2B_SANDBOX_TIMEOUT_MS', DEFAULT_E2B_TIMEOUT_MS),
@@ -249,7 +255,6 @@ export async function resetE2BSandbox(conversationId: string): Promise<void> {
 
   if (existing && envBool('AGENT_E2B_KILL_ON_RESET', true)) {
     try {
-      const { Sandbox } = await import('e2b')
       await Sandbox.kill(existing, { apiKey: envString('E2B_API_KEY') })
     } catch {
       // The sandbox may already be gone or paused past its retention window.
@@ -265,7 +270,6 @@ export async function pauseE2BSandbox(conversationId: string): Promise<void> {
   if (!sandboxId || !envBool('AGENT_E2B_PAUSE_ON_TASK_END', true)) return
 
   try {
-    const { Sandbox } = await import('e2b')
     await Sandbox.pause(sandboxId, { apiKey: envString('E2B_API_KEY') })
     e2bCache.delete(safeId)
   } catch (error) {
@@ -285,7 +289,6 @@ export async function destroyE2BSandbox(conversationId: string): Promise<void> {
 
   if (!sandboxId) return
   try {
-    const { Sandbox } = await import('e2b')
     await Sandbox.kill(sandboxId, { apiKey: envString('E2B_API_KEY') })
   } catch {
     // Best effort cleanup.
@@ -646,6 +649,7 @@ nohup "$CHROME" \
   --disable-background-timer-throttling \
   --disable-backgrounding-occluded-windows \
   --disable-renderer-backgrounding \
+  --remote-allow-origins=* \
   --remote-debugging-address=0.0.0.0 \
   --remote-debugging-port=${port} \
   --user-data-dir=${shellQuote(profileDir)} \
@@ -654,7 +658,7 @@ nohup "$CHROME" \
 `
 
   try {
-    await sandbox.commands.run(`bash -lc ${JSON.stringify(script)}`, {
+    await sandbox.commands.run(script, {
       cwd: root,
       timeoutMs: envPositiveInt('AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS', 30_000),
     })
