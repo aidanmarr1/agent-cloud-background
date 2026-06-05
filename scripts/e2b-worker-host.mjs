@@ -48,6 +48,12 @@ function optionalEnv(name) {
   return value ? { [name]: value } : {}
 }
 
+function envFileContent(envs) {
+  return `${Object.entries(envs)
+    .map(([key, value]) => `${key}=${String(value).replace(/\r?\n/g, '')}`)
+    .join('\n')}\n`
+}
+
 function workerEnvs(workerId) {
   return {
     ...optionalEnv('AUTH_SECRET'),
@@ -55,6 +61,7 @@ function workerEnvs(workerId) {
     TURSO_DATABASE_URL: requireEnv('TURSO_DATABASE_URL', 'durable task queue'),
     TURSO_AUTH_TOKEN: requireEnv('TURSO_AUTH_TOKEN', 'durable task queue auth'),
     OPENROUTER_API_KEY: requireEnv('OPENROUTER_API_KEY', 'task LLM calls'),
+    ...optionalEnv('BRAVE_SEARCH_API_KEY'),
     OPENROUTER_MODEL: envOrDefault('OPENROUTER_MODEL', 'google/gemini-2.5-flash-lite'),
     OPENROUTER_REASONING_EFFORT: envOrDefault('OPENROUTER_REASONING_EFFORT', 'minimal'),
     OPENROUTER_REASONING_EXCLUDE: envOrDefault('OPENROUTER_REASONING_EXCLUDE', 'true'),
@@ -113,6 +120,7 @@ const sandbox = await Sandbox.create({
 })
 
 try {
+  const envs = workerEnvs(workerId)
   const setupScript = `
 set -e
 rm -rf ${shellQuote(workdir)}
@@ -124,10 +132,14 @@ npm ci
   await sandbox.commands.run(setupScript, {
     timeoutMs: installTimeoutMs,
   })
+  await sandbox.files.write(`${workdir}/.env.local`, envFileContent(envs))
 
   const startScript = `
 set -e
 cd ${shellQuote(workdir)}
+set -a
+. ./.env.local
+set +a
 nohup npm run worker:cloud > /tmp/agent-worker.log 2>&1 < /dev/null &
 echo "$!" > /tmp/agent-worker.pid
 sleep 10
@@ -141,7 +153,7 @@ tail -80 /tmp/agent-worker.log || true
 
   const started = await sandbox.commands.run(startScript, {
     timeoutMs: 60_000,
-    envs: workerEnvs(workerId),
+    envs,
   })
 
   console.log(JSON.stringify({

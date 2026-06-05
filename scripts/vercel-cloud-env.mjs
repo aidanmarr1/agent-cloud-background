@@ -23,6 +23,7 @@ const CLOUD_ENV = [
   { name: 'TURSO_DATABASE_URL', source: 'local', required: true },
   { name: 'TURSO_AUTH_TOKEN', source: 'local', required: true },
   { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
+  { name: 'BRAVE_SEARCH_API_KEY', source: 'local', required: false },
   { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash-lite' },
   { name: 'OPENROUTER_REASONING_EFFORT', value: process.env.OPENROUTER_REASONING_EFFORT || 'minimal' },
   { name: 'OPENROUTER_REASONING_EXCLUDE', value: process.env.OPENROUTER_REASONING_EXCLUDE || 'true' },

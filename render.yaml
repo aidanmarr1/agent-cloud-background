@@ -27,6 +27,8 @@ services:
         sync: false
       - key: OPENROUTER_API_KEY
         sync: false
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
       - key: OPENROUTER_MODEL
         value: google/gemini-2.5-flash-lite
       - key: OPENROUTER_REASONING_EFFORT
@@ -100,6 +102,8 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: OPENROUTER_API_KEY
+        sync: false
+      - key: BRAVE_SEARCH_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
         value: google/gemini-2.5-flash-lite
