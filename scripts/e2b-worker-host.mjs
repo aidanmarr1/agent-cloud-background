@@ -62,7 +62,7 @@ function workerEnvs(workerId) {
     TURSO_AUTH_TOKEN: requireEnv('TURSO_AUTH_TOKEN', 'durable task queue auth'),
     OPENROUTER_API_KEY: requireEnv('OPENROUTER_API_KEY', 'task LLM calls'),
     ...optionalEnv('BRAVE_SEARCH_API_KEY'),
-    OPENROUTER_MODEL: envOrDefault('OPENROUTER_MODEL', 'google/gemini-2.5-flash-lite'),
+    OPENROUTER_MODEL: envOrDefault('OPENROUTER_MODEL', 'openai/gpt-5.4-mini'),
     OPENROUTER_REASONING_EFFORT: envOrDefault('OPENROUTER_REASONING_EFFORT', 'minimal'),
     OPENROUTER_REASONING_EXCLUDE: envOrDefault('OPENROUTER_REASONING_EXCLUDE', 'true'),
     AGENT_STORAGE_DRIVER: 'turso',

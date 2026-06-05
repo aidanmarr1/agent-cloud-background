@@ -30,7 +30,7 @@ services:
       - key: BRAVE_SEARCH_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: google/gemini-2.5-flash-lite
+        value: openai/gpt-5.4-mini
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -106,7 +106,7 @@ services:
       - key: BRAVE_SEARCH_API_KEY
         sync: false
       - key: OPENROUTER_MODEL
-        value: google/gemini-2.5-flash-lite
+        value: openai/gpt-5.4-mini
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE

@@ -33,7 +33,7 @@ export const TASK_START_CREDITS = 0
 export const ACTIVE_CREDITS_PER_MINUTE = 0
 
 // Public provider rates used to keep in-app credits anchored to real spend.
-// Current route: google/gemini-2.5-flash-lite on OpenRouter.
+// Current route: openai/gpt-5.4-mini on OpenRouter.
 export const MODEL_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.inputUsdPer1M
 export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens

@@ -122,7 +122,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'NODE_ENV', 'production')
   requireValue(service, 'AUTH_TRUST_HOST', 'true')
   requireValue(service, 'AGENT_TRUST_PROXY_HEADERS', 'true')
-  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-2.5-flash-lite')
+  requireValue(service, 'OPENROUTER_MODEL', 'openai/gpt-5.4-mini')
   requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
   requireValue(service, 'AGENT_STORAGE_DRIVER', 'turso')
