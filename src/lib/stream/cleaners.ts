@@ -190,6 +190,7 @@ const PLAN_LEAK_NARRATION_PATTERNS = [
   /\b(?:detailing these amendments|status of legal reviews|provide a comprehensive answer|synthesize all gathered information|compile findings|official government publications|reputable legal analysis sites)\b/i,
 ]
 const HIGH_LEVEL_NEXT_NARRATION_PATTERN = /^(?:(?:next,\s*)?i(?:'|’)?ll|next,\s*i will|i(?:'|’)?ll now|i will now(?:\s+proceed to)?|will(?:\s+now\s+proceed to)?|will|proceeding to|moving forward with|next step:?)\s+(?:analyze|compare|verify|synthesize|review|assess|evaluate|connect|check|look at|extract|consolidate|prepare|gather|develop|explore|organize|compile|finalize|continue|proceed|enter|answer|submit|inspect|open|outline|add|refine|focus|run|update|rebuild|apply|correct|gathering|developing|exploring|organizing|compiling|finalizing|verifying|outlining|adding|refining|focusing|running|updating|rebuilding|applying|correcting)\b/i
+const PERMISSION_TO_CONTINUE_PATTERN = /\bif\s+you\s+(?:want|would\s+like|need|prefer),?\s+i\s+(?:can|could|will|would)\s+(?:continue|keep\s+going|go\s+on|proceed|move\s+on|dig\s+deeper|look\s+further|research\s+more|expand|finish)\b/i
 const MAX_NARRATION_SENTENCE_LENGTH = 300
 const MAX_NARRATION_WORDS = 45
 const MIN_NARRATION_WORDS = 12
@@ -207,6 +208,7 @@ const OPERATIONAL_NARRATION_PATTERNS = [
   /^i have (?:initial\s+)?(?:findings|research|sources|images|enough)\b/i,
   /^now (?:i|let me)\b/i,
   /^continuing with\b/i,
+  PERMISSION_TO_CONTINUE_PATTERN,
   /^i(?:['’]ll| will) (?:continue|move on|proceed|switch|try|use)\b/i,
   /^i(?:['’]ll| will| am going to) .*\bnow\b.*\b(?:files?|website|app|page|code|deliverable)\b/i,
 ]
@@ -384,6 +386,7 @@ export function isIntentionNarration(text: string): boolean {
   if (trimmed.length < 8) return true
   if (isPhaseLeakNarration(trimmed)) return true
   if (isPlanLeakNarration(trimmed)) return true
+  if (PERMISSION_TO_CONTINUE_PATTERN.test(trimmed)) return true
   if (/^i have (?:searched|looked up)\b/i.test(trimmed)) return true
   // Only filter pure meta-commentary with no factual substance
   const metaPattern = /^(the next step is|my approach is|the plan is|step \d|moving to step|advancing to|let me think|okay so|alright|so basically|here goes|now then)/i

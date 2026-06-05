@@ -7,7 +7,7 @@ import { build } from 'esbuild'
 const root = process.cwd()
 
 async function assertSourceContracts() {
-  const [dispatcher, prompts, taskGroupView, actionFeed, taskSlice, globals, computerPanel, uiStore, policyEngine, streamProcessor, config, toolPipeline, agentLoop] = await Promise.all([
+  const [dispatcher, prompts, taskGroupView, actionFeed, taskSlice, globals, computerPanel, uiStore, policyEngine, streamProcessor, config, toolPipeline, agentLoop, cleaners] = await Promise.all([
     readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
     readFile(join(root, 'src/lib/prompts.ts'), 'utf8'),
     readFile(join(root, 'src/components/chat/TaskGroupView.tsx'), 'utf8'),
@@ -21,6 +21,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/stream/cleaners.ts'), 'utf8'),
   ])
 
   assert.match(dispatcher, /MIN_TOOLS_BETWEEN_NARRATION_FLUSHES\s*=\s*3/, 'narration must not flush before 3 visible actions')
@@ -79,6 +80,9 @@ async function assertSourceContracts() {
   assert.match(prompts, /before <next_step\/> if the current phase is complete/, 'agent prompt must allow narration at the end of a phase before next_step')
   assert.match(prompts, /Phase-end narration is allowed and expected/, 'agent prompt must not wait for an extra tool call at phase end')
   assert.match(prompts, /vary the opening verb and sentence shape/, 'agent prompt must require varied progress narration openings')
+  assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
+  assert.match(agentLoop, /Never ask permission to continue or write opt-in handoffs/, 'runtime narration nudges must ban permission-to-continue progress text')
+  assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
   assert.match(taskGroupView, /task-thread-body/, 'task group view must render a subtle timeline body')
   assert.match(taskGroupView, /InlineThinkingIndicator/, 'task group view must show inline thinking while the model is deciding after visible actions')
   assert.match(taskGroupView, /streamingStatus === 'thinking'/, 'inline thinking must be tied to the real streaming thinking state')
@@ -111,6 +115,8 @@ export function runNarrationSmoke() {
   assert.equal(sanitizeNarrationText('artificialanalysis.ai shows for more details including relating to our methodology, see our FAQs.'), null)
   assert.equal(sanitizeNarrationText('I have sufficient evidence for Step 1.'), null)
   assert.equal(sanitizeNarrationText('I have examined the Australian Framework for Generative AI in Schools, which establishes a national approach to the ethical and responsible The framework emphasises that AI should be used to benefit students.'), null)
+  assert.equal(sanitizeNarrationText('If you want, I can continue with the next layer on capabilities and pricing.', { requireSignal: true }), null)
+  assert.equal(stripToolActionNarration('Manus AI is positioned as a hands-on agent for business deliverables. If you want, I can continue with capabilities and pricing.'), 'Manus AI is positioned as a hands-on agent for business deliverables.')
   assert.equal(sanitizeNarrationText('Review the College Board I have identified significant institutional and educator concerns regarding AI in high schools.'), null)
   assert.equal(sanitizeNarrationText('Access the Frontiers systematic review to I have identified key socio-ethical risks associated with AI in education.'), null)
   assert.equal(sanitizeNarrationText('gather evidence on those issues.'), null)
