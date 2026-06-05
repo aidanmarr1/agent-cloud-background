@@ -18,6 +18,9 @@ const TRUSTED_DOMAINS = new Set([
   'developer.mozilla.org', 'docs.python.org', 'docs.microsoft.com',
 ])
 
+const WEB_SEARCH_REQUEST_TIMEOUT_MS = 6500
+const WEB_SEARCH_RESULT_COUNT = 5
+
 const HTML_ENTITIES: Record<string, string> = {
   amp: '&',
   apos: "'",
@@ -94,11 +97,11 @@ export async function webSearch(query: string): Promise<SearchResult[]> {
   }
 
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10000)
+  const timer = setTimeout(() => controller.abort(), WEB_SEARCH_REQUEST_TIMEOUT_MS)
 
   try {
     const res = await fetch(
-      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=8`,
+      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${WEB_SEARCH_RESULT_COUNT}`,
       {
         headers: {
           Accept: 'application/json',

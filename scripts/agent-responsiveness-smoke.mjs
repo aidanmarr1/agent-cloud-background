@@ -24,7 +24,7 @@ assert.match(config, /checkIntervalMs:\s*150/, 'timeout watchdog must check ofte
 assert.match(config, /export const STREAM_REQUEST_TIMEOUT_MS = 150_000/, 'streaming model requests must tolerate normal provider latency without false task timeouts')
 assert.match(config, /export const STREAM_RETRY_MAX_DELAY_MS = 4_000/, 'stream retries must not sleep for provider-scale retry windows')
 assert.match(config, /export const STREAM_MAX_RETRIES = 2/, 'agent streaming retries must stay bounded')
-assert.match(config, /export const WEB_SEARCH_TOOL_TIMEOUT_MS = .*12_000/, 'web search needs its own bounded timeout')
+assert.match(config, /export const WEB_SEARCH_TOOL_TIMEOUT_MS = .*8_000/, 'web search needs its own tighter bounded timeout')
 assert.match(config, /export const BROWSER_TOOL_TIMEOUT_MS = .*12_000/, 'browser actions need their own bounded timeout')
 assert.match(config, /export const DOCUMENT_TOOL_TIMEOUT_MS = .*12_000/, 'document reads need their own bounded timeout')
 assert.match(config, /export const FILE_WRITE_TOOL_TIMEOUT_MS = .*18_000/, 'file writes must not wait for multi-minute stalls')
@@ -35,7 +35,7 @@ assert.match(toolPipeline, /toolName\.startsWith\('browser_'\) \|\| toolName ===
 assert.match(toolPipeline, /read_document[\s\S]*http_request[\s\S]*DOCUMENT_TOOL_TIMEOUT_MS/, 'document-like tools must use the document timeout')
 
 assert.match(agentLoop, /requestTimeoutMs,/, 'agent loop must pass the computed streaming request timeout into the LLM client')
-assert.match(agentLoop, /state\.deadlineFinalizationStarted[\s\S]*?agentRunRemainingMs\(state\) - 10_000/, 'deadline finalization must shorten model request timeout to fit remaining platform time')
+assert.match(agentLoop, /state\.deadlineFinalizationStarted[\s\S]*?agentRunRemainingMs\(state\) - AGENT_DEADLINE_HARD_STOP_BUFFER_MS/, 'deadline finalization must shorten model request timeout to fit remaining platform time')
 assert.match(agentLoop, /retryMaxAttempts:\s*STREAM_MAX_RETRIES/, 'agent loop must pass bounded retry count into the LLM client')
 assert.match(agentLoop, /retryMaxDelayMs:\s*STREAM_RETRY_MAX_DELAY_MS/, 'agent loop must pass retry delay cap into the LLM client')
 assert.match(agentLoop, /Math\.min\(Math\.max\(retryAfterMs,\s*baseBackoff\),\s*STREAM_RETRY_MAX_DELAY_MS\)/, 'rate-limit retry-after values must be capped for responsiveness')

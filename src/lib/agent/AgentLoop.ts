@@ -1227,10 +1227,19 @@ function cleanStartupSearchText(value: string, fallback: string): string {
   return (cleaned || fallback || 'the topic').slice(0, 180)
 }
 
+function expandStartupSearchQuery(query: string): string {
+  const normalized = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+  if (normalized === 'ai') return 'artificial intelligence AI overview current developments credible sources'
+  if (normalized === 'ml') return 'machine learning overview current developments credible sources'
+  const words = normalized.split(/\s+/).filter(Boolean)
+  if (words.length === 1 && normalized.length <= 4) return `${query} overview credible sources`
+  return query
+}
+
 function startupSearchQuery(state: AgentStateData): string {
   const request = state.originalUserRequest || ''
   const step = currentStepText(state)
-  return cleanStartupSearchText(request || step, step || request)
+  return expandStartupSearchQuery(cleanStartupSearchText(request || step, step || request))
 }
 
 function startupSearchActionLabel(query: string): string {
