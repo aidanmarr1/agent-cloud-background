@@ -401,6 +401,7 @@ export interface AgentLoopOptions {
   signal?: AbortSignal
   creditRunId?: string
   userId?: string
+  skipStartupAcknowledgement?: boolean
   diagnostics?: (event: { type: string; data: Record<string, unknown> }) => void
 }
 
@@ -1474,7 +1475,7 @@ export class AgentLoop {
     const assertPlannerCreditRunway = async () => {
       if (this.options.userId) await assertServerCreditsAvailable(this.options.userId)
     }
-    const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, customInstructions, recordPlannerUsage, assertPlannerCreditRunway)
+    const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, customInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
 
     planManager.setStateRef(state)
     planManager.startPlanCall()

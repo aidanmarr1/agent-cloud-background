@@ -112,6 +112,7 @@ if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowe
 }
 
 requireRecommendedTrue('AGENT_E2B_PAUSE_ON_TASK_END', 'idle E2B sandbox cost bounded')
+requireRecommendedTrue('AGENT_E2B_WARM_POOL_ENABLED', 'first task can adopt an already-ready sandbox and browser')
 requireRecommendedTrue('AGENT_E2B_VERIFY_ON_WORKER_STARTUP', 'invalid E2B keys or templates failing before worker heartbeat')
 requireRecommendedTrue('AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', 'Chromium browser template failures surfacing before worker heartbeat')
 

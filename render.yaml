@@ -77,6 +77,8 @@ services:
         value: "30000"
       - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
         value: "30000"
+      - key: AGENT_E2B_WARM_POOL_ENABLED
+        value: "true"
 
   - type: worker
     name: agent-worker
@@ -122,7 +124,7 @@ services:
       - key: AGENT_TASK_WORKER_ID
         value: render-worker-1
       - key: AGENT_TASK_WORKER_POLL_MS
-        value: "1500"
+        value: "250"
       - key: AGENT_TASK_WORKER_HEARTBEAT_MS
         value: "15000"
       - key: AGENT_TASK_WORKER_STALE_MS
@@ -157,6 +159,8 @@ services:
         value: "30000"
       - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
         value: "30000"
+      - key: AGENT_E2B_WARM_POOL_ENABLED
+        value: "true"
       - key: AGENT_E2B_VERIFY_ON_WORKER_STARTUP
         value: "true"
       - key: AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP

@@ -73,7 +73,7 @@ async function assertSourceContracts() {
   assert.match(prompts, /never fewer than 15 words/, 'agent prompt must forbid too-short progress narration')
   assert.match(prompts, /1-2 complete sentences/, 'agent prompt must define short paragraph cadence')
   assert.match(prompts, /result-first/, 'agent prompt must request result-first evidence narration')
-  assert.match(prompts, /At exactly 3 visible actions, naturally start the next response/, 'agent prompt must make narration happen in the normal next model turn')
+  assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'agent prompt must make narration happen in the normal next model turn')
   assert.match(prompts, /standing cadence for every phase/, 'agent prompt must frame narration as a per-phase cadence, not only research narration')
   assert.match(prompts, /narration is the default first visible text/, 'agent prompt must make narration the preferred first visible text at the 3-action window')
   assert.match(prompts, /before <next_step\/> if the current phase is complete/, 'agent prompt must allow narration at the end of a phase before next_step')

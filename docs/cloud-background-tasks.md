@@ -79,10 +79,12 @@ Optional worker tuning:
 
 ```bash
 AGENT_TASK_WORKER_ID=production-worker-1
-AGENT_TASK_WORKER_POLL_MS=1500
+AGENT_TASK_WORKER_POLL_MS=250
 ```
 
 If you set `AGENT_TASK_WORKER_ID` manually, keep it unique per queue. Leaving it blank is fine; the worker generates a unique ID at startup.
+
+Use the default `AGENT_E2B_WARM_POOL_ENABLED=true` on cloud workers when you want Manus-style startup latency: the worker prewarms one E2B sandbox and Chromium browser before advertising readiness, then adopts that ready sandbox for the next task before emitting the first acknowledgement.
 
 `AGENT_TASK_WORKER_MAX_ATTEMPTS` caps repeated claims for a task whose worker keeps dying before completion. The default is `3`. When the next claim would exceed the cap, the job is marked terminal with a replayable error event and the user's active-task lease is released, preventing an infinite crash/retry loop and unbounded cloud spend.
 

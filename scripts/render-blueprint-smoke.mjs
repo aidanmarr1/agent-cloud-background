@@ -137,11 +137,12 @@ for (const service of [web, worker]) {
   requireValue(service, 'AGENT_SANDBOX_PROVIDER', 'e2b')
   requireValue(service, 'E2B_TEMPLATE_ID', 'agent-cloud-browser')
   requireValue(service, 'AGENT_E2B_PAUSE_ON_TASK_END', 'true')
+  requireValue(service, 'AGENT_E2B_WARM_POOL_ENABLED', 'true')
 }
 
 requireSecret(web, 'AGENT_INTERNAL_HEALTH_SECRET')
 requireValue(worker, 'AGENT_TASK_WORKER_ID', 'render-worker-1')
-requireValue(worker, 'AGENT_TASK_WORKER_POLL_MS', '1500')
+requireValue(worker, 'AGENT_TASK_WORKER_POLL_MS', '250')
 requireValue(worker, 'AGENT_E2B_VERIFY_ON_WORKER_STARTUP', 'true')
 requireValue(worker, 'AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', 'true')
 
@@ -158,6 +159,7 @@ for (const key of [
   'AGENT_SANDBOX_PROVIDER',
   'E2B_TEMPLATE_ID',
   'AGENT_E2B_PAUSE_ON_TASK_END',
+  'AGENT_E2B_WARM_POOL_ENABLED',
 ]) {
   assert.equal(envValue(web, key), envValue(worker, key), `${key} must match between web and worker`)
 }

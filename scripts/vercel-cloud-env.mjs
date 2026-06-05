@@ -47,6 +47,7 @@ const CLOUD_ENV = [
   { name: 'AGENT_E2B_BROWSER_PORT', value: '9222' },
   { name: 'AGENT_E2B_BROWSER_START_TIMEOUT_MS', value: '30000' },
   { name: 'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS', value: '30000' },
+  { name: 'AGENT_E2B_WARM_POOL_ENABLED', value: 'true' },
 ]
 
 loadLocalEnv()

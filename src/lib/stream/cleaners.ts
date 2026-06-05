@@ -189,7 +189,7 @@ const PLAN_LEAK_NARRATION_PATTERNS = [
   /^(?:state\/territory\)|state[- ]level responses?|or reputable legal analysis sites)(?:\b|[).])/i,
   /\b(?:detailing these amendments|status of legal reviews|provide a comprehensive answer|synthesize all gathered information|compile findings|official government publications|reputable legal analysis sites)\b/i,
 ]
-const HIGH_LEVEL_NEXT_NARRATION_PATTERN = /^(?:(?:next,\s*)?i(?:'|’)?ll|next,\s*i will|i(?:'|’)?ll now|i will now(?:\s+proceed to)?|will(?:\s+now\s+proceed to)?|proceeding to|moving forward with|next step:?)\s+(?:analyze|compare|verify|synthesize|review|assess|evaluate|connect|check|look at|extract|consolidate|prepare|gather|develop|explore|organize|compile|finalize|continue|proceed|enter|answer|submit|inspect|open|outline|add|refine|focus|gathering|developing|exploring|organizing|compiling|finalizing|verifying|outlining|adding|refining|focusing)\b/i
+const HIGH_LEVEL_NEXT_NARRATION_PATTERN = /^(?:(?:next,\s*)?i(?:'|’)?ll|next,\s*i will|i(?:'|’)?ll now|i will now(?:\s+proceed to)?|will(?:\s+now\s+proceed to)?|will|proceeding to|moving forward with|next step:?)\s+(?:analyze|compare|verify|synthesize|review|assess|evaluate|connect|check|look at|extract|consolidate|prepare|gather|develop|explore|organize|compile|finalize|continue|proceed|enter|answer|submit|inspect|open|outline|add|refine|focus|run|update|rebuild|apply|correct|gathering|developing|exploring|organizing|compiling|finalizing|verifying|outlining|adding|refining|focusing|running|updating|rebuilding|applying|correcting)\b/i
 const MAX_NARRATION_SENTENCE_LENGTH = 300
 const MAX_NARRATION_WORDS = 45
 const MIN_NARRATION_WORDS = 12

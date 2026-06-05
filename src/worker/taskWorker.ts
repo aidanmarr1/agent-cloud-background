@@ -5,10 +5,12 @@ import { taskQueueName } from '@/lib/agent/taskQueue'
 import { markTaskWorkerStopped, recordTaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
 import { getTursoSetupStatus } from '@/lib/db/turso'
 import {
+  destroyWarmE2BSandbox,
   destroyE2BSandbox,
   ensureE2BRemoteBrowser,
   executeCommandInE2B,
   getOrCreateE2BSandbox,
+  prewarmE2BSandbox,
 } from '@/lib/e2bSandbox'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 
@@ -16,7 +18,7 @@ interface TaskWorkerOptions {
   once?: boolean
 }
 
-const DEFAULT_WORKER_POLL_MS = 1_500
+const DEFAULT_WORKER_POLL_MS = 250
 const DEFAULT_WORKER_HEARTBEAT_MS = 15_000
 
 function finitePositiveInt(value: string | undefined, fallback: number): number {
@@ -31,6 +33,17 @@ function env(name: string): string {
 function envBool(name: string): boolean {
   const value = env(name).toLowerCase()
   return value === 'true' || value === '1'
+}
+
+function envBoolDefault(name: string, fallback: boolean): boolean {
+  const value = env(name).toLowerCase()
+  if (!value) return fallback
+  return value === 'true' || value === '1'
+}
+
+function e2bWarmPoolEnabled(): boolean {
+  return env('AGENT_SANDBOX_PROVIDER').toLowerCase() === 'e2b' &&
+    envBoolDefault('AGENT_E2B_WARM_POOL_ENABLED', true)
 }
 
 function validateWorkerRuntimeConfig(): void {
@@ -114,7 +127,11 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   if (!turso.configured) {
     throw new Error(`Task worker requires Turso. Missing: ${turso.missing.join(', ')}`)
   }
-  await verifyE2BWorkerStartup()
+  if (e2bWarmPoolEnabled()) {
+    await prewarmE2BSandbox('worker-startup')
+  } else {
+    await verifyE2BWorkerStartup()
+  }
 
   const workerId = process.env.AGENT_TASK_WORKER_ID?.trim() || `worker-${randomUUID()}`
   const queueName = taskQueueName()
@@ -227,6 +244,11 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   } finally {
     clearInterval(heartbeatTimer)
     currentRunId = null
+    await destroyWarmE2BSandbox().catch((error) => {
+      console.warn('[TaskWorker] Warm sandbox cleanup failed', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
     await markTaskWorkerStopped(workerId).catch((error) => {
       console.error('[TaskWorker] Failed to mark worker stopped', {
         workerId,

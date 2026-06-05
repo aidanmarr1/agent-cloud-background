@@ -25,6 +25,9 @@ async function assertSourceContracts() {
     serverCredits,
     activeTasks,
     taskJobs,
+    chatTaskRunner,
+    taskWorker,
+    e2bSandbox,
     taskQueue,
     activeTaskConstants,
     taskConstraints,
@@ -108,6 +111,9 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/serverCredits.ts'), 'utf8'),
     readFile(join(root, 'src/lib/activeTasks.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskJobs.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/chatTaskRunner.ts'), 'utf8'),
+    readFile(join(root, 'src/worker/taskWorker.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/e2bSandbox.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskQueue.ts'), 'utf8'),
     readFile(join(root, 'src/lib/activeTaskConstants.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskConstraints.ts'), 'utf8'),
@@ -230,7 +236,7 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /BASE_ITERATIONS\s*=\s*36/, 'long tasks need a larger base iteration budget')
   assert.match(agentConfig, /MAX_ITERATIONS\s*=\s*112/, 'long tasks need a higher global iteration ceiling')
   assert.match(agentConfig, /COMPLEXITY_ITERATION_BONUS\s*=\s*\{\s*1:\s*0,\s*2:\s*28,\s*3:\s*64\s*\}/, 'complex research tasks need expanded iteration bonus')
-  assert.match(agentLoop, /new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*customInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway\)/, 'AgentLoop must wire custom instructions, credit usage, and credit preflight into PlanManager')
+  assert.match(agentLoop, /new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*customInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire custom instructions, credit usage, credit preflight, and startup acknowledgement control into PlanManager')
   assert.match(agentLoop, /latestUserMessage = \[\.\.\.messages\]\.reverse\(\)\.find\(m => m\.role === 'user'\)/, 'prompt-injection checks must only inspect the latest user turn')
   assert.doesNotMatch(agentLoop, /messages\.some\(\s*\n\s*m => m\.role === 'user' && isPromptInjection/, 'old user messages must not poison later unrelated tasks')
   assert.match(planManager, /Boot local preview/, 'website plans must still require local visual QA')
@@ -698,8 +704,18 @@ async function assertSourceContracts() {
   assert.match(taskJobs, /where run_id = \? and queue_name = \?/, 'durable invalid-payload handling must be scoped to the current queue namespace')
   assert.match(taskJobs, /status in \('queued', 'running'\)/, 'active job discovery must include queued jobs that have not been claimed yet')
   assert.match(taskJobs, /cancel_requested = 0/, 'active job discovery must exclude cancelled jobs')
+  assert.match(taskJobs, /TASK_JOB_DB_POLL_MS = 250/, 'persisted task event replay must poll fast enough for early acknowledgement')
   assert.match(taskJobs, /job\.conversationId !== input\.conversationId/, 'in-memory task event replay must reject run ids from a different conversation')
   assert.match(taskJobs, /snapshot\.conversationId !== input\.conversationId/, 'persisted task event replay must reject run ids from a different conversation')
+  assert.match(taskWorker, /DEFAULT_WORKER_POLL_MS = 250/, 'cloud worker must poll the queue quickly enough for sub-second claim latency')
+  assert.match(taskWorker, /prewarmE2BSandbox\('worker-startup'\)/, 'worker readiness must include a prewarmed E2B sandbox and browser')
+  assert.match(e2bSandbox, /warmSandboxPromise/, 'E2B runtime must track an in-process warm sandbox promise')
+  assert.match(e2bSandbox, /adoptWarmE2BSandbox/, 'E2B runtime must adopt a prewarmed sandbox for the next task')
+  assert.match(e2bSandbox, /ensureE2BRemoteBrowser\(warmId\)/, 'E2B warm pool must start Chromium before task acknowledgement')
+  assert.match(chatTaskRunner, /ensureE2BRemoteBrowser\(conversationId\)/, 'worker task startup must ensure the task browser exists before acknowledgement')
+  assert.match(chatTaskRunner, /Cloud sandbox and browser are ready/, 'worker must emit the first visible acknowledgement only after sandbox and browser readiness')
+  assert.match(chatTaskRunner, /skipStartupAcknowledgement: startupAcknowledgementSent/, 'agent loop must skip planner acknowledgement after the sandbox-ready acknowledgement')
+  assert.match(planManager, /if \(this\.skipAcknowledgement\) return/, 'planner must not emit a duplicate acknowledgement after worker startup text')
   assert.match(chatRoute, /acquireActiveTaskLease\(userId,\s*conversationId,\s*creditRunId\)/, 'chat route must acquire the account-wide active-task lease before starting a new task')
   assert.match(chatRoute, /findActiveTaskJobForUser\(userId\)/, 'chat route must reject new starts when a durable queued or running job already exists')
   assert.match(chatRoute, /status:\s*409/, 'second concurrent task starts must return a conflict response')
@@ -847,7 +863,7 @@ async function assertSourceContracts() {
   assert.match(prompts, /never fewer than 15 words/, 'runtime prompt must forbid too-short progress paragraphs')
   assert.match(prompts, /<=34 words and <=240 characters/, 'runtime prompt must keep progress paragraphs concise')
   assert.match(prompts, /vary the opening verb and sentence shape/, 'runtime prompt must require varied progress narration openings')
-  assert.match(prompts, /At exactly 3 visible actions, naturally start the next response/, 'runtime prompt must make narration same-turn at the 3-action point')
+  assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'runtime prompt must make narration same-turn at the 3-action point')
   assert.match(prompts, /standing cadence for every phase/, 'runtime prompt must keep narration active across every phase')
   assert.match(prompts, /narration is the default first visible text/, 'runtime prompt must make narration the preferred first visible text when cadence is open')
   assert.match(prompts, /result-first/, 'runtime prompt must request result-first evidence narration')

@@ -1,4 +1,5 @@
 import { constants } from 'fs'
+import { randomUUID } from 'crypto'
 import { mkdir, open, rm } from 'fs/promises'
 import { createRequire } from 'module'
 import { dirname, join, relative, isAbsolute, basename, posix } from 'path'
@@ -29,6 +30,13 @@ interface CachedE2BSandbox {
   lastUsed: number
 }
 
+interface WarmE2BSandbox {
+  conversationId: string
+  sandboxId: string
+  sandbox: E2BSandboxInstance
+  createdAt: number
+}
+
 export interface E2BFileInfo {
   name: string
   path: string
@@ -42,6 +50,8 @@ export type SandboxFileReadResult =
 
 const e2bCache = new Map<string, CachedE2BSandbox>()
 let schemaReady: Promise<void> | null = null
+let warmSandbox: WarmE2BSandbox | null = null
+let warmSandboxPromise: Promise<WarmE2BSandbox> | null = null
 
 function envString(name: string): string {
   return process.env[name]?.trim() || ''
@@ -56,6 +66,10 @@ function envBool(name: string, fallback: boolean): boolean {
   const value = envString(name).toLowerCase()
   if (!value) return fallback
   return value === '1' || value === 'true' || value === 'yes'
+}
+
+function shouldUseWarmPool(): boolean {
+  return shouldUseE2BSandbox() && envBool('AGENT_E2B_WARM_POOL_ENABLED', true)
 }
 
 function sanitizeConversationId(conversationId: string): string {
@@ -237,13 +251,16 @@ export async function getOrCreateE2BSandbox(conversationId: string): Promise<E2B
 
   const persistedId = await loadPersistedSandboxId(safeId)
   const connected = persistedId ? await connectSandbox(safeId, persistedId) : null
-  const sandbox = connected || await createSandbox(safeId)
+  const adopted = connected ? null : await adoptWarmE2BSandbox(safeId)
+  const sandbox = connected || adopted || await createSandbox(safeId)
 
-  e2bCache.set(safeId, {
-    sandboxId: sandbox.sandboxId,
-    sandbox,
-    lastUsed: Date.now(),
-  })
+  if (!e2bCache.has(safeId)) {
+    e2bCache.set(safeId, {
+      sandboxId: sandbox.sandboxId,
+      sandbox,
+      lastUsed: Date.now(),
+    })
+  }
   return sandbox
 }
 
@@ -261,7 +278,8 @@ export async function resetE2BSandbox(conversationId: string): Promise<void> {
     }
   }
 
-  await getOrCreateE2BSandbox(safeId)
+  const adopted = await adoptWarmE2BSandbox(safeId)
+  if (!adopted) await getOrCreateE2BSandbox(safeId)
 }
 
 export async function pauseE2BSandbox(conversationId: string): Promise<void> {
@@ -290,6 +308,90 @@ export async function destroyE2BSandbox(conversationId: string): Promise<void> {
   if (!sandboxId) return
   try {
     await Sandbox.kill(sandboxId, { apiKey: envString('E2B_API_KEY') })
+  } catch {
+    // Best effort cleanup.
+  }
+}
+
+async function createWarmE2BSandbox(reason: string): Promise<WarmE2BSandbox> {
+  const warmId = sanitizeConversationId(`warm-${randomUUID()}`)
+  console.log('[E2B] Prewarming sandbox', { warmId, reason })
+  const sandbox = await createSandbox(warmId)
+  e2bCache.set(warmId, {
+    sandboxId: sandbox.sandboxId,
+    sandbox,
+    lastUsed: Date.now(),
+  })
+  await ensureE2BRemoteBrowser(warmId)
+  const warm = {
+    conversationId: warmId,
+    sandboxId: sandbox.sandboxId,
+    sandbox,
+    createdAt: Date.now(),
+  }
+  warmSandbox = warm
+  console.log('[E2B] Warm sandbox ready', { warmId, sandboxId: warm.sandboxId })
+  return warm
+}
+
+export async function prewarmE2BSandbox(reason = 'background'): Promise<void> {
+  if (!shouldUseWarmPool()) return
+  if (warmSandbox) return
+  if (!warmSandboxPromise) {
+    warmSandboxPromise = createWarmE2BSandbox(reason).catch((error) => {
+      warmSandboxPromise = null
+      warmSandbox = null
+      throw error
+    })
+  }
+  await warmSandboxPromise
+}
+
+async function adoptWarmE2BSandbox(conversationId: string): Promise<E2BSandboxInstance | null> {
+  if (!shouldUseWarmPool()) return null
+  const safeId = sanitizeConversationId(conversationId)
+  const warm = warmSandbox || (warmSandboxPromise ? await warmSandboxPromise : null)
+  if (!warm) return null
+
+  warmSandbox = null
+  warmSandboxPromise = null
+  e2bCache.delete(warm.conversationId)
+  await deletePersistedSandboxId(warm.conversationId)
+
+  await warm.sandbox.files.makeDir(workspaceRoot(safeId)).catch(() => undefined)
+  await persistSandboxId(safeId, warm.sandboxId)
+  e2bCache.set(safeId, {
+    sandboxId: warm.sandboxId,
+    sandbox: warm.sandbox,
+    lastUsed: Date.now(),
+  })
+
+  console.log('[E2B] Adopted warm sandbox for task', {
+    conversationId: safeId,
+    sandboxId: warm.sandboxId,
+    warmAgeMs: Date.now() - warm.createdAt,
+  })
+
+  void prewarmE2BSandbox('replacement').catch((error) => {
+    console.warn('[E2B] Replacement warm sandbox failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
+
+  return warm.sandbox
+}
+
+export async function destroyWarmE2BSandbox(): Promise<void> {
+  const pending = warmSandboxPromise
+  const warm = warmSandbox || (pending ? await pending.catch(() => null) : null)
+  warmSandbox = null
+  warmSandboxPromise = null
+  if (!warm) return
+
+  e2bCache.delete(warm.conversationId)
+  await deletePersistedSandboxId(warm.conversationId)
+  try {
+    await Sandbox.kill(warm.sandboxId, { apiKey: envString('E2B_API_KEY') })
   } catch {
     // Best effort cleanup.
   }

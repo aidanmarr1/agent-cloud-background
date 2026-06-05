@@ -1,5 +1,6 @@
 import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
 import { getOrCreateSandboxDir, pauseSandboxIfIdle, resetSandboxDir } from '@/lib/sandbox'
+import { ensureE2BRemoteBrowser, shouldUseE2BSandbox } from '@/lib/e2bSandbox'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
 import { isContextualTaskUpdate } from '@/lib/conversationContext'
 import { clearLiveDirectives } from '@/lib/liveDirectives'
@@ -176,6 +177,31 @@ function directChatNeedsTemporalContext(messages: Array<{ role: string; content:
   return !!lastUser?.content && DIRECT_CHAT_TEMPORAL_PATTERN.test(lastUser.content)
 }
 
+function latestUserTaskText(messages: AgentLoopOptions['messages']): string {
+  const latest = [...messages].reverse().find((message) => message.role === 'user' && typeof message.content === 'string')
+  return latest?.content || ''
+}
+
+function conciseTaskSubject(text: string): string {
+  const cleaned = text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
+    .replace(/^(?:please\s+)?use\s+(?:your\s+)?(?:chromium\s+)?browser\s+and\s+sandbox\s+(?:to\s+)?/i, '')
+    .trim()
+  if (!cleaned) return ''
+  if (cleaned.length <= 84) return cleaned
+  const clipped = cleaned.slice(0, 84).replace(/\s+\S*$/, '').trim()
+  return clipped || cleaned.slice(0, 84).trim()
+}
+
+function sandboxReadyAcknowledgement(messages: AgentLoopOptions['messages']): string {
+  const subject = conciseTaskSubject(latestUserTaskText(messages))
+  if (!subject) return 'Cloud sandbox and browser are ready for this task.'
+  const punctuated = /[.!?]$/.test(subject) ? subject : `${subject}.`
+  return `Cloud sandbox and browser are ready for ${punctuated}`
+}
+
 function appendContinuation(base: string, continuation: string): string {
   const left = base.trimEnd()
   const right = continuation.trimStart()
@@ -296,6 +322,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
   let lastActiveCreditAt = Date.now()
   let jobAborted = signal.aborted
   let meteredTaskStarted = false
+  let startupAcknowledgementSent = false
 
   const isJobAbort = () => jobAborted || signal.aborted
 
@@ -371,8 +398,15 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           })
         }
       }
+      if (!directChat && shouldUseE2BSandbox()) {
+        await ensureE2BRemoteBrowser(conversationId)
+      }
       emitCreditRecord(await chargeServerTaskStart(userId, conversationId, creditRunId))
       meteredTaskStarted = true
+      if (!directChat && !emitter.isClosed) {
+        emitter.textDelta(`${sandboxReadyAcknowledgement(messages)}\n\n`)
+        startupAcknowledgementSent = true
+      }
       if (ACTIVE_CREDITS_PER_MINUTE > 0) {
         activeCreditTimer = setInterval(() => {
           void chargeActiveCredit()
@@ -399,6 +433,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         signal,
         creditRunId,
         userId,
+        skipStartupAcknowledgement: startupAcknowledgementSent,
       })
       await loop.run()
       console.log('[AgentDiagnostics] Agent loop returned', {

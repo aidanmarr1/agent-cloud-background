@@ -275,6 +275,8 @@ function isUsablePlannerAck(ack: string): boolean {
   const normalized = ack.trim().toLowerCase()
   if (!normalized) return false
   if (normalized.length < 18) return false
+  if (/^(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b.{0,120}\b(?:research|open|browse|search|work|start|check|look|review|analyze|analyse|compare|build|create|write|fix|make)\b/.test(normalized)) return false
+  if (/^(?:next|now|then|after that|moving forward|from here)[,\s]+(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b/.test(normalized)) return false
   return !/\b(?:i(?:'|’)?ll|i will)\s+(?:open the site|work through this|start with the required|keep the task steps updated)\b/.test(normalized) &&
     !/\b(?:the requested task|the request|the site|the topic)\b.{0,80}\b(?:steps updated|visible steps)\b/.test(normalized)
 }
@@ -428,6 +430,7 @@ export class PlanManager {
   private customInstructions?: string
   private recordUsage?: PlanUsageRecorder
   private preflightCredit?: PlanCreditPreflight
+  private skipAcknowledgement: boolean
   private usageSequence = 0
 
   constructor(
@@ -438,6 +441,7 @@ export class PlanManager {
     customInstructions?: string,
     recordUsage?: PlanUsageRecorder,
     preflightCredit?: PlanCreditPreflight,
+    skipAcknowledgement = false,
   ) {
     this.emitter = emitter
     this.messages = messages
@@ -446,6 +450,7 @@ export class PlanManager {
     this.customInstructions = customInstructions?.trim() || undefined
     this.recordUsage = recordUsage
     this.preflightCredit = preflightCredit
+    this.skipAcknowledgement = skipAcknowledgement
   }
 
   startPlanCall(): void {
@@ -500,11 +505,12 @@ export class PlanManager {
       messages: [
         {
           role: 'system' as const,
-          content: `Write exactly one first-person acknowledgement for Agent before it starts a ${taskShape} task.
+          content: `Write exactly one short acknowledgement for Agent before it starts a ${taskShape} task.
 Requirements:
 - One sentence, <=160 characters.
 - Specific to the user's concrete target/topic/artifact.
-- No generic lines such as "I'll open the site", "I'll keep the steps updated", or "I'll work through this".
+- State the concrete work area in present-tense style; do not start with "I'll", "I will", "Let me", "I'm going to", "Next", or "Now".
+- No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
 - No markdown, no bullets, no refusal, no mention of being an AI.`,
         },
         {
@@ -532,6 +538,7 @@ Requirements:
   }
 
   private async emitAcknowledgement(ack: string | undefined, taskShape: string): Promise<void> {
+    if (this.skipAcknowledgement) return
     const sanitized = typeof ack === 'string' ? sanitizePlannerAck(ack) : ''
     if (isUsablePlannerAck(sanitized)) {
       this.emitter.textDelta(sanitized + '\n\n')
