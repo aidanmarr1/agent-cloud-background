@@ -1,0 +1,42 @@
+services:
+  web:
+    build: .
+    command: npm start
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+      AGENT_STORAGE_DRIVER: turso
+      AGENT_TASK_WORKER_MODE: external
+      AGENT_TASK_QUEUE_NAME: docker-cloud
+      AGENT_TASK_WORKER_HEARTBEAT_MS: "15000"
+      AGENT_TASK_WORKER_STALE_MS: "60000"
+      AGENT_TASK_WORKER_MAX_ATTEMPTS: "3"
+      AGENT_REQUIRE_TASK_WORKER_HEARTBEAT: "true"
+      AGENT_SANDBOX_PROVIDER: e2b
+      E2B_TEMPLATE_ID: agent-cloud-browser
+      AGENT_E2B_PAUSE_ON_TASK_END: "true"
+    ports:
+      - "3000:3000"
+
+  worker:
+    build: .
+    command: npm run worker:cloud
+    env_file:
+      - .env.local
+    environment:
+      NODE_ENV: production
+      AGENT_STORAGE_DRIVER: turso
+      AGENT_TASK_WORKER_MODE: external
+      AGENT_TASK_QUEUE_NAME: docker-cloud
+      AGENT_TASK_WORKER_ID: docker-worker-1
+      AGENT_TASK_WORKER_POLL_MS: "1500"
+      AGENT_TASK_WORKER_HEARTBEAT_MS: "15000"
+      AGENT_TASK_WORKER_STALE_MS: "60000"
+      AGENT_TASK_WORKER_MAX_ATTEMPTS: "3"
+      AGENT_REQUIRE_TASK_WORKER_HEARTBEAT: "true"
+      AGENT_SANDBOX_PROVIDER: e2b
+      E2B_TEMPLATE_ID: agent-cloud-browser
+      AGENT_E2B_PAUSE_ON_TASK_END: "true"

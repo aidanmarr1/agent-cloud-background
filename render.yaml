@@ -1,0 +1,159 @@
+services:
+  - type: web
+    name: agent-web
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    maxShutdownDelaySeconds: 120
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: AUTH_SECRET
+        sync: false
+      - key: AGENT_INTERNAL_HEALTH_SECRET
+        sync: false
+      - key: AUTH_TRUST_HOST
+        value: "true"
+      - key: AGENT_TRUST_PROXY_HEADERS
+        value: "true"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.5-flash-lite
+      - key: OPENROUTER_REASONING_EFFORT
+        value: minimal
+      - key: OPENROUTER_REASONING_EXCLUDE
+        value: "true"
+      - key: AGENT_STORAGE_DRIVER
+        value: turso
+      - key: AGENT_PUBLIC_SIGNUP
+        value: "false"
+      - key: AGENT_TASK_WORKER_MODE
+        value: external
+      - key: AGENT_TASK_QUEUE_NAME
+        value: production
+      - key: AGENT_TASK_WORKER_HEARTBEAT_MS
+        value: "15000"
+      - key: AGENT_TASK_WORKER_STALE_MS
+        value: "60000"
+      - key: AGENT_TASK_WORKER_MAX_ATTEMPTS
+        value: "3"
+      - key: AGENT_DEPLOYMENT_VERSION
+        value: ""
+      - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION
+        value: "false"
+      - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
+        value: "true"
+      - key: AGENT_SANDBOX_PROVIDER
+        value: e2b
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_TEMPLATE_ID
+        value: agent-cloud-browser
+      - key: AGENT_E2B_SANDBOX_TIMEOUT_MS
+        value: "3600000"
+      - key: AGENT_E2B_COMMAND_TIMEOUT_MS
+        value: "120000"
+      - key: AGENT_E2B_ALLOW_INTERNET
+        value: "true"
+      - key: AGENT_E2B_PAUSE_ON_TASK_END
+        value: "true"
+      - key: AGENT_E2B_KILL_ON_RESET
+        value: "true"
+      - key: AGENT_E2B_BROWSER_PORT
+        value: "9222"
+      - key: AGENT_E2B_BROWSER_START_TIMEOUT_MS
+        value: "30000"
+      - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
+        value: "30000"
+
+  - type: worker
+    name: agent-worker
+    runtime: node
+    plan: starter
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm run worker:cloud
+    maxShutdownDelaySeconds: 300
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: NODE_ENV
+        value: production
+      - key: AUTH_SECRET
+        sync: false
+      - key: AUTH_TRUST_HOST
+        value: "true"
+      - key: AGENT_TRUST_PROXY_HEADERS
+        value: "true"
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: google/gemini-2.5-flash-lite
+      - key: OPENROUTER_REASONING_EFFORT
+        value: minimal
+      - key: OPENROUTER_REASONING_EXCLUDE
+        value: "true"
+      - key: AGENT_STORAGE_DRIVER
+        value: turso
+      - key: AGENT_PUBLIC_SIGNUP
+        value: "false"
+      - key: AGENT_TASK_WORKER_MODE
+        value: external
+      - key: AGENT_TASK_QUEUE_NAME
+        value: production
+      - key: AGENT_TASK_WORKER_ID
+        value: render-worker-1
+      - key: AGENT_TASK_WORKER_POLL_MS
+        value: "1500"
+      - key: AGENT_TASK_WORKER_HEARTBEAT_MS
+        value: "15000"
+      - key: AGENT_TASK_WORKER_STALE_MS
+        value: "60000"
+      - key: AGENT_TASK_WORKER_MAX_ATTEMPTS
+        value: "3"
+      - key: AGENT_DEPLOYMENT_VERSION
+        value: ""
+      - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION
+        value: "false"
+      - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
+        value: "true"
+      - key: AGENT_SANDBOX_PROVIDER
+        value: e2b
+      - key: E2B_API_KEY
+        sync: false
+      - key: E2B_TEMPLATE_ID
+        value: agent-cloud-browser
+      - key: AGENT_E2B_SANDBOX_TIMEOUT_MS
+        value: "3600000"
+      - key: AGENT_E2B_COMMAND_TIMEOUT_MS
+        value: "120000"
+      - key: AGENT_E2B_ALLOW_INTERNET
+        value: "true"
+      - key: AGENT_E2B_PAUSE_ON_TASK_END
+        value: "true"
+      - key: AGENT_E2B_KILL_ON_RESET
+        value: "true"
+      - key: AGENT_E2B_BROWSER_PORT
+        value: "9222"
+      - key: AGENT_E2B_BROWSER_START_TIMEOUT_MS
+        value: "30000"
+      - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
+        value: "30000"
+      - key: AGENT_E2B_VERIFY_ON_WORKER_STARTUP
+        value: "true"
+      - key: AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP
+        value: "true"

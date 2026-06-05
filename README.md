@@ -6,15 +6,19 @@ First, run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000) with your browser to see the result.
+
+The project dev launcher normalizes the host/port, clears stale Next dev locks,
+and exits cleanly if the server is already running. Use these scripts for local
+server control:
+
+```bash
+npm run dev          # start, or report the existing server
+npm run dev:restart  # stop the project server and start fresh
+npm run dev:stop     # stop the project server and clear its dev lock
+```
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

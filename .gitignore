@@ -15,6 +15,7 @@
 
 # next.js
 /.next/
+/.next.*/
 /out/
 
 # production
@@ -32,6 +33,17 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
+
+# detached local dev logs
+screenlog.*
+
+# generated smoke-test runners
+/scripts/.browser-nav-runner-*/
+/scripts/.guarded-fetch-smoke-runner-*/
+
+# local user attachment/blob storage
+/.agent-storage/
 
 # vercel
 .vercel

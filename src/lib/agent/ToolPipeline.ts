@@ -1,0 +1,4148 @@
+import { executeTool, ToolContext } from '@/lib/tools'
+import { appendFileInSandbox, createFileInSandbox, listFilesInSandbox, getOrCreateSandboxDir, readFileInSandbox } from '@/lib/sandbox'
+import { chargeServerTool } from '@/lib/serverCredits'
+import { markTaskFileDeleted, persistSandboxTaskFile } from '@/lib/taskFiles'
+import type { ChatMessageParam } from '@/lib/llm'
+import type { AgentEventEmitter } from './SSEEmitter'
+import {
+  AgentStateData,
+  type WorkLedgerArtifactPurpose,
+  trackToolCall,
+  trackFileCreate,
+  trackSearchResult,
+  trackBrowseResult,
+  logWork,
+  trackSearchQuery,
+  trackSourceDomain,
+  trackVisitedSourceDomain,
+  trackFailure,
+  updateToolHealth,
+  isToolDisabled,
+  recordWorkLedgerDeliverable,
+  recordWorkLedgerFailure,
+  recordWorkLedgerSearchResults,
+  recordWorkLedgerSource,
+  recordWorkLedgerVerification,
+  recordWorkLedgerVisualObservation,
+  satisfyWorkLedgerRequirement,
+  currentStepText,
+  isConcreteBuildStep,
+  isResearchStepText,
+} from './AgentState'
+import { inferArtifactType, tryEncodeImageBase64, IMAGE_EXTENSIONS } from './guards'
+import type { ToolCallData } from './StreamProcessor'
+import type { ToolCache } from './ToolCache'
+import type { ToolRetry } from './ToolRetry'
+// WorkingMemory interface — only the methods ToolPipeline uses
+interface WorkingMemoryLike {
+  recordFailure(toolName: string, error: string, stepIdx: number): void
+  extractFromSearch(query: string, results: unknown[], stepIdx: number): void
+  extractFromBrowse(url: string, content: string, stepIdx: number): void
+  recordFileCreated(path: string, stepIdx: number): void
+}
+import type { Logger } from './Logger'
+import { ErrorRecoveryEngine, type ToolFailure } from './recovery/ErrorRecoveryEngine'
+import { currentStepWebSearchLimit, hasSingleWebSearchLimit, requestsMarkdownDeliverable } from './taskConstraints'
+import {
+  browserActionPreflight,
+  browserNavigate,
+  normalizeBrowserScrollArgs,
+  type BrowserActionPreflightElement,
+  type BrowserActionPreflightSnapshot,
+  type BrowserActionResult,
+} from '@/lib/browser'
+import { BROWSER_TOOLS } from '@/lib/stream/constants'
+import {
+  appendTargetHintsToContent,
+  appendTaskCompletionToContent,
+  classifyBrowserProgress,
+  computeBrowserPageSignature,
+  detectBrowserTaskCompletion,
+  formatTargetHints,
+  getBrowserActionTargetKey,
+  isBrowserRecoveryTool,
+  rankBrowserTargets,
+  type BrowserTargetHint,
+} from '@/lib/browserIntelligence'
+import { buildLocalWebsiteLaunch, isManagedWebsiteServerUrl, isWebsiteEntryPath } from '@/lib/localWebsiteServer'
+import {
+  buildTsxWebsitePreviewLaunch,
+  getNextWebsiteProjectStatus,
+  isManagedWebsitePreviewUrl,
+  isNextWebsiteProjectPath,
+} from '@/lib/tsxWebsitePreview'
+import { analyzeScreenshotQuality } from '@/lib/visualQuality'
+import { strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { sanitizeNarrationText } from '@/lib/stream/cleaners'
+import {
+  addResearchActivityToIndex,
+  appendResearchActivityEntry,
+  deliberateRepeatReason,
+  makeResearchActivityEntry,
+  normalizeResearchQuery,
+  normalizeResearchUrl,
+  researchDomainFromUrl,
+  type ResearchActivityEntry,
+  type ResearchActivityKind,
+} from './ResearchActivityLog'
+
+export interface ToolExecutionResult {
+  tc: ToolCallData
+  result: unknown
+  isError: boolean
+  cached?: boolean
+  durationMs?: number
+}
+
+import {
+  TOOL_TIMEOUT_MS, FILE_WRITE_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS, MAX_BROWSE_RESULT_CHARS,
+  WEB_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
+  URL_NORMALIZE_STRIP_PARAMS,
+  SEARCH_STOPWORDS,
+  TOOL_TYPE_RATE_LIMITS,
+  CROSS_TOOL_PATTERN_WINDOW, CROSS_TOOL_CYCLE_LENGTH, CROSS_TOOL_CYCLE_REPEATS,
+} from './config'
+
+// Tools that count as actual research progress (not note-taking)
+const RESEARCH_TOOLS = new Set([
+  'web_search', 'browser_navigate', 'browser_get_content', 'browse_page',
+  'browser_find_text', 'http_request', 'read_document', 'youtube_transcript', 'image_search',
+])
+
+const DELIVERABLE_STEP_TOOLS = new Set([
+  'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'list_files',
+  'image_search', 'browser_screenshot', 'browser_scroll',
+])
+
+const FINAL_SYNTHESIS_CARRYOVER_TOOLS = new Set([
+  'web_search',
+  'image_search',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+  'browser_screenshot',
+  'browser_scroll',
+  'browse_page',
+  'read_document',
+  'http_request',
+  'youtube_transcript',
+])
+
+const FILE_WRITE_TOOLS = new Set(['create_file', 'edit_file', 'append_file', 'export_pdf'])
+
+const RESEARCH_FILE_DETOUR_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'read_file', 'list_files'])
+
+const BROWSER_VISION_TOOLS = new Set([
+  'browse_page', 'browser_navigate', 'browser_click', 'browser_click_at', 'browser_type',
+  'browser_screenshot', 'browser_scroll', 'browser_hover', 'browser_select',
+  'browser_press_key', 'browser_go_back', 'browser_click_and_hold',
+  'browser_drag', 'browser_action_sequence',
+  'browser_fill_form', 'browser_find_text',
+])
+
+const BROWSER_VISUAL_BOOTSTRAP_TOOLS = new Set(['browser_navigate', 'browser_scroll'])
+
+const BROWSER_VISUAL_RECOVERY_PROGRESS = new Set([
+  'recoverable_block',
+  'hard_blocker',
+  'no_progress_same_target',
+  'no_progress_same_page',
+])
+
+const NARRATION_HIDDEN_TOOLS = new Set(['browser_screenshot', 'browser_resize'])
+
+const BROWSER_ACTION_PREFLIGHT_TOOLS = new Set([
+  'browser_click', 'browser_click_at', 'browser_type', 'browser_select',
+  'browser_hover', 'browser_fill_form', 'browser_action_sequence',
+  'browser_click_and_hold', 'browser_drag',
+])
+
+const BROWSER_RESULT_TOOLS = new Set(['browse_page', 'browser_navigate', 'browser_get_content', 'browser_find_text'])
+
+const BROWSER_CONTENT_INVALIDATING_TOOLS = new Set([
+  'browser_navigate',
+  'browser_click',
+  'browser_click_at',
+  'browser_type',
+  'browser_fill_form',
+  'browser_scroll',
+  'browser_hover',
+  'browser_select',
+  'browser_press_key',
+  'browser_go_back',
+  'browser_click_and_hold',
+  'browser_drag',
+  'browser_action_sequence',
+])
+
+const BROWSER_SEQUENCE_ACTION_BY_TOOL: Record<string, 'click_at' | 'type' | 'select' | 'press_key' | 'hover' | 'scroll'> = {
+  browser_click_at: 'click_at',
+  browser_type: 'type',
+  browser_select: 'select',
+  browser_press_key: 'press_key',
+  browser_hover: 'hover',
+  browser_scroll: 'scroll',
+}
+
+function timeoutMsForTool(toolName: string): number {
+  if (FILE_WRITE_TOOLS.has(toolName)) return FILE_WRITE_TOOL_TIMEOUT_MS
+  if (toolName === 'web_search' || toolName === 'image_search') return WEB_SEARCH_TOOL_TIMEOUT_MS
+  if (toolName.startsWith('browser_') || toolName === 'browse_page') return BROWSER_TOOL_TIMEOUT_MS
+  if (toolName === 'read_document' || toolName === 'http_request' || toolName === 'youtube_transcript') return DOCUMENT_TOOL_TIMEOUT_MS
+  return TOOL_TIMEOUT_MS
+}
+
+const SINGLE_SEARCH_BLOCKED_WEB_TOOLS = new Set([
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+  'browser_screenshot',
+  'browser_scroll',
+  'browse_page',
+  'read_document',
+  'http_request',
+])
+
+const UPLOADED_IMAGE_DIRECT_CONTEXT_BLOCKED_TOOLS = new Set([
+  ...BROWSER_TOOLS,
+  'web_search',
+  'read_file',
+  'read_document',
+  'http_request',
+])
+
+const TOOL_DISPLAY_CONTRACT_KEYS = ['action_label', 'plan_step_index'] as const
+
+function isTaskTrackingMarkdownPath(filePath: string): boolean {
+  const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
+  return /^(?:todo|todos|task|tasks|plan|plans|checklist|progress|status|scratch|notes?)\.md$/.test(base)
+}
+
+function currentStepAllowsTaskTrackingMarkdown(state: AgentStateData, filePath: string): boolean {
+  const stepText = currentStepText(state)
+  const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
+  if (!base) return false
+  if (new RegExp(`\\b${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(stepText)) return true
+  return /\b(?:todo\.md|to-do\.md|tracking file|task tracking|progress file|checklist\.md|plan\.md)\b/i.test(stepText)
+}
+
+function fileWritePreflightBlockReason(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  if (FILE_WRITE_TOOLS.has(toolName) && state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length) {
+    return 'BLOCKED: All steps are complete. Do NOT create or edit any more files. Write a brief final summary for the user, then STOP.'
+  }
+
+  if (toolName === 'create_file') {
+    const filePath = (args.path as string) || ''
+    const isMdFile = filePath.endsWith('.md')
+    const hasPlan = state.currentPlanItems && state.currentPlanItems.length > 1
+    const isLastStep = hasPlan ? state.currentStepIdx === state.currentPlanItems!.length - 1 : false
+    const stepText = hasPlan ? currentStepText(state).toLowerCase() : ''
+    const isBuildStep = hasPlan ? isConcreteBuildStep(state, stepText) : false
+    console.log(`[ToolPipeline] create_file guard: path="${filePath}" isMd=${isMdFile} hasPlan=${!!hasPlan} isLastStep=${isLastStep} isBuildStep=${isBuildStep} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0} researchCalls=${state.stepResearchCallCount}`)
+
+    if (hasPlan && !isLastStep && !isBuildStep && !isMdFile) {
+      return 'BLOCKED: Only .md files are allowed during research steps. Save non-markdown deliverables for the final step. You CAN create .md files for notes and intermediate findings.'
+    }
+    if (hasPlan && !isLastStep && !isBuildStep && isMdFile && isTaskTrackingMarkdownPath(filePath) && !currentStepAllowsTaskTrackingMarkdown(state, filePath)) {
+      return 'BLOCKED: Do not invent task-tracking, todo, checklist, plan, progress, scratch, or generic notes files. If the user or saved custom instructions require one, it must appear in the current step title or scope; otherwise use research-notes/step-N.md for genuine phase notes after research.'
+    }
+    const content = args.content as string | undefined
+    if (!content || content.trim().length < 50) {
+      return 'BLOCKED: File content is too short (minimum 50 characters). Write substantive content before creating a file.'
+    }
+  }
+
+  if (toolName === 'append_file') {
+    const content = args.content as string | undefined
+    if (!content || content.trim().length < 20) {
+      return 'BLOCKED: Append content is too short. Append a substantive chapter, scene, section, or revision chunk.'
+    }
+  }
+
+  return null
+}
+
+function isResearchPhaseStep(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.currentStepIdx === state.currentPlanItems.length - 1) return false
+  if (state.taskStrategy === 'browse' || state.taskStrategy === 'creative') return false
+  if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
+    const stepText = state.currentPlanItems[state.currentStepIdx] || ''
+    return /\b(research|gather|find|search|source|collect|asset|image|reference|investigate)\b/i.test(stepText)
+  }
+  return state.taskStrategy === 'research' || state.currentPhase === 'research'
+}
+
+function visibleToolActionText(toolName: string, args: Record<string, unknown>): string {
+  const parts = [
+    typeof args.action_label === 'string' ? args.action_label : '',
+    typeof args.query === 'string' ? args.query : '',
+    typeof args.url === 'string' ? args.url.replace(/^https?:\/\//i, ' ').replace(/[/?#=&._-]+/g, ' ') : '',
+    typeof args.source === 'string' ? args.source.replace(/^https?:\/\//i, ' ').replace(/[/?#=&._-]+/g, ' ') : '',
+    typeof args.path === 'string' ? args.path.replace(/[/?#=&._-]+/g, ' ') : '',
+    typeof args.output_path === 'string' ? args.output_path.replace(/[/?#=&._-]+/g, ' ') : '',
+    typeof args.command === 'string' ? args.command : '',
+    toolName,
+  ]
+  return parts.filter(Boolean).join(' ')
+}
+
+function currentStepLooksLikeLiveResearch(state: AgentStateData): boolean {
+  const stepText = [
+    currentStepText(state),
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+  ].join(' ')
+
+  return isResearchStepText(stepText) ||
+    /\b(?:search(?:es)?|sources?|evidence|research|find|reported|publicly|public|web|news|controvers(?:y|ies|ial)?|investigate|verify|gather|collect|surface|claims?|audit|reviews?)\b/i.test(stepText)
+}
+
+function hasCurrentStepLiveResearchEvidence(state: AgentStateData): boolean {
+  return state.stepResearchCallCount > 0 ||
+    state.stepSearchQueries.size > 0 ||
+    state.stepVisitedUrls.size > 0 ||
+    state.stepSourceDomainCounts.size > 0
+}
+
+function looksLikeAccessBlockerOrNoteDetour(text: string): boolean {
+  return /\b(?:without live access|no live access|chat environment|tools?\s+(?:unavailable|limited|blocked)|web access(?:\s+is)?\s+(?:unavailable|blocked|limited)|blocked from doing|inability to access|access limitation|log web access|existing research (?:notes|artifacts|files)|workspace only contains|static pages?|snapshots?|research blocker|blocker note|plan step|establish .* scope)\b/i.test(text)
+}
+
+function currentStepExplicitlyRequestsNotes(state: AgentStateData): boolean {
+  const stepText = [
+    currentStepText(state),
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+  ].join(' ')
+  return /\b(?:write|save|record|create|append)\b.{0,80}\b(?:research notes?|source notes?|findings notes?|phase notes?)\b/i.test(stepText)
+}
+
+function researchFileDetourBlockReason(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  if (!RESEARCH_FILE_DETOUR_TOOLS.has(toolName)) return null
+  if (!isResearchPhaseStep(state)) return null
+  if (state.uploadedAttachmentContextAvailable) return null
+  if (!currentStepLooksLikeLiveResearch(state)) return null
+
+  const hasLiveEvidence = hasCurrentStepLiveResearchEvidence(state)
+  const actionText = visibleToolActionText(toolName, args)
+  const contentText = typeof args.content === 'string' ? args.content.slice(0, 600) : ''
+  const combinedText = `${actionText}\n${contentText}`
+
+  if (
+    hasLiveEvidence &&
+    currentStepExplicitlyRequestsNotes(state) &&
+    !looksLikeAccessBlockerOrNoteDetour(combinedText)
+  ) {
+    return null
+  }
+
+  if (hasLiveEvidence && !looksLikeAccessBlockerOrNoteDetour(combinedText)) return null
+
+  const current = currentStepText(state) || 'the active research step'
+  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make exactly one concrete source tool call now: web_search for a targeted query, browser_navigate/read_document for a known source, or browser_get_content/browser_find_text for an already-open relevant page. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
+}
+
+const ATTACHMENT_MATCH_STOPWORDS = new Set([
+  ...SEARCH_STOPWORDS,
+  'uploaded',
+  'attached',
+  'attachment',
+  'attachments',
+  'file',
+  'files',
+  'document',
+  'documents',
+  'open',
+  'read',
+  'load',
+  'locate',
+  'find',
+  'search',
+  'pdf',
+  'docx',
+  'pptx',
+  'xlsx',
+  'rtf',
+  'txt',
+])
+
+function normalizeAttachmentReference(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^\.?\//, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9.\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function attachmentReferenceTokens(value: string): Set<string> {
+  return new Set(
+    normalizeAttachmentReference(value)
+      .replace(/\.[a-z0-9]{1,8}$/i, ' ')
+      .split(/\s+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 2 && !ATTACHMENT_MATCH_STOPWORDS.has(token))
+  )
+}
+
+function uploadedAttachmentMatch(
+  state: AgentStateData,
+  candidate: string,
+): { name: string; overlap: number; similarity: number } | null {
+  const normalizedCandidate = normalizeAttachmentReference(candidate)
+  if (!normalizedCandidate || state.uploadedAttachmentNames.length === 0) return null
+
+  let best: { name: string; overlap: number; similarity: number } | null = null
+  const candidateTokens = attachmentReferenceTokens(normalizedCandidate)
+
+  for (const name of state.uploadedAttachmentNames) {
+    const normalizedName = normalizeAttachmentReference(name)
+    if (!normalizedName) continue
+    if (normalizedCandidate === normalizedName || normalizedCandidate.endsWith(`/${normalizedName}`)) {
+      return { name, overlap: 99, similarity: 1 }
+    }
+
+    const nameWithoutExt = normalizedName.replace(/\.[a-z0-9]{1,8}$/i, '').trim()
+    if (nameWithoutExt && (normalizedCandidate === nameWithoutExt || normalizedCandidate.includes(nameWithoutExt))) {
+      return { name, overlap: 99, similarity: 1 }
+    }
+
+    const nameTokens = attachmentReferenceTokens(normalizedName)
+    if (nameTokens.size === 0 || candidateTokens.size === 0) continue
+    let overlap = 0
+    for (const token of nameTokens) {
+      if (candidateTokens.has(token)) overlap += 1
+    }
+    const similarity = overlap / Math.max(nameTokens.size, candidateTokens.size)
+    const current = { name, overlap, similarity }
+    if (!best || current.similarity > best.similarity || (current.similarity === best.similarity && current.overlap > best.overlap)) {
+      best = current
+    }
+  }
+
+  if (!best) return null
+  if (best.overlap >= 3 && best.similarity >= 0.35) return best
+  return null
+}
+
+function attachmentTaskExplicitlyRequestsExternalLookup(state: AgentStateData): boolean {
+  return /\b(?:web|internet|online|external|outside|public(?:ly)?|live|current|latest|sources?|citations?|search the web|find (?:it|this|the file) online|locate (?:it|this|the file) online)\b/i
+    .test(state.originalUserRequest || '')
+}
+
+function isUploadedImageDirectInspectionTask(state: AgentStateData): boolean {
+  if (!state.uploadedImageAttachmentAvailable || !state.uploadedAttachmentContentAvailable) return false
+  if (state.userProvidedUrl) return false
+  if (attachmentTaskExplicitlyRequestsExternalLookup(state)) return false
+  if (state.taskStrategy === 'build' || state.taskStrategy === 'code' || state.taskStrategy === 'browse') return false
+
+  const request = state.originalUserRequest || ''
+  if (!request.trim()) return true
+  return /\b(?:what\s+is\s+this|what'?s\s+this|describe|identify|inspect|look at|visually|visual|image|screenshot|photo|picture|attachment|attached|file|read|ocr|extract|transcribe|summari[sz]e|analy[sz]e|explain)\b/i
+    .test(request)
+}
+
+function uploadedAttachmentToolBlockReason(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  if (!state.uploadedAttachmentContextAvailable || state.uploadedAttachmentNames.length === 0) return null
+
+  if (
+    isUploadedImageDirectInspectionTask(state) &&
+    UPLOADED_IMAGE_DIRECT_CONTEXT_BLOCKED_TOOLS.has(toolName)
+  ) {
+    return 'INTERNAL_RECOVERY: The uploaded image is already available as high-detail visual input in conversation context. Do not use browser/current-view/open/read_file/web_search tools for image inspection. Inspect the attached image directly and answer from the visual input unless the user explicitly asks for outside web/current information.'
+  }
+
+  if (toolName === 'read_file') {
+    const target = [args.path, args.source, args.file]
+      .map(value => typeof value === 'string' ? value : '')
+      .find(Boolean) || ''
+    const match = uploadedAttachmentMatch(state, target)
+    if (!match) return null
+    return `INTERNAL_RECOVERY: "${match.name}" is an uploaded attachment, not a workspace/sandbox file. Do not use read_file for uploaded attachment names. Use the uploaded attachment content already loaded in conversation context. If no extracted content is available, say that the uploaded file could not be read from the provided content.`
+  }
+
+  if (toolName === 'web_search') {
+    if (attachmentTaskExplicitlyRequestsExternalLookup(state)) return null
+    const query = typeof args.query === 'string' ? args.query : ''
+    const match = uploadedAttachmentMatch(state, query)
+    if (!match) return null
+    return `INTERNAL_RECOVERY: Do not web_search uploaded attachment filenames or titles. "${match.name}" was supplied by the user upload UI and is already in the conversation context. Answer/analyze from that attached content unless the user explicitly asks for external web information.`
+  }
+
+  if (toolName === 'read_document' || toolName === 'http_request' || toolName === 'browser_navigate' || toolName === 'browse_page') {
+    const target = [args.source, args.url, args.path]
+      .map(value => typeof value === 'string' ? value : '')
+      .find(Boolean) || ''
+    const match = uploadedAttachmentMatch(state, target)
+    if (!match) return null
+    return `INTERNAL_RECOVERY: "${match.name}" is an uploaded attachment reference, not a public URL or workspace path. Use the uploaded attachment context already present in the conversation instead of opening/searching it.`
+  }
+
+  return null
+}
+
+function planStepIndexBlockReason(args: Record<string, unknown>, state: AgentStateData): string | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  const raw = args.plan_step_index
+  const index = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN
+  const expected = state.currentStepIdx + 1
+  if (!Number.isInteger(index)) {
+    return `INTERNAL_RECOVERY: this tool call was skipped because plan_step_index is required for phase safety. Retry the same intended tool only if it belongs to active step ${expected}; include plan_step_index: ${expected} and a specific action_label.`
+  }
+  if (index !== expected) {
+    const current = state.currentPlanItems[state.currentStepIdx] || 'the active step'
+    const declared = state.currentPlanItems[index - 1] || `step ${index}`
+    return `INTERNAL_RECOVERY: this tool call was skipped because it declared plan_step_index ${index} ("${declared}") while the active step is ${expected} ("${current}"). If the active step is complete, emit <next_step/> with no tool call. Otherwise call a tool that directly serves the active step and set plan_step_index: ${expected}.`
+  }
+  return null
+}
+
+function actionLabelBlockReason(args: Record<string, unknown>, state: AgentStateData): string | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  if (strictActionLabelFromArgs(args)) return null
+  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label is required for the visible action pill. Retry the same intended tool only if it still belongs to the active step, and include a 4-12 word, task-specific objective label with no first person, no tool names, no raw JSON, and no gerund/tool-wrapper starts like Searching, Researching, Navigating, Reading, Reviewing, Scrolling, or Clicking.'
+}
+
+function narrationCadenceBlockReason(
+  toolCallId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+  assistantContent: string,
+): string | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  if (NARRATION_HIDDEN_TOOLS.has(toolName)) return null
+  if (!strictActionLabelFromArgs(args)) return null
+  const countedThisTool = state.visibleNarrationToolStartIds.has(toolCallId)
+  const visibleActionsBeforeTool = countedThisTool
+    ? Math.max(0, state.visibleToolActionsSinceLastNarration - 1)
+    : state.visibleToolActionsSinceLastNarration
+  const narrationDueBeforeTool = state.forceTextNextIteration || visibleActionsBeforeTool >= 4
+  if (!narrationDueBeforeTool) return null
+
+  const validSameTurnNarration = !!sanitizeNarrationText(assistantContent, {
+    requireSignal: state.forceTextNextIteration,
+    maxSentences: 2,
+    maxLength: 300,
+  })
+  if (validSameTurnNarration) {
+    state.forceTextNextIteration = false
+    state.forcedNarrationRepairAttempts = 0
+    state.iterationsSinceLastContent = 0
+    // The current visible tool is already rendered after the narration, so
+    // count the next cadence from that frontier instead of forcing a separate
+    // narration-only model turn.
+    state.visibleToolActionsSinceLastNarration = countedThisTool ? 1 : 0
+    return null
+  }
+
+  // Keep cadence soft. Blocking a useful tool call just to force a separate
+  // narration turn made the agent feel slow and caused out-of-order narration.
+  // AgentLoop already injects a same-turn narration reminder at 3-4 actions.
+  return null
+}
+
+function topicFamiliesFor(text: string): Set<string> {
+  const families = new Set<string>()
+  const normalized = text.toLowerCase()
+  if (/\b(?:tools?|platforms?|apps?|chatgpt|gemini|claude|writing|feedback|summari[sz](?:e|ing|ation)|coding|revision|study|essay|planner|tutor)\b/.test(normalized)) {
+    families.add('tools')
+  }
+  if (/\b(?:risks?|academic integrity|honesty|cheat(?:ing)?|plagiarism|over[-\s]?reliance|skill atrophy|cognitive atrophy|misuse|harm|concerns?)\b/.test(normalized)) {
+    families.add('risk')
+  }
+  if (/\b(?:unequal access|digital divide|equity|inequity|inequality|access gap|disadvantage|low[-\s]?income|rural)\b/.test(normalized)) {
+    families.add('access')
+  }
+  if (/\b(?:policy|policies|framework|guidelines?|authority|department|school system|education authority|teacher|teachers|union|regulation|rules?)\b/.test(normalized)) {
+    families.add('policy')
+  }
+  if (/\b(?:benefits?|support|learning support|pedagogy|scaffold(?:ing)?|socratic|cognitive partner|learning partner|personal(?:i|iza)sed|improve|assist(?:ance)?)\b/.test(normalized)) {
+    families.add('benefits')
+  }
+  return families
+}
+
+function hasOnlyFutureTopicFamily(actionFamilies: Set<string>, currentFamilies: Set<string>, futureFamilies: Set<string>): boolean {
+  if (actionFamilies.size === 0 || futureFamilies.size === 0) return false
+  let overlapsFuture = false
+  for (const family of actionFamilies) {
+    if (futureFamilies.has(family)) overlapsFuture = true
+    if (currentFamilies.has(family)) return false
+  }
+  return overlapsFuture
+}
+
+function phaseSemanticBlockReason(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  if (state.taskStrategy === 'browse') return null
+  if (toolName === 'read_file' || toolName === 'list_files') return null
+
+  const actionTokens = tokenizeQuery(visibleToolActionText(toolName, args))
+  if (actionTokens.size < 3) return null
+
+  const currentTitle = state.currentPlanItems[state.currentStepIdx] || ''
+  const currentScope = state.currentPlanScopes?.[state.currentStepIdx] || ''
+  const currentText = `${currentTitle} ${currentScope}`
+  const currentTokens = tokenizeQuery(currentText)
+  const currentScore = tokenSimilarity(actionTokens, currentTokens)
+  const actionText = visibleToolActionText(toolName, args)
+  const actionFamilies = topicFamiliesFor(actionText)
+  const currentFamilies = topicFamiliesFor(currentText)
+
+  if (state.currentStepIdx > 0 && state.currentStepIdx < state.currentPlanItems.length - 1 && state.stepResearchCallCount < 2) {
+    let bestPreviousScore = 0
+    let bestPreviousIdx = -1
+    for (let i = 0; i < state.currentStepIdx; i++) {
+      const previousTitle = state.currentPlanItems[i] || ''
+      const previousScope = state.currentPlanScopes?.[i] || ''
+      const previousTokens = tokenizeQuery(`${previousTitle} ${previousScope}`)
+      const score = tokenSimilarity(actionTokens, previousTokens)
+      if (score > bestPreviousScore) {
+        bestPreviousScore = score
+        bestPreviousIdx = i
+      }
+    }
+
+    const stronglyLooksPrevious = bestPreviousScore >= 0.24 &&
+      currentScore < 0.36 &&
+      (bestPreviousScore >= currentScore + 0.12 || bestPreviousScore >= currentScore * 1.35)
+
+    if (stronglyLooksPrevious && bestPreviousIdx >= 0) {
+      const current = state.currentPlanItems[state.currentStepIdx] || 'the active step'
+      const previous = state.currentPlanItems[bestPreviousIdx] || `step ${bestPreviousIdx + 1}`
+      return `INTERNAL_RECOVERY: this ${toolName} call appears to continue previous step ${bestPreviousIdx + 1} ("${previous}") instead of starting active step ${state.currentStepIdx + 1} ("${current}"). Previous-step "next" notes are closed. Retry with one tool/query/action scoped to the active step's title and scope only.`
+    }
+  }
+
+  if (state.currentStepIdx >= state.currentPlanItems.length - 1) return null
+
+  let bestFutureScore = 0
+  let bestFutureIdx = -1
+  let bestFutureFamilies = new Set<string>()
+  for (let i = state.currentStepIdx + 1; i < state.currentPlanItems.length; i++) {
+    const futureTitle = state.currentPlanItems[i] || ''
+    const futureScope = state.currentPlanScopes?.[i] || ''
+    const futureText = `${futureTitle} ${futureScope}`
+    const futureTokens = tokenizeQuery(futureText)
+    const score = tokenSimilarity(actionTokens, futureTokens)
+    if (score > bestFutureScore) {
+      bestFutureScore = score
+      bestFutureIdx = i
+      bestFutureFamilies = topicFamiliesFor(futureText)
+    }
+  }
+
+  if (bestFutureIdx < 0) return null
+  const futureFamilyDrift = hasOnlyFutureTopicFamily(actionFamilies, currentFamilies, bestFutureFamilies)
+  if (!futureFamilyDrift) {
+    if (bestFutureScore < 0.22) return null
+    if (bestFutureScore <= currentScore && currentScore >= 0.28) return null
+    if (bestFutureScore < currentScore + 0.12 && bestFutureScore < currentScore * 1.35) return null
+    if (currentScore >= 0.42) return null
+  } else if (currentScore >= 0.36 && bestFutureScore <= currentScore) {
+    return null
+  }
+
+  const current = state.currentPlanItems[state.currentStepIdx] || 'the active step'
+  const future = state.currentPlanItems[bestFutureIdx] || `step ${bestFutureIdx + 1}`
+  return `INTERNAL_RECOVERY: this ${toolName} call appears to belong to future step ${bestFutureIdx + 1} ("${future}") instead of the active step ${state.currentStepIdx + 1} ("${current}"). Do not execute future-phase work early. If the active step is complete, emit <next_step/> with no tool call; otherwise choose a tool/query/file action scoped to the active step only.`
+}
+
+function countVisibleToolActionForNarration(
+  toolCallId: string,
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): void {
+  if (NARRATION_HIDDEN_TOOLS.has(toolName)) return
+  if (!strictActionLabelFromArgs(args)) return
+  if (state.visibleNarrationToolStartIds.has(toolCallId)) return
+  state.visibleNarrationToolStartIds.add(toolCallId)
+  state.visibleToolActionsSinceLastNarration++
+}
+
+function singleWebSearchLimitBlockReason(
+  toolName: string,
+  state: AgentStateData,
+): string | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  const fixedLimit = currentStepWebSearchLimit(state) ?? (hasSingleWebSearchLimit(state) ? 1 : null)
+  if (fixedLimit === null) return null
+  const isFinalStep = state.currentStepIdx === state.currentPlanItems.length - 1
+  const completedSearches = Math.max(state.stepResearchCallCount, state.stepSearchQueries.size)
+  const plural = fixedLimit === 1 ? 'search' : 'searches'
+
+  if (toolName === 'web_search') {
+    if (completedSearches >= fixedLimit) {
+      return fixedLimit === 1
+        ? 'INTERNAL_RECOVERY: a second web_search was skipped because the user explicitly requested only one web search. Do not mention this to the user. Advance to the deliverable/answer step and use the one search result already gathered.'
+        : `INTERNAL_RECOVERY: an extra web_search was skipped because the user explicitly requested exactly ${fixedLimit} web searches. Do not mention this to the user. Advance to the answer step and use the ${fixedLimit} search results already gathered.`
+    }
+    return null
+  }
+
+  if (SINGLE_SEARCH_BLOCKED_WEB_TOOLS.has(toolName)) {
+    return completedSearches >= fixedLimit || isFinalStep
+      ? `INTERNAL_RECOVERY: ${toolName} was skipped because the user explicitly requested exactly ${fixedLimit} web ${plural}, not browsing or additional page reading. Do not mention this to the user. Use the existing search result data and finish the requested answer or deliverable.`
+      : `INTERNAL_RECOVERY: ${toolName} was skipped because the user explicitly requested exactly ${fixedLimit} web ${plural}. Do not mention this to the user. Call web_search ${fixedLimit - completedSearches} more time${fixedLimit - completedSearches === 1 ? '' : 's'}, then finish without browsing result URLs.`
+  }
+
+  return null
+}
+
+function isManagedLocalBrowserUrl(rawUrl: unknown): boolean {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false
+  try {
+    const parsed = new URL(rawUrl)
+    return isManagedWebsiteServerUrl(parsed) || isManagedWebsitePreviewUrl(parsed)
+  } catch {
+    return false
+  }
+}
+
+function sourceDomainFromUrl(rawUrl: unknown): string | null {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null
+  try {
+    const trimmed = rawUrl.trim()
+    const candidate = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
+    return new URL(candidate).hostname.toLowerCase().replace(/^www\./, '')
+  } catch {
+    return null
+  }
+}
+
+function isBrowseFailureResult(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false
+
+  const browseResult = result as {
+    error?: string
+    success?: boolean
+  }
+  return browseResult.success === false || typeof browseResult.error === 'string'
+}
+
+function allowNonDeliverableToolOnFinalStep(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): boolean {
+  if (state.taskStrategy === 'browse' && (BROWSER_VISION_TOOLS.has(toolName) || toolName === 'browser_get_content')) {
+    return true
+  }
+
+  const websiteCheckInProgress = state.websiteResponsiveCheckPrompted && !state.websiteResponsiveCheckDone
+  if (websiteCheckInProgress && (BROWSER_VISION_TOOLS.has(toolName) || toolName === 'browser_get_content')) {
+    return true
+  }
+
+  if (toolName === 'browser_navigate' && isManagedLocalBrowserUrl(args.url)) {
+    return true
+  }
+
+  return false
+}
+
+function isResearchSynthesisFinalStep(state: AgentStateData): boolean {
+  return !!state.currentPlanItems &&
+    state.currentPlanItems.length > 0 &&
+    state.currentStepIdx === state.currentPlanItems.length - 1 &&
+    (state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.taskStrategy === 'general') &&
+    !state.buildTask
+}
+
+function finalSynthesisCarryoverBlockReason(
+  toolName: string,
+  state: AgentStateData,
+): string | null {
+  if (!isResearchSynthesisFinalStep(state)) return null
+  if (!FINAL_SYNTHESIS_CARRYOVER_TOOLS.has(toolName)) return null
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable step'
+  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${currentStep}") is the final synthesis/deliverable phase, not a continuation of the previous research phase. Do not mention this to the user. Use create_file for the initial deliverable, append_file for continuation chunks, edit_file for targeted revisions, read_file/list_files only to inspect existing work, or export_pdf after the source file exists.`
+}
+
+async function applyVisualQualityGate(
+  result: BrowserActionResult,
+  context: string,
+): Promise<BrowserActionResult> {
+  const visualQuality = await analyzeScreenshotQuality(result.screenshotBase64)
+  if (!visualQuality) return result
+
+  if (visualQuality.blank) {
+    const reason = visualQuality.reason || 'preview screenshot appears blank'
+    return {
+      ...result,
+      success: false,
+      error: `VISUAL_CHECK_FAILED: ${context} rendered a blank/empty page (${reason}). Fix the generated website files and re-run the local preview before final delivery.`,
+      action: `Blank preview detected for ${context}`,
+      visualQuality,
+    }
+  }
+
+  return { ...result, visualQuality }
+}
+
+const PREFLIGHT_TYPEABLE_ROLES = new Set([
+  'text-input', 'textarea', 'search-input', 'email-input', 'password-input',
+  'tel-input', 'url-input', 'number-input', 'date-input', 'time-input',
+  'datetime-local-input', 'month-input', 'week-input', 'contenteditable',
+  'textbox', 'searchbox', 'combobox', 'textbox-input', 'searchbox-input',
+  'combobox-input',
+])
+
+const MAX_BROWSER_VISION_IMAGE_BASE64_CHARS = 4_000_000
+const MAX_BROWSER_VISUALS_PER_STEP = 2
+const MAX_BROWSER_VISUALS_PER_TASK = 8
+
+function hasToolError(result: unknown): boolean {
+  return !!result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)
+}
+
+function browserProgressKind(resultObj: Record<string, unknown> | null): string {
+  const progress = resultObj && typeof resultObj === 'object'
+    ? resultObj.browserProgress
+    : null
+  if (!progress || typeof progress !== 'object') return ''
+  const kind = (progress as Record<string, unknown>).kind
+  return typeof kind === 'string' ? kind : ''
+}
+
+function browserVisualBypassesBudget(
+  toolName: string,
+  resultObj: Record<string, unknown> | null,
+  state: AgentStateData | undefined,
+  opts: {
+    hasLocalWebsiteSnapshot: boolean
+    hasNextWebsiteSnapshot: boolean
+    isFindTextNoMatchVisualRecovery: boolean
+  },
+): boolean {
+  return opts.hasLocalWebsiteSnapshot ||
+    opts.hasNextWebsiteSnapshot ||
+    toolName === 'browser_screenshot' ||
+    (state?.taskStrategy === 'browse' && opts.isFindTextNoMatchVisualRecovery) ||
+    BROWSER_VISUAL_RECOVERY_PROGRESS.has(browserProgressKind(resultObj))
+}
+
+function shouldAttachBrowserVisual(
+  toolName: string,
+  resultObj: Record<string, unknown> | null,
+  state: AgentStateData | undefined,
+  opts: {
+    hasLocalWebsiteSnapshot: boolean
+    hasNextWebsiteSnapshot: boolean
+    isFindTextNoMatchVisualRecovery: boolean
+  },
+): boolean {
+  if (opts.hasLocalWebsiteSnapshot || opts.hasNextWebsiteSnapshot) return true
+  if (toolName === 'browser_screenshot') return true
+  if (!state) return false
+  if ((state.currentPhase === 'build' || state.websiteBrowserCheckAttempted || state.websiteResponsiveCheckPrompted) && toolName === 'browser_screenshot') return true
+  if (state.taskStrategy === 'browse' && opts.isFindTextNoMatchVisualRecovery) return true
+  if (BROWSER_VISUAL_RECOVERY_PROGRESS.has(browserProgressKind(resultObj))) return true
+  if (state.browserRecoveryRequired) return true
+  if (state.taskStrategy === 'browse' && BROWSER_VISUAL_BOOTSTRAP_TOOLS.has(toolName) && state.stepBrowserVisualSnapshotsSent < 1) return true
+  return false
+}
+
+function isCurrentPlanDeliverableStep(state: AgentStateData): boolean {
+  return !!state.currentPlanItems &&
+    state.currentPlanItems.length > 0 &&
+    state.currentStepIdx === state.currentPlanItems.length - 1
+}
+
+function isSupportOnlyFilePath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase()
+  return normalized.startsWith('research-notes/') ||
+    normalized.startsWith('notes/') ||
+    normalized.startsWith('_internal/') ||
+    normalized.startsWith('.agent/') ||
+    /(?:^|\/)(?:step-\d+|phase-\d+|research-notes?|notes?)\.md$/.test(normalized)
+}
+
+function userRequestedMarkdownDeliverable(state: AgentStateData, filePath: string): boolean {
+  if (!filePath.toLowerCase().endsWith('.md')) return false
+  if (isSupportOnlyFilePath(filePath)) return false
+  const text = [
+    state.originalUserRequest || '',
+    ...(state.currentPlanItems || []),
+    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
+  ].join(' ')
+  return requestsMarkdownDeliverable(text)
+}
+
+function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', explicitDeliverable = false): WorkLedgerArtifactPurpose {
+  if (!state.currentPlanItems || state.currentPlanItems.length === 0) return 'deliverable'
+  if (userRequestedMarkdownDeliverable(state, filePath)) return 'deliverable'
+  if (explicitDeliverable || isCurrentPlanDeliverableStep(state)) return 'deliverable'
+  return 'support'
+}
+
+function maybeSatisfyWebsiteStructureRequirement(state: AgentStateData): void {
+  const files = [...state.createdFiles].map(path => path.toLowerCase())
+  const hasNextStructure =
+    files.some(path => /(?:^|\/)package\.json$/.test(path)) &&
+    files.some(path => /(?:^|\/)(?:app\/)?layout\.(?:tsx|jsx)$/.test(path)) &&
+    files.some(path => /(?:^|\/)(?:app\/)?page\.(?:tsx|jsx)$/.test(path)) &&
+    files.some(path => /(?:^|\/)(?:app\/)?globals\.css$/.test(path) || path.endsWith('.css'))
+  const hasStandaloneStructure =
+    files.some(path => /(?:^|\/)index\.html$/.test(path)) &&
+    files.some(path => path.endsWith('.css') || path.endsWith('.js') || path.endsWith('.ts'))
+
+  if (hasNextStructure || hasStandaloneStructure) {
+    satisfyWorkLedgerRequirement(state, 'Complete runnable website files created', [
+      'create complete runnable website files',
+      'complete runnable website files',
+      'complete runnable file set',
+      'runnable website files',
+      'website files',
+    ])
+  }
+}
+
+function toolTargetFromArgs(args: Record<string, unknown>, result?: unknown): string {
+  const resultObj = result && typeof result === 'object' ? result as Record<string, unknown> : null
+  for (const value of [
+    args.url,
+    args.query,
+    args.selector,
+    args.path,
+    args.output_path,
+    args.source_path,
+    resultObj?.url,
+    resultObj?.path,
+  ]) {
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  if (typeof args.index === 'number') return `[${args.index}]`
+  return ''
+}
+
+function researchUrlFromToolCall(toolName: string, args: Record<string, unknown>, result?: unknown): string | undefined {
+  const resultObj = result && typeof result === 'object' ? result as Record<string, unknown> : null
+  const value = toolName === 'read_document'
+    ? args.source
+    : toolName === 'http_request'
+      ? args.url
+      : args.url || resultObj?.url || resultObj?.source
+  const parsed = parsedHttpUrl(value)
+  return parsed ? parsed.toString() : undefined
+}
+
+function researchQueryFromToolArgs(toolName: string, args: Record<string, unknown>): string | undefined {
+  if (toolName !== 'web_search') return undefined
+  const query = typeof args.query === 'string' ? args.query.trim() : ''
+  return query || undefined
+}
+
+function researchActivityResultDetails(result: unknown): {
+  resultCount?: number
+  titles?: string[]
+  sourceUrls?: string[]
+} {
+  if (!Array.isArray(result)) return {}
+  const rows = result.filter((item): item is { title?: unknown; url?: unknown } => !!item && typeof item === 'object')
+  return {
+    resultCount: rows.length,
+    titles: rows.map(item => item.title).filter((title): title is string => typeof title === 'string' && !!title.trim()).slice(0, 8),
+    sourceUrls: rows.map(item => item.url).filter((url): url is string => typeof url === 'string' && !!url.trim()).slice(0, 12),
+  }
+}
+
+function browserObservationDetail(result: BrowserActionResult): string {
+  const parts = [
+    result.action,
+    result.taskCompletion?.completed ? `completed: ${result.taskCompletion.reason}` : '',
+    result.browserProgress?.kind ? `progress: ${result.browserProgress.kind}` : '',
+    result.error ? `error: ${result.error}` : '',
+  ].filter(Boolean)
+  return parts.join(' | ') || 'Captured browser visual state'
+}
+
+function withoutScreenshotBase64<T extends Record<string, unknown>>(value: T | undefined): T | undefined {
+  if (!value) return value
+  const { screenshotBase64: _screenshotBase64, ...rest } = value
+  return rest as T
+}
+
+function truncateBrowserText(value: string, maxChars: number): string {
+  const clean = value.trim()
+  if (clean.length <= maxChars) return clean
+  const usable = Math.max(0, maxChars - '...[truncated]'.length)
+  const head = clean.slice(0, usable)
+  const lineBreak = head.lastIndexOf('\n')
+  const prefix = lineBreak > usable * 0.45 ? head.slice(0, lineBreak) : head
+  return `${prefix.trimEnd()}...[truncated]`
+}
+
+function indexOfPattern(value: string, pattern: RegExp, start = 0): number {
+  const match = value.slice(start).match(pattern)
+  return match && match.index !== undefined ? start + match.index : -1
+}
+
+function sliceBrowserSection(value: string, startPattern: RegExp, endPatterns: RegExp[]): string | null {
+  const match = value.match(startPattern)
+  if (!match || match.index === undefined) return null
+
+  const start = match.index
+  const searchStart = start + match[0].length
+  let end = value.length
+  for (const pattern of endPatterns) {
+    const next = indexOfPattern(value, pattern, searchStart)
+    if (next >= 0 && next < end) end = next
+  }
+
+  const section = value.slice(start, end).trim()
+  return section || null
+}
+
+function firstBrowserSectionIndex(value: string): number {
+  const indexes = [
+    indexOfPattern(value, /(^|\n)VISIBLE VALIDATION ERRORS:?/i),
+    indexOfPattern(value, /(^|\n)Interactive elements\b/i),
+    indexOfPattern(value, /(^|\n)FORMS:/i),
+    indexOfPattern(value, /(^|\n)PRIMARY ACTIONS\b/i),
+    indexOfPattern(value, /(^|\n)NAVIGATION:/i),
+    indexOfPattern(value, /(^|\n)LINKS & OTHER:/i),
+    indexOfPattern(value, /(^|\n)TARGET HINTS:/i),
+    indexOfPattern(value, /(^|\n)TASK COMPLETION (?:DETECTED|REJECTED):/i),
+  ].filter(index => index >= 0)
+  return indexes.length > 0 ? Math.min(...indexes) : -1
+}
+
+function browserControlsSection(value: string): string | null {
+  const starts = [
+    indexOfPattern(value, /(^|\n)Interactive elements\b/i),
+    indexOfPattern(value, /(^|\n)FORMS:/i),
+    indexOfPattern(value, /(^|\n)PRIMARY ACTIONS\b/i),
+    indexOfPattern(value, /(^|\n)NAVIGATION:/i),
+    indexOfPattern(value, /(^|\n)LINKS & OTHER:/i),
+  ].filter(index => index >= 0)
+  if (starts.length === 0) return null
+
+  const start = Math.min(...starts)
+  let end = value.length
+  for (const pattern of [/(^|\n)TARGET HINTS:/i, /(^|\n)TASK COMPLETION (?:DETECTED|REJECTED):/i]) {
+    const next = indexOfPattern(value, pattern, start + 1)
+    if (next >= 0 && next < end) end = next
+  }
+
+  const section = value.slice(start, end).trim()
+  return section || null
+}
+
+function buildBrowserContentSummary(
+  intro: string | null,
+  validation: string | null,
+  controls: string | null,
+  targetHints: string | null,
+  completion: string | null,
+  budgets: { intro: number; validation: number; controls: number; targetHints: number; completion: number },
+): string {
+  const parts = ['[Browser content compacted: preserved controls, target hints, completion.]']
+  if (intro) parts.push(truncateBrowserText(intro, budgets.intro))
+  if (validation) parts.push(truncateBrowserText(validation, budgets.validation))
+  if (controls) parts.push(truncateBrowserText(controls, budgets.controls))
+  if (targetHints) parts.push(truncateBrowserText(targetHints, budgets.targetHints))
+  if (completion) parts.push(truncateBrowserText(completion, budgets.completion))
+  return parts.join('\n\n')
+}
+
+function compactBrowserContentForModel(content: string, limit: number): string {
+  const clean = content.trim()
+  if (clean.length <= limit) return content
+
+  const firstSection = firstBrowserSectionIndex(clean)
+  const validation = sliceBrowserSection(clean, /(^|\n)VISIBLE VALIDATION ERRORS:?/i, [
+    /(^|\n)Interactive elements\b/i,
+    /(^|\n)FORMS:/i,
+    /(^|\n)PRIMARY ACTIONS\b/i,
+    /(^|\n)TARGET HINTS:/i,
+    /(^|\n)TASK COMPLETION (?:DETECTED|REJECTED):/i,
+  ])
+  const controls = browserControlsSection(clean)
+  const targetHints = sliceBrowserSection(clean, /(^|\n)TARGET HINTS:/i, [
+    /(^|\n)TASK COMPLETION (?:DETECTED|REJECTED):/i,
+  ])
+  const completion = sliceBrowserSection(clean, /(^|\n)TASK COMPLETION (?:DETECTED|REJECTED):/i, [])
+
+  if (!validation && !controls && !targetHints && !completion) {
+    return `${truncateBrowserText(clean, Math.max(120, limit - 45))}\n[Page text truncated]`
+  }
+
+  const intro = firstSection > 0 ? clean.slice(0, firstSection).trim() : null
+  const budgetPasses = [
+    {
+      intro: Math.max(140, Math.floor(limit * 0.18)),
+      validation: Math.max(120, Math.floor(limit * 0.14)),
+      controls: Math.max(220, Math.floor(limit * 0.34)),
+      targetHints: Math.max(180, Math.floor(limit * 0.22)),
+      completion: Math.max(120, Math.floor(limit * 0.14)),
+    },
+    { intro: 110, validation: 90, controls: 170, targetHints: 140, completion: 90 },
+    { intro: 80, validation: 70, controls: 120, targetHints: 100, completion: 70 },
+  ]
+
+  let summary = ''
+  for (const budgets of budgetPasses) {
+    summary = buildBrowserContentSummary(intro, validation, controls, targetHints, completion, budgets)
+    if (summary.length <= limit) return summary
+  }
+  return truncateBrowserText(summary, limit)
+}
+
+function compactBrowserProgressForModel(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const progress = value as Record<string, unknown>
+  const compact: Record<string, unknown> = {}
+  if (typeof progress.kind === 'string') compact.kind = progress.kind
+  if (typeof progress.reason === 'string') compact.reason = truncateBrowserText(progress.reason, 160)
+  if (typeof progress.targetKey === 'string') compact.targetKey = truncateBrowserText(progress.targetKey, 120)
+  if (typeof progress.recoveryUsed === 'boolean') compact.recoveryUsed = progress.recoveryUsed
+  return Object.keys(compact).length > 0 ? compact : undefined
+}
+
+function compactBrowserCompletionForModel(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const completion = value as Record<string, unknown>
+  const compact: Record<string, unknown> = {}
+  if (typeof completion.completed === 'boolean') compact.completed = completion.completed
+  if (typeof completion.confidence === 'number') compact.confidence = completion.confidence
+  if (typeof completion.reason === 'string') compact.reason = truncateBrowserText(completion.reason, 160)
+  if (Array.isArray(completion.evidence)) {
+    compact.evidence = completion.evidence
+      .filter((item): item is string => typeof item === 'string' && !!item.trim())
+      .slice(0, 2)
+      .map(item => truncateBrowserText(item, 120))
+  }
+  return Object.keys(compact).length > 0 ? compact : undefined
+}
+
+function compactBrowserTargetHintsForModel(value: unknown): Array<Record<string, unknown>> | undefined {
+  if (!Array.isArray(value)) return undefined
+  const hints = value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .slice(0, 4)
+    .map(hint => {
+      const compact: Record<string, unknown> = {}
+      if (typeof hint.index === 'number') compact.index = hint.index
+      if (typeof hint.role === 'string') compact.role = hint.role
+      if (typeof hint.label === 'string') compact.label = truncateBrowserText(hint.label, 90)
+      if (typeof hint.recommendedTool === 'string') compact.recommendedTool = hint.recommendedTool
+      if (typeof hint.reason === 'string') compact.reason = truncateBrowserText(hint.reason, 90)
+      return compact
+    })
+    .filter(hint => Object.keys(hint).length > 0)
+  return hints.length > 0 ? hints : undefined
+}
+
+function buildCompactBrowserResult(resultObj: Record<string, unknown>, contentLimit: number): Record<string, unknown> {
+  const compact: Record<string, unknown> = {}
+  for (const key of ['success', 'url', 'title', 'recoverable', 'action', 'error']) {
+    const value = resultObj[key]
+    if (typeof value === 'string') compact[key] = truncateBrowserText(value, key === 'error' ? 220 : 180)
+    else if (typeof value === 'boolean') compact[key] = value
+  }
+
+  const progress = compactBrowserProgressForModel(resultObj.browserProgress)
+  if (progress) compact.browserProgress = progress
+
+  const completion = compactBrowserCompletionForModel(resultObj.taskCompletion)
+  if (completion) compact.taskCompletion = completion
+
+  const targetHints = compactBrowserTargetHintsForModel(resultObj.targetHints)
+  if (targetHints) compact.targetHints = targetHints
+
+  if (typeof resultObj.content === 'string' && resultObj.content.trim()) {
+    compact.content = compactBrowserContentForModel(resultObj.content, contentLimit)
+  }
+
+  return compact
+}
+
+function compactBrowserResultForModel(resultObj: Record<string, unknown> | null, resultStr: string, limit: number): string {
+  if (!resultObj) return truncateBrowserText(resultStr, limit)
+
+  for (const contentLimit of [
+    Math.max(240, Math.floor(limit * 0.62)),
+    Math.max(180, Math.floor(limit * 0.48)),
+    Math.max(140, Math.floor(limit * 0.34)),
+  ]) {
+    const compactResult = buildCompactBrowserResult(resultObj, contentLimit)
+    const serialized = JSON.stringify(compactResult)
+    if (serialized.length <= limit) return serialized
+  }
+
+  const minimal = buildCompactBrowserResult(resultObj, 120)
+  const serialized = JSON.stringify(minimal)
+  return serialized.length <= limit
+    ? serialized
+    : truncateBrowserText(serialized, limit)
+}
+
+function compactCommandText(value: unknown, maxChars: number): string | undefined {
+  if (maxChars <= 0) return undefined
+  if (typeof value !== 'string') return undefined
+  const text = value.replace(/\r\n/g, '\n').trim()
+  if (!text) return undefined
+  if (text.length <= maxChars) return text
+
+  const marker = `\n...[${text.length - maxChars} chars omitted]...\n`
+  const available = Math.max(80, maxChars - marker.length)
+  const headLen = Math.max(40, Math.floor(available * 0.36))
+  const tailLen = Math.max(40, available - headLen)
+  return `${text.slice(0, headLen).trimEnd()}${marker}${text.slice(-tailLen).trimStart()}`
+}
+
+function buildCompactCommandResult(
+  obj: Record<string, unknown>,
+  stdoutChars: number,
+  stderrChars: number,
+): Record<string, unknown> {
+  const compact: Record<string, unknown> = {}
+
+  for (const key of ['exitCode', 'timedOut', 'language']) {
+    const value = obj[key]
+    if (typeof value === 'number' || typeof value === 'boolean') compact[key] = value
+    if (typeof value === 'string' && value.trim()) compact[key] = truncateBrowserText(value, 80)
+  }
+
+  const error = compactCommandText(obj.error, 220)
+  if (error) compact.error = error
+
+  const stderr = compactCommandText(obj.stderr, stderrChars)
+  if (stderr) compact.stderr = stderr
+
+  const stdout = compactCommandText(obj.stdout, stdoutChars)
+  if (stdout) compact.stdout = stdout
+
+  return compact
+}
+
+function compactCommandResultForModel(resultObj: Record<string, unknown> | null, resultStr: string, limit: number): string {
+  if (!resultObj) return truncateBrowserText(resultStr, limit)
+
+  const exitCode = typeof resultObj.exitCode === 'number' ? resultObj.exitCode : undefined
+  const hasErrorOutput = exitCode !== 0 || typeof resultObj.error === 'string' || typeof resultObj.stderr === 'string'
+  const budgets = hasErrorOutput
+    ? [
+        { stdout: 220, stderr: 430 },
+        { stdout: 120, stderr: 360 },
+        { stdout: 0, stderr: 460 },
+      ]
+    : [
+        { stdout: 620, stderr: 120 },
+        { stdout: 520, stderr: 80 },
+        { stdout: 420, stderr: 0 },
+      ]
+
+  for (const budget of budgets) {
+    const compact = buildCompactCommandResult(resultObj, budget.stdout, budget.stderr)
+    const serialized = JSON.stringify(compact)
+    if (serialized.length <= limit) return serialized
+  }
+
+  const minimal = buildCompactCommandResult(resultObj, hasErrorOutput ? 0 : 320, hasErrorOutput ? 320 : 0)
+  const serialized = JSON.stringify(minimal)
+  return serialized.length <= limit ? serialized : truncateBrowserText(serialized, limit)
+}
+
+function normalizeSandboxFilePath(path: string): string {
+  const normalized = path.replace(/^\.?\/+/, '').replace(/\/+/g, '/')
+  return normalized || 'output.md'
+}
+
+function decodeJsonStringFragment(fragment: string): string {
+  let out = ''
+  let escaped = false
+
+  for (let i = 0; i < fragment.length; i++) {
+    const ch = fragment[i]
+    if (escaped) {
+      switch (ch) {
+        case '"': out += '"'; break
+        case '\\': out += '\\'; break
+        case '/': out += '/'; break
+        case 'b': out += '\b'; break
+        case 'f': out += '\f'; break
+        case 'n': out += '\n'; break
+        case 'r': out += '\r'; break
+        case 't': out += '\t'; break
+        case 'u': {
+          const hex = fragment.slice(i + 1, i + 5)
+          if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+            out += String.fromCharCode(parseInt(hex, 16))
+            i += 4
+          }
+          break
+        }
+        default:
+          out += ch
+      }
+      escaped = false
+      continue
+    }
+
+    if (ch === '\\') {
+      escaped = true
+      continue
+    }
+
+    if (ch === '"') {
+      break
+    }
+
+    out += ch
+  }
+
+  return out
+}
+
+function extractPartialFileArgs(rawArgs: string): { path: string; content: string } | null {
+  const pathMatch = rawArgs.match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+  const contentMatch = rawArgs.match(/"content"\s*:\s*"/)
+  if (!pathMatch || !contentMatch || contentMatch.index === undefined) return null
+
+  let path = pathMatch[1]
+  try { path = JSON.parse(`"${path}"`) } catch { /* use regex value */ }
+
+  const contentStart = contentMatch.index + contentMatch[0].length
+  const content = decodeJsonStringFragment(rawArgs.slice(contentStart))
+  return { path: normalizeSandboxFilePath(path), content }
+}
+
+function lineCount(value: string): number {
+  return value.length > 0 ? value.split('\n').length : 0
+}
+
+function buildToolStartArgsForExecution(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+  const displayContractArgs = Object.fromEntries(
+    TOOL_DISPLAY_CONTRACT_KEYS
+      .filter(key => args[key] !== undefined)
+      .map(key => [key, args[key]]),
+  )
+
+  if (toolName === 'create_file' || toolName === 'append_file') {
+    const content = typeof args.content === 'string' ? args.content : ''
+    return {
+      ...displayContractArgs,
+      path: args.path,
+      contentCharCount: content.length,
+      contentLineCount: lineCount(content),
+    }
+  }
+
+  if (toolName === 'edit_file') {
+    return { ...displayContractArgs, path: args.path }
+  }
+
+  if (toolName === 'run_code') {
+    const code = typeof args.code === 'string' ? args.code : ''
+    return {
+      ...displayContractArgs,
+      language: args.language,
+      codeCharCount: code.length,
+      codeLineCount: lineCount(code),
+    }
+  }
+
+  return args
+}
+
+/**
+ * Normalize a URL by stripping tracking parameters and trailing slashes.
+ * This prevents the agent from visiting the same page twice with different tracking params.
+ */
+function normalizeUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl)
+    // Lowercase hostname
+    url.hostname = url.hostname.toLowerCase()
+    // Strip tracking params
+    for (const param of URL_NORMALIZE_STRIP_PARAMS) {
+      url.searchParams.delete(param)
+    }
+    // Sort remaining params for consistent comparison
+    url.searchParams.sort()
+    // Strip fragment (anchors don't change page content)
+    url.hash = ''
+    // Remove trailing slash for consistency
+    let normalized = url.toString()
+    if (normalized.endsWith('/') && url.pathname !== '/') {
+      normalized = normalized.slice(0, -1)
+    }
+    return normalized
+  } catch {
+    return rawUrl
+  }
+}
+
+function coerceHttpUrl(rawUrl: unknown): string | null {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null
+  const trimmed = rawUrl.trim()
+  if (/^https?:\/\//i.test(trimmed)) return trimmed
+  if (/^[a-z0-9.-]+\.[a-z]{2,}(?::\d+)?(?:[/?#].*)?$/i.test(trimmed)) {
+    return `https://${trimmed}`
+  }
+  return null
+}
+
+function parsedHttpUrl(rawUrl: unknown): URL | null {
+  const coerced = coerceHttpUrl(rawUrl)
+  if (!coerced) return null
+  try {
+    const parsed = new URL(coerced)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function sameSourceDomain(a: URL, b: URL): boolean {
+  return a.hostname.toLowerCase().replace(/^www\./, '') === b.hostname.toLowerCase().replace(/^www\./, '')
+}
+
+function isLocalNavigationUrl(rawUrl: unknown): boolean {
+  const parsed = parsedHttpUrl(rawUrl)
+  if (!parsed) return false
+  const host = parsed.hostname.toLowerCase()
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+}
+
+function hasTriedUserProvidedNavigation(state: AgentStateData): boolean {
+  const userUrl = parsedHttpUrl(state.userProvidedUrl)
+  if (!userUrl) return false
+  const normalizedUserUrl = normalizeUrl(userUrl.toString())
+
+  for (const visited of state.visitedUrls) {
+    const visitedUrl = parsedHttpUrl(visited)
+    if (visitedUrl && (normalizeUrl(visitedUrl.toString()) === normalizedUserUrl || sameSourceDomain(visitedUrl, userUrl))) return true
+  }
+
+  return state.workLedger.failedRoutes.some(failure => {
+    if (failure.tool !== 'browser_navigate' && failure.tool !== 'browse_page') return false
+    const targetUrl = parsedHttpUrl(failure.target)
+    return !!targetUrl && (normalizeUrl(targetUrl.toString()) === normalizedUserUrl || sameSourceDomain(targetUrl, userUrl))
+  })
+}
+
+function directNavigationBeforeSearchTarget(
+  toolName: string,
+  state: AgentStateData,
+): URL | null {
+  if (toolName !== 'web_search') return null
+  if (!state.userProvidedUrl) return null
+  const userUrl = parsedHttpUrl(state.userProvidedUrl)
+  if (!userUrl) return null
+  if (hasTriedUserProvidedNavigation(state)) return null
+
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || ''
+  const stepLooksLikeBrowserEntry = state.currentStepIdx === 0 ||
+    /\b(navigate|open|visit|go to|access|load|enter|website|site|page|interface)\b/i.test(currentStep)
+  const browseTask = state.taskStrategy === 'browse'
+
+  if (!browseTask && !stepLooksLikeBrowserEntry) return null
+
+  return userUrl
+}
+
+function isLikelyStructuredEndpoint(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl)
+    const host = url.hostname.toLowerCase()
+    const path = url.pathname.toLowerCase()
+    if (host.startsWith('api.') || host.includes('.api.') || host.includes('eutils.ncbi.nlm.nih.gov')) return true
+    if (/\/(?:api|apis|graphql|rest|v\d+)(?:\/|$)/i.test(path)) return true
+    if (/\.(?:json|xml|csv|tsv|txt|rss|atom)(?:$|\?)/i.test(path)) return true
+    if (url.searchParams.has('format') || url.searchParams.has('retmode') || url.searchParams.has('output')) return true
+    return false
+  } catch {
+    return false
+  }
+}
+
+function pageLikeHttpRequestBlockReason(toolName: string, args: Record<string, unknown>): string | null {
+  if (toolName !== 'http_request') return null
+  const method = String(args.method || 'GET').toUpperCase()
+  const url = String(args.url || '').trim()
+  if (!url || !/^https?:\/\//i.test(url)) return null
+  if (method !== 'GET' && method !== 'HEAD') return null
+  if (isLikelyStructuredEndpoint(url)) return null
+
+  return `INTERNAL_RECOVERY: http_request GET/HEAD was skipped for a normal webpage URL (${url}). Do not mention this to the user. Use browser_navigate for rendered pages, read_document for PDFs/documents, or web_search for alternatives. Reserve http_request for structured API/data endpoints only.`
+}
+
+function getIntegerIndex(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) ? value : null
+}
+
+function normalizeMatchValue(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+function selectorAppearsInSnapshot(selector: string, snapshot: BrowserActionPreflightSnapshot): boolean {
+  const trimmed = selector.trim()
+  if (!trimmed) return false
+  if (snapshot.elements.some(element => element.primary === trimmed)) return true
+  return !!snapshot.content && snapshot.content.includes(trimmed)
+}
+
+function labelAppearsInSnapshot(label: string, snapshot: BrowserActionPreflightSnapshot): boolean {
+  const needle = normalizeMatchValue(label)
+  if (!needle) return false
+  return snapshot.elements.some(element => {
+    const haystack = normalizeMatchValue(`${element.label} ${element.groupLabel || ''} ${element.visualLabel || ''} ${(element.options || []).join(' ')} ${element.primary} ${element.role}`)
+    return haystack.includes(needle) || needle.includes(haystack)
+  })
+}
+
+function findPreflightElement(snapshot: BrowserActionPreflightSnapshot, index: number): BrowserActionPreflightElement | null {
+  return snapshot.elements.find(element => element.index === index) || null
+}
+
+function findPreflightElementBySelector(snapshot: BrowserActionPreflightSnapshot, selector: string): BrowserActionPreflightElement | null {
+  const trimmed = selector.trim()
+  if (!trimmed) return null
+  return snapshot.elements.find(element => element.primary === trimmed) || null
+}
+
+function isPreflightTypeableElement(element: BrowserActionPreflightElement): boolean {
+  return PREFLIGHT_TYPEABLE_ROLES.has(element.role) && !element.disabled && !element.unavailable
+}
+
+function textInputIntentScore(element: BrowserActionPreflightElement, objectiveText: string): number {
+  if (!isPreflightTypeableElement(element)) return Number.NEGATIVE_INFINITY
+
+  const haystack = normalizeMatchValue(`${element.label} ${element.groupLabel || ''} ${element.visualLabel || ''} ${element.primary} ${element.role}`)
+  const objective = normalizeMatchValue(objectiveText)
+  let score = 20
+
+  if (/\b(ask anything|what s on your mind|message|chat|prompt|question|reply|comment|compose|type|write)\b/.test(haystack)) score += 90
+  if (/\b(search|find)\b/.test(haystack) && !/\b(search|find)\b/.test(objective)) score -= 45
+  if (/\b(email|password|log in|login|sign in|signup|sign up)\b/.test(haystack) && !/\b(log ?in|sign ?in|account|email|password)\b/.test(objective)) score -= 70
+  if (element.role === 'textarea' || element.role === 'contenteditable') score += 18
+  if (element.role === 'text-input' || element.role.endsWith('-input')) score += 12
+  if (element.label && objective.includes(normalizeMatchValue(element.label))) score += 15
+
+  return score
+}
+
+function findBestPreflightTypeTarget(
+  snapshot: BrowserActionPreflightSnapshot,
+  state: AgentStateData,
+  args: Record<string, unknown>,
+): BrowserActionPreflightElement | null {
+  const objective = [
+    browserObjectiveText(state),
+    typeof args.text === 'string' ? args.text : '',
+    'message chat prompt ask question input',
+  ].filter(Boolean).join('\n')
+
+  const hinted = rankBrowserTargets(objective, snapshot.elements, { limit: 8 })
+    .map(hint => findPreflightElement(snapshot, hint.index))
+    .find((element): element is BrowserActionPreflightElement => !!element && isPreflightTypeableElement(element))
+
+  if (hinted) return hinted
+
+  return snapshot.elements
+    .filter(isPreflightTypeableElement)
+    .map(element => ({ element, score: textInputIntentScore(element, objective) }))
+    .filter(item => Number.isFinite(item.score))
+    .sort((a, b) => b.score - a.score || a.element.index - b.element.index)[0]?.element || null
+}
+
+function browserObjectiveText(state: AgentStateData): string {
+  return [
+    state.originalUserRequest || '',
+    state.currentPlanItems?.[state.currentStepIdx] || '',
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+    state.stepMicroPlan || '',
+  ].filter(Boolean).join('\n')
+}
+
+function browserCompletionObjectiveText(state: AgentStateData): string {
+  const stepObjective = [
+    state.currentPlanItems?.[state.currentStepIdx] || '',
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+    state.stepMicroPlan || '',
+  ].filter(Boolean).join('\n')
+
+  return stepObjective || state.originalUserRequest || ''
+}
+
+function researchObjectiveText(state: AgentStateData, args?: Record<string, unknown>): string {
+  return [
+    state.originalUserRequest || '',
+    currentStepText(state),
+    state.stepMicroPlan || '',
+    typeof args?.action_label === 'string' ? args.action_label : '',
+    typeof args?.query === 'string' ? args.query : '',
+    typeof args?.url === 'string' ? args.url : '',
+  ].filter(Boolean).join('\n')
+}
+
+function researchActivityKindForTool(toolName: string): ResearchActivityKind | null {
+  if (toolName === 'web_search') return 'search'
+  if (toolName === 'browser_navigate' || toolName === 'browse_page') return 'visit'
+  if (
+    toolName === 'browser_get_content' ||
+    toolName === 'browser_find_text' ||
+    toolName === 'read_document' ||
+    toolName === 'http_request'
+  ) {
+    return 'extract'
+  }
+  return null
+}
+
+function isBrowserPreflightActionBlock(error?: string): boolean {
+  return !!error && /BROWSER_ACTION_PREFLIGHT_BLOCKED|blocked before execution|browser_(?:click_at|type|select|fill_form) requires/i.test(error)
+}
+
+/**
+ * Tokenize a search query into meaningful words for similarity comparison.
+ */
+function tokenizeQuery(query: string): Set<string> {
+  return new Set(
+    query.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length > 2 && !SEARCH_STOPWORDS.has(w))
+  )
+}
+
+/**
+ * Compute Jaccard similarity between two token sets.
+ */
+function tokenSimilarity(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1
+  let intersection = 0
+  for (const t of a) { if (b.has(t)) intersection++ }
+  const union = a.size + b.size - intersection
+  return union > 0 ? intersection / union : 0
+}
+
+/**
+ * Detect repeating tool-type cycles in a sequence.
+ * E.g. [search, browse, search, browse] → cycle [search, browse] repeated 2x.
+ */
+function detectToolCycle(sequence: string[], cycleLen: number, minRepeats: number): string[] | null {
+  if (sequence.length < cycleLen * minRepeats) return null
+  const tail = sequence.slice(-cycleLen * minRepeats)
+  const pattern = tail.slice(0, cycleLen)
+  for (let r = 1; r < minRepeats; r++) {
+    for (let i = 0; i < cycleLen; i++) {
+      if (tail[r * cycleLen + i] !== pattern[i]) return null
+    }
+  }
+  return pattern
+}
+
+export class ToolPipeline {
+  private emitter: AgentEventEmitter
+  private conversationId: string | undefined
+  private cache: ToolCache | null = null
+  private retry: ToolRetry | null = null
+  private memory: WorkingMemoryLike | null = null
+  private logger: Logger | null = null
+  private recovery: ErrorRecoveryEngine | null = null
+  private signal: AbortSignal | null = null
+  private creditRunId: string | undefined
+  private userId: string | undefined
+  private ensureBrowserFrameStream: (() => void) | undefined
+
+  constructor(
+    emitter: AgentEventEmitter,
+    conversationId: string | undefined,
+    opts?: {
+      cache?: ToolCache
+      retry?: ToolRetry
+      memory?: WorkingMemoryLike
+      logger?: Logger
+      recovery?: ErrorRecoveryEngine
+      signal?: AbortSignal
+      creditRunId?: string
+      userId?: string
+      ensureBrowserFrameStream?: () => void
+    },
+  ) {
+    this.emitter = emitter
+    this.conversationId = conversationId
+    this.cache = opts?.cache ?? null
+    this.retry = opts?.retry ?? null
+    this.memory = opts?.memory ?? null
+    this.logger = opts?.logger ?? null
+    this.recovery = opts?.recovery ?? null
+    this.signal = opts?.signal ?? null
+    this.creditRunId = opts?.creditRunId
+    this.userId = opts?.userId
+    this.ensureBrowserFrameStream = opts?.ensureBrowserFrameStream
+  }
+
+  private async recordResearchActivity(state: AgentStateData, input: {
+    tool: string
+    kind: ResearchActivityKind
+    query?: string
+    url?: string
+    success: boolean
+    error?: string
+    resultCount?: number
+    titles?: string[]
+    sourceUrls?: string[]
+    allowedRepeatReason?: string | null
+  }): Promise<void> {
+    if (!this.userId || !this.conversationId) return
+
+    const normalizedQuery = input.query ? normalizeResearchQuery(input.query) : undefined
+    const normalizedUrl = input.url ? normalizeResearchUrl(input.url) : undefined
+    const domain = researchDomainFromUrl(input.url)
+    const entry: ResearchActivityEntry = makeResearchActivityEntry({
+      userId: this.userId,
+      conversationId: this.conversationId,
+      runId: this.creditRunId,
+      stepIdx: state.currentStepIdx,
+      stepTitle: state.currentPlanItems?.[state.currentStepIdx],
+      tool: input.tool,
+      kind: input.kind,
+      ...(input.query ? { query: input.query, normalizedQuery } : {}),
+      ...(input.url ? { url: input.url, normalizedUrl } : {}),
+      ...(domain ? { domain } : {}),
+      success: input.success,
+      ...(input.error ? { error: input.error.slice(0, 300) } : {}),
+      ...(input.resultCount !== undefined ? { resultCount: input.resultCount } : {}),
+      ...(input.titles ? { titles: input.titles.slice(0, 8) } : {}),
+      ...(input.sourceUrls ? { sourceUrls: input.sourceUrls.slice(0, 12) } : {}),
+      ...(input.allowedRepeatReason ? { allowedRepeatReason: input.allowedRepeatReason } : {}),
+    })
+
+    addResearchActivityToIndex(state.researchActivity, entry)
+    try {
+      await appendResearchActivityEntry(entry)
+    } catch (error) {
+      this.logger?.warn('Failed to persist hidden research activity entry', {
+        tool: input.tool,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  private researchActivityPreflightBlockReason(
+    toolName: string,
+    args: Record<string, unknown>,
+    state: AgentStateData,
+  ): string | null {
+    void toolName
+    void args
+    void state
+    // The research activity log is an advisory memory, not a hard gate. Letting
+    // calls execute is cheaper and more stable than returning internal recovery
+    // errors that the model may spend several turns trying to satisfy.
+    return null
+  }
+
+  private abortError(): Error {
+    return new Error('Tool execution aborted')
+  }
+
+  private throwIfAborted(): void {
+    if (this.signal?.aborted) throw this.abortError()
+  }
+
+  private async emitServerToolCharge(toolCallId: string, toolName: string): Promise<void> {
+    if (!this.userId || !this.conversationId) return
+    const recorded = await chargeServerTool(this.userId, this.conversationId, toolName, toolCallId, this.creditRunId)
+    if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+  }
+
+  private async persistGeneratedTaskFile(toolName: string, args: Record<string, unknown>, result: unknown): Promise<void> {
+    if (!this.userId || !this.conversationId || !result || typeof result !== 'object') return
+    const fileResult = result as { path?: unknown; size?: unknown; error?: unknown }
+    if (typeof fileResult.error === 'string') return
+
+    if (toolName === 'delete_file') {
+      const deletePath = typeof fileResult.path === 'string' && fileResult.path
+        ? fileResult.path
+        : typeof args.path === 'string' && args.path
+          ? args.path
+          : ''
+      if (!deletePath) return
+      await markTaskFileDeleted({
+        userId: this.userId,
+        conversationId: this.conversationId,
+        path: deletePath,
+      })
+      return
+    }
+
+    if (!['create_file', 'append_file', 'edit_file', 'export_pdf'].includes(toolName)) return
+    const path = typeof fileResult.path === 'string' && fileResult.path
+      ? fileResult.path
+      : typeof args.path === 'string' && args.path
+        ? args.path
+        : typeof args.output_path === 'string' && args.output_path
+          ? args.output_path
+          : ''
+    if (!path || typeof fileResult.size !== 'number') return
+
+    await persistSandboxTaskFile({
+      userId: this.userId,
+      conversationId: this.conversationId,
+      path,
+    })
+  }
+
+  private async recordCachedToolProgress(
+    tc: ToolCallData,
+    args: Record<string, unknown>,
+    cached: unknown,
+    state: AgentStateData,
+    activity: {
+      kind: ResearchActivityKind | null
+      query?: string
+      url?: string
+      repeatReason?: string | null
+    },
+  ): Promise<boolean> {
+    const cachedIsError = !!(cached && typeof cached === 'object' && 'error' in (cached as Record<string, unknown>))
+
+    trackToolCall(state, tc.name, JSON.stringify(args))
+    state.stepToolCallCount++
+    state.stepToolTypeCounts.set(tc.name, (state.stepToolTypeCounts.get(tc.name) || 0) + 1)
+    if (tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') state.stepBrowseCount++
+    if (!cachedIsError && RESEARCH_TOOLS.has(tc.name)) state.stepResearchCallCount++
+    updateToolHealth(state, tc.name, !cachedIsError)
+
+    const cachedActivityUrl = researchUrlFromToolCall(tc.name, args, cached) || activity.url
+    if (activity.kind && (activity.query || cachedActivityUrl)) {
+      await this.recordResearchActivity(state, {
+        tool: tc.name,
+        kind: cachedIsError ? 'failure' : activity.kind,
+        query: activity.query,
+        url: cachedActivityUrl,
+        success: !cachedIsError,
+        error: cachedIsError ? String((cached as Record<string, unknown>).error || 'Cached tool error') : undefined,
+        allowedRepeatReason: activity.repeatReason,
+      })
+    }
+
+    if (cachedIsError) {
+      const error = String((cached as Record<string, unknown>).error || 'Cached tool error')
+      trackFailure(state, tc.name, error)
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args, cached),
+        error,
+      })
+      this.memory?.recordFailure(tc.name, error, state.currentStepIdx)
+      return true
+    }
+
+    if (tc.name === 'web_search') {
+      const query = (args.query as string) || ''
+      const resultArr = cached as Array<{ title: string; url?: string; snippet?: string }> | undefined
+      const count = Array.isArray(resultArr) ? resultArr.length : 0
+      trackSearchResult(state, count === 0)
+      trackSearchQuery(state, query)
+      logWork(state, `Used cached search: "${query}" → ${count} results`)
+      await this.recordResearchActivity(state, {
+        tool: tc.name,
+        kind: 'search_result',
+        query,
+        success: true,
+        ...researchActivityResultDetails(cached),
+      })
+      if (Array.isArray(resultArr) && resultArr.length > 0) {
+        trackSourceDomain(state, resultArr)
+        recordWorkLedgerSearchResults(state, query, resultArr)
+        for (const item of resultArr.slice(0, 5)) {
+          recordWorkLedgerSource(state, {
+            url: item.url,
+            title: item.title,
+          })
+        }
+        this.memory?.extractFromSearch(query, resultArr, state.currentStepIdx)
+      }
+    } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
+      const url = (args.url as string) || (cached as { url?: string } | undefined)?.url || ''
+      if (url) {
+        state.visitedUrls.add(url)
+        state.stepVisitedUrls.add(url)
+        const normalized = normalizeUrl(url)
+        if (normalized !== url) {
+          state.visitedUrls.add(normalized)
+          state.stepVisitedUrls.add(normalized)
+        }
+        trackVisitedSourceDomain(state, url)
+        recordWorkLedgerSource(state, {
+          url,
+          title: (cached as { title?: string } | undefined)?.title,
+        })
+      }
+      trackBrowseResult(state, false, url)
+      logWork(state, `Used cached browser result: ${url}`)
+      const browseContent = (cached as { content?: string })?.content || ''
+      if (browseContent) this.memory?.extractFromBrowse(url, browseContent, state.currentStepIdx)
+    } else if (tc.name === 'http_request') {
+      this.recordHttpRequestEvidence(args, cached, state, true)
+    } else if (tc.name === 'read_document') {
+      this.recordDocumentReadEvidence(args, cached, state, true)
+    } else if (tc.name === 'read_file') {
+      const path = (args.path as string) || (args.source as string) || ''
+      logWork(state, `Used cached file: ${path}`)
+      satisfyWorkLedgerRequirement(state, 'Input file/document read', [
+        'read and load selected skill/file',
+        'file content before',
+        'extracting selected file',
+        'read/extracting',
+      ])
+    } else if (tc.name === 'list_files') {
+      this.recordFileListingEvidence(args, cached, state, true)
+    }
+
+    return false
+  }
+
+  private recordHttpRequestEvidence(
+    args: Record<string, unknown>,
+    result: unknown,
+    state: AgentStateData,
+    cached: boolean,
+  ): void {
+    const resultObj = result && typeof result === 'object'
+      ? result as { url?: unknown; body?: unknown; status?: unknown; statusText?: unknown }
+      : null
+    const url = researchUrlFromToolCall('http_request', args, result) ||
+      (typeof resultObj?.url === 'string' ? resultObj.url : '')
+    const method = typeof args.method === 'string' && args.method.trim()
+      ? args.method.trim().toUpperCase()
+      : 'GET'
+
+    if (url) {
+      state.visitedUrls.add(url)
+      state.stepVisitedUrls.add(url)
+      const normalized = normalizeUrl(url)
+      if (normalized !== url) {
+        state.visitedUrls.add(normalized)
+        state.stepVisitedUrls.add(normalized)
+      }
+      trackVisitedSourceDomain(state, url)
+      const status = typeof resultObj?.status === 'number' ? resultObj.status : undefined
+      const statusText = typeof resultObj?.statusText === 'string' ? resultObj.statusText : ''
+      recordWorkLedgerSource(state, {
+        url,
+        title: status ? `HTTP ${status}${statusText ? ` ${statusText}` : ''}` : undefined,
+      })
+    }
+
+    const target = url || toolTargetFromArgs(args, result)
+    logWork(state, `${cached ? 'Used cached HTTP result' : 'Fetched HTTP result'}: ${method} ${target}`)
+    const body = typeof resultObj?.body === 'string' ? resultObj.body : ''
+    if (url && body) this.memory?.extractFromBrowse(url, body, state.currentStepIdx)
+  }
+
+  private recordDocumentReadEvidence(
+    args: Record<string, unknown>,
+    result: unknown,
+    state: AgentStateData,
+    cached: boolean,
+  ): void {
+    const source = typeof args.source === 'string' ? args.source : ''
+    const resultObj = result && typeof result === 'object'
+      ? result as { content?: unknown; title?: unknown }
+      : null
+    const url = researchUrlFromToolCall('read_document', args, result)
+    logWork(state, `${cached ? 'Used cached document' : 'Read document'}: ${source}`)
+    satisfyWorkLedgerRequirement(state, 'Input file/document read', [
+      'read and load selected skill/file',
+      'file content before',
+      'extracting selected file',
+      'read/extracting',
+    ])
+
+    if (url) {
+      trackVisitedSourceDomain(state, url)
+      recordWorkLedgerSource(state, {
+        url,
+        title: typeof resultObj?.title === 'string' ? resultObj.title : undefined,
+      })
+    }
+
+    const content = typeof resultObj?.content === 'string' ? resultObj.content : ''
+    if (url && content) this.memory?.extractFromBrowse(url, content, state.currentStepIdx)
+  }
+
+  private recordFileListingEvidence(
+    args: Record<string, unknown>,
+    result: unknown,
+    state: AgentStateData,
+    cached: boolean,
+  ): void {
+    const directory = typeof args.directory === 'string' && args.directory.trim()
+      ? args.directory.trim()
+      : '.'
+    const files = result && typeof result === 'object' && Array.isArray((result as { files?: unknown }).files)
+      ? (result as { files: unknown[] }).files
+      : []
+    logWork(state, `${cached ? 'Used cached file listing' : 'Listed files'}: ${directory} (${files.length} file${files.length === 1 ? '' : 's'})`)
+    satisfyWorkLedgerRequirement(state, 'Workspace files inspected', [
+      'inspect existing files',
+      'inspect current files',
+      'list files',
+      'workspace files',
+      'existing workspace',
+    ])
+  }
+
+  private createAbortPromise(): Promise<never> | null {
+    if (!this.signal) return null
+    if (this.signal.aborted) return Promise.reject(this.abortError())
+
+    return new Promise<never>((_, reject) => {
+      this.signal?.addEventListener('abort', () => reject(this.abortError()), { once: true })
+    })
+  }
+
+  private async maybeLaunchWebsiteAfterWrite(
+    toolCallId: string,
+    filePath: string,
+    result: unknown,
+    state: AgentStateData,
+  ): Promise<unknown> {
+    if (!this.conversationId || !filePath || !isWebsiteEntryPath(filePath) || hasToolError(result)) {
+      return result
+    }
+
+    state.websiteBrowserCheckAttempted = true
+    state.websiteBrowserCheckPath = filePath
+    state.websiteResponsiveCheckDone = false
+
+    let launch: Awaited<ReturnType<typeof buildLocalWebsiteLaunch>>
+    try {
+      launch = await buildLocalWebsiteLaunch(this.conversationId, filePath)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      state.websiteBrowserCheckDone = false
+      logWork(state, `Failed to start local website server for ${filePath}: ${errorMessage}`)
+      recordWorkLedgerFailure(state, {
+        tool: 'local_preview',
+        target: filePath,
+        error: errorMessage,
+      })
+      if (result && typeof result === 'object') {
+        return {
+          ...(result as Record<string, unknown>),
+          localWebsite: {
+            success: false,
+            url: '',
+            title: '',
+            error: errorMessage,
+            action: `Failed to start local website server for ${filePath}`,
+            servedBy: 'local-static-server',
+          },
+        }
+      }
+      return result
+    }
+
+    const navigateId = `${toolCallId}_local_server`
+    this.emitter.toolStart(navigateId, 'browser_navigate', { url: launch.url })
+    await this.emitServerToolCharge(navigateId, 'browser_navigate')
+
+    let browserResult: BrowserActionResult
+    try {
+      browserResult = await browserNavigate(this.conversationId, launch.url)
+    } catch (err) {
+      browserResult = {
+        success: false,
+        url: launch.url,
+        title: '',
+        error: err instanceof Error ? err.message : String(err),
+        action: `Failed to open local website server for ${filePath}`,
+      }
+    }
+    browserResult = await applyVisualQualityGate(browserResult, `local website preview for ${filePath}`)
+
+    const browserResultWithServer = {
+      ...browserResult,
+      localServerUrl: launch.url,
+      localServerOrigin: launch.origin,
+      localServerPort: launch.port,
+      servedBy: 'local-static-server',
+    }
+    state.websiteBrowserCheckDone = !!browserResult.success
+    state.websiteResponsiveCheckDone = !!browserResult.success
+    logWork(state, `${browserResult.success ? 'Opened local website server for' : 'Failed local website server check for'} ${filePath}${browserResult.error ? `: ${browserResult.error}` : ''}`)
+    recordWorkLedgerVisualObservation(state, {
+      tool: 'browser_navigate',
+      url: browserResult.url || launch.url,
+      title: browserResult.title,
+      detail: browserObservationDetail(browserResult),
+    })
+    if (browserResult.success) {
+      recordWorkLedgerVerification(state, {
+        kind: 'local-website-preview',
+        detail: `Opened ${filePath} at ${launch.url} and captured a non-blank visual preview.`,
+      })
+      recordWorkLedgerVerification(state, {
+        kind: 'fixed-viewport-preview',
+        detail: 'Captured the local website preview at the existing Computer browser size without changing the viewport ratio.',
+      })
+    } else {
+      recordWorkLedgerFailure(state, {
+        tool: 'local_preview',
+        target: launch.url,
+        error: browserResult.error || 'Local website preview failed',
+      })
+    }
+    this.emitter.toolResult(navigateId, 'browser_navigate', browserResultWithServer as never)
+
+    const cleanBrowserResult = withoutScreenshotBase64(browserResultWithServer)
+
+    if (result && typeof result === 'object') {
+      return {
+        ...(result as Record<string, unknown>),
+        localWebsite: cleanBrowserResult,
+        localWebsiteUrl: launch.url,
+        screenshotBase64: browserResult.screenshotBase64,
+      }
+    }
+    return {
+      result,
+      localWebsite: cleanBrowserResult,
+      localWebsiteUrl: launch.url,
+      screenshotBase64: browserResult.screenshotBase64,
+    }
+  }
+
+  private async maybeLaunchNextWebsiteAfterWrite(
+    toolCallId: string,
+    filePath: string,
+    result: unknown,
+    state: AgentStateData,
+  ): Promise<unknown> {
+    if (!this.conversationId || !filePath || !isNextWebsiteProjectPath(filePath) || hasToolError(result)) {
+      return result
+    }
+
+    let status: Awaited<ReturnType<typeof getNextWebsiteProjectStatus>>
+    try {
+      status = await getNextWebsiteProjectStatus(this.conversationId)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      state.nextWebsitePreviewAttempted = true
+      state.nextWebsitePreviewDone = false
+      state.nextWebsitePreviewError = errorMessage
+      logWork(state, `Failed to inspect Next.js website project: ${errorMessage}`)
+      recordWorkLedgerFailure(state, {
+        tool: 'next_preview',
+        target: filePath,
+        error: errorMessage,
+      })
+      return result && typeof result === 'object'
+        ? {
+            ...(result as Record<string, unknown>),
+            nextWebsitePreview: {
+              success: false,
+              url: '',
+              error: errorMessage,
+              action: 'Failed to inspect Next.js website project',
+              servedBy: 'tsx-esbuild-preview',
+            },
+          }
+        : result
+    }
+
+    if (!status.ready) {
+      state.nextWebsitePreviewDone = false
+      state.nextWebsitePreviewError = `Missing required file(s): ${status.missingFiles.join(', ')}`
+      logWork(state, `Next.js website preview waiting for required files: ${status.missingFiles.join(', ')}`)
+      recordWorkLedgerFailure(state, {
+        tool: 'next_preview',
+        target: filePath,
+        error: `Missing required file(s): ${status.missingFiles.join(', ')}`,
+      })
+      return result
+    }
+
+    state.nextWebsitePreviewAttempted = true
+    state.nextWebsitePreviewDone = false
+    state.nextWebsitePreviewUrl = null
+    state.nextWebsitePreviewError = null
+    state.websiteBrowserCheckAttempted = true
+    state.websiteBrowserCheckPath = `${status.appDir}/page.tsx`
+    state.websiteResponsiveCheckDone = false
+
+    let launch: Awaited<ReturnType<typeof buildTsxWebsitePreviewLaunch>>
+    try {
+      launch = await buildTsxWebsitePreviewLaunch(this.conversationId)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err)
+      state.nextWebsitePreviewDone = false
+      state.nextWebsitePreviewError = errorMessage
+      state.websiteBrowserCheckDone = false
+      logWork(state, `Failed to build TSX website preview: ${errorMessage}`)
+      recordWorkLedgerFailure(state, {
+        tool: 'next_preview',
+        target: `${status.appDir}/page.tsx`,
+        error: errorMessage,
+      })
+      return result && typeof result === 'object'
+        ? {
+            ...(result as Record<string, unknown>),
+            nextWebsitePreview: {
+              success: false,
+              url: '',
+              error: errorMessage,
+              action: 'Failed to build TSX website preview',
+              servedBy: 'tsx-esbuild-preview',
+            },
+          }
+        : result
+    }
+
+    const navigateId = `${toolCallId}_tsx_preview`
+    this.emitter.toolStart(navigateId, 'browser_navigate', { url: launch.url })
+    await this.emitServerToolCharge(navigateId, 'browser_navigate')
+
+    let browserResult: BrowserActionResult
+    try {
+      browserResult = await browserNavigate(this.conversationId, launch.url)
+    } catch (err) {
+      browserResult = {
+        success: false,
+        url: launch.url,
+        title: '',
+        error: err instanceof Error ? err.message : String(err),
+        action: `Failed to open TSX website preview for ${status.appDir}/page.tsx`,
+      }
+    }
+    browserResult = await applyVisualQualityGate(browserResult, `Next.js/TSX preview for ${status.appDir}/page.tsx`)
+
+    const browserResultWithPreview = {
+      ...browserResult,
+      localServerUrl: launch.url,
+      localServerOrigin: launch.origin,
+      localServerPort: launch.port,
+      servedBy: 'tsx-esbuild-preview',
+      appDir: launch.appDir,
+    }
+
+    state.nextWebsitePreviewDone = !!browserResult.success
+    state.nextWebsitePreviewUrl = launch.url
+    state.nextWebsitePreviewError = browserResult.success ? null : browserResult.error || 'Browser preview failed'
+    state.websiteBrowserCheckDone = !!browserResult.success
+    state.websiteResponsiveCheckDone = !!browserResult.success
+    logWork(state, `${browserResult.success ? 'Opened TSX website preview for' : 'Failed TSX website browser check for'} ${status.appDir}/page.tsx${browserResult.error ? `: ${browserResult.error}` : ''}`)
+    recordWorkLedgerVisualObservation(state, {
+      tool: 'browser_navigate',
+      url: browserResult.url || launch.url,
+      title: browserResult.title,
+      detail: browserObservationDetail(browserResult),
+    })
+    if (browserResult.success) {
+      recordWorkLedgerVerification(state, {
+        kind: 'next-website-preview',
+        detail: `Opened ${status.appDir}/page.tsx at ${launch.url} and captured a non-blank visual preview.`,
+      })
+      recordWorkLedgerVerification(state, {
+        kind: 'fixed-viewport-preview',
+        detail: 'Captured the Next.js/TSX preview at the existing Computer browser size without changing the viewport ratio.',
+      })
+    } else {
+      recordWorkLedgerFailure(state, {
+        tool: 'next_preview',
+        target: launch.url,
+        error: browserResult.error || 'Next.js/TSX preview failed',
+      })
+    }
+    this.emitter.toolResult(navigateId, 'browser_navigate', browserResultWithPreview as never)
+
+    const cleanBrowserResult = withoutScreenshotBase64(browserResultWithPreview)
+
+    if (result && typeof result === 'object') {
+      return {
+        ...(result as Record<string, unknown>),
+        nextWebsitePreview: cleanBrowserResult,
+        nextWebsitePreviewUrl: launch.url,
+        screenshotBase64: browserResult.screenshotBase64,
+      }
+    }
+    return {
+      result,
+      nextWebsitePreview: cleanBrowserResult,
+      nextWebsitePreviewUrl: launch.url,
+      screenshotBase64: browserResult.screenshotBase64,
+    }
+  }
+
+  private async blockBrowserActionPreflight(
+    tc: ToolCallData,
+    args: Record<string, unknown>,
+    state: AgentStateData,
+    startTime: number,
+    message: string,
+    snapshot?: BrowserActionPreflightSnapshot,
+    opts?: { suppressHints?: boolean },
+  ): Promise<ToolExecutionResult> {
+    let freshSnapshot = snapshot
+    if (this.conversationId) {
+      try {
+        freshSnapshot = await browserActionPreflight(this.conversationId, { includeFrame: true })
+      } catch {
+        // Keep the earlier snapshot, if any. Preflight failures should still
+        // return a clear action-level error instead of throwing.
+      }
+    }
+
+    const hints = freshSnapshot && !opts?.suppressHints
+      ? rankBrowserTargets(browserObjectiveText(state), freshSnapshot.elements, { limit: 5 })
+      : []
+    const hintText = formatTargetHints(hints)
+    const pageSignature = freshSnapshot
+      ? computeBrowserPageSignature({
+          url: freshSnapshot.url,
+          title: freshSnapshot.title,
+          content: freshSnapshot.content,
+        })
+      : ''
+    const error = `BROWSER_ACTION_PREFLIGHT_BLOCKED: ${message}`
+    const result: BrowserActionResult = {
+      success: false,
+      url: freshSnapshot?.url || '',
+      title: freshSnapshot?.title || '',
+      screenshotPath: freshSnapshot?.screenshotPath,
+      screenshotUrl: freshSnapshot?.screenshotUrl,
+      screenshotBase64: freshSnapshot?.screenshotBase64,
+      error,
+      browserProgress: {
+        kind: 'recoverable_block',
+        reason: message,
+        pageSignature,
+        targetKey: getBrowserActionTargetKey(tc.name, args, freshSnapshot?.elements),
+        recoveryUsed: false,
+      },
+      targetHints: hints.length > 0 ? hints : undefined,
+      content: [message, freshSnapshot?.content, hintText].filter(Boolean).join('\n\n') || undefined,
+      action: `Blocked ${tc.name} before execution`,
+    }
+
+    this.emitter.toolResult(tc.id, tc.name, result as never)
+    trackToolCall(state, tc.name, JSON.stringify(args))
+    // Preflight blocks return fresh recovery state, but they are not real
+    // progress. Do not let them satisfy a phase's tool-count/exit criteria.
+    updateToolHealth(state, tc.name, false)
+    trackFailure(state, tc.name, error)
+    recordWorkLedgerFailure(state, {
+      tool: tc.name,
+      target: toolTargetFromArgs(args, result),
+      error,
+    })
+    if (freshSnapshot?.screenshotBase64 || freshSnapshot?.content) {
+      recordWorkLedgerVisualObservation(state, {
+        tool: tc.name,
+        url: freshSnapshot.url,
+        title: freshSnapshot.title,
+        detail: `Preflight blocked action; returned fresh visual/element state for recovery.`,
+      })
+    }
+    this.memory?.recordFailure(tc.name, error, state.currentStepIdx)
+
+    return { tc, result, isError: true, durationMs: Date.now() - startTime }
+  }
+
+  private async getBrowserTargetHints(state: AgentStateData): Promise<{ snapshot: BrowserActionPreflightSnapshot | null; hints: BrowserTargetHint[] }> {
+    if (!this.conversationId) return { snapshot: null, hints: [] }
+    try {
+      const snapshot = await browserActionPreflight(this.conversationId, { preferCached: true })
+      const hints = rankBrowserTargets(browserObjectiveText(state), snapshot.elements, { limit: 5 })
+      return { snapshot, hints }
+    } catch {
+      return { snapshot: null, hints: [] }
+    }
+  }
+
+  private async addBrowserIntelligenceToResult(
+    tc: ToolCallData,
+    args: Record<string, unknown>,
+    result: unknown,
+    state: AgentStateData,
+  ): Promise<unknown> {
+    if (!tc.name.startsWith('browser_') || !result || typeof result !== 'object') return result
+
+    const resultObj = result as BrowserActionResult
+    const { snapshot, hints } = await this.getBrowserTargetHints(state)
+    const targetKey = getBrowserActionTargetKey(tc.name, args, snapshot?.elements)
+    const progressResult = snapshot?.content
+      ? { ...resultObj, content: snapshot.content, url: snapshot.url || resultObj.url, title: snapshot.title || resultObj.title }
+      : resultObj
+    const outcome = classifyBrowserProgress(state.browserActionHistory, tc.name, args, progressResult, targetKey)
+    const recoveryUsed = isBrowserRecoveryTool(tc.name, args)
+    const combinedCompletionContent = [resultObj.content, snapshot?.content].filter(Boolean).join('\n\n')
+    const useFreshSnapshotForCompletion = isBrowserPreflightActionBlock(resultObj.error) && !!snapshot?.content
+    const completion = detectBrowserTaskCompletion(browserCompletionObjectiveText(state), {
+      ...resultObj,
+      success: useFreshSnapshotForCompletion ? true : resultObj.success,
+      error: useFreshSnapshotForCompletion ? undefined : resultObj.error,
+      url: useFreshSnapshotForCompletion ? (snapshot?.url || resultObj.url) : resultObj.url,
+      title: useFreshSnapshotForCompletion ? (snapshot?.title || resultObj.title) : resultObj.title,
+      action: useFreshSnapshotForCompletion
+        ? `${resultObj.action || tc.name}\nFresh browser state after blocked preflight action.`
+        : resultObj.action,
+      content: combinedCompletionContent,
+    })
+    const contentWithHints = appendTargetHintsToContent(resultObj.content, hints)
+    const contentWithCompletion = appendTaskCompletionToContent(contentWithHints, completion)
+
+    const nextResult: BrowserActionResult = {
+      ...resultObj,
+      browserProgress: outcome,
+      targetHints: hints.length > 0 ? hints : resultObj.targetHints,
+      taskCompletion: completion,
+      content: contentWithCompletion,
+    }
+
+    state.browserActionHistory.push({
+      toolName: tc.name,
+      targetKey,
+      url: resultObj.url || '',
+      title: resultObj.title || '',
+      pageSignature: outcome.pageSignature,
+      progressKind: outcome.kind,
+      success: !resultObj.error && resultObj.success !== false,
+      recoveryUsed,
+      createdAt: Date.now(),
+    })
+    if (state.browserActionHistory.length > 30) state.browserActionHistory.shift()
+
+    if (resultObj.screenshotBase64 || resultObj.screenshotPath || snapshot?.screenshotBase64) {
+      recordWorkLedgerVisualObservation(state, {
+        tool: tc.name,
+        url: resultObj.url || snapshot?.url,
+        title: resultObj.title || snapshot?.title,
+        detail: browserObservationDetail(nextResult),
+      })
+    }
+
+    if (recoveryUsed || outcome.kind === 'progress') {
+      state.browserRecoveryRequired = false
+      state.lastNoProgressTargetKey = null
+      state.consecutiveNoProgressClicks = 0
+    } else if (outcome.kind === 'no_progress_same_target' || outcome.kind === 'no_progress_same_page') {
+      state.browserRecoveryRequired = !!targetKey
+      state.lastNoProgressTargetKey = targetKey
+      state.consecutiveNoProgressClicks++
+      state.lastLoopSignal = { type: 'browser_state', tool: tc.name }
+    } else if (outcome.kind === 'recoverable_block') {
+      state.browserRecoveryRequired = !!targetKey
+      state.lastNoProgressTargetKey = targetKey
+      state.consecutiveNoProgressClicks++
+    } else if (outcome.kind === 'hard_blocker') {
+      state.browserRecoveryRequired = false
+      state.lastNoProgressTargetKey = null
+      recordWorkLedgerVerification(state, {
+        kind: 'browser-hard-blocker',
+        detail: outcome.reason,
+      })
+    }
+
+    if (completion.completed) {
+      state.browserTaskCompleted = true
+      state.browserTaskCompletionEvidence = completion.evidence.slice(0, 5)
+      state.consecutiveNoProgressClicks = 0
+      state.browserRecoveryRequired = false
+      state.lastNoProgressTargetKey = null
+      logWork(state, `Browser task completion detected: ${completion.reason}`)
+      recordWorkLedgerVerification(state, {
+        kind: 'browser-final-state',
+        detail: completion.evidence.length > 0
+          ? `${completion.reason}: ${completion.evidence.slice(0, 3).join('; ')}`
+          : completion.reason,
+      })
+    }
+
+    state.lastBrowserStateHash = outcome.pageSignature
+    state.recentBrowserStateHashes.push(outcome.pageSignature)
+    if (state.recentBrowserStateHashes.length > 12) state.recentBrowserStateHashes.shift()
+
+    return nextResult
+  }
+
+  private async maybeBlockBrowserActionPreflight(
+    tc: ToolCallData,
+    args: Record<string, unknown>,
+    state: AgentStateData,
+    startTime: number,
+  ): Promise<ToolExecutionResult | null> {
+    if (!BROWSER_ACTION_PREFLIGHT_TOOLS.has(tc.name)) return null
+
+    const block = (message: string, snapshot?: BrowserActionPreflightSnapshot) =>
+      this.blockBrowserActionPreflight(tc, args, state, startTime, message, snapshot)
+    const hardBlock = (message: string, snapshot?: BrowserActionPreflightSnapshot) =>
+      this.blockBrowserActionPreflight(tc, args, state, startTime, message, snapshot, { suppressHints: true })
+
+    if (!this.conversationId) {
+      return block('No browser task context is available. Navigate first from a real task before trying to interact with a page.')
+    }
+
+    let snapshot: BrowserActionPreflightSnapshot
+    try {
+      snapshot = await browserActionPreflight(this.conversationId)
+    } catch (err) {
+      return block(`Could not refresh the live page controls before acting: ${err instanceof Error ? err.message : String(err)}`)
+    }
+
+    if (!snapshot.hasSession || !snapshot.url || snapshot.url === 'about:blank') {
+      return block('No live browser page is open. Use browser_navigate first, then act only on [N] controls from the returned elements list.', snapshot)
+    }
+
+    if (snapshot.pageBlocker) {
+      return hardBlock(
+        `The current browser page is marked as a failed/blocking page (${snapshot.pageBlocker}). Do not click, type, select, or hover on this page. Recover with browser_navigate to a different URL, browser_get_content to read what is already loaded, or web_search/same-site search for an alternative source.`,
+        snapshot,
+      )
+    }
+
+    const targetKey = getBrowserActionTargetKey(tc.name, args, snapshot.elements)
+    if (state.browserRecoveryRequired && targetKey && state.lastNoProgressTargetKey === targetKey) {
+      return block(
+        `Repeated no-progress target blocked. The previous attempt against this same target did not move the page forward. Use a recovery tactic first: browser_scroll, browser_find_text, browser_screenshot, browser_get_content, browser_press_key({key:"Escape"}), or navigate to a genuinely different page. Then choose a different TARGET HINT or fresh [N].`,
+        snapshot,
+      )
+    }
+
+    const validateIndex = (rawIndex: unknown, purpose: string): { element: BrowserActionPreflightElement | null; error?: string } => {
+      const index = getIntegerIndex(rawIndex)
+      if (index === null) {
+        return { element: null, error: `${purpose} requires an integer {index: N} copied from the fresh elements list. Do not use coordinates or page numbers.` }
+      }
+      if (index < 1) {
+        return { element: null, error: `Indices start at [1], not [${index}]. Pick a visible [N] from the fresh elements list.` }
+      }
+      if (snapshot.indexedCount === 0) {
+        return { element: null, error: 'No live indexed controls are visible after waiting for the page to settle. Use browser_screenshot, browser_scroll, browser_find_text, or browser_get_content to reveal/read the target before clicking or typing.' }
+      }
+      const element = findPreflightElement(snapshot, index)
+      if (!element) {
+        return {
+          element: null,
+          error: `Index [${index}] is not in the current live elements list (highest valid index is [${snapshot.maxIndex}]). Use the fresh [N] list below; do not reuse an index from an older page state.`,
+        }
+      }
+      if (element.disabled || element.unavailable) {
+        return {
+          element: null,
+          error: `Element [${index}] "${element.label || element.primary}" is ${element.unavailable ? 'unavailable' : 'disabled'}. Do not click it; choose another visible option, scroll to the next section, or report this exact blocker only if it prevents the task.`,
+        }
+      }
+      return { element }
+    }
+
+    const validateSelector = (selector: unknown, purpose: string): string | null => {
+      if (typeof selector !== 'string' || !selector.trim()) {
+        return `${purpose} requires {index: N} or a selector copied exactly from the fresh elements list. Prefer {index: N}.`
+      }
+      if (snapshot.indexedCount === 0) {
+        return 'No live indexed controls are visible after waiting for the page to settle. Do not guess selectors; refresh/reveal the target first.'
+      }
+      if (!selectorAppearsInSnapshot(selector, snapshot)) {
+        return `Selector "${selector}" is not present in the fresh elements list. Do not hand-guess selectors; choose the matching [N] from the list below.`
+      }
+      return null
+    }
+
+    switch (tc.name) {
+      case 'browser_click_at': {
+        const { error } = validateIndex(args.index, 'browser_click_at')
+        if (error) return block(error, snapshot)
+        break
+      }
+      case 'browser_click':
+        {
+          const index = getIntegerIndex(args.index)
+          if (index !== null) {
+            const { error } = validateIndex(index, 'browser_click')
+            if (error) return block(error, snapshot)
+          } else {
+            const error = validateSelector(args.selector, 'browser_click')
+            if (error) return block(error, snapshot)
+          }
+          break
+        }
+      case 'browser_click_and_hold': {
+        const error = validateSelector(args.selector, tc.name)
+        if (error) return block(error, snapshot)
+        break
+      }
+      case 'browser_hover': {
+        const index = getIntegerIndex(args.index)
+        if (index !== null) {
+          const { error } = validateIndex(index, 'browser_hover')
+          if (error) return block(error, snapshot)
+        } else {
+          const error = validateSelector(args.selector, 'browser_hover')
+          if (error) return block(error, snapshot)
+        }
+        break
+      }
+      case 'browser_type': {
+        if (typeof args.text !== 'string') {
+          return block('browser_type requires a string text value plus a live text-input/textarea index.', snapshot)
+        }
+        const index = getIntegerIndex(args.index)
+        if (index !== null) {
+          const { element, error } = validateIndex(index, 'browser_type')
+          if (error) return block(error, snapshot)
+          if (element?.role && !PREFLIGHT_TYPEABLE_ROLES.has(element.role)) {
+            return block(`Element [${index}] is a ${element.role}, not a text input. Use browser_click_at for buttons/radios/checkboxes/links, or browser_select for dropdowns.`, snapshot)
+          }
+        } else if (typeof args.selector === 'string' && args.selector.trim()) {
+          const error = validateSelector(args.selector, 'browser_type')
+          if (error) return block(error, snapshot)
+          const element = findPreflightElementBySelector(snapshot, args.selector)
+          if (element?.role && !PREFLIGHT_TYPEABLE_ROLES.has(element.role)) {
+            return block(`Selector "${args.selector}" points to a ${element.role}, not a text input. Use browser_click_at for buttons/radios/checkboxes/links, or choose a text-input/textarea/contenteditable [N].`, snapshot)
+          }
+        } else {
+          const focused = snapshot.focusedElement
+          if (!focused?.typeable) {
+            const target = findBestPreflightTypeTarget(snapshot, state, args)
+            if (target) {
+              args.index = target.index
+            } else {
+              return block(
+                focused
+                  ? `browser_type has no {index:N} or selector, and the currently focused element is a ${focused.role}${focused.label ? ` ("${focused.label}")` : ''}, not a ready text field. First click a fresh text-input/textarea/contenteditable [N] from the latest elements list, then call browser_type({text:"..."}), or call browser_type({index:N,text:"..."}) directly.`
+                  : 'browser_type has no {index:N} or selector, and no focused text field is active. First click a fresh text-input/textarea/contenteditable [N] from the latest elements list, then call browser_type({text:"..."}), or call browser_type({index:N,text:"..."}) directly.',
+                snapshot,
+              )
+            }
+          }
+        }
+        break
+      }
+      case 'browser_select': {
+        if (typeof args.value !== 'string' || !args.value.trim()) {
+          return block('browser_select requires a non-empty string value plus a live dropdown index.', snapshot)
+        }
+        const index = getIntegerIndex(args.index)
+        if (index !== null) {
+          const { element, error } = validateIndex(index, 'browser_select')
+          if (error) return block(error, snapshot)
+          if (element?.role && element.role !== 'dropdown') {
+            return block(`Element [${index}] is a ${element.role}, not a dropdown. Click buttons/radios/options with browser_click_at; type into inputs with browser_type.`, snapshot)
+          }
+        } else {
+          const error = validateSelector(args.selector, 'browser_select')
+          if (error) return block(error, snapshot)
+        }
+        break
+      }
+      case 'browser_fill_form': {
+        const fields = args.fields
+        if (!Array.isArray(fields) || fields.length === 0) {
+          return block('browser_fill_form requires a non-empty fields array.', snapshot)
+        }
+        if (fields.length > 20) {
+          return block('browser_fill_form supports at most 20 fields in one call. Split the form into smaller chunks.', snapshot)
+        }
+        if (snapshot.indexedCount === 0) {
+          return block('No live form controls are visible after waiting for the page to settle. Reveal the form with browser_scroll or browser_find_text before filling it.', snapshot)
+        }
+        const misses: string[] = []
+        for (const rawField of fields) {
+          const field = rawField && typeof rawField === 'object' ? rawField as Record<string, unknown> : null
+          if (!field) {
+            misses.push('invalid field object')
+            continue
+          }
+          if (field.index !== undefined) {
+            const { error } = validateIndex(field.index, 'browser_fill_form')
+            if (error) misses.push(error)
+            continue
+          }
+          const label = typeof field.label === 'string' ? field.label.trim() : ''
+          if (!label) {
+            misses.push('field is missing label or index')
+          } else if (!labelAppearsInSnapshot(label, snapshot)) {
+            misses.push(`"${label}" is not visible in the current indexed controls`)
+          }
+        }
+        if (misses.length > 0) {
+          return block(`Form fill target check failed: ${misses.slice(0, 5).join('; ')}. Use labels or [N] indices from the fresh FORMS list only.`, snapshot)
+        }
+        break
+      }
+      case 'browser_drag': {
+        const fromError = validateSelector(args.from_selector, 'browser_drag from_selector')
+        if (fromError) return block(fromError, snapshot)
+        const toError = validateSelector(args.to_selector, 'browser_drag to_selector')
+        if (toError) return block(toError, snapshot)
+        break
+      }
+      case 'browser_action_sequence': {
+        const actions = args.actions
+        if (!Array.isArray(actions) || actions.length === 0) {
+          return block('browser_action_sequence requires a non-empty actions array.', snapshot)
+        }
+        if (actions.length > 8) {
+          return block('browser_action_sequence supports at most 8 actions. Split longer work into smaller observed steps.', snapshot)
+        }
+        for (let i = 0; i < actions.length; i++) {
+          const actionEntry = actions[i] && typeof actions[i] === 'object' ? actions[i] as Record<string, unknown> : null
+          const action = actionEntry?.action
+          const actionArgs = actionEntry?.args && typeof actionEntry.args === 'object' ? actionEntry.args as Record<string, unknown> : {}
+          if (action === 'click_at') {
+            const { error } = validateIndex(actionArgs.index, `browser_action_sequence step ${i + 1} click_at`)
+            if (error) return block(error, snapshot)
+          } else if (action === 'type') {
+            if (typeof actionArgs.text !== 'string') {
+              return block(`browser_action_sequence step ${i + 1} type requires a string text value.`, snapshot)
+            }
+            const index = getIntegerIndex(actionArgs.index)
+            if (index !== null) {
+              const { element, error } = validateIndex(index, `browser_action_sequence step ${i + 1} type`)
+              if (error) return block(error, snapshot)
+              if (element?.role && !PREFLIGHT_TYPEABLE_ROLES.has(element.role)) {
+                return block(`browser_action_sequence step ${i + 1} targets [${index}], which is a ${element.role}, not a text input.`, snapshot)
+              }
+            } else {
+              const error = validateSelector(actionArgs.selector, `browser_action_sequence step ${i + 1} type`)
+              if (error) return block(error, snapshot)
+            }
+          } else if (action === 'select') {
+            if (typeof actionArgs.value !== 'string' || !actionArgs.value.trim()) {
+              return block(`browser_action_sequence step ${i + 1} select requires a non-empty string value.`, snapshot)
+            }
+            const index = getIntegerIndex(actionArgs.index)
+            if (index !== null) {
+              const { element, error } = validateIndex(index, `browser_action_sequence step ${i + 1} select`)
+              if (error) return block(error, snapshot)
+              if (element?.role && element.role !== 'dropdown') {
+                return block(`browser_action_sequence step ${i + 1} targets [${index}], which is a ${element.role}, not a dropdown.`, snapshot)
+              }
+            } else {
+              const error = validateSelector(actionArgs.selector, `browser_action_sequence step ${i + 1} select`)
+              if (error) return block(error, snapshot)
+            }
+          } else if (action === 'hover') {
+            const index = getIntegerIndex(actionArgs.index)
+            if (index !== null) {
+              const { error } = validateIndex(index, `browser_action_sequence step ${i + 1} hover`)
+              if (error) return block(error, snapshot)
+            } else {
+              const error = validateSelector(actionArgs.selector, `browser_action_sequence step ${i + 1} hover`)
+              if (error) return block(error, snapshot)
+            }
+          } else if (action === 'scroll') {
+            const normalized = normalizeBrowserScrollArgs(actionArgs)
+            actionArgs.direction = normalized.direction
+            if (normalized.amount !== undefined) actionArgs.amount = normalized.amount
+          } else if (action === 'press_key') {
+            if (typeof actionArgs.key !== 'string' || !actionArgs.key.trim()) {
+              return block(`browser_action_sequence step ${i + 1} press_key requires a key.`, snapshot)
+            }
+          } else {
+            return block(`browser_action_sequence step ${i + 1} has unknown action "${String(action)}".`, snapshot)
+          }
+        }
+        break
+      }
+    }
+
+    return null
+  }
+
+  private parsedToolArgs(tc: ToolCallData): Record<string, unknown> | null {
+    try {
+      const parsed = JSON.parse(tc.arguments) as unknown
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null
+    } catch {
+      return null
+    }
+  }
+
+  private coalesceBrowserActionSequence(allCalls: ToolCallData[]): ToolCallData | null {
+    if (allCalls.length < 2 || allCalls.length > 8) return null
+
+    const actions: Array<{ action: string; args: Record<string, unknown> }> = []
+    let actionLabel: string | undefined
+    let planStepIndex: unknown
+
+    for (let i = 0; i < allCalls.length; i++) {
+      const tc = allCalls[i]
+      const action = BROWSER_SEQUENCE_ACTION_BY_TOOL[tc.name]
+      if (!action) return null
+
+      const args = this.parsedToolArgs(tc)
+      if (!args) return null
+      if (!actionLabel && typeof args.action_label === 'string') actionLabel = args.action_label
+      if (planStepIndex === undefined && args.plan_step_index !== undefined) planStepIndex = args.plan_step_index
+
+      const actionArgs = { ...args }
+      delete actionArgs.action_label
+      delete actionArgs.plan_step_index
+
+      if (tc.name === 'browser_type' && actionArgs.submit === true && i < allCalls.length - 1) return null
+      if (tc.name === 'browser_press_key') {
+        const key = typeof actionArgs.key === 'string' ? actionArgs.key.toLowerCase() : ''
+        if ((key === 'enter' || key === 'return') && i < allCalls.length - 1) return null
+      }
+
+      actions.push({ action, args: actionArgs })
+    }
+
+    return {
+      id: allCalls[0].id,
+      name: 'browser_action_sequence',
+      arguments: JSON.stringify({
+        actions,
+        ...(actionLabel ? { action_label: actionLabel } : {}),
+        ...(planStepIndex !== undefined ? { plan_step_index: planStepIndex } : {}),
+      }),
+    }
+  }
+
+  async executeAll(
+    toolCalls: Map<number, ToolCallData>,
+    state: AgentStateData,
+    assistantContent = '',
+  ): Promise<ToolExecutionResult[]> {
+    this.throwIfAborted()
+
+    const allCalls = [...toolCalls.values()]
+    const coalescedSequence = this.coalesceBrowserActionSequence(allCalls)
+    const sequentialBatch = coalescedSequence ? [coalescedSequence] : allCalls.slice(0, 1)
+    const results: ToolExecutionResult[] = []
+    if (allCalls.length > 1) {
+      if (coalescedSequence) {
+        this.logger?.info(`Model requested ${allCalls.length} tool calls; coalescing stable browser actions into browser_action_sequence`)
+      } else {
+        this.logger?.info(`Model requested ${allCalls.length} tool calls; executing only the first one this turn`)
+      }
+    }
+
+    // Execute sequential tools one at a time
+    for (const tc of sequentialBatch) {
+      this.throwIfAborted()
+      const result = await this.executeSingle(tc, state, assistantContent)
+      if (result === null) continue  // skipped (pre-validation blocked)
+      results.push(result)
+
+      // Check for termination signal — stop executing further tools if file creation is looping
+      if (result.isError) {
+        const errorMsg = (result.result as { error?: string })?.error
+        if (errorMsg?.includes('BLOCKED') && tc.name === 'create_file') {
+          let filePath = ''
+          try { filePath = (JSON.parse(tc.arguments) as { path?: string }).path || '' } catch { /* truncated args */ }
+          const priorCreates = filePath ? (state.fileCreateCounts.get(filePath) || 0) : 2
+          if (priorCreates >= 2) return results
+        }
+      }
+    }
+
+    return results
+  }
+
+  /**
+   * Execute a single tool call with pre-validation, caching, retry, and working memory extraction.
+   * Returns null if the call was blocked by pre-validation.
+   */
+  private async executeSingle(
+    tc: ToolCallData,
+    state: AgentStateData,
+    assistantContent = '',
+  ): Promise<ToolExecutionResult | null> {
+    this.throwIfAborted()
+
+    const startTime = Date.now()
+
+    // Parse arguments
+    let args: Record<string, unknown>
+    try {
+      args = JSON.parse(tc.arguments)
+    } catch {
+      if ((tc.name === 'create_file' || tc.name === 'append_file') && this.conversationId) {
+        const partial = extractPartialFileArgs(tc.arguments)
+        const minChars = tc.name === 'create_file' ? 50 : 20
+        if (partial && partial.content.trim().length >= minChars) {
+          const recoveredArgs = { path: partial.path, content: partial.content }
+          const preflightReason = researchFileDetourBlockReason(tc.name, recoveredArgs, state) ||
+            fileWritePreflightBlockReason(tc.name, recoveredArgs, state)
+          if (preflightReason) {
+            const errorResult = { error: preflightReason }
+            recordWorkLedgerFailure(state, {
+              tool: tc.name,
+              target: toolTargetFromArgs(recoveredArgs),
+              error: preflightReason,
+            })
+            trackToolCall(state, tc.name, JSON.stringify(recoveredArgs))
+            state.stepToolCallCount++
+            return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+          }
+
+          const recoveredLines = lineCount(partial.content)
+          const recovery = {
+            path: partial.path,
+            toolName: tc.name,
+            chars: partial.content.length,
+            lines: recoveredLines,
+          }
+          this.emitter.toolStart(tc.id, tc.name, {
+            path: partial.path,
+            contentCharCount: partial.content.length,
+            contentLineCount: recoveredLines,
+          })
+
+          const result = tc.name === 'create_file'
+            ? await createFileInSandbox(this.conversationId, partial.path, partial.content)
+            : await appendFileInSandbox(this.conversationId, partial.path, partial.content)
+
+          this.emitter.toolResult(tc.id, tc.name, result as never)
+
+          if (result.size !== undefined) {
+            state.createdFiles.add(partial.path)
+            if (tc.name === 'create_file') trackFileCreate(state, partial.path)
+            state.partialFileWriteRecoveryPending = recovery
+            state.partialFileWriteRecoveryNudged = false
+            state.partialFileWriteRecoveries.push({ ...recovery, createdAt: Date.now() })
+            if (state.partialFileWriteRecoveries.length > 10) state.partialFileWriteRecoveries.shift()
+            logWork(state, `${tc.name === 'create_file' ? 'Recovered and created' : 'Recovered and appended'} file: ${partial.path}`)
+            if (this.memory) this.memory.recordFileCreated(partial.path, state.currentStepIdx)
+            await this.persistGeneratedTaskFile(tc.name, recoveredArgs, result).catch((error) => {
+              this.logger?.warn('Failed to persist recovered generated file', {
+                path: partial.path,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            })
+            await this.emitFileArtifact(tc.id, { path: partial.path, content: partial.content }, result, state)
+            let recoveredResult = await this.maybeLaunchWebsiteAfterWrite(tc.id, partial.path, result, state)
+            recoveredResult = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, partial.path, recoveredResult, state)
+            const recoveredObject = recoveredResult && typeof recoveredResult === 'object'
+              ? recoveredResult as Record<string, unknown>
+              : { result: recoveredResult }
+            return {
+              tc,
+              result: {
+                ...recoveredObject,
+                recoveredFromPartial: true,
+                partialWriteIncomplete: true,
+                partialWriteRecovery: {
+                  ...recovery,
+                  nextAction: `Do not recreate or overwrite ${partial.path}. Continue from the saved content with append_file, or use edit_file only for a targeted fix.`,
+                },
+              },
+              isError: false,
+              durationMs: Date.now() - startTime,
+            }
+          }
+
+          return { tc, result, isError: true, durationMs: Date.now() - startTime }
+        }
+
+        if (partial?.path) {
+          this.emitter.toolStart(tc.id, tc.name, { path: partial.path, content: '' })
+        }
+      }
+
+      // Truncated create_file — do NOT track as created since the file was never written.
+      // The agent needs to retry with a shorter version.
+      if (tc.name === 'create_file') {
+        const errorResult = {
+          error: `BLOCKED: Your file content was too long and got truncated (the JSON was cut off mid-generation). Do NOT retry with the same large content. Instead: (1) create the file with a shorter initial version covering the first few sections, then (2) use append_file to add remaining sections one chunk at a time.`,
+        }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+
+      // Detect truncated edit_file/append_file calls — same problem as create_file
+      if (tc.name === 'edit_file' || tc.name === 'append_file') {
+        const errorResult = {
+          error: `BLOCKED: Your ${tc.name} call was too long and got truncated (the JSON was cut off mid-generation). Do NOT retry the same large write. Break the manuscript into smaller chapter/section chunks, then append each chunk with append_file.`,
+        }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+
+      const argPreview = tc.arguments.slice(0, 200)
+      const errorResult = {
+        error: `Failed to parse tool arguments: ${argPreview}${tc.arguments.length > 200 ? '...' : ''}`,
+      }
+      this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    // --- Pre-validation guards ---
+
+    const isFinalDeliverableStep = !!state.currentPlanItems &&
+      state.currentPlanItems.length > 0 &&
+      state.currentStepIdx === state.currentPlanItems.length - 1
+
+    const stepIndexReason = planStepIndexBlockReason(args, state)
+    if (stepIndexReason) {
+      const errorResult = { error: stepIndexReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: stepIndexReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const actionLabelReason = actionLabelBlockReason(args, state)
+    if (actionLabelReason) {
+      const errorResult = { error: actionLabelReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: actionLabelReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const narrationCadenceReason = narrationCadenceBlockReason(tc.id, tc.name, args, state, assistantContent)
+    if (narrationCadenceReason) {
+      const errorResult = { error: narrationCadenceReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: narrationCadenceReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const phaseSemanticReason = phaseSemanticBlockReason(tc.name, args, state)
+    if (phaseSemanticReason) {
+      const errorResult = { error: phaseSemanticReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: phaseSemanticReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const researchFileDetourReason = researchFileDetourBlockReason(tc.name, args, state)
+    if (researchFileDetourReason) {
+      const errorResult = { error: researchFileDetourReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: researchFileDetourReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const uploadedAttachmentReason = uploadedAttachmentToolBlockReason(tc.name, args, state)
+    if (uploadedAttachmentReason) {
+      const errorResult = { error: uploadedAttachmentReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: uploadedAttachmentReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    if (tc.name === 'browser_resize') {
+      const errorResult = {
+        error: 'INTERNAL_RECOVERY: browser_resize is disabled because autonomous viewport/ratio changes are blocked. Keep the Computer browser at its existing size. Use browser_screenshot, browser_scroll, browser_get_content, read_file, or edit_file to inspect and fix the page without changing the browser dimensions.',
+      }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: errorResult.error,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    // The final step is for writing/saving the deliverable. Do not let the model
+    // keep browsing or fetching sources after the plan has reached synthesis.
+    const finalSynthesisCarryoverReason = finalSynthesisCarryoverBlockReason(tc.name, state)
+    if (finalSynthesisCarryoverReason) {
+      const errorResult = { error: finalSynthesisCarryoverReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: finalSynthesisCarryoverReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    if (
+      isFinalDeliverableStep &&
+      !DELIVERABLE_STEP_TOOLS.has(tc.name) &&
+      !allowNonDeliverableToolOnFinalStep(tc.name, args, state)
+    ) {
+      const errorResult = {
+        error: `INTERNAL_RECOVERY: final-step ${tc.name} was skipped because the current step needs the saved deliverable, not another external action. Do not mention this to the user. Use create_file for the initial written/code deliverable, append_file for large continuation chunks, edit_file for targeted revisions, export_pdf after saving a Markdown/HTML source when the user requested PDF, or image_search only when the requested deliverable is an image. Use the findings and assets already gathered.`,
+      }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: errorResult.error,
+      })
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const singleSearchLimitReason = singleWebSearchLimitBlockReason(tc.name, state)
+    if (singleSearchLimitReason) {
+      const errorResult = { error: singleSearchLimitReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: singleSearchLimitReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = tc.name === 'web_search'
+        ? { type: 'search_duplicate', tool: 'web_search' }
+        : { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
+    if (browserPreflightBlock) return browserPreflightBlock
+
+    const httpRequestBlockReason = pageLikeHttpRequestBlockReason(tc.name, args)
+    if (httpRequestBlockReason) {
+      const errorResult = { error: httpRequestBlockReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: httpRequestBlockReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const fileWritePreflightReason = fileWritePreflightBlockReason(tc.name, args, state)
+    if (fileWritePreflightReason) {
+      const errorResult = { error: fileWritePreflightReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: fileWritePreflightReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    // If the user supplied an explicit URL/domain, silently reroute search
+    // scaffolding to the required direct navigation before any visible pill is
+    // emitted. This avoids showing a misleading search action and keeps the
+    // narration cadence from counting an action that did not really happen.
+    const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
+    if (directNavigationTarget) {
+      const reroutedArgs = {
+        url: directNavigationTarget.toString(),
+        action_label: `Open ${directNavigationTarget.hostname} directly`,
+        plan_step_index: state.currentStepIdx + 1,
+      }
+      const reroutedToolCall: ToolCallData = {
+        id: tc.id,
+        name: 'browser_navigate',
+        arguments: JSON.stringify(reroutedArgs),
+      }
+      logWork(state, `Rerouted web_search to direct navigation: ${directNavigationTarget.toString()}`)
+      return this.executeSingle(reroutedToolCall, state)
+    }
+
+    // Emit tool_start after final-step/browser-action/file-write preflight so blocked
+    // calls do not appear in the UI as if the agent actually acted.
+    const startArgs = buildToolStartArgsForExecution(tc.name, args)
+    countVisibleToolActionForNarration(tc.id, tc.name, startArgs, state)
+    this.emitter.toolStart(tc.id, tc.name, startArgs)
+
+    const toolContext: ToolContext = {
+      conversationId: this.conversationId,
+      onTerminalOutput: (streamType, data) => {
+        this.emitter.terminalOutput(tc.id, streamType, data)
+      },
+    }
+
+    // Block same-file rewrites AND semantically similar filenames
+    if (tc.name === 'create_file') {
+      const filePath = args.path as string
+      const priorCreates = filePath ? (state.fileCreateCounts.get(filePath) || 0) : 0
+      const isDeliverableStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
+      const pendingPartial = state.partialFileWriteRecoveryPending?.path === filePath
+        ? state.partialFileWriteRecoveryPending
+        : null
+      if (filePath && pendingPartial) {
+        state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
+        const errorResult = {
+          error: `"${filePath}" already has a recovered partial write (${pendingPartial.lines} lines, ${pendingPartial.chars} chars). Do NOT recreate or overwrite it. Use append_file to continue from the saved content, or edit_file only for a targeted replacement.`,
+        }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+      // Allow overwriting on the deliverable step — the final output supersedes research notes.
+      // On other steps, block rewrites after 1st create.
+      if (filePath && priorCreates >= 1 && !isDeliverableStep) {
+        state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
+        const errorResult = { error: `"${filePath}" already exists. Use append_file to continue writing it or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue working.` }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+      // On deliverable step, block after 2 creates (prevent genuine loops even on last step)
+      if (filePath && priorCreates >= 2 && isDeliverableStep) {
+        const errorResult = { error: `"${filePath}" has been created twice already. Use append_file for additional sections or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue.` }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+
+      // Semantic dedup: check if a file with a similar name was already created
+      // Skip on the last step (deliverable) — the deliverable file is intentionally different from research files
+      if (filePath && state.createdFiles.size > 0 && !isDeliverableStep) {
+        const newTokens = this.extractFileNameTokens(filePath)
+        if (newTokens.length > 0) {
+          for (const existing of state.createdFiles) {
+            const existingTokens = this.extractFileNameTokens(existing)
+            if (existingTokens.length === 0) continue
+            const overlap = newTokens.filter(t => existingTokens.includes(t)).length
+            const similarity = overlap / Math.max(newTokens.length, existingTokens.length)
+            if (similarity >= 0.9) { // Only block near-exact dupes (e.g. report.md vs report-v2.md)
+              const errorResult = { error: `A file with a very similar name "${existing}" already exists. Use append_file to continue "${existing}" or edit_file for targeted replacements instead of creating a near-duplicate file. Do NOT tell the user about this error — just switch tools and continue working.` }
+              this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+              return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+            }
+          }
+        }
+      }
+    }
+
+    const researchActivityBlock = this.researchActivityPreflightBlockReason(tc.name, args, state)
+    if (researchActivityBlock) {
+      const errorResult = { error: researchActivityBlock }
+      await this.recordResearchActivity(state, {
+        tool: tc.name,
+        kind: 'failure',
+        query: typeof args.query === 'string' ? args.query : undefined,
+        url: typeof args.url === 'string' ? args.url : undefined,
+        success: false,
+        error: researchActivityBlock,
+      })
+      this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = tc.name === 'web_search'
+        ? { type: 'search_duplicate', tool: 'web_search' }
+        : { type: 'near_dup_search', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const activityKind = researchActivityKindForTool(tc.name)
+    const activityQuery = researchQueryFromToolArgs(tc.name, args)
+    const activityUrl = researchUrlFromToolCall(tc.name, args)
+    const activityRepeatReason = activityKind
+      ? deliberateRepeatReason({
+          objectiveText: researchObjectiveText(state, args),
+          actionText: typeof args.action_label === 'string' ? args.action_label : undefined,
+          domain: researchDomainFromUrl(activityUrl),
+          url: activityUrl,
+        })
+      : null
+
+    // Prefer cached duplicates, but do not hard-block search repeats. Hard
+    // duplicate guards were causing paid recovery loops that cost more than an
+    // occasional repeated search request. Cached repeats still update progress
+    // state so the agent does not spend another model turn seeking evidence it
+    // already has.
+    if (tc.name === 'web_search') {
+      const query = ((args.query as string) || '').toLowerCase().trim()
+      if (query) {
+        if (state.stepSearchQueries.has(query)) {
+          if (this.cache) {
+            const cached = this.cache.get(tc.name, args)
+            if (cached !== undefined) {
+              this.logger?.info(`Returning cached search result for "${query}"`)
+              this.emitter.toolResult(tc.id, tc.name, cached as never)
+              const cachedIsError = await this.recordCachedToolProgress(tc, args, cached, state, {
+                kind: activityKind,
+                query: activityQuery,
+                url: activityUrl,
+                repeatReason: activityRepeatReason,
+              })
+              return { tc, result: cached, isError: cachedIsError, cached: true, durationMs: Date.now() - startTime }
+            }
+          }
+          this.logger?.info(`Allowing repeated web_search without hard guard: "${query}"`)
+        }
+      }
+    }
+
+    // Tool type rate limiting per step
+    const rateLimit = TOOL_TYPE_RATE_LIMITS[tc.name]
+    if (rateLimit !== undefined) {
+      const count = state.stepToolTypeCounts.get(tc.name) || 0
+      if (count >= rateLimit) {
+        state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+        const errorResult = { error: `You've used "${tc.name}" ${count} times this step (limit: ${rateLimit}). Move on to a different approach or advance to the next step. Using the SAME tool repeatedly wastes budget.` }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.stepFailureCount++
+        console.log(`[ToolPipeline] Rate limit hit: ${tc.name} used ${count}/${rateLimit} times`)
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+    }
+
+    // Cross-tool cycle detection — detect search→browse→search→browse loops
+    state.recentToolSequence.push(tc.name)
+    if (state.recentToolSequence.length > CROSS_TOOL_PATTERN_WINDOW) {
+      state.recentToolSequence = state.recentToolSequence.slice(-CROSS_TOOL_PATTERN_WINDOW)
+    }
+    const cycle = detectToolCycle(state.recentToolSequence, CROSS_TOOL_CYCLE_LENGTH, CROSS_TOOL_CYCLE_REPEATS)
+    if (cycle) {
+      state.lastLoopSignal = { type: 'cross_tool_cycle', tool: tc.name }
+      state.stepCrossToolCycleDetections = (state.stepCrossToolCycleDetections || 0) + 1
+      console.log(`[ToolPipeline] Cross-tool cycle detected: [${cycle.join(' → ')}] repeated ${CROSS_TOOL_CYCLE_REPEATS}x`)
+      if (state.stepCrossToolCycleDetections >= 2) {
+        const errorResult = {
+          error: `Repeated tool cycle blocked: [${cycle.join(' → ')}]. Stop repeating this pattern. If the current phase has enough evidence, emit <next_step/>; otherwise use a materially different source, query, or tool.`,
+        }
+        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.stepFailureCount++
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+    }
+
+    // Circuit breaker check
+    if (isToolDisabled(state, tc.name)) {
+      const errorResult = { error: `Tool "${tc.name}" is temporarily disabled due to repeated failures. It will be re-enabled automatically. Use an alternative approach.` }
+      this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    // Block disabled search
+    if (tc.name === 'web_search' && state.searchDisabled) {
+      const errorResult = { error: 'Search is permanently disabled for this task. Use browser_navigate with direct URLs instead, or proceed with your existing knowledge.' }
+      this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    // --- Check cache before execution ---
+    if (this.cache) {
+      const cached = this.cache.get(tc.name, args)
+      if (cached !== undefined) {
+        this.logger?.info(`Cache hit for ${tc.name}`)
+        this.emitter.toolResult(tc.id, tc.name, cached as never)
+        const cachedIsError = await this.recordCachedToolProgress(tc, args, cached, state, {
+          kind: activityKind,
+          query: activityQuery,
+          url: activityUrl,
+          repeatReason: activityRepeatReason,
+        })
+        return { tc, result: cached, isError: cachedIsError, cached: true, durationMs: Date.now() - startTime }
+      }
+    }
+
+    // --- Execute with timeout and retry ---
+    await this.emitServerToolCharge(tc.id, tc.name)
+    let result: unknown
+    const executeFn = async () => {
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+      const timeoutMs = timeoutMsForTool(tc.name)
+      const abortPromise = this.createAbortPromise()
+
+      if (this.conversationId && BROWSER_TOOLS.includes(tc.name)) {
+        this.ensureBrowserFrameStream?.()
+      }
+
+      const operations: Array<Promise<unknown>> = [
+        executeTool(tc.name, args, toolContext),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error(`Tool "${tc.name}" timed out after ${timeoutMs / 1000}s`)),
+            timeoutMs,
+          )
+        }),
+      ]
+      if (abortPromise) operations.push(abortPromise)
+
+      try {
+        return await Promise.race(operations)
+      } finally {
+        if (timeoutId !== undefined) clearTimeout(timeoutId)
+      }
+    }
+
+    try {
+      if (this.retry) {
+        result = await this.retry.execute(tc.name, executeFn)
+      } else {
+        result = await executeFn()
+      }
+    } catch (error) {
+      const errMsg = error instanceof Error ? error.message : 'Unknown error'
+      if (errMsg === 'Tool execution aborted') throw error
+      const isTimeout = errMsg.includes('timed out')
+      const sideEffectWarning = isTimeout && ['create_file', 'execute_command', 'run_code', 'edit_file', 'append_file', 'export_pdf'].includes(tc.name)
+        ? ' Warning: the operation may have partially completed.'
+        : ''
+      result = {
+        error: `Tool execution failed: ${errMsg}${sideEffectWarning}`,
+      }
+    }
+
+    // --- Error tracking: record failures without substituting another tool ---
+    if (this.recovery && result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)) {
+      const errMsg = ((result as Record<string, unknown>).error as string) || ''
+      const isRecoverableBrowserNavigation =
+        tc.name === 'browser_navigate' &&
+        (result as { recoverable?: boolean }).recoverable === true
+      // Only attempt recovery for actual execution failures, not BLOCKED guards
+      if (!errMsg.includes('BLOCKED') && !isRecoverableBrowserNavigation) {
+        const failure: ToolFailure = {
+          toolName: tc.name,
+          error: errMsg,
+          args,
+          durationMs: Date.now() - startTime,
+        }
+        this.recovery.recordFailure(failure)
+        const diagnosis = this.recovery.diagnose(failure)
+
+        if (!diagnosis.isTransient || (diagnosis.isTransient && this.recovery.isToolUnhealthy(tc.name))) {
+          this.logger?.warn(`Tool failure recorded: ${tc.name} (${diagnosis.rootCause.type}/${diagnosis.rootCause.detail})`)
+        }
+      }
+    }
+
+    const durationMs = Date.now() - startTime
+    result = await this.addBrowserIntelligenceToResult(tc, args, result, state)
+
+    if (tc.name.startsWith('browser_') && result && typeof result === 'object') {
+      const browserResult = result as BrowserActionResult
+      if (isManagedLocalBrowserUrl(browserResult.url) && browserResult.screenshotBase64) {
+        result = await applyVisualQualityGate(browserResult, 'managed local website preview')
+      }
+    }
+
+    // --- Cache the result ---
+    if (this.cache) {
+      this.cache.set(tc.name, args, result)
+      if (BROWSER_CONTENT_INVALIDATING_TOOLS.has(tc.name)) {
+        this.cache.invalidateForTool('browser_get_content')
+      }
+      // Invalidate related caches on file mutations
+      if (tc.name === 'create_file' || tc.name === 'edit_file' || tc.name === 'append_file' || tc.name === 'export_pdf' || tc.name === 'delete_file') {
+        const filePath = (args.path as string) || (args.output_path as string) || (args.source_path as string) || ''
+        if (filePath) this.cache.invalidateForFile(filePath)
+      }
+    }
+
+    // --- Track results ---
+
+    // Track search failures
+    if (tc.name === 'web_search') {
+      const resultArr = result as Array<{ title: string }> | undefined
+      const isFailure =
+        !resultArr ||
+        resultArr.length === 0 ||
+        (resultArr.length === 1 && resultArr[0]?.title === 'Search unavailable')
+      trackSearchResult(state, isFailure)
+    }
+
+    // Track browse failures
+    if (tc.name === 'browse_page' || tc.name === 'browser_navigate') {
+      const browseResult = result as { url?: string } | undefined
+      const isBrowseFailure = isBrowseFailureResult(result)
+      trackBrowseResult(state, isBrowseFailure, browseResult?.url || (args.url as string) || '')
+    }
+
+    // Track recent tool calls for loop detection
+    trackToolCall(state, tc.name, JSON.stringify(args))
+    state.stepToolCallCount++
+    state.stepToolTypeCounts.set(tc.name, (state.stepToolTypeCounts.get(tc.name) || 0) + 1)
+    if (tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') state.stepBrowseCount++
+
+    // Check if error
+    const isError = result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)
+
+    // Real research calls only — note files don't count toward research progress
+    if (!isError && RESEARCH_TOOLS.has(tc.name)) {
+      state.stepResearchCallCount++
+    }
+
+    // Update tool health for circuit breaker
+    updateToolHealth(state, tc.name, !isError)
+
+    if (isError) {
+      const activityFailureUrl = researchUrlFromToolCall(tc.name, args, result) || activityUrl
+      if (activityKind && (activityQuery || activityFailureUrl)) {
+        await this.recordResearchActivity(state, {
+          tool: tc.name,
+          kind: 'failure',
+          query: activityQuery,
+          url: activityFailureUrl,
+          success: false,
+          error: ((result as Record<string, unknown>).error as string) || 'Unknown tool failure',
+          allowedRepeatReason: activityRepeatReason,
+        })
+      }
+      trackFailure(state, tc.name, ((result as Record<string, unknown>).error as string) || '')
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args, result),
+        error: ((result as Record<string, unknown>).error as string) || 'Unknown tool failure',
+      })
+      // Record failure in working memory
+      if (this.memory) {
+        this.memory.recordFailure(tc.name, ((result as Record<string, unknown>).error as string) || '', state.currentStepIdx)
+      }
+      // Session learning: record domain-specific failures
+      if (this.recovery) {
+        const url = (args.url as string) || (args.query as string) || ''
+        if (url) this.recovery.recordDomainFailure(tc.name, url)
+      }
+    } else {
+      // Session learning: record tool success
+      if (this.recovery) {
+        this.recovery.recordSuccess(tc.name)
+      }
+    }
+
+    // --- Tool-specific tracking and working memory extraction ---
+
+    if (tc.name === 'web_search') {
+      const query = (args.query as string) || ''
+      trackSearchQuery(state, query)
+      const resultArr = result as Array<{ title: string; url?: string; snippet?: string }> | undefined
+      const count = Array.isArray(resultArr) ? resultArr.length : 0
+      logWork(state, `Searched: "${query}" → ${count} results`)
+      await this.recordResearchActivity(state, {
+        tool: tc.name,
+        kind: 'search_result',
+        query,
+        success: !isError,
+        ...researchActivityResultDetails(result),
+      })
+      if (Array.isArray(resultArr) && resultArr.length > 0) {
+        trackSourceDomain(state, resultArr)
+        recordWorkLedgerSearchResults(state, query, resultArr)
+        for (const item of resultArr.slice(0, 5)) {
+          recordWorkLedgerSource(state, {
+            url: item.url,
+            title: item.title,
+          })
+        }
+        // Extract findings into working memory
+        if (this.memory) {
+          this.memory.extractFromSearch(query, resultArr, state.currentStepIdx)
+        }
+      }
+    } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
+      const url = (args.url as string) || (result as { url?: string } | undefined)?.url || ''
+      if (url) {
+        state.visitedUrls.add(url)
+        state.stepVisitedUrls.add(url)
+        const normalized = normalizeUrl(url)
+        if (normalized !== url) {
+          state.visitedUrls.add(normalized)
+          state.stepVisitedUrls.add(normalized)
+        }
+      }
+      logWork(state, `Visited: ${url}`)
+      if (url) {
+        trackVisitedSourceDomain(state, url)
+        recordWorkLedgerSource(state, {
+          url,
+          title: (result as { title?: string } | undefined)?.title,
+        })
+      }
+      const resultActivityUrl = researchUrlFromToolCall(tc.name, args, result)
+      const resultActivityKind = researchActivityKindForTool(tc.name)
+      if (resultActivityKind && resultActivityUrl) {
+        await this.recordResearchActivity(state, {
+          tool: tc.name,
+          kind: resultActivityKind,
+          url: resultActivityUrl,
+          success: !isError,
+          error: isError ? String((result as Record<string, unknown>).error || 'Unknown tool failure') : undefined,
+          allowedRepeatReason: activityRepeatReason,
+        })
+      }
+      // Extract from browse result
+      if (this.memory && !isError) {
+        const browseContent = (result as { content?: string })?.content || ''
+        if (browseContent) {
+          this.memory.extractFromBrowse(url, browseContent, state.currentStepIdx)
+        }
+      }
+    } else if (tc.name === 'http_request') {
+      this.recordHttpRequestEvidence(args, result, state, false)
+      const resultActivityUrl = researchUrlFromToolCall(tc.name, args, result)
+      if (resultActivityUrl) {
+        await this.recordResearchActivity(state, {
+          tool: tc.name,
+          kind: 'extract',
+          url: resultActivityUrl,
+          success: !isError,
+          allowedRepeatReason: activityRepeatReason,
+        })
+      }
+    } else if (tc.name === 'create_file') {
+      const path = (args.path as string) || ''
+      if (path) state.createdFiles.add(path)
+      maybeSatisfyWebsiteStructureRequirement(state)
+      logWork(state, `Created file: ${path}`)
+      if (/^research-notes\//i.test(path) || /research[-_ ]?notes/i.test(path)) {
+        satisfyWorkLedgerRequirement(state, 'Phase research notes saved', [
+          'research notes',
+          'phase-scoped research notes',
+          'save phase-scoped',
+        ])
+      }
+      if (this.memory && path) {
+        this.memory.recordFileCreated(path, state.currentStepIdx)
+      }
+    } else if (tc.name === 'append_file') {
+      const path = (args.path as string) || ''
+      if (path) state.createdFiles.add(path)
+      maybeSatisfyWebsiteStructureRequirement(state)
+      if (path && state.partialFileWriteRecoveryPending?.path === path) {
+        state.partialFileWriteRecoveryPending = null
+        state.partialFileWriteRecoveryNudged = false
+      }
+      logWork(state, `Appended file: ${path}`)
+      if (/^research-notes\//i.test(path) || /research[-_ ]?notes/i.test(path)) {
+        satisfyWorkLedgerRequirement(state, 'Phase research notes saved', [
+          'research notes',
+          'phase-scoped research notes',
+          'save phase-scoped',
+        ])
+      }
+      if (this.memory && path) {
+        this.memory.recordFileCreated(path, state.currentStepIdx)
+      }
+    } else if (tc.name === 'export_pdf') {
+      const pdfResult = result as { path?: string } | undefined
+      const path = pdfResult?.path || (args.output_path as string) || ''
+      if (path) state.createdFiles.add(path)
+      logWork(state, `Exported PDF: ${path}`)
+      if (this.memory && path) {
+        this.memory.recordFileCreated(path, state.currentStepIdx)
+      }
+    } else if (tc.name === 'read_document') {
+      const resultActivityUrl = researchUrlFromToolCall(tc.name, args, result)
+      this.recordDocumentReadEvidence(args, result, state, false)
+      if (resultActivityUrl) {
+        await this.recordResearchActivity(state, {
+          tool: tc.name,
+          kind: 'extract',
+          url: resultActivityUrl,
+          success: !isError,
+          allowedRepeatReason: activityRepeatReason,
+        })
+      }
+    } else if (tc.name === 'read_file') {
+      const path = (args.path as string) || (args.source as string) || ''
+      logWork(state, `Read file: ${path}`)
+      satisfyWorkLedgerRequirement(state, 'Input file/document read', [
+        'read and load selected skill/file',
+        'file content before',
+        'extracting selected file',
+        'read/extracting',
+      ])
+    } else if (tc.name === 'list_files') {
+      this.recordFileListingEvidence(args, result, state, false)
+    } else if (tc.name === 'execute_command' || tc.name === 'run_code') {
+      logWork(state, `Ran code/command`)
+      // Track code execution results for auto-debug
+      const codeResult = result as { exitCode?: number; stderr?: string; stdout?: string; error?: string } | null
+      if (codeResult) {
+        const exitCode = codeResult.exitCode ?? (codeResult.error ? 1 : 0)
+        state.lastCodeExitCode = exitCode
+        if (exitCode !== 0) {
+          const errorOutput = codeResult.stderr || codeResult.error || ''
+          state.lastCodeError = errorOutput.slice(0, 500)
+          state.consecutiveCodeErrors++
+        } else {
+          state.lastCodeError = null
+          state.consecutiveCodeErrors = 0
+          state.deliverableVerified = true
+          recordWorkLedgerVerification(state, {
+            kind: tc.name,
+            detail: 'Command/code execution completed successfully.',
+          })
+        }
+      }
+    } else if (tc.name === 'edit_file') {
+      const path = (args.path as string) || ''
+      if (path && state.partialFileWriteRecoveryPending?.path === path) {
+        state.partialFileWriteRecoveryPending = null
+        state.partialFileWriteRecoveryNudged = false
+      }
+      if (path) {
+        state.createdFiles.add(path)
+        maybeSatisfyWebsiteStructureRequirement(state)
+      }
+      logWork(state, `Edited file: ${(args.path as string) || ''}`)
+    }
+
+    // Emit tool_result
+    this.emitter.toolResult(tc.id, tc.name, result as never)
+
+    if (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'delete_file') {
+      await this.persistGeneratedTaskFile(tc.name, args, result).catch((error) => {
+        this.logger?.warn('Failed to persist generated task file', {
+          tool: tc.name,
+          path: String((args.path as string | undefined) || (args.output_path as string | undefined) || ''),
+          error: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }
+
+    // Emit/update artifact for deliverable file writes.
+    if ((tc.name === 'create_file' || tc.name === 'append_file') && args.content) {
+      await this.emitFileArtifact(tc.id, args, result, state)
+      result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
+      result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
+    } else if (tc.name === 'edit_file') {
+      result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
+      result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
+    } else if (tc.name === 'export_pdf') {
+      const pdfResult = result as { path?: string; size?: number } | undefined
+      if (pdfResult?.path && pdfResult.size !== undefined) {
+        await this.emitFileArtifact(tc.id, { path: pdfResult.path, content: '' }, result, state)
+      }
+    }
+
+    // Scan for new images after execute_command or run_code
+    if ((tc.name === 'execute_command' || tc.name === 'run_code') && this.conversationId) {
+      await this.scanForNewImages(state)
+    }
+
+    // Emit artifacts for image_search downloads
+    if (tc.name === 'image_search' && this.conversationId) {
+      await this.emitImageSearchArtifacts(result, state)
+      const downloadResult = result as { downloaded?: string[] }
+      for (const imgPath of downloadResult.downloaded || []) {
+        state.createdFiles.add(imgPath)
+        logWork(state, `Downloaded image: ${imgPath}`)
+        if (this.memory) {
+          this.memory.recordFileCreated(imgPath, state.currentStepIdx)
+        }
+      }
+    }
+
+    // Track file creates
+    if (tc.name === 'create_file') {
+      const filePath = args.path as string
+      if (filePath) {
+        trackFileCreate(state, filePath)
+      }
+    } else if (tc.name === 'append_file') {
+      const filePath = args.path as string
+      if (filePath) {
+        state.createdFiles.add(filePath)
+      }
+    } else if (tc.name === 'export_pdf') {
+      const pdfResult = result as { path?: string } | undefined
+      if (pdfResult?.path) {
+        state.createdFiles.add(pdfResult.path)
+        trackFileCreate(state, pdfResult.path)
+      }
+    }
+
+    this.logger?.debug(`${tc.name} completed in ${durationMs}ms`, { cached: false })
+
+    return { tc, result, isError: !!isError, durationMs }
+  }
+
+  /**
+   * Build debug injection message if code execution failed.
+   * Returns a system message to inject, or null if no debug needed.
+   */
+  buildDebugInjection(results: ToolExecutionResult[], state: AgentStateData): { role: string; content: string } | null {
+    const codeResults = results.filter(r =>
+      (r.tc.name === 'run_code' || r.tc.name === 'execute_command') && !r.cached
+    )
+    if (codeResults.length === 0) return null
+
+    const lastCodeResult = codeResults[codeResults.length - 1]
+    const resultObj = lastCodeResult.result as { exitCode?: number; stderr?: string; error?: string } | null
+    if (!resultObj) return null
+
+    const exitCode = resultObj.exitCode ?? (resultObj.error ? 1 : 0)
+    if (exitCode === 0) return null
+
+    // Don't inject debug messages after too many consecutive failures
+    if (state.consecutiveCodeErrors > 3) {
+      return {
+        role: 'system',
+        content: 'You have had multiple consecutive code errors. STOP trying the same approach. Either simplify your code significantly, try a completely different approach, or deliver what you have and explain the issue to the user.',
+      }
+    }
+
+    const errorSnippet = (resultObj.stderr || resultObj.error || 'Unknown error').slice(0, 300)
+    const fixHint = this.getPatternSpecificFixHint(errorSnippet)
+    return {
+      role: 'system',
+      content: `AUTO-DEBUG: Your code produced an error (exit code ${exitCode}):\n${errorSnippet}\n\n${fixHint}Fix the issue in your code using edit_file, then re-run it. Do NOT move on or deliver code that has errors. Debug until it runs cleanly.`,
+    }
+  }
+
+  /**
+   * Map error patterns to specific fix suggestions for smarter debug injection.
+   */
+  private getPatternSpecificFixHint(errorSnippet: string): string {
+    const patterns: Array<{ pattern: RegExp; hint: string }> = [
+      { pattern: /ImportError|ModuleNotFoundError|No module named|Cannot find module/i, hint: 'LIKELY FIX: Missing import or dependency. Add the missing import statement, or install the dependency with pip/npm.\n' },
+      { pattern: /IndentationError|unexpected indent/i, hint: 'LIKELY FIX: Indentation mismatch. Check that all lines in the block use consistent tabs/spaces.\n' },
+      { pattern: /SyntaxError|unexpected token/i, hint: 'LIKELY FIX: Syntax error — check for missing brackets, parentheses, quotes, or colons near the line number shown.\n' },
+      { pattern: /NameError|ReferenceError|is not defined/i, hint: 'LIKELY FIX: Variable or function used before definition. Check spelling and ensure it is defined/imported before use.\n' },
+      { pattern: /TypeError.*argument|takes \d+ positional/i, hint: 'LIKELY FIX: Wrong number of arguments passed to a function. Check the function signature.\n' },
+      { pattern: /TypeError.*not subscriptable|not iterable|NoneType/i, hint: 'LIKELY FIX: Operating on None/null/undefined value. Add a null check or verify the variable has the expected type.\n' },
+      { pattern: /KeyError|index out of range|IndexError/i, hint: 'LIKELY FIX: Accessing a key/index that does not exist. Check the data structure contents before accessing.\n' },
+      { pattern: /FileNotFoundError|ENOENT|no such file/i, hint: 'LIKELY FIX: File path is wrong. Verify the file exists at the expected path, or create it first.\n' },
+      { pattern: /PermissionError|EACCES|permission denied/i, hint: 'LIKELY FIX: Permission denied. Try a different directory or check file permissions.\n' },
+      { pattern: /JSONDecodeError|JSON\.parse|Unexpected token/i, hint: 'LIKELY FIX: Invalid JSON. Check for trailing commas, unquoted keys, or malformed strings.\n' },
+      { pattern: /RecursionError|Maximum call stack/i, hint: 'LIKELY FIX: Infinite recursion. Add a base case or check your loop termination condition.\n' },
+      { pattern: /MemoryError|heap out of memory/i, hint: 'LIKELY FIX: Out of memory. Process data in smaller chunks or reduce data size.\n' },
+      { pattern: /ConnectionError|ECONNREFUSED|fetch failed/i, hint: 'LIKELY FIX: Network/connection issue. Verify the URL is correct and the server is reachable.\n' },
+      { pattern: /UnicodeDecodeError|UnicodeEncodeError/i, hint: 'LIKELY FIX: Encoding issue. Specify encoding explicitly (e.g., encoding="utf-8") when reading/writing files.\n' },
+      { pattern: /ZeroDivisionError|division by zero/i, hint: 'LIKELY FIX: Division by zero. Add a check for zero before dividing.\n' },
+    ]
+
+    for (const { pattern, hint } of patterns) {
+      if (pattern.test(errorSnippet)) return hint
+    }
+    return 'Read the error carefully. '
+  }
+
+  buildToolResultMessages(results: ToolExecutionResult[], state?: AgentStateData): ChatMessageParam[] {
+    const toolMessages: ChatMessageParam[] = []
+    const visualMessages: ChatMessageParam[] = []
+
+    for (const { tc, result } of results) {
+      // Detect truncation and add hint
+      const isTruncated = (s: string) =>
+        s.endsWith('...[truncated]') || s.includes('[Content truncated') || s.length === MAX_TOOL_RESULT_CHARS
+      let resultStr: string
+      const resultObj = result as Record<string, unknown> | null
+      try {
+        if (resultObj && resultObj.screenshotBase64) {
+          const { screenshotBase64: _, ...rest } = resultObj
+          resultStr = JSON.stringify(rest)
+        } else {
+          resultStr = JSON.stringify(result)
+        }
+      } catch {
+        resultStr = JSON.stringify({ error: 'Result could not be serialized' })
+      }
+
+      // Smart truncation: for search results, try to keep complete JSON items
+      let finalContent: string
+      if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
+        if (tc.name === 'web_search' && Array.isArray(result)) {
+          // Progressively remove results to fit within limit
+          const arr = result as Array<Record<string, unknown>>
+          let truncated = arr
+          while (JSON.stringify(truncated).length > MAX_TOOL_RESULT_CHARS && truncated.length > 1) {
+            truncated = truncated.slice(0, -1)
+          }
+          finalContent = JSON.stringify(truncated)
+          if (truncated.length < arr.length) {
+            finalContent += `\n[${arr.length - truncated.length} results omitted for brevity]`
+          }
+        } else if (BROWSER_RESULT_TOOLS.has(tc.name)) {
+          finalContent = compactBrowserResultForModel(resultObj, resultStr, MAX_BROWSE_RESULT_CHARS)
+        } else if (tc.name === 'execute_command' || tc.name === 'run_code') {
+          finalContent = compactCommandResultForModel(resultObj, resultStr, MAX_TOOL_RESULT_CHARS)
+        } else {
+          finalContent = resultStr.slice(0, MAX_TOOL_RESULT_CHARS) + '...[truncated]'
+        }
+      } else {
+        finalContent = resultStr
+      }
+
+      // Add tool-specific truncation hint so the model knows what was lost
+      if (isTruncated(finalContent)) {
+        if (tc.name === 'web_search') {
+          finalContent += '\n[NOTE: Some search results were omitted. The top-ranked results are shown. Try a more specific query if needed.]'
+        } else if (BROWSER_RESULT_TOOLS.has(tc.name)) {
+          finalContent += '\n[NOTE: Page content was compacted. Fresh controls, target hints, and completion signals were preserved when available.]'
+        } else if (tc.name === 'execute_command' || tc.name === 'run_code') {
+          finalContent += '\n[NOTE: Output was truncated. Beginning and end are shown, middle was omitted. Check the exit code and last lines for errors.]'
+        } else {
+          finalContent += '\n[NOTE: Result was truncated. Work with available data.]'
+        }
+      }
+
+      toolMessages.push({
+        role: 'tool',
+        tool_call_id: tc.id,
+        content: finalContent,
+      })
+
+      const screenshotBase64 = resultObj?.screenshotBase64
+      const hasLocalWebsiteSnapshot =
+        (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file') &&
+        typeof resultObj?.localWebsiteUrl === 'string'
+      const hasNextWebsiteSnapshot =
+        (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file') &&
+        typeof resultObj?.nextWebsitePreviewUrl === 'string'
+      const isFindTextNoMatchVisualRecovery =
+        tc.name === 'browser_find_text' &&
+        typeof resultObj?.content === 'string' &&
+        resultObj.content.includes('TEXT SEARCH RESULT: No visible text nodes matched')
+      const browserVisualOpts = {
+        hasLocalWebsiteSnapshot,
+        hasNextWebsiteSnapshot,
+        isFindTextNoMatchVisualRecovery,
+      }
+      const shouldSendBrowserVisual = shouldAttachBrowserVisual(tc.name, resultObj, state, browserVisualOpts)
+      const browserVisualBudgetBypassed = browserVisualBypassesBudget(tc.name, resultObj, state, browserVisualOpts)
+      const browserVisualBudgetAvailable =
+        !state ||
+        browserVisualBudgetBypassed ||
+        (state.browserVisualSnapshotsSent < MAX_BROWSER_VISUALS_PER_TASK &&
+          state.stepBrowserVisualSnapshotsSent < MAX_BROWSER_VISUALS_PER_STEP)
+      if (
+        shouldSendBrowserVisual &&
+        browserVisualBudgetAvailable &&
+        typeof screenshotBase64 === 'string' &&
+        screenshotBase64.length > 0 &&
+        screenshotBase64.length <= MAX_BROWSER_VISION_IMAGE_BASE64_CHARS
+      ) {
+        visualMessages.push({
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: hasNextWebsiteSnapshot
+                ? `NEXT.JS/TSX WEBSITE PREVIEW SNAPSHOT after writing ${String((resultObj.path as string) || 'a frontend file')}. Inspect the screenshot for layout, content, and visible issues at the existing browser size. Use browser_scroll or targeted file edits next; do not change the browser viewport.`
+                : hasLocalWebsiteSnapshot
+                ? `LOCAL WEBSITE SERVER SNAPSHOT after writing ${String((resultObj.path as string) || 'the entry file')}. Inspect the screenshot for layout, content, and visible issues at the existing browser size. Use browser_scroll or targeted file edits next; do not change the browser viewport.`
+                : isFindTextNoMatchVisualRecovery
+                ? 'BROWSER VISUAL SNAPSHOT after browser_find_text returned no text-node match. This is a visual recovery frame: inspect the screenshot and [N] list for swatches, icons, map controls, cards, image controls, and aria-labeled options before deciding the target is absent.'
+                : `BROWSER VISUAL SNAPSHOT after ${tc.name}. Use this screenshot and the interactive elements list as equal inputs: inspect the screenshot for real page state/layout/visibility, then use the matching [N] from the preceding tool result for exact click/type/select targets. The blue numbered markers correspond to the [N] indices.`,
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${screenshotBase64}`,
+                detail: hasLocalWebsiteSnapshot || hasNextWebsiteSnapshot ? 'high' : 'low',
+              },
+            },
+          ],
+        })
+        if (state && !hasLocalWebsiteSnapshot && !hasNextWebsiteSnapshot) {
+          state.browserVisualSnapshotsSent++
+          state.stepBrowserVisualSnapshotsSent++
+        }
+      } else if (
+        shouldSendBrowserVisual &&
+        browserVisualBudgetAvailable &&
+        typeof screenshotBase64 === 'string' &&
+        screenshotBase64.length > MAX_BROWSER_VISION_IMAGE_BASE64_CHARS
+      ) {
+        visualMessages.push({
+          role: 'user',
+          content: `BROWSER VISUAL SNAPSHOT after ${tc.name} was omitted because the screenshot was too large. Use browser_screenshot with the current viewport if visual inspection is needed.`,
+        })
+      }
+    }
+
+    return [...toolMessages, ...visualMessages]
+  }
+
+  /**
+   * Extract normalized tokens from a filename for semantic comparison.
+   * "sydney-iced-latte-research-summary.md" → ["sydney", "iced", "latte", "research", "summary"]
+   */
+  private extractFileNameTokens(filePath: string): string[] {
+    const name = filePath.split('/').pop() || filePath
+    const withoutExt = name.replace(/\.[^.]+$/, '')
+    return withoutExt
+      .split(/[-_.\s]+/)
+      .map(t => t.toLowerCase())
+      .filter(t => t.length > 2)
+  }
+
+  private shouldDeliverImageArtifacts(state: AgentStateData): boolean {
+    const request = state.originalUserRequest || ''
+    const step = state.currentPlanItems?.[state.currentStepIdx] || ''
+    const text = `${request} ${step}`
+    const asksForImages = /\b(?:find|get|download|return|give|show|collect|provide|source|gather|save)\b[\s\S]{0,90}\b(?:images?|photos?|pictures?|screenshots?|assets?|wallpapers?|icons?|logos?)\b/i.test(text)
+      || /\b(?:images?|photos?|pictures?|screenshots?|assets?|wallpapers?|icons?|logos?)\b[\s\S]{0,90}\b(?:for me|to me|as files|as deliverables|downloaded|returned|provided)\b/i.test(text)
+    const asksForContainerDeliverable = /\b(?:website|web\s*site|site|page|app|application|report|deck|slides?|presentation|document|article|essay|write[-\s]?up|pdf|markdown|mdx|html)\b/i.test(request)
+
+    if (!asksForImages) return false
+    if (!asksForContainerDeliverable) return true
+
+    return /\b(?:deliver|return|provide|include|attach|package|final)\b[\s\S]{0,90}\b(?:images?|photos?|pictures?|assets?|screenshots?)\b/i.test(step)
+  }
+
+  private async emitFileArtifact(
+    tcId: string,
+    args: Record<string, unknown>,
+    result: unknown,
+    state: AgentStateData,
+  ): Promise<void> {
+    const fileResult = result as { size?: number; action?: string }
+    const pathStr = String(args.path || '')
+    // Only emit artifact_created events for files on the deliverable step (last plan step).
+    // Note files written during research/build steps remain on disk but are not surfaced
+    // in the deliverables UI — keeps the final output uncluttered.
+    const hasPlan = !!state.currentPlanItems && state.currentPlanItems.length > 0
+    const isDeliverableStep = hasPlan && state.currentStepIdx === state.currentPlanItems!.length - 1
+    const purpose = artifactPurposeForCurrentStep(state, pathStr)
+    if (fileResult.size !== undefined) {
+      if (pathStr) {
+        recordWorkLedgerDeliverable(state, { path: pathStr, purpose })
+      }
+      if (hasPlan && !isDeliverableStep && purpose !== 'deliverable') return
+      let contentStr = String(args.content ?? '')
+      if (fileResult.action === 'appended' && this.conversationId && pathStr) {
+        try {
+          const diskFile = await readFileInSandbox(this.conversationId, pathStr)
+          if (diskFile.content && !diskFile.content.startsWith('Error:')) {
+            contentStr = diskFile.content
+          }
+        } catch {
+          // Non-critical: fall back to the appended chunk preview.
+        }
+      }
+      const artifactType = inferArtifactType(pathStr)
+      const isImage = artifactType === 'image'
+      const artifactContent = isImage
+        ? ''
+        : contentStr.length > 20000
+          ? contentStr.slice(0, 20000) + '\n\n---\n*Content truncated for preview. Download the full file from Project Files.*'
+          : contentStr
+      if (isImage) state.emittedImageArtifacts.add(pathStr)
+      let imageDataUrl: string | undefined
+      if (isImage && this.conversationId) {
+        const sbDir = await getOrCreateSandboxDir(this.conversationId)
+        imageDataUrl = await tryEncodeImageBase64(sbDir, pathStr)
+      }
+      this.emitter.artifactCreated({
+        id: `artifact_${tcId}`,
+        fileName: pathStr.split('/').pop() || pathStr || 'file',
+        filePath: pathStr,
+        content: artifactContent,
+        type: artifactType,
+        ...(isImage && this.conversationId ? { imageUrl: `/api/sandbox/${this.conversationId}/${pathStr}` } : {}),
+        ...(imageDataUrl ? { imageDataUrl } : {}),
+        deliverable: purpose === 'deliverable',
+        purpose,
+        createdAt: Date.now(),
+      })
+    }
+  }
+
+  private async scanForNewImages(state: AgentStateData): Promise<void> {
+    if (!this.conversationId) return
+    try {
+      const listing = await listFilesInSandbox(this.conversationId)
+      const imageFiles = (listing.files || []).filter((f: string) => {
+        // Skip internal browser screenshots — they're not user deliverables
+        if (f.startsWith('_browser_screenshots/')) return false
+        const ext = f.split('.').pop()?.toLowerCase()
+        return IMAGE_EXTENSIONS.includes(ext || '')
+      })
+      const sbDir = await getOrCreateSandboxDir(this.conversationId)
+      for (const imgPath of imageFiles) {
+        if (!state.emittedImageArtifacts.has(imgPath)) {
+          state.emittedImageArtifacts.add(imgPath)
+          const imgDataUrl = await tryEncodeImageBase64(sbDir, imgPath)
+          const deliverable = this.shouldDeliverImageArtifacts(state)
+          const purpose = deliverable ? 'deliverable' : 'support'
+          recordWorkLedgerDeliverable(state, { path: imgPath, purpose })
+          this.emitter.artifactCreated({
+            id: `artifact_img_${Date.now()}_${imgPath.replace(/\//g, '_')}`,
+            fileName: imgPath.split('/').pop() || imgPath,
+            filePath: imgPath,
+            content: '',
+            type: 'image' as const,
+            imageUrl: `/api/sandbox/${this.conversationId}/${imgPath}`,
+            ...(imgDataUrl ? { imageDataUrl: imgDataUrl } : {}),
+            deliverable,
+            purpose,
+            createdAt: Date.now(),
+          })
+        }
+      }
+    } catch {
+      // Non-critical: image scanning failed
+    }
+  }
+
+  private async emitImageSearchArtifacts(result: unknown, state: AgentStateData): Promise<void> {
+    if (!this.conversationId) return
+    try {
+      const downloadResult = result as { downloaded?: string[] }
+      const sbDir = await getOrCreateSandboxDir(this.conversationId)
+      for (const imgPath of downloadResult.downloaded || []) {
+        if (!state.emittedImageArtifacts.has(imgPath)) {
+          state.emittedImageArtifacts.add(imgPath)
+          const imgDataUrl = await tryEncodeImageBase64(sbDir, imgPath)
+          const deliverable = this.shouldDeliverImageArtifacts(state)
+          const purpose = deliverable ? 'deliverable' : 'support'
+          recordWorkLedgerDeliverable(state, { path: imgPath, purpose })
+          this.emitter.artifactCreated({
+            id: `artifact_img_${Date.now()}_${imgPath.replace(/\//g, '_')}`,
+            fileName: imgPath.split('/').pop() || imgPath,
+            filePath: imgPath,
+            content: '',
+            type: 'image' as const,
+            imageUrl: `/api/sandbox/${this.conversationId}/${imgPath}`,
+            ...(imgDataUrl ? { imageDataUrl: imgDataUrl } : {}),
+            deliverable,
+            purpose,
+            createdAt: Date.now(),
+          })
+        }
+      }
+    } catch {
+      // Non-critical: image artifact emission failed
+    }
+  }
+}

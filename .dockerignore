@@ -1,0 +1,14 @@
+.DS_Store
+.agent-storage
+.env
+.env.*
+!.env.example
+.git
+.next
+.next.*
+.vercel
+coverage
+node_modules
+npm-debug.log*
+screenlog.*
+tsconfig.tsbuildinfo

@@ -1,7 +1,23 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next'
+
+const projectRoot = process.cwd()
 
 const nextConfig: NextConfig = {
-  /* config options here */
-};
+  outputFileTracingRoot: projectRoot,
+  serverExternalPackages: ['@sparticuz/chromium', 'esbuild', 'playwright'],
+  outputFileTracingIncludes: {
+    '/api/**/*': ['./node_modules/@sparticuz/chromium/**/*'],
+  },
+  turbopack: {
+    root: projectRoot,
+  },
+  webpack: (config, { dev }) => {
+    if (dev) {
+      config.cache = false
+    }
 
-export default nextConfig;
+    return config
+  },
+}
+
+export default nextConfig

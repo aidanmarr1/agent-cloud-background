@@ -1,0 +1,499 @@
+'use client'
+
+import dynamic from 'next/dynamic'
+import { useParams, useRouter } from 'next/navigation'
+import { useEffect, useCallback, useRef, useState } from 'react'
+import { loadConversationFromServer, useChatStore } from '@/store/chat'
+import { useUIStore } from '@/store/ui'
+import { getTotalCredits, useCreditStore } from '@/store/credits'
+import { useHydration } from '@/lib/useHydration'
+import { hasActiveAgentStream, useAgentStream } from '@/stream/client/useAgentStream'
+import { ModelSelector } from '@/components/ui/ModelSelector'
+import { CreditPill } from '@/components/ui/CreditPill'
+import { UserMenu } from '@/components/ui/UserMenu'
+import { ProjectFiles } from '@/components/ui/ProjectFiles'
+import { MessageList } from '@/components/chat/MessageList'
+import { ChatInput } from '@/components/chat/ChatInput'
+import { StepTrackerBar } from '@/components/chat/StepTrackerBar'
+import { exportAsMarkdown, exportAsJSON, downloadFile } from '@/lib/exportConversation'
+import { AlertCircle, RefreshCw, Home, Bot, Monitor, Sliders, LayoutGrid, MoreHorizontal, Download, Code, BarChart3 } from '@/components/icons'
+import { ChatSkeleton } from '@/components/chat/ChatSkeleton'
+import { OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
+import { userErrorMessage } from '@/lib/errorMessages'
+
+const ComputerPanel = dynamic(
+  () => import('@/components/computer/ComputerPanel').then((mod) => mod.ComputerPanel),
+  { ssr: false }
+)
+const InstructionsEditor = dynamic(
+  () => import('@/components/chat/InstructionsEditor').then((mod) => mod.InstructionsEditor),
+  { ssr: false }
+)
+const ArtifactGallery = dynamic(
+  () => import('@/components/chat/ArtifactGallery').then((mod) => mod.ArtifactGallery),
+  { ssr: false }
+)
+const ConversationSearch = dynamic(
+  () => import('@/components/chat/ConversationSearch').then((mod) => mod.ConversationSearch),
+  { ssr: false }
+)
+
+function visibleTaskError(error: string): string {
+  const message = userErrorMessage(error, 'The task could not finish. Please try again.')
+  if (/credits ran out|out of credits/i.test(message)) return message
+  if (/timed out|timeout/i.test(message)) return 'The task took too long to respond. Please try again.'
+  if (/stream ended|stopped before|did not return|no response body|request failed/i.test(message)) {
+    return 'The task stopped before it finished. Please try again.'
+  }
+  if (/authentication|required|unauthorized/i.test(message)) return 'Please sign in again to continue.'
+  if (/assistant service|openrouter|qwen|gemini|model|provider|api key|env\.local|function\.arguments|billable usage/i.test(message)) {
+    return 'The assistant could not complete the request. Please try again.'
+  }
+  return message
+}
+
+export default function ChatPage() {
+  const params = useParams()
+  const router = useRouter()
+  const id = params.id as string
+  const hydrated = useHydration()
+
+  const conversation = useChatStore((s) => s.conversations.find((c) => c.id === id))
+  const setActiveId = useChatStore((s) => s.setActiveId)
+  const truncateAfterMessage = useChatStore((s) => s.truncateAfterMessage)
+  const computerPanelOpen = useUIStore((s) => s.computerPanelOpen)
+  const toggleComputerPanel = useUIStore((s) => s.toggleComputerPanel)
+  const isStreaming = useUIStore((s) => s.isStreaming)
+  const webIdeMode = useUIStore((s) => s.webIdeMode)
+  const computerPanelWidth = useUIStore((s) => s.computerPanelWidth)
+  const conversationSearchOpen = useUIStore((s) => s.conversationSearchOpen)
+  const setConversationSearchOpen = useUIStore((s) => s.setConversationSearchOpen)
+  const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
+  const setSettingsTab = useUIStore((s) => s.setSettingsTab)
+  const addToast = useUIStore((s) => s.addToast)
+  const creditBalance = useCreditStore((s) => s.balance)
+  const totalCredits = getTotalCredits(creditBalance)
+
+  const { sendMessage, handleStop, resumeActiveTask, streamError, clearError } = useAgentStream(id)
+  const [instructionsOpen, setInstructionsOpen] = useState(false)
+  const [galleryOpen, setGalleryOpen] = useState(false)
+  const [taskBodyLoadFailed, setTaskBodyLoadFailed] = useState(false)
+  const creditBlocked = streamError === OUT_OF_CREDITS_MESSAGE || /credits ran out|out of credits/i.test(streamError || '')
+
+  const handleSlashAction = useCallback((action: string) => {
+    if (action === '/export' && conversation) {
+      const slug = conversation.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)
+      const md = exportAsMarkdown(conversation)
+      downloadFile(md, `${slug}.md`, 'text/markdown')
+    } else if (action === '/clear') {
+      // Clear context: remove all messages but keep the task record.
+      useChatStore.setState((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === id ? { ...c, messages: [], updatedAt: Date.now() } : c
+        ),
+      }))
+    }
+  }, [conversation, id])
+
+  useEffect(() => {
+    setActiveId(id)
+    // A prior crashed/aborted stream must never leave the input disabled after
+    // opening or refreshing a task. But route transitions can happen while a
+    // real stream is active, so preserve that state and keep the stop control.
+    const hasLiveStream = hasActiveAgentStream(id)
+    useUIStore.getState().setStreaming(hasLiveStream)
+    if (hasLiveStream && !useUIStore.getState().streamingStatus) {
+      useUIStore.getState().setStreamingStatus('thinking')
+    }
+    const uiState = useUIStore.getState()
+    if (uiState.webIdeMode && uiState.webIdeConversationId !== id) {
+      uiState.deactivateWebIde()
+    }
+  }, [id, setActiveId])
+
+  useEffect(() => {
+    if (!hydrated) return
+    if (!conversation || !conversation.serverSummary || taskBodyLoadFailed) {
+      useUIStore.getState().setRouteHandoffPending(false)
+    }
+  }, [hydrated, conversation, taskBodyLoadFailed])
+
+  useEffect(() => {
+    if (!hydrated || !conversation?.serverSummary) {
+      setTaskBodyLoadFailed(false)
+      return
+    }
+
+    let cancelled = false
+    setTaskBodyLoadFailed(false)
+    void loadConversationFromServer(id).then((loaded) => {
+      if (!cancelled && !loaded) setTaskBodyLoadFailed(true)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [hydrated, id, conversation?.serverSummary])
+
+  const handleRegenerate = useCallback(() => {
+    if (!conversation) return
+    const lastUserMsg = [...conversation.messages].reverse().find((m) => m.role === 'user')
+    if (lastUserMsg) {
+      truncateAfterMessage(id, lastUserMsg.id)
+      sendMessage(lastUserMsg.content, true)
+    }
+  }, [conversation, sendMessage, id, truncateAfterMessage])
+
+  const openUsage = useCallback(() => {
+    setSettingsTab('usage')
+    setSettingsOpen(true)
+  }, [setSettingsOpen, setSettingsTab])
+
+  const handleContinueAfterCredits = useCallback(async () => {
+    await useCreditStore.getState().syncFromServer({ force: true })
+    if (useCreditStore.getState().getTotalCredits() <= 0) {
+      addToast('Add credits before continuing this task.', 'error')
+      return
+    }
+    clearError()
+    handleRegenerate()
+  }, [addToast, clearError, handleRegenerate])
+
+  useEffect(() => {
+    if (!hydrated || !conversation || conversation.serverSummary) return
+    if (
+      conversation.messages.length === 1 &&
+      conversation.messages[0].role === 'user'
+    ) {
+      return
+    }
+    void resumeActiveTask().catch((error) => {
+      console.error('Task resume failed:', error)
+    })
+  }, [hydrated, conversation, resumeActiveTask])
+
+  // Auto-send on first load
+  const hasSentRef = useRef(false)
+  useEffect(() => {
+    if (!hydrated || !conversation || hasSentRef.current) return
+    if (
+      conversation.messages.length === 1 &&
+      conversation.messages[0].role === 'user'
+    ) {
+      hasSentRef.current = true
+      let cancelled = false
+
+      void (async () => {
+        const resumed = await resumeActiveTask().catch((error) => {
+          console.error('Initial task resume failed:', error)
+          return false
+        })
+        if (cancelled || resumed) return
+
+        const uiState = useUIStore.getState()
+        uiState.setStreaming(true)
+        uiState.setStreamingStatus('startup')
+        try {
+          await sendMessage(conversation.messages[0].content, true)
+        } catch (err) {
+          console.error('Auto-send failed:', err)
+          // Reset so a page reload (or re-mount) can retry the auto-send.
+          // Without this, the user is stuck with an unanswered first message.
+          if (!cancelled) {
+            hasSentRef.current = false
+            useUIStore.getState().addToast('Failed to send message. Please try again.', 'error')
+          }
+        }
+      })()
+
+      return () => {
+        cancelled = true
+      }
+    }
+  }, [hydrated, conversation, resumeActiveTask, sendMessage])
+
+  // Get computer panel data from the last assistant message
+  const lastAssistantMsg = conversation?.messages
+    .slice()
+    .reverse()
+    .find((m) => m.role === 'assistant')
+  const computerPanelData = lastAssistantMsg?.computerPanelData || []
+  const hasComputerPanelContent = computerPanelData.length > 0 || webIdeMode
+  const showComputerPanel = computerPanelOpen && hasComputerPanelContent
+
+  // Auto-open computer panel when first tool call data arrives during streaming
+  const prevPanelDataLen = useRef(0)
+  useEffect(() => {
+    const hadItems = prevPanelDataLen.current > 0
+    const hasItems = computerPanelData.length > 0
+    prevPanelDataLen.current = computerPanelData.length
+    if (!hadItems && hasItems && isStreaming && !computerPanelOpen) {
+      useUIStore.getState().setComputerPanelOpen(true, { source: 'auto' })
+    }
+  }, [computerPanelData.length, isStreaming, computerPanelOpen])
+
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  // Hydration skeleton
+  if (!hydrated) {
+    return <ChatSkeleton />
+  }
+
+  if (conversation?.serverSummary && !taskBodyLoadFailed) {
+    return <ChatSkeleton />
+  }
+
+  // Task not found
+  if (!conversation) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-center flex flex-col items-center max-w-[360px] px-6">
+          <div className="w-14 h-14 rounded-2xl bg-bg-secondary border border-border-primary flex items-center justify-center mb-5">
+            <Bot size={24} className="text-text-muted" strokeWidth={1.75} />
+          </div>
+          <h2 className="text-[20px] text-text-primary [font-family:var(--font-display)] mb-2">Task not found</h2>
+          <p className="text-[13px] text-text-tertiary mb-7 leading-relaxed">This task is no longer available.</p>
+          <button
+            onClick={() => router.push('/')}
+            className="inline-flex items-center gap-2 px-5 h-10 bg-text-primary text-primary-foreground hover:opacity-90 rounded-xl text-[12.5px] font-semibold transition-all duration-200 active:scale-95"
+          >
+            <Home size={13} strokeWidth={2.25} />
+            Back to home
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-screen overflow-hidden">
+      {/* Main area */}
+      {showComputerPanel && (
+        <style>{`
+          @media (min-width: 768px) {
+            [data-chat-main] { margin-right: ${computerPanelWidth}%; }
+          }
+        `}</style>
+      )}
+      <div
+        data-chat-main=""
+        className="flex-1 flex flex-col min-h-screen min-w-0 overflow-hidden transition-[margin] duration-300"
+        style={{ transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)' }}
+      >
+        {/* Top bar */}
+        <div className="h-12 flex items-center gap-4 pl-14 pr-4 border-b border-border-primary flex-shrink-0 relative z-40 bg-bg-primary backdrop-blur-xl md:px-6">
+          <ModelSelector />
+          <div className="flex-1 items-center gap-2.5 min-w-0 hidden md:flex">
+            <span className="text-[14px] text-text-secondary truncate font-medium tracking-[0]">
+              {conversation.title}
+            </span>
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {hasComputerPanelContent && (
+              <button
+                onClick={() => toggleComputerPanel()}
+                aria-label={showComputerPanel ? 'Hide computer panel' : 'Show computer panel'}
+                className={`subtle-icon-button h-9 px-3 rounded-full flex items-center gap-2 transition-all duration-150 active:scale-[0.96] ${
+                  showComputerPanel ? 'is-active' : ''
+                }`}
+              >
+                <Monitor size={14} strokeWidth={2.25} weight="regular" />
+                <span className="text-[12.5px] font-semibold hidden sm:inline">Computer</span>
+              </button>
+            )}
+            {/* Unified overflow menu */}
+            <div className="relative">
+              <button
+                onClick={() => setMenuOpen(!menuOpen)}
+                className="subtle-icon-button w-9 h-9 rounded-full flex items-center justify-center transition-all duration-150 active:scale-[0.96]"
+                title="More actions"
+                aria-label="More task actions"
+              >
+                <MoreHorizontal size={16} strokeWidth={2.25} weight="regular" />
+              </button>
+              {menuOpen && (
+                <>
+                  <button
+                    type="button"
+                    className="fixed inset-0 z-40"
+                    onClick={() => setMenuOpen(false)}
+                    aria-label="Close task actions"
+                  />
+                  <div
+                    className="absolute right-0 top-full mt-1.5 w-52 menu-surface border border-border-primary rounded-xl p-1 z-50 animate-scale-in overflow-hidden"
+                    style={{ boxShadow: 'var(--shadow-xl)' }}
+                  >
+                    <button
+                      onClick={() => { setInstructionsOpen(true); setMenuOpen(false) }}
+                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                    >
+                      <Sliders size={13} className="text-text-muted" strokeWidth={2.25} />
+                      Instructions
+                    </button>
+                    {(lastAssistantMsg?.artifacts?.length ?? 0) > 0 && (
+                      <button
+                        onClick={() => { setGalleryOpen(true); setMenuOpen(false) }}
+                        className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                      >
+                      <LayoutGrid size={13} className="text-text-muted" strokeWidth={2.25} />
+                      Created files
+                      </button>
+                    )}
+                    <div className="h-px bg-border-primary my-1 -mx-1" />
+                    <button
+                      onClick={() => {
+                        const slug = conversation.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)
+                        downloadFile(exportAsMarkdown(conversation), `${slug}.md`, 'text/markdown')
+                        setMenuOpen(false)
+                      }}
+                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                    >
+                      <Download size={13} className="text-text-muted" strokeWidth={2.25} />
+                      Export as Markdown
+                    </button>
+                    <button
+                      onClick={() => {
+                        const slug = conversation.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40)
+                        downloadFile(exportAsJSON(conversation), `${slug}.json`, 'application/json')
+                        setMenuOpen(false)
+                      }}
+                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                    >
+                      <Code size={13} className="text-text-muted" strokeWidth={2.25} />
+                      Export as JSON
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="hidden md:block">
+              <ProjectFiles conversationId={id} />
+            </div>
+            <CreditPill />
+            <UserMenu />
+          </div>
+        </div>
+
+        {/* Task search */}
+        {conversationSearchOpen && (
+          <ConversationSearch
+            messages={conversation.messages}
+            onClose={() => setConversationSearchOpen(false)}
+            onScrollToMessage={(msgId) => {
+              document.getElementById(`msg-${msgId}`)?.scrollIntoView({ behavior: 'smooth' })
+            }}
+          />
+        )}
+
+        {/* Messages */}
+        <MessageList
+          messages={conversation.messages}
+          conversationId={id}
+          onFollowUp={sendMessage}
+          onRegenerate={handleRegenerate}
+        />
+
+        {/* Credit cutoff banner */}
+        {creditBlocked && (
+          <div className="flex-shrink-0 px-6 pb-2 animate-fade-in-up">
+            <div className="max-w-[810px] mx-auto bg-bg-card border border-border-primary rounded-2xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center" style={{ boxShadow: 'var(--shadow-sm)' }}>
+              <div className="flex items-center gap-3 min-w-0 flex-1">
+                <div className="w-8 h-8 rounded-lg bg-bg-secondary flex items-center justify-center flex-shrink-0">
+                  <AlertCircle size={15} className="text-text-secondary" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[13px] font-semibold text-text-primary">Credits ran out</div>
+                  <div className="text-[12px] text-text-tertiary leading-snug">
+                    Add credits or check usage, then continue this task. Current balance: {Math.max(0, totalCredits).toLocaleString()} credits.
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 sm:flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={openUsage}
+                  className="h-8 inline-flex items-center gap-1.5 rounded-lg border border-border-primary bg-bg-secondary px-3 text-[12px] font-semibold text-text-secondary transition-all duration-150 hover:bg-bg-secondary hover:text-text-primary active:scale-95"
+                >
+                  <BarChart3 size={12} />
+                  Check usage
+                </button>
+                <button
+                  type="button"
+                  onClick={handleContinueAfterCredits}
+                  disabled={isStreaming}
+                  className="h-8 inline-flex items-center gap-1.5 rounded-lg bg-text-primary px-3 text-[12px] font-semibold text-primary-foreground transition-all duration-150 hover:opacity-90 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <RefreshCw size={12} />
+                  Continue
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Error banner */}
+        {streamError && !creditBlocked && (
+          <div className="flex-shrink-0 px-6 pb-2 animate-fade-in-up">
+            <div className="max-w-[768px] mx-auto bg-accent-red/5 border border-accent-red/15 rounded-2xl px-4 py-3 flex items-center gap-3">
+              <div className="w-7 h-7 rounded-lg bg-accent-red/10 flex items-center justify-center flex-shrink-0">
+                <AlertCircle size={14} className="text-accent-red" />
+              </div>
+              <span className="text-[13px] text-accent-red/80 flex-1 leading-snug">{visibleTaskError(streamError)}</span>
+              <button
+                onClick={() => {
+                  clearError()
+                  handleRegenerate()
+                }}
+                disabled={isStreaming}
+                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-accent-red text-text-on-accent hover:opacity-90 rounded-lg text-xs font-medium transition-all flex-shrink-0 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RefreshCw size={12} />
+                Retry
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Step tracker bar (Manus-style, above input) */}
+        {lastAssistantMsg?.taskGroups && lastAssistantMsg.taskGroups.length > 0 && (
+          <StepTrackerBar taskGroups={lastAssistantMsg.taskGroups} isStreaming={isStreaming} />
+        )}
+
+        {/* Input */}
+        <div className="flex-shrink-0 px-5 pt-3 pb-5">
+          <div className="flex justify-center">
+            <ChatInput
+              onSubmit={(msg, attachments) => sendMessage(msg, attachments)}
+              onStop={handleStop}
+              onSlashAction={handleSlashAction}
+              placeholder="Send a message..."
+              conversationId={id}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* Computer panel */}
+      {showComputerPanel && (
+        <ComputerPanel items={computerPanelData} conversationId={id} />
+      )}
+
+      {/* Instructions editor modal */}
+      {instructionsOpen && (
+        <InstructionsEditor
+          open={instructionsOpen}
+          onClose={() => setInstructionsOpen(false)}
+          conversationId={id}
+        />
+      )}
+
+      {/* Artifact gallery modal */}
+      {galleryOpen && (
+        <ArtifactGallery
+          open={galleryOpen}
+          onClose={() => setGalleryOpen(false)}
+          artifacts={lastAssistantMsg?.artifacts || []}
+        />
+      )}
+    </div>
+  )
+}
