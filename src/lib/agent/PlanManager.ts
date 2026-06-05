@@ -289,6 +289,113 @@ function conciseTopicLabel(topic: string | null | undefined): string {
   return cleaned ? cleaned.slice(0, 72) : 'the requested topic'
 }
 
+function conciseRequestSubject(messages: Array<{ role: string; content: string }>): string {
+  const request = effectiveTaskRequest(messages)
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const cleaned = request
+    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
+    .replace(/^(?:please\s+)?(?:research|find out|look up|investigate|analy[sz]e|explain|tell me|write|create|build|make|implement|fix|update)\s+(?:all\s+)?(?:about\s+)?/i, '')
+    .replace(/^(?:all\s+)?(?:about\s+)/i, '')
+    .trim()
+  return conciseTopicLabel(cleaned || request)
+}
+
+function fastStartAck(messages: Array<{ role: string; content: string }>, taskType: TaskType): string {
+  const subject = conciseRequestSubject(messages)
+  if (taskType === 'browse') return `Browser task is ready for ${subject}.`
+  if (taskType === 'build' || taskType === 'code') return `Workspace is ready for ${subject}.`
+  return `I’m starting on ${subject}.`
+}
+
+function fastStartPlannerSteps(
+  messages: Array<{ role: string; content: string }>,
+  taskType: TaskType,
+): { titles: string[]; scopes: (string | null)[] } {
+  const subject = conciseRequestSubject(messages)
+  const compact = subject.length > 44 ? `${subject.slice(0, 44).replace(/\s+\S*$/, '')}` : subject
+
+  if (taskType === 'browse') {
+    return {
+      titles: [
+        `Open and inspect ${compact}`,
+        `Complete the requested browser action`,
+        `Verify the final page state`,
+      ],
+      scopes: [
+        `Open the target page or service for "${subject}" and inspect the current browser state before acting.`,
+        `Use visible controls to complete only the user's requested browser task for "${subject}".`,
+        `Confirm the resulting page state and report any blocker plainly.`,
+      ],
+    }
+  }
+
+  if (taskType === 'build' || taskType === 'code') {
+    const website = isWebsiteBuildTask(messages)
+    return {
+      titles: website
+        ? [
+            `Inspect project structure for ${compact}`,
+            `Build the requested UI`,
+            `Run local preview verification`,
+            `Deliver final implementation notes`,
+          ]
+        : [
+            `Inspect code context for ${compact}`,
+            `Implement the requested change`,
+            `Run validation and fix issues`,
+            `Summarize final changes`,
+          ],
+      scopes: website
+        ? [
+            `Check the relevant files, framework, styling system, and existing app conventions for "${subject}".`,
+            `Create or edit the actual UI files for "${subject}" using the existing project patterns.`,
+            `Run the local preview or relevant verification and fix visible or build issues.`,
+            `Summarize exactly what changed and any verification limits.`,
+          ]
+        : [
+            `Read the relevant files and existing patterns before changing code for "${subject}".`,
+            `Apply the requested code change with minimal, scoped edits.`,
+            `Run the most relevant tests, build, lint, or smoke checks and fix failures from this change.`,
+            `Summarize changed files and verification results.`,
+          ],
+    }
+  }
+
+  if (isLongWritingTask(messages)) {
+    return {
+      titles: [
+        `Define structure for ${compact}`,
+        `Draft the main content`,
+        `Refine continuity and completeness`,
+        `Create the final deliverable`,
+      ],
+      scopes: [
+        `Establish the structure, audience, and required sections for "${subject}".`,
+        `Write the substantive content requested by the user.`,
+        `Review the draft for completeness, consistency, and obvious gaps.`,
+        `Produce the final response or file in the requested format.`,
+      ],
+    }
+  }
+
+  return {
+    titles: [
+      `Map ${compact} fundamentals`,
+      `Gather authoritative source evidence`,
+      `Compare themes and tradeoffs`,
+      `Write the final research summary`,
+    ],
+    scopes: [
+      `Identify the core definitions, scope, and terminology for "${subject}".`,
+      `Collect current, credible sources and concrete evidence about "${subject}".`,
+      `Compare important themes, examples, limitations, and disagreements in the evidence.`,
+      `Synthesize the findings into the requested answer with sources or caveats where useful.`,
+    ],
+  }
+}
+
 const STEP_COUNT_WORDS: Record<string, number> = {
   one: 1,
   two: 2,
@@ -459,6 +566,10 @@ export class PlanManager {
       messages: this.messages.length,
       hasCustomInstructions: !!this.customInstructions,
     })
+    if (this.emitFastStartPlan()) {
+      this.planPromise = Promise.resolve(null)
+      return
+    }
     const start = PLAN_STARTUP_DELAY_MS > 0
       ? new Promise<null>(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
       : Promise.resolve(null)
@@ -547,6 +658,41 @@ Requirements:
 
     const emitted = await this.emitModelGeneratedAcknowledgement(taskShape)
     if (!emitted && !this.emitter.isClosed) throw new Error(PLANNER_QUALITY_ERROR)
+  }
+
+  private emitFastStartPlan(): boolean {
+    const state = this._stateRef
+    if (!state || state.planEmitted || this.emitter.isClosed) return false
+
+    const taskType = (state.taskStrategy === 'action' ? 'browse' : state.taskStrategy) as TaskType
+    const base = fastStartPlannerSteps(this.messages, taskType)
+    try {
+      const enforcedTitles = this.enforceMinSteps(base.titles)
+      const enforcedScopes = enforcedTitles.length === base.scopes.length
+        ? base.scopes
+        : enforcedTitles.map((_, index) => base.scopes[index] ?? null)
+      const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
+      const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
+      const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
+
+      if (!this.skipAcknowledgement) {
+        this.emitter.textDelta(fastStartAck(this.messages, taskType) + '\n\n')
+      }
+      this.emitter.plan(withRequired.titles)
+      state.planItems = withRequired.titles
+      state.planScopes = withRequired.scopes
+      state.planEmitted = true
+      console.log('[Plan] Fast-start plan emitted', {
+        steps: withRequired.titles.length,
+        taskType,
+      })
+      return true
+    } catch (error) {
+      console.warn('[Plan] Fast-start plan unavailable; falling back to planner call', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
   }
 
   getStepInjection(state: AgentStateData, iterationLimit: number): { role: string; content: string } | null {

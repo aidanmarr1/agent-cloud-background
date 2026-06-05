@@ -233,6 +233,8 @@ async function assertSourceContracts() {
   assert.match(planManager, /planAwareIterationFloor/, 'plan sizing must raise the global iteration cap for multi-phase tasks')
   assert.match(planManager, /state\.dynamicIterationLimit = boundedPlanFloor/, 'plan-aware iteration floors must update the live dynamic cap before work starts')
   assert.match(planManager, /Math\.min\(planFloor,\s*MAX_ITERATIONS\)/, 'plan-aware iteration floors must be capped to prevent runaway cost')
+  assert.match(planManager, /emitFastStartPlan\(\)[\s\S]*this\.emitter\.plan\(withRequired\.titles\)[\s\S]*state\.planEmitted = true/, 'initial tasks must emit a fast-start plan before any slow planner/model roundtrip')
+  assert.match(planManager, /if \(this\.emitFastStartPlan\(\)\) \{[\s\S]*this\.planPromise = Promise\.resolve\(null\)[\s\S]*return/, 'PlanManager startup must not wait on a planner LLM call after fast-start planning succeeds')
   assert.match(agentConfig, /BASE_ITERATIONS\s*=\s*36/, 'long tasks need a larger base iteration budget')
   assert.match(agentConfig, /MAX_ITERATIONS\s*=\s*112/, 'long tasks need a higher global iteration ceiling')
   assert.match(agentConfig, /COMPLEXITY_ITERATION_BONUS\s*=\s*\{\s*1:\s*0,\s*2:\s*28,\s*3:\s*64\s*\}/, 'complex research tasks need expanded iteration bonus')
