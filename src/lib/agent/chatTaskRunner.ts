@@ -18,6 +18,7 @@ import { refreshActiveTaskLease, releaseActiveTaskLease } from '@/lib/activeTask
 import { userErrorMessage } from '@/lib/errorMessages'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
+import { sandboxReadyAcknowledgementForTask } from './taskText'
 
 const DIRECT_CHAT_SYSTEM_PROMPT = `You are Agent, a helpful assistant. Answer the user's request directly and concisely.
 Do not browse, search, use tools, or create a multi-step plan in this path.
@@ -177,29 +178,8 @@ function directChatNeedsTemporalContext(messages: Array<{ role: string; content:
   return !!lastUser?.content && DIRECT_CHAT_TEMPORAL_PATTERN.test(lastUser.content)
 }
 
-function latestUserTaskText(messages: AgentLoopOptions['messages']): string {
-  const latest = [...messages].reverse().find((message) => message.role === 'user' && typeof message.content === 'string')
-  return latest?.content || ''
-}
-
-function conciseTaskSubject(text: string): string {
-  const cleaned = text
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/\s+/g, ' ')
-    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
-    .replace(/^(?:please\s+)?use\s+(?:your\s+)?(?:chromium\s+)?browser\s+and\s+sandbox\s+(?:to\s+)?/i, '')
-    .trim()
-  if (!cleaned) return ''
-  if (cleaned.length <= 84) return cleaned
-  const clipped = cleaned.slice(0, 84).replace(/\s+\S*$/, '').trim()
-  return clipped || cleaned.slice(0, 84).trim()
-}
-
 function sandboxReadyAcknowledgement(messages: AgentLoopOptions['messages']): string {
-  const subject = conciseTaskSubject(latestUserTaskText(messages))
-  if (!subject) return 'Cloud sandbox and browser are ready for this task.'
-  const punctuated = /[.!?]$/.test(subject) ? subject : `${subject}.`
-  return `Cloud sandbox and browser are ready for ${punctuated}`
+  return sandboxReadyAcknowledgementForTask(messages)
 }
 
 function appendContinuation(base: string, continuation: string): string {

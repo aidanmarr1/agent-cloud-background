@@ -31,6 +31,8 @@ export interface StreamResult {
   usage: StreamUsage | null
 }
 
+const FILE_PREVIEW_MIN_DELTA_CHARS = 160
+
 function normalizeUsage(raw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }): StreamUsage | null {
   if (!Number.isFinite(raw.prompt_tokens) || !Number.isFinite(raw.completion_tokens) || !Number.isFinite(raw.cost)) return null
   const promptTokens = Math.max(0, Math.round(raw.prompt_tokens || 0))
@@ -586,8 +588,11 @@ export class StreamProcessor {
                     this.emitter.fileContentStart(toolCall.id, path, toolCall.name)
                   }
                   if (typeof content === 'string' && content.length > preview.emittedChars) {
-                    this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
-                    preview.emittedChars = content.length
+                    const pendingChars = content.length - preview.emittedChars
+                    if (pendingChars >= FILE_PREVIEW_MIN_DELTA_CHARS) {
+                      this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
+                      preview.emittedChars = content.length
+                    }
                   }
                   filePreviewState.set(tc.index, preview)
                 }
@@ -665,6 +670,17 @@ export class StreamProcessor {
     assistantContent = stripThinkingTags(assistantContent)
     assistantContent = stripStepMarkers(assistantContent)
     assistantContent = stripPlanMarkers(assistantContent)
+
+    for (const [index, preview] of filePreviewState) {
+      const toolCall = toolCalls.get(index)
+      if (!toolCall) continue
+      const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
+      const content = extractPartialStringArg(toolCall.arguments, contentKey)
+      if (typeof content === 'string' && content.length > preview.emittedChars) {
+        this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
+        preview.emittedChars = content.length
+      }
+    }
 
     return {
       assistantContent,

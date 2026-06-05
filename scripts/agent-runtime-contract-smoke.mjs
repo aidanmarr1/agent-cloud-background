@@ -26,6 +26,7 @@ async function assertSourceContracts() {
     activeTasks,
     taskJobs,
     chatTaskRunner,
+    taskText,
     taskWorker,
     e2bSandbox,
     taskQueue,
@@ -112,6 +113,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/activeTasks.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskJobs.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/chatTaskRunner.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/taskText.ts'), 'utf8'),
     readFile(join(root, 'src/worker/taskWorker.ts'), 'utf8'),
     readFile(join(root, 'src/lib/e2bSandbox.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskQueue.ts'), 'utf8'),
@@ -720,8 +722,13 @@ async function assertSourceContracts() {
   assert.match(e2bSandbox, /warmSandboxPromise/, 'E2B runtime must track an in-process warm sandbox promise')
   assert.match(e2bSandbox, /adoptWarmE2BSandbox/, 'E2B runtime must adopt a prewarmed sandbox for the next task')
   assert.match(e2bSandbox, /ensureE2BRemoteBrowser\(warmId\)/, 'E2B warm pool must start Chromium before task acknowledgement')
+  assert.match(e2bSandbox, /cat \$\{shellQuote\(tempPath\)\} >> \$\{shellQuote\(target\.absolutePath\)\}/, 'E2B append_file must append inside the VM instead of reading and rewriting the whole remote file')
+  assert.match(e2bSandbox, /appendLocalMirror/, 'E2B append_file must update the local mirror by appending instead of rewriting the whole file')
   assert.match(chatTaskRunner, /ensureE2BRemoteBrowser\(conversationId\)/, 'worker task startup must ensure the task browser exists before acknowledgement')
-  assert.match(chatTaskRunner, /Cloud sandbox and browser are ready/, 'worker must emit the first visible acknowledgement only after sandbox and browser readiness')
+  assert.match(chatTaskRunner, /sandboxReadyAcknowledgementForTask\(messages\)/, 'worker must emit the shared sandbox-ready acknowledgement only after sandbox and browser readiness')
+  assert.match(taskText, /Cloud sandbox and browser are ready; researching \$\{subject\} with live sources\./, 'sandbox-ready acknowledgement must be natural and task-specific for research')
+  assert.match(agentLoop, /startupSearchDisplayTopic\(state\)[\s\S]*action_label: startupSearchActionLabel\(displayTopic\)/, 'startup search must use a human topic label for visible action text, not the expanded backend query')
+  assert.match(planManager, /Define \$\{compact\} scope and key questions[\s\S]*Gather current \$\{compact\} sources[\s\S]*Write the sourced \$\{compact\} summary/, 'fast research plans must use topic-specific visible steps')
   assert.match(chatTaskRunner, /skipStartupAcknowledgement: startupAcknowledgementSent/, 'agent loop must skip planner acknowledgement after the sandbox-ready acknowledgement')
   assert.match(planManager, /if \(this\.skipAcknowledgement\) return/, 'planner must not emit a duplicate acknowledgement after worker startup text')
   assert.match(chatRoute, /acquireActiveTaskLease\(userId,\s*conversationId,\s*creditRunId\)/, 'chat route must acquire the account-wide active-task lease before starting a new task')
@@ -897,6 +904,8 @@ async function assertSourceContracts() {
   assert.match(streamProcessor, /hasDisplayLabel[\s\S]*?path && hasDisplayLabel/, 'live file previews must still require a strict model-authored action label')
   assert.match(streamProcessor, /this\.emitter\.fileContentStart\(toolCall\.id,\s*path,\s*toolCall\.name\)/, 'file write previews must initialize during tool argument streaming')
   assert.match(streamProcessor, /this\.emitter\.fileContentDelta\(toolCall\.id,\s*content\.slice\(preview\.emittedChars\)\)/, 'file write previews must stream incremental content deltas')
+  assert.match(streamProcessor, /FILE_PREVIEW_MIN_DELTA_CHARS/, 'file write previews must batch tiny streamed deltas for cloud event persistence')
+  assert.match(streamProcessor, /for \(const \[index, preview\] of filePreviewState\)/, 'file write preview batching must flush the final pending content before tool execution')
   assert.doesNotMatch(sandbox, /content:\s*'Error: old_string not found in file'/, 'edit_file old_string misses must not render raw errors as file contents')
   assert.match(sandbox, /INTERNAL_RECOVERY: edit_file did not apply because old_string did not match/, 'edit_file old_string misses must be internal retry signals')
   assert.match(streamCleaners, /to\\s\+i\\s\+\(\?:have\\s\+\)\?\(\?:found\|identified\|confirmed\|learned\|gathered\|examined\|reviewed/, 'narration sanitizer must reject malformed action-plus-finding fragments')

@@ -15,6 +15,7 @@ import { buildStepMessage } from './guards'
 import { computeTimeouts, getStrategy, type TaskType } from './TaskStrategy'
 import { PLAN_STARTUP_DELAY_MS, PLAN_MAX_RETRIES, PLAN_RETRY_BASE_MS, MIN_STEP_BUDGET, MIN_DELIVERABLE_BUDGET, RESEARCH_STEP_BUDGET_MULTIPLIER, DELIVERABLE_BUDGET_FRACTION, COMPLEXITY_BUDGET_MULTIPLIERS, MIN_RESEARCH_CALLS_BY_COMPLEXITY, MAX_ITERATIONS, REPLAN_MAX_TIMES as REPLAN_MAX_RETRIES, INFO_REPLAN_MIN_ITERATIONS, INFO_REPLAN_COOLDOWN_ITERATIONS } from './config'
 import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, isSingleWebSearchMarkdownTask } from './taskConstraints'
+import { humanTopicLabel, requestSubject } from './taskText'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 
 export interface RequiredPlanStep {
@@ -282,31 +283,23 @@ function isUsablePlannerAck(ack: string): boolean {
 }
 
 function conciseTopicLabel(topic: string | null | undefined): string {
-  const cleaned = (topic || '')
-    .replace(/\s+/g, ' ')
-    .replace(/["“”]/g, '')
-    .trim()
-  return cleaned ? cleaned.slice(0, 72) : 'the requested topic'
+  return humanTopicLabel(topic, 'the requested topic')
 }
 
 function conciseRequestSubject(messages: Array<{ role: string; content: string }>): string {
-  const request = effectiveTaskRequest(messages)
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const cleaned = request
-    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
-    .replace(/^(?:please\s+)?(?:research|find out|look up|investigate|analy[sz]e|explain|tell me|write|create|build|make|implement|fix|update)\s+(?:all\s+)?(?:about\s+)?/i, '')
-    .replace(/^(?:all\s+)?(?:about\s+)/i, '')
-    .trim()
-  return conciseTopicLabel(cleaned || request)
+  return requestSubject(messages)
 }
 
 function fastStartAck(messages: Array<{ role: string; content: string }>, taskType: TaskType): string {
   const subject = conciseRequestSubject(messages)
   if (taskType === 'browse') return `Browser task is ready for ${subject}.`
   if (taskType === 'build' || taskType === 'code') return `Workspace is ready for ${subject}.`
-  return `I’m starting on ${subject}.`
+  return `Researching ${subject} with live sources.`
+}
+
+function compactPlanSubject(subject: string, maxLength = 44): string {
+  if (subject.length <= maxLength) return subject
+  return subject.slice(0, maxLength).replace(/\s+\S*$/, '').trim() || subject.slice(0, maxLength).trim()
 }
 
 function fastStartPlannerSteps(
@@ -314,7 +307,7 @@ function fastStartPlannerSteps(
   taskType: TaskType,
 ): { titles: string[]; scopes: (string | null)[] } {
   const subject = conciseRequestSubject(messages)
-  const compact = subject.length > 44 ? `${subject.slice(0, 44).replace(/\s+\S*$/, '')}` : subject
+  const compact = compactPlanSubject(subject)
 
   if (taskType === 'browse') {
     return {
@@ -382,10 +375,10 @@ function fastStartPlannerSteps(
 
   return {
     titles: [
-      `Map ${compact} fundamentals`,
-      `Gather authoritative source evidence`,
-      `Compare themes and tradeoffs`,
-      `Write the final research summary`,
+      `Define ${compact} scope and key questions`,
+      `Gather current ${compact} sources`,
+      `Compare evidence, limits, and tradeoffs`,
+      `Write the sourced ${compact} summary`,
     ],
     scopes: [
       `Identify the core definitions, scope, and terminology for "${subject}".`,

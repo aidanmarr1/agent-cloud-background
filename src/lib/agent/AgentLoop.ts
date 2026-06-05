@@ -73,6 +73,7 @@ import {
   researchActivityContext,
 } from './ResearchActivityLog'
 import { userErrorMessage } from '@/lib/errorMessages'
+import { humanTopicLabel } from './taskText'
 
 /**
  * Phase 12 Fix NNN: scan the user's most recent message for a URL or bare
@@ -1242,13 +1243,19 @@ function startupSearchQuery(state: AgentStateData): string {
   return expandStartupSearchQuery(cleanStartupSearchText(request || step, step || request))
 }
 
-function startupSearchActionLabel(query: string): string {
-  const topic = query
+function startupSearchDisplayTopic(state: AgentStateData): string {
+  const request = state.originalUserRequest || ''
+  const step = currentStepText(state)
+  return humanTopicLabel(cleanStartupSearchText(request || step, step || request), 'the topic', 48)
+}
+
+function startupSearchActionLabel(topicLabel: string): string {
+  const topic = topicLabel
     .replace(/[^\w\s.-]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 48)
-  return `Map ${topic || 'topic'} fundamentals and sources`
+  return `Search ${topic || 'topic'} source evidence`
 }
 
 function shouldRunStartupResearchSearch(state: AgentStateData): boolean {
@@ -1360,12 +1367,13 @@ export class AgentLoop {
     if (!shouldRunStartupResearchSearch(state)) return []
 
     const query = startupSearchQuery(state)
+    const displayTopic = startupSearchDisplayTopic(state)
     const toolCall: ToolCallData = {
       id: `startup_web_search_${Date.now().toString(36)}`,
       name: 'web_search',
       arguments: JSON.stringify({
         query,
-        action_label: startupSearchActionLabel(query),
+        action_label: startupSearchActionLabel(displayTopic),
         plan_step_index: state.currentStepIdx + 1,
       }),
     }

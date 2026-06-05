@@ -415,6 +415,24 @@ async function writeLocalMirror(localRoot: string, relativePath: string, body: U
   }
 }
 
+async function appendLocalMirror(localRoot: string, relativePath: string, body: Uint8Array | string): Promise<void> {
+  const resolved = join(localRoot, relativePath)
+  const rel = relative(localRoot, resolved)
+  if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return
+
+  await mkdir(dirname(resolved), { recursive: true })
+  const fd = await open(
+    resolved,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW,
+    0o644,
+  )
+  try {
+    await fd.writeFile(body)
+  } finally {
+    await fd.close()
+  }
+}
+
 async function removeLocalMirror(localRoot: string, relativePath: string): Promise<void> {
   const resolved = join(localRoot, relativePath)
   const rel = relative(localRoot, resolved)
@@ -634,16 +652,28 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
   if (!target) return { action: 'appended', path: filePath, content: 'Error: path traversal not allowed' }
 
   const sandbox = await getOrCreateE2BSandbox(conversationId)
-  let previous = ''
-  try {
-    previous = await sandbox.files.read(target.absolutePath)
-  } catch {
-    previous = ''
-  }
-  const updated = `${previous}${content}`
-  await sandbox.files.write(target.absolutePath, updated)
-  if (localMirrorRoot) await writeLocalMirror(localMirrorRoot, target.relativePath, updated).catch(() => undefined)
-  return { action: 'appended', path: target.relativePath, size: Buffer.byteLength(updated, 'utf8') }
+  const root = workspaceRoot(conversationId)
+  const tempDir = `${root}/.agent/tmp`
+  const tempPath = `${tempDir}/append-${randomUUID()}.txt`
+  await sandbox.files.makeDir(tempDir).catch(() => undefined)
+  await sandbox.files.write(tempPath, content)
+
+  const script = `
+set -e
+mkdir -p ${shellQuote(posix.dirname(target.absolutePath))}
+cat ${shellQuote(tempPath)} >> ${shellQuote(target.absolutePath)}
+rm -f ${shellQuote(tempPath)}
+wc -c < ${shellQuote(target.absolutePath)}
+`
+  const result = await sandbox.commands.run(script, {
+    timeoutMs: envPositiveInt('AGENT_E2B_COMMAND_TIMEOUT_MS', DEFAULT_E2B_COMMAND_TIMEOUT_MS),
+  })
+  if (localMirrorRoot) await appendLocalMirror(localMirrorRoot, target.relativePath, content).catch(() => undefined)
+  const parsedSize = Number.parseInt((result.stdout || '').trim().split(/\s+/)[0] || '', 10)
+  const size = Number.isFinite(parsedSize) && parsedSize >= 0
+    ? parsedSize
+    : Buffer.byteLength(content, 'utf8')
+  return { action: 'appended', path: target.relativePath, size }
 }
 
 export async function readE2BFileBytes(conversationId: string, filePath: string, maxFileBytes: number): Promise<SandboxFileReadResult> {
