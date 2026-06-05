@@ -308,12 +308,15 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
     if (!reader) throw new Error('The task could not start. Please try again.')
 
     let dispatchErrors = 0
+    let highestDispatchedSeq = 0
     for await (const event of parseSSEStream(reader)) {
       if (!runId && typeof event.runId === 'string') {
         runId = event.runId
       }
       const seq = Number(event.seq)
       if (runId && Number.isFinite(seq) && seq > 0) {
+        if (seq <= highestDispatchedSeq) continue
+        highestDispatchedSeq = seq
         saveStoredActiveRun(conversationId, {
           runId,
           lastSeq: seq,

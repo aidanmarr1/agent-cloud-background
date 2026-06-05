@@ -1513,6 +1513,7 @@ export function createTaskJobEventStream(input: {
           return
         }
 
+        let pollInFlight = false
         const replayPersistedEvents = async (): Promise<boolean> => {
           const snapshot = await loadPersistedTaskJobSnapshot(input.userId, input.runId, lastSeq)
           if (!snapshot) {
@@ -1579,6 +1580,8 @@ export function createTaskJobEventStream(input: {
           }
         }, TASK_JOB_KEEP_ALIVE_MS)
         activePollTimer = setInterval(() => {
+          if (closed || pollInFlight) return
+          pollInFlight = true
           void replayPersistedEvents().then((terminal) => {
             if (terminal) close()
           }).catch((error) => {
@@ -1588,6 +1591,8 @@ export function createTaskJobEventStream(input: {
               runId: input.runId,
             })))
             close()
+          }).finally(() => {
+            pollInFlight = false
           })
         }, TASK_JOB_DB_POLL_MS)
       } catch (error) {

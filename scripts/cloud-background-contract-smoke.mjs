@@ -122,6 +122,8 @@ assert.match(chatRoute, /conversationId:\s*authenticated\.conversationId/, 'resu
 assert.match(chatRoute, /conversationId,\s*\n\s*afterSeq: 0/, 'initial task streams must pass the conversation id into task event replay')
 assert.match(taskJobs, /job\.conversationId !== input\.conversationId/, 'task event replay must reject in-memory runs from a different conversation')
 assert.match(taskJobs, /snapshot\.conversationId !== input\.conversationId/, 'task event replay must reject persisted runs from a different conversation')
+assert.match(taskJobs, /let pollInFlight = false[\s\S]*if \(closed \|\| pollInFlight\) return[\s\S]*pollInFlight = true[\s\S]*finally\(\(\) => \{[\s\S]*pollInFlight = false/, 'persisted task event replay polling must be serialized to avoid duplicate replay of the same seq')
+assert.match(useAgentStream, /let highestDispatchedSeq = 0[\s\S]*if \(seq <= highestDispatchedSeq\) continue[\s\S]*highestDispatchedSeq = seq/, 'client task stream consumer must drop duplicate seq events before mutating the chat store')
 assert.match(chatRoute, /restoreTaskFilesToActiveSandbox/, 'local route runner must restore persisted task files before contextual sandbox reuse')
 assert.match(chatTaskRunner, /restoreTaskFilesToActiveSandbox/, 'external worker runner must restore persisted task files before contextual sandbox reuse')
 assert.match(activeTasks, /getActiveTaskLeaseForUser/, 'server must expose active task leases so reopened clients can discover the active run id')
