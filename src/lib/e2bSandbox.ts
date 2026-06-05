@@ -607,6 +607,33 @@ async function waitForE2BBrowser(endpoint: string): Promise<void> {
   throw new Error('Timed out waiting for E2B Chromium to expose its debugging endpoint.')
 }
 
+export function rewriteE2BRemoteDebuggerUrl(endpoint: string, debuggerUrl: string): string {
+  const endpointUrl = new URL(endpoint)
+  const debuggerEndpoint = new URL(debuggerUrl)
+  debuggerEndpoint.protocol = endpointUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+  debuggerEndpoint.username = endpointUrl.username
+  debuggerEndpoint.password = endpointUrl.password
+  debuggerEndpoint.hostname = endpointUrl.hostname
+  debuggerEndpoint.port = endpointUrl.port
+  return debuggerEndpoint.toString()
+}
+
+export async function ensureE2BRemoteBrowserDebuggerUrl(conversationId: string): Promise<string> {
+  const endpoint = await ensureE2BRemoteBrowser(conversationId)
+  const response = await fetch(`${endpoint}/json/version`)
+  if (!response.ok) {
+    throw new Error(`E2B Chromium debugging endpoint returned HTTP ${response.status}.`)
+  }
+
+  const version = await response.json().catch(() => null) as { webSocketDebuggerUrl?: unknown } | null
+  const debuggerUrl = version?.webSocketDebuggerUrl
+  if (typeof debuggerUrl !== 'string' || !debuggerUrl) {
+    throw new Error('E2B Chromium debugging endpoint did not expose a WebSocket debugger URL.')
+  }
+
+  return rewriteE2BRemoteDebuggerUrl(endpoint, debuggerUrl)
+}
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }

@@ -3,7 +3,7 @@ import serverlessChromium from '@sparticuz/chromium'
 import { mkdir, readFile, unlink } from 'fs/promises'
 import { join } from 'path'
 import { getOrCreateSandboxDir, isCloudSandboxProviderEnabled, resolveAndVerify, writeSandboxFileBytes } from './sandbox'
-import { ensureE2BRemoteBrowser } from './e2bSandbox'
+import { ensureE2BRemoteBrowserDebuggerUrl } from './e2bSandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 import { isManagedWebsiteServerUrl } from './localWebsiteServer'
 import { isManagedWebsitePreviewUrl } from './tsxWebsitePreview'
@@ -1403,8 +1403,8 @@ async function createBrowserRuntime(conversationId: string): Promise<{
   remoteProvider?: 'e2b'
 }> {
   if (isCloudSandboxProviderEnabled()) {
-    const endpoint = await ensureE2BRemoteBrowser(conversationId)
-    const browser = await playwrightChromium.connectOverCDP(endpoint)
+    const debuggerUrl = await ensureE2BRemoteBrowserDebuggerUrl(conversationId)
+    const browser = await playwrightChromium.connectOverCDP(debuggerUrl)
     let context = browser.contexts()[0]
     if (!context) {
       context = await browser.newContext(BROWSER_CONTEXT_OPTIONS)

@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
+import { chromium as playwrightChromium } from 'playwright'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
@@ -61,6 +62,7 @@ const jiti = createJiti(import.meta.url, {
 const {
   destroyE2BSandbox,
   ensureE2BRemoteBrowser,
+  ensureE2BRemoteBrowserDebuggerUrl,
   executeCommandInE2B,
   getOrCreateE2BSandbox,
   pauseE2BSandbox,
@@ -102,7 +104,7 @@ try {
     throw new Error(`E2B template command smoke failed: ${commandResult.stderr || commandResult.stdout || `exit ${commandResult.exitCode}`}`)
   }
 
-  let browser = null
+  let browserInfo = null
   if (!skipBrowser) {
     const endpoint = await ensureE2BRemoteBrowser(conversationId)
     const response = await withTimeout(
@@ -117,8 +119,16 @@ try {
     if (!version || typeof version !== 'object') {
       throw new Error('E2B Chromium endpoint did not return JSON.')
     }
-    browser = {
+    const debuggerUrl = await ensureE2BRemoteBrowserDebuggerUrl(conversationId)
+    const connectedBrowser = await withTimeout(
+      playwrightChromium.connectOverCDP(debuggerUrl),
+      Number.parseInt(env('AGENT_E2B_BROWSER_VERIFY_TIMEOUT_MS') || '15000', 10),
+      'Timed out connecting to E2B Chromium over CDP.',
+    )
+    await connectedBrowser.close().catch(() => undefined)
+    browserInfo = {
       endpoint,
+      debuggerHostMatchesEndpoint: new URL(debuggerUrl).host === new URL(endpoint).host,
       browser: version.Browser || null,
       webSocketDebuggerUrl: typeof version.webSocketDebuggerUrl === 'string',
     }
@@ -141,7 +151,7 @@ try {
       stdout: commandResult.stdout.trim().split(/\r?\n/).slice(0, 12),
       durationMs: commandResult.durationMs,
     },
-    browser,
+    browser: browserInfo,
     durationMs: Date.now() - startedAt,
   }, null, 2))
 } catch (error) {

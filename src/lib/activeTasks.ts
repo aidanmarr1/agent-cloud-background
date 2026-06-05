@@ -1,9 +1,11 @@
+import type { InArgs, ResultSet } from '@tursodatabase/serverless/compat'
 import { getTursoSetupStatus, tursoExecute, tursoTransaction } from '@/lib/db/turso'
 import { taskQueueName } from '@/lib/agent/taskQueue'
 export { ACTIVE_TASK_CONFLICT_CODE, ACTIVE_TASK_CONFLICT_MESSAGE } from '@/lib/activeTaskConstants'
 
 const ACTIVE_TASK_LEASE_MS = 120_000
 const ACTIVE_TASK_STALE_DELETE_MS = 24 * 60 * 60 * 1000
+const ACTIVE_TASK_ORPHAN_JOB_GRACE_MS = 30_000
 
 export interface ActiveTaskLease {
   userId: string
@@ -28,6 +30,17 @@ type ActiveTaskRow = {
   started_at_ms?: unknown
   updated_at_ms?: unknown
   expires_at_ms?: unknown
+}
+
+type ActiveTaskJobRow = {
+  status?: unknown
+  terminal_status?: unknown
+  cancel_requested?: unknown
+  lease_expires_at_ms?: unknown
+}
+
+type TursoExecutor = {
+  execute(input: { sql: string; args?: InArgs }): Promise<ResultSet>
 }
 
 interface ActiveTaskMemoryState {
@@ -71,6 +84,54 @@ function rowToLease(row: ActiveTaskRow | undefined | null): ActiveTaskLease | nu
     updatedAt: finiteTimestamp(row.updated_at_ms, now),
     expiresAt: finiteTimestamp(row.expires_at_ms, now),
   }
+}
+
+function taskJobStillActive(row: ActiveTaskJobRow | undefined | null, lease: ActiveTaskLease, now: number): boolean {
+  if (!row) {
+    return now - lease.startedAt < ACTIVE_TASK_ORPHAN_JOB_GRACE_MS || now - lease.updatedAt < ACTIVE_TASK_ORPHAN_JOB_GRACE_MS
+  }
+
+  const status = row.status
+  const terminalStatus = row.terminal_status
+  const cancelRequested = row.cancel_requested === 1 || row.cancel_requested === true
+  if (terminalStatus || cancelRequested) return false
+  if (status === 'queued') return true
+  if (status !== 'running') return false
+
+  const leaseExpiresAt = Number(row.lease_expires_at_ms)
+  return Number.isFinite(leaseExpiresAt) && leaseExpiresAt > now
+}
+
+async function readTaskJobForLease(
+  executor: TursoExecutor,
+  lease: ActiveTaskLease,
+): Promise<ActiveTaskJobRow | null> {
+  try {
+    const result = await executor.execute({
+      sql: `
+        select status, terminal_status, cancel_requested, lease_expires_at_ms
+        from agent_task_jobs
+        where queue_name = ? and user_id = ? and run_id = ?
+        limit 1
+      `,
+      args: [lease.queueName, lease.userId, lease.runId],
+    })
+    return result.rows[0] as ActiveTaskJobRow | undefined || null
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/no such table|no such column/i.test(message)) return null
+    throw error
+  }
+}
+
+async function deleteActiveTaskLease(
+  executor: TursoExecutor,
+  lease: ActiveTaskLease,
+): Promise<void> {
+  await executor.execute({
+    sql: 'delete from user_active_task_leases where queue_name = ? and user_id = ? and run_id = ?',
+    args: [lease.queueName, lease.userId, lease.runId],
+  })
 }
 
 async function ensureActiveTaskSchema(): Promise<void> {
@@ -151,6 +212,37 @@ export async function acquireActiveTaskLease(
         args: [queueName, userId],
       })
       lease = rowToLease(active.rows[0] as ActiveTaskRow | undefined)
+
+      if (lease) {
+        const jobRow = await readTaskJobForLease(transaction, lease)
+        if (!taskJobStillActive(jobRow, lease, startedAt)) {
+          await deleteActiveTaskLease(transaction, lease)
+          const replacement = await transaction.execute({
+            sql: `
+              insert or ignore into user_active_task_leases (
+                queue_name, user_id, conversation_id, run_id, started_at_ms, updated_at_ms, expires_at_ms
+              )
+              values (?, ?, ?, ?, ?, ?, ?)
+            `,
+            args: [queueName, userId, conversationId, runId, startedAt, startedAt, expiresAt],
+          })
+          if (replacement.rowsAffected === 1) {
+            lease = { userId, queueName, conversationId, runId, startedAt, updatedAt: startedAt, expiresAt }
+            return { acquired: true, lease }
+          }
+
+          const activeAfterCleanup = await transaction.execute({
+            sql: `
+              select queue_name, user_id, conversation_id, run_id, started_at_ms, updated_at_ms, expires_at_ms
+              from user_active_task_leases
+              where queue_name = ? and user_id = ?
+              limit 1
+            `,
+            args: [queueName, userId],
+          })
+          lease = rowToLease(activeAfterCleanup.rows[0] as ActiveTaskRow | undefined)
+        }
+      }
     }
 
     if (!lease) {
@@ -229,7 +321,16 @@ export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveT
     `,
     [queueName, userId, now],
   )
-  return rowToLease(rows.rows[0] as ActiveTaskRow | undefined)
+  const lease = rowToLease(rows.rows[0] as ActiveTaskRow | undefined)
+  if (!lease) return null
+
+  const jobRow = await readTaskJobForLease({
+    execute: ({ sql, args }) => tursoExecute(sql, args),
+  }, lease)
+  if (taskJobStillActive(jobRow, lease, now)) return lease
+
+  await releaseActiveTaskLease(lease.userId, lease.runId)
+  return null
 }
 
 export function clearActiveTaskLeasesForTest(): void {
