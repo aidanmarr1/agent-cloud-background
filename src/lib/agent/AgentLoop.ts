@@ -18,7 +18,16 @@ import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
 
 import type { AgentEventEmitter } from './SSEEmitter'
-import { AgentStateData, createInitialState, updatePhase, trackFileCreate, logWork, recordWorkLedgerDeliverable } from './AgentState'
+import {
+  AgentStateData,
+  createInitialState,
+  updatePhase,
+  trackFileCreate,
+  logWork,
+  recordWorkLedgerDeliverable,
+  currentStepText,
+  isResearchStepText,
+} from './AgentState'
 import {
   MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES,
   STREAM_MAX_RETRIES, STREAM_RETRY_BASE_MS, STREAM_RETRY_EXPONENT,
@@ -1208,6 +1217,44 @@ function providerToolModeRecoveryMessage(state: AgentStateData): string {
   ].join(' ')
 }
 
+const STARTUP_SEARCH_SKIP_PATTERN = /\b(?:do\s+not|don't|dont|without|no)\s+(?:use\s+)?(?:web\s+)?(?:search|browse|browsing|internet|web)\b/i
+
+function cleanStartupSearchText(value: string, fallback: string): string {
+  const cleaned = value
+    .replace(/\s+/g, ' ')
+    .replace(/^\s*(?:please\s+)?(?:can\s+you\s+)?(?:research|look\s+up|find|search|investigate|check|tell\s+me)\s+(?:all\s+)?(?:about\s+)?/i, '')
+    .trim()
+  return (cleaned || fallback || 'the topic').slice(0, 180)
+}
+
+function startupSearchQuery(state: AgentStateData): string {
+  const request = state.originalUserRequest || ''
+  const step = currentStepText(state)
+  return cleanStartupSearchText(request || step, step || request)
+}
+
+function startupSearchActionLabel(query: string): string {
+  const topic = query
+    .replace(/[^\w\s.-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 48)
+  return `Map ${topic || 'topic'} fundamentals and sources`
+}
+
+function shouldRunStartupResearchSearch(state: AgentStateData): boolean {
+  if (state.iterations > 0 || state.stepToolCallCount > 0 || state.currentStepIdx !== 0) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.buildTask || state.searchDisabled || state.userProvidedUrl) return false
+  if (state.uploadedAttachmentContextAvailable || state.uploadedAttachmentContentAvailable) return false
+  if (STARTUP_SEARCH_SKIP_PATTERN.test(state.originalUserRequest || '')) return false
+
+  const stepText = currentStepText(state)
+  return state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    isResearchStepText(stepText)
+}
+
 export class AgentLoop {
   private emitter: AgentEventEmitter
   private options: AgentLoopOptions
@@ -1292,6 +1339,65 @@ export class AgentLoop {
       this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
     }
     return 'STREAMING'
+  }
+
+  private async runStartupResearchSearch(
+    state: AgentStateData,
+    toolPipeline: ToolPipeline,
+    contextManager: ContextManager,
+    toolRegistry: ToolRegistry,
+    goalTracker: GoalTracker,
+  ): Promise<ToolExecutionResult[]> {
+    if (!shouldRunStartupResearchSearch(state)) return []
+
+    const query = startupSearchQuery(state)
+    const toolCall: ToolCallData = {
+      id: `startup_web_search_${Date.now().toString(36)}`,
+      name: 'web_search',
+      arguments: JSON.stringify({
+        query,
+        action_label: startupSearchActionLabel(query),
+        plan_step_index: state.currentStepIdx + 1,
+      }),
+    }
+    const toolCalls = new Map<number, ToolCallData>([[0, toolCall]])
+
+    console.log('[AgentDiagnostics] Running startup research search', {
+      step: state.currentStepIdx,
+      query,
+    })
+    const results = await toolPipeline.executeAll(toolCalls, state, '')
+    const executedToolCalls = executedToolCallsForProviderHistory(toolCalls, results)
+    if (executedToolCalls.length > 0) {
+      contextManager.push({
+        role: 'assistant',
+        content: null,
+        tool_calls: executedToolCalls.map(tc => ({
+          id: tc.id,
+          type: 'function' as const,
+          function: { name: tc.name, arguments: tc.arguments },
+        })),
+      } as unknown as ChatMessageParam)
+    }
+
+    for (const msg of toolPipeline.buildToolResultMessages(results, state)) {
+      contextManager.push(msg as unknown as ChatMessageParam, 4)
+    }
+
+    for (const result of results) {
+      toolRegistry.recordCall(result.tc.name)
+      if (goalTracker.isInitialized()) {
+        goalTracker.recordToolContribution(result.tc.name, result, state.currentStepIdx, state.workingMemory)
+      }
+    }
+
+    const resultCount = Array.isArray(results[0]?.result) ? results[0].result.length : 0
+    contextManager.push({
+      role: 'system',
+      content: `STARTUP SEARCH COMPLETE: A real web_search already ran for "${query}" before the first model turn and returned ${resultCount} result${resultCount === 1 ? '' : 's'}. Do not repeat this exact query. Continue from these results; open or extract the strongest relevant source next, or use a narrower follow-up only if the current results are insufficient.`,
+    } as ChatMessageParam, 3)
+
+    return results
   }
 
   private maybeStartDeadlineFinalization(
@@ -1538,6 +1644,15 @@ export class AgentLoop {
             if (state.currentPlanItems && !goalTracker.isInitialized()) {
               goalTracker.initializeFromPlan(state.currentPlanItems)
             }
+
+            lastToolResults = await this.runStartupResearchSearch(
+              state,
+              toolPipeline,
+              contextManager,
+              toolRegistry,
+              goalTracker,
+            )
+            if (signal?.aborted) { phase = 'ERROR'; break }
 
             phase = 'STREAMING'
             break
