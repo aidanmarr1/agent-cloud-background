@@ -53,10 +53,10 @@ const STRATEGIES: Record<TaskType, TaskStrategyConfig> = {
     allowParallelTools: false,
     preferredPhaseOrder: ['research', 'research', 'deliver'],
     stepGuidance: {
-      research: 'Do more work inside each phase instead of adding more phase titles. Use strong sources, not snippet-only coverage. One search can satisfy a narrow lookup, but explanatory, cultural, historical, technical, current, or contested phases need a real evidence packet: targeted searches, opened primary/academic/specialist pages, concrete extracted details, and enough comparison/caveat coverage to make the phase useful.',
+      research: 'Do more work inside each phase instead of adding more phase titles. Use strong sources, not snippet-only coverage. Prefer web_search plus read_document/http extraction for normal research pages; use the full browser only when rendered state, interaction, screenshots, or page scripts are actually needed. One search can satisfy a narrow lookup, but explanatory, cultural, historical, technical, current, or contested phases need a real evidence packet: targeted searches, opened primary/academic/specialist pages, concrete extracted details, and enough comparison/caveat coverage to make the phase useful.',
       deliverable: 'Create a clean report-style deliverable when the user asks for research/report output: specific title, compact metadata when useful, Executive Summary, numbered thematic findings, Conclusion, and numbered References with inline [n] citations. Synthesize the why, examples, tradeoffs, and bottom line instead of stacking source notes. Cite sources and state source gaps plainly.',
     },
-    toolPriority: ['web_search', 'browser_navigate', 'read_document', 'create_file'],
+    toolPriority: ['web_search', 'read_document', 'browser_navigate', 'create_file'],
   },
 
   build: {

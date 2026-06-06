@@ -241,6 +241,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /runStartupResearchSearch\([\s\S]*toolPipeline\.executeAll\(toolCalls,\s*state,\s*''\)/, 'startup research search must execute through ToolPipeline so it emits real tool events and server credit charges')
   assert.match(agentLoop, /lastToolResults = await this\.runStartupResearchSearch\([\s\S]*phase = 'STREAMING'/, 'startup research search must run after planning and before the first streaming model call')
   assert.match(agentLoop, /STARTUP SEARCH COMPLETE:[\s\S]*Do not repeat this exact query/, 'bootstrap search results must be injected into model context to prevent duplicate first searches')
+  assert.match(agentLoop, /read_document or otherwise extract the strongest relevant source next[\s\S]*Use browser_navigate only if the source needs rendered page state/, 'research startup handoff must prefer fast extraction before full browser navigation')
+  assert.match(taskStrategy, /toolPriority:\s*\['web_search', 'read_document', 'browser_navigate', 'create_file'\]/, 'research tools must prioritize document extraction before full browser navigation')
   assert.match(agentConfig, /BASE_ITERATIONS\s*=\s*36/, 'long tasks need a larger base iteration budget')
   assert.match(agentConfig, /MAX_ITERATIONS\s*=\s*112/, 'long tasks need a higher global iteration ceiling')
   assert.match(agentConfig, /COMPLEXITY_ITERATION_BONUS\s*=\s*\{\s*1:\s*0,\s*2:\s*28,\s*3:\s*64\s*\}/, 'complex research tasks need expanded iteration bonus')

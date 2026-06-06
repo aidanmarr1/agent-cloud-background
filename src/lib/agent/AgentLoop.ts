@@ -1411,7 +1411,7 @@ export class AgentLoop {
     const resultCount = Array.isArray(results[0]?.result) ? results[0].result.length : 0
     contextManager.push({
       role: 'system',
-      content: `STARTUP SEARCH COMPLETE: A real web_search already ran for "${query}" before the first model turn and returned ${resultCount} result${resultCount === 1 ? '' : 's'}. Do not repeat this exact query. Continue from these results; open or extract the strongest relevant source next, or use a narrower follow-up only if the current results are insufficient.`,
+      content: `STARTUP SEARCH COMPLETE: A real web_search already ran for "${query}" before the first model turn and returned ${resultCount} result${resultCount === 1 ? '' : 's'}. Do not repeat this exact query. Continue from these results; read_document or otherwise extract the strongest relevant source next. Use browser_navigate only if the source needs rendered page state, screenshots, interaction, or scripts. Use a narrower follow-up search only if the current results are insufficient.`,
     } as ChatMessageParam, 3)
 
     return results

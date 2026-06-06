@@ -1642,7 +1642,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
                   ? `CRITICAL: You have NOT saved anything on this step. Use create_file for a new file or append_file for a continuation chunk NOW. Use export_pdf only after the source file is complete and the user requested PDF. Use edit_file only for targeted replacements. Do NOT write more prose in the reply. Save it to a file.`
                   : state.uploadedAttachmentContextAvailable
                     ? `UPLOADED ATTACHMENT CONTEXT AVAILABLE: Do NOT use web_search, browser_navigate, or read_file to locate the uploaded attachment. Use the attached content already in context and answer now, or emit <next_step/> if the attachment-read phase is complete. If extracted content is unavailable, report that the uploaded file could not be read from the provided content.`
-                  : `CRITICAL: You have NOT made any tool calls on this step. You MUST use web_search or browser_navigate NOW. Do NOT write text — call a tool immediately. Example: web_search("${state.currentPlanItems[state.currentStepIdx]?.slice(0, 40)}")`
+                  : `CRITICAL: You have NOT made any tool calls on this step. Use web_search for a targeted query or read_document for a known source URL NOW. Use browser_navigate only when rendered state or interaction is needed. Do NOT write text — call a tool immediately. Example: web_search("${state.currentPlanItems[state.currentStepIdx]?.slice(0, 40)}")`
               ),
             },
             continueLoop: true,
@@ -1682,7 +1682,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
                 state,
                 state.uploadedAttachmentContextAvailable
                   ? `UPLOADED ATTACHMENT CONTEXT AVAILABLE: This phase should use the attached file content already in context. Do not compensate with web_search/browser_navigate/read_file for the uploaded filename. Answer from the attachment content, emit <next_step/> if this phase is complete, or report that the uploaded file content could not be read.`
-                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make exactly one concrete research tool call now, scoped to this step: use web_search with a new specific query, browser_navigate to a new relevant source, browser_get_content on the current relevant page, or browser_find_text for a concrete term.`,
+                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make exactly one concrete research tool call now, scoped to this step: use web_search with a new specific query, read_document for a known source URL, browser_get_content on an already-open relevant page, or browser_find_text for a concrete term. Use browser_navigate only when rendered state or interaction is needed.`,
               ),
             },
             continueLoop: true,
@@ -1861,7 +1861,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
             type: 'inject_message',
             message: {
               role: 'system',
-              content: stepMsg(state, `Multiple browse attempts failed. ${depth.message} Switch route: use a different useful source, read_document for PDFs/documents, or a more specific web_search query instead of retrying the failed page.`),
+              content: stepMsg(state, `Multiple browse attempts failed. ${depth.message} Switch route: use read_document on a useful source URL, or a more specific web_search query instead of retrying the failed page. Use the full browser only when rendered state is necessary.`),
             },
           }
         }

@@ -346,7 +346,7 @@ function researchFileDetourBlockReason(
   if (hasLiveEvidence && !looksLikeAccessBlockerOrNoteDetour(combinedText)) return null
 
   const current = currentStepText(state) || 'the active research step'
-  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make exactly one concrete source tool call now: web_search for a targeted query, browser_navigate/read_document for a known source, or browser_get_content/browser_find_text for an already-open relevant page. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
+  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make exactly one concrete source tool call now: web_search for a targeted query, read_document for a known source URL, or browser_get_content/browser_find_text for an already-open relevant page. Use browser_navigate only when rendered state or interaction is needed. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
 }
 
 const ATTACHMENT_MATCH_STOPWORDS = new Set([
