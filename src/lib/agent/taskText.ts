@@ -69,13 +69,13 @@ export function sandboxReadyAcknowledgementForTask(
   const resolvedType = taskType === 'action' ? 'browse' : taskType
 
   if (resolvedType === 'build' || resolvedType === 'code') {
-    return `Cloud sandbox and browser are ready; building ${subject} in the workspace.`
+    return `Building ${subject} in the workspace, then running the relevant checks.`
   }
   if (resolvedType === 'browse') {
-    return `Cloud sandbox and browser are ready; working on ${subject} in the browser.`
+    return `Working through ${subject}, then verifying the final state.`
   }
   if (/\b(?:research|find out|look up|investigate|compare|current|latest|source|sources)\b/.test(lower)) {
-    return `Cloud sandbox and browser are ready; researching ${subject} with live sources.`
+    return `Researching ${subject} with current sources, then comparing the evidence and summarizing the findings.`
   }
-  return `Cloud sandbox and browser are ready; starting ${subject}.`
+  return `Starting ${subject} and keeping the work focused on the request.`
 }
