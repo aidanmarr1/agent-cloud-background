@@ -6,7 +6,7 @@ const nextConfig: NextConfig = {
   outputFileTracingRoot: projectRoot,
   serverExternalPackages: ['@sparticuz/chromium', 'esbuild', 'playwright'],
   outputFileTracingIncludes: {
-    '/api/**/*': ['./node_modules/@sparticuz/chromium/**/*'],
+    '/api/internal/browser-health': ['./node_modules/@sparticuz/chromium/**/*'],
   },
   turbopack: {
     root: projectRoot,
