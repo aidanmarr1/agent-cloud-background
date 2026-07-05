@@ -27,7 +27,6 @@ function dismissedKey(email: string | null | undefined, approvedAt: string | nul
 }
 
 export function InviteOnlyGate({
-  initialAccessStatus,
   initialAccountDeleted = false,
 }: {
   initialAccessStatus?: 'pending' | 'approved'
@@ -36,9 +35,7 @@ export function InviteOnlyGate({
   const pathname = usePathname()
   const { data: session, status: sessionStatus } = useSession()
   const syncCredits = useCreditStore((s) => s.syncFromServer)
-  const [status, setStatus] = useState<AccessStatusResponse | null>(
-    initialAccessStatus ? { accessStatus: initialAccessStatus } : null,
-  )
+  const [status, setStatus] = useState<AccessStatusResponse | null>(null)
   const [requesting, setRequesting] = useState(false)
   const [requestError, setRequestError] = useState('')
   const [approvedDismissed, setApprovedDismissed] = useState(false)
@@ -48,13 +45,10 @@ export function InviteOnlyGate({
   const email = session?.user?.email || null
   const deletedFromSession = session?.user?.accountDeleted === true
   const deleted = accountDeleted || deletedFromSession
-  const serverAccessStatus = status?.accessStatus
-  const pending = serverAccessStatus
-    ? serverAccessStatus === 'pending'
-    : session?.user?.accessStatus === 'pending'
+  const confirmedPending = status?.accessStatus === 'pending'
   const approvedByRequest = status?.accessStatus === 'approved' && status.requestStatus === 'accepted'
   const visible = !deleted && !authRoute && (
-    pending || (sessionStatus === 'authenticated' && approvedByRequest && !approvedDismissed)
+    confirmedPending || (sessionStatus === 'authenticated' && approvedByRequest && !approvedDismissed)
   )
 
   const approvalDismissedKey = useMemo(
@@ -105,7 +99,7 @@ export function InviteOnlyGate({
   }, [refreshStatus])
 
   useEffect(() => {
-    if (!pending) return
+    if (!confirmedPending) return
     void refreshStatus()
     const interval = window.setInterval(() => {
       void refreshStatus()
@@ -126,7 +120,7 @@ export function InviteOnlyGate({
       document.removeEventListener('visibilitychange', onVisibilityChange)
       window.removeEventListener('pageshow', onPageShow)
     }
-  }, [pending, refreshStatus])
+  }, [confirmedPending, refreshStatus])
 
   useEffect(() => {
     if (!approvedByRequest) return

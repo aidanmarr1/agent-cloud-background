@@ -34,6 +34,7 @@ interface ServerConversationBodyState {
 const SAVE_DEBOUNCE_MS = 250
 const REFRESH_INTERVAL_MS = 5_000
 const REFRESH_THROTTLE_MS = 1_500
+const SERVER_FETCH_TIMEOUT_MS = 12_000
 
 let storeApi: ChatStoreApi | null = null
 let currentUserId: string | null = null
@@ -92,6 +93,19 @@ function serverRecordToConversation(record: ServerConversationRecord, summary: b
     return { ...conversation, serverSummary: true }
   }
   return normalizeConversationForPersistence(conversation)
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), SERVER_FETCH_TIMEOUT_MS)
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+    })
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 function normalizeServerConversations(records: ServerConversationRecord[] | undefined, partial: boolean): Conversation[] {
@@ -154,7 +168,7 @@ function noteServerState(conversations: Conversation[], deletedIds: string[] = [
 }
 
 async function fetchServerState(): Promise<ServerConversationState> {
-  const response = await fetch('/api/conversations', {
+  const response = await fetchWithTimeout('/api/conversations', {
     cache: 'no-store',
   })
   if (!response.ok) {
@@ -165,7 +179,7 @@ async function fetchServerState(): Promise<ServerConversationState> {
 }
 
 async function fetchServerConversation(conversationId: string): Promise<Conversation | null> {
-  const response = await fetch(`/api/conversations?id=${encodeURIComponent(conversationId)}`, {
+  const response = await fetchWithTimeout(`/api/conversations?id=${encodeURIComponent(conversationId)}`, {
     cache: 'no-store',
   })
   if (!response.ok) {

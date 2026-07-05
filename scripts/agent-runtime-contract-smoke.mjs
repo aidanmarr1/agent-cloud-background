@@ -62,6 +62,7 @@ async function assertSourceContracts() {
     appLayout,
     authSessionProvider,
     authGate,
+    inviteOnlyGate,
     homePage,
     chatPage,
     chatLoading,
@@ -149,6 +150,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/app/layout.tsx'), 'utf8'),
     readFile(join(root, 'src/components/auth/AuthSessionProvider.tsx'), 'utf8'),
     readFile(join(root, 'src/components/auth/AuthGate.tsx'), 'utf8'),
+    readFile(join(root, 'src/components/auth/InviteOnlyGate.tsx'), 'utf8'),
     readFile(join(root, 'src/app/page.tsx'), 'utf8'),
     readFile(join(root, 'src/app/chat/[id]/page.tsx'), 'utf8'),
     readFile(join(root, 'src/app/chat/[id]/loading.tsx'), 'utf8'),
@@ -351,6 +353,8 @@ async function assertSourceContracts() {
   assert.match(authGate, /const hasSession = !!session\?\.user\?\.id/, 'auth gate must track session data separately from the status flag')
   assert.match(authGate, /if \(status === 'loading'\) \{\s*return <>\{children\}<\/>\s*\}/, 'auth gate loading state must keep routed children visible instead of blanking the app shell')
   assert.match(authGate, /status === 'unauthenticated' && !hasSession/, 'auth gate must not hide children when the status flag is stale but session data exists')
+  assert.match(inviteOnlyGate, /const confirmedPending = status\?\.accessStatus === 'pending'/, 'invite gate must only block after a fresh server status confirms pending access')
+  assert.doesNotMatch(inviteOnlyGate, /session\?\.user\?\.accessStatus === 'pending'/, 'invite gate must not cover the app from stale session access status')
   assert.match(appLayout, /<ChatStoreSync \/>/, 'root layout must mount authenticated DB task-history sync')
   assert.match(globalsCss, /--accent-blue:\s*var\(--text-secondary\)/, 'general accent-blue must preserve the existing muted app accent')
   assert.match(globalsCss, /--status-live:\s*#0081f2/, 'light theme must expose a dedicated blue live-status token')
@@ -383,6 +387,10 @@ async function assertSourceContracts() {
   assert.doesNotMatch(chatStoreIndex, /persist\(/, 'chat/task history must not use browser-local Zustand persistence as the source of truth')
   assert.doesNotMatch(chatStoreIndex, /debouncedIdbStorage|TASK_STORE_KEY/, 'chat store must not hydrate task history from IndexedDB storage')
   assert.match(chatStoreIndex, /initializeChatStoreServerSync\(userId,\s*useChatStore\)/, 'chat store must initialize account-scoped server persistence')
+  assert.match(chatServerSync, /SERVER_FETCH_TIMEOUT_MS\s*=\s*12_000/, 'account task history fetches must have a finite timeout so chat routes cannot skeleton forever')
+  assert.match(chatServerSync, /function fetchWithTimeout[\s\S]*AbortController[\s\S]*controller\.abort\(\)/, 'account task history fetches must abort stalled requests')
+  assert.match(chatServerSync, /fetchWithTimeout\('\/api\/conversations'/, 'task index hydration must use the bounded fetch helper')
+  assert.match(chatServerSync, /fetchWithTimeout\(`\/api\/conversations\?id=\$\{encodeURIComponent\(conversationId\)\}`/, 'single task body loading must use the bounded fetch helper')
   assert.doesNotMatch(chatPersistence, /createJSONStorage|createDebouncedStorage|StateStorage/, 'legacy chat persistence must not provide runtime local storage persistence')
   assert.match(chatPersistence, /readLegacyChatPersistedState/, 'legacy local chat state should only be available for one-time DB migration')
   assert.match(chatPersistence, /clearLegacyChatPersistence/, 'legacy local chat state must be clearable after DB migration')
