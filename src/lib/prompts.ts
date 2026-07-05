@@ -360,7 +360,7 @@ export function getPlanningPrompt(customInstructions?: string): string {
 ${getCustomInstructionPlanningBlock(customInstructions)}
 
 ## Task types — classify EVERY task into ONE of these
-- "research": research, current/live info, sources/citations, reports, multi-source analysis.
+- "research": research, current/live info, sources/citations, reports, current-state/landscape/application synthesis, multi-source analysis.
 - "action": complete a live website/system task and report the actual final state, even if blocked.
 - "build": create a working website/app/artifact with files.
 - "code": write or modify code, functions, scripts, algorithms.
@@ -373,7 +373,7 @@ ${getCustomInstructionPlanningBlock(customInstructions)}
 - Explicit user limits override defaults. If the user requests exactly/only N web searches, plan exactly 2 steps: one web_search-only step with exactly N calls and no page browsing, then one answer/deliverable step. If the latest message only says to do N searches, use the prior user question as the topic.
 - Saved custom instructions supersede defaults for process, source rules, file handling, deliverable format, narration, verification, and visible step count. They do NOT supersede safety, permissions, sandbox/tool availability, or core runtime rules. If saved instructions require a fixed number of visible phases, honor that count unless the latest request or higher-priority rule overrides it.
 - If the user supplied uploaded attachments, plan from those uploaded files first. Do not plan web_search for an attachment filename/title. Do not plan read_file/open-local-path work for uploaded attachment names; read_file is only for workspace files created during the task. Use web/browsing only if the user explicitly asks for outside/current information beyond the attachment.
-- Ordinary answerable questions are NOT research tasks. Use complexity 1 and steps [] when existing knowledge/conversation is enough. Modern named AI products, companies, services, models, agents, capabilities, pricing, and comparisons are external/dynamic research unless the user explicitly says answer from memory.
+- Ordinary answerable questions are NOT research tasks. Use complexity 1 and steps [] when existing knowledge/conversation is enough. Current-state, landscape, ecosystem, real-world application, modern capability, pricing, and comparison requests about AI/products/companies/services/models/agents are external/dynamic research unless the user explicitly says answer from memory.
 - Named AI chat/debate requests are ACTION tasks, not research. If asked to debate, chat, talk, message, ask, or prompt Gemini, ChatGPT, Claude, Copilot, Perplexity, Grok, or another named AI service, open the official chat UI first and send/continue the requested conversation. Add research only if explicitly requested.
 - Step count is flexible and must match the task. Do not default to 3 or 4 steps. Simple action/check/lookup tasks may be 1-2 steps; deep work may need 5+. Image-only retrieval is exactly 1 image_search step; explicit fixed-search tasks are exactly 2 steps. Last step is the deliverable or final verification/report.
 - Avoid repair loops: action tasks need at least 2 steps with a final verify/report step; code/build tasks need at least 2 steps; website/app builds need at least 3 steps including a late local preview/visual inspection before final delivery; long manuscript/book tasks need enough production chunks, usually 5+ steps.
@@ -411,9 +411,14 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
     return 3
   }
 
+  if (/\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?\s+of|use cases?|core technolog(?:y|ies)|key technolog(?:y|ies)|capabilities?|trends?|impact)\b/i.test(content) &&
+    /\b(?:summari[sz]e|explain|cover(?:ing)?|survey|map|compare|analy[sz]e|evaluate|assess|overview|modern|today|current)\b/i.test(content)) {
+    return 2
+  }
+
   // Keep explicitly lightweight requests lightweight unless the user also asks
   // for a formal cited report or deep analysis.
-  if (/\b(very quickly|real quick|asap|super quick|quickly|quick|brief|short|concise)\b/i.test(content) &&
+  if (/\b(very quickly|real quick|asap|super quick|quickly|quick|brief|short)\b/i.test(content) &&
     !/\b(?:deep|comprehensive|thorough|detailed|report|citations?|sources?|cite|analysis)\b/i.test(content)) {
     return 1
   }

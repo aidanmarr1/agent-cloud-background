@@ -13,8 +13,8 @@ import {
   GOAL_MAX_EVIDENCE_PER_STEP,
   MIN_TOOL_CALLS_BY_COMPLEXITY,
   MIN_RESEARCH_CALLS_BY_COMPLEXITY,
-  MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY,
 } from './config'
+import { isSubstantiveResearchState, researchDepthProfileForState } from './ResearchDepth'
 import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit } from './taskConstraints'
 
 export type GoalStatus = 'pending' | 'active' | 'achieved' | 'blocked'
@@ -25,16 +25,6 @@ export interface SubGoal {
   status: GoalStatus
   stepIdx: number
   evidence: string[]
-}
-
-function isExactSingleSourceLookup(text: string): boolean {
-  return /\b(?:exact|official|primary|source[-\s]?specific|single source|one source|specific page|specific document|quote|verbatim|wording|date|timing|release|price|policy|docs?|documentation|spec|api reference|pep|standard)\b/i.test(text) &&
-    !/\b(?:compare|versus|vs\.?|across|rank|ranking|pros?|cons?|tradeoffs?|risks?|benefits?|why|how|evaluate|assess|analy[sz]e|synthesis|perspectives?|drivers?|ecosystem)\b/i.test(text)
-}
-
-function requiredOpenedSourcesForDepth(stepText: string, complexity: number): number {
-  if (isExactSingleSourceLookup(stepText)) return 1
-  return MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY[complexity as keyof typeof MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY] ?? 2
 }
 
 export class GoalTracker {
@@ -173,8 +163,10 @@ export class GoalTracker {
       isResearchStepText(stepText)
     const fixedSearchLimit = currentStepWebSearchLimit(state)
     const fixedSearchOnly = fixedSearchLimit !== null || currentStepHasSingleWebSearchLimit(state)
+    const researchDepth = researchDepthProfileForState(state)
+    const substantiveResearch = isSubstantiveResearchState(state)
     const minCalls = researchLike
-      ? (fixedSearchLimit ?? MIN_RESEARCH_CALLS_BY_COMPLEXITY[complexity] ?? MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 3)
+      ? (fixedSearchLimit ?? researchDepth.requiredCalls)
       : (MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 3)
     let met = false
 
@@ -196,15 +188,14 @@ export class GoalTracker {
         state.stepVisitedUrls.size > 0 ||
         state.stepSourceDomainCounts.size > 0
       const directResearchEvidence =
-        (fixedSearchOnly || !researchLike || complexity <= 1)
+        (fixedSearchOnly || !researchLike || (complexity <= 1 && !substantiveResearch))
           ? state.stepSearchQueries.size > 0 || goal.evidence.length > 0 || openedSourceEvidence
           : openedSourceEvidence
-      const requiredOpenedSources = requiredOpenedSourcesForDepth(stepText, complexity)
+      const requiredOpenedSources = researchDepth.requiredSourceBreadth
       const sourceBreadthSatisfied =
         fixedSearchOnly ||
         !researchLike ||
-        complexity <= 1 ||
-        state.stepVisitedUrls.size >= requiredOpenedSources ||
+        (complexity <= 1 && !substantiveResearch) ||
         state.stepSourceDomainCounts.size >= requiredOpenedSources
       met = state.stepResearchCallCount >= minCalls &&
         (!researchLike || (directResearchEvidence && sourceBreadthSatisfied))

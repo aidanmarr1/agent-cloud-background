@@ -803,12 +803,14 @@ async function assertSourceContracts() {
   assert.match(prompts, /do not stop at page titles, snippets, generic positioning copy, Wikipedia-only context, one-source summaries, placeholder UI, first-draft code, or thin prose/, 'runtime prompt must counter skim behavior across task types')
   assert.match(prompts, /mechanism\/why, concrete evidence, example or comparison, limitation or counterpoint, and implication/, 'runtime prompt must define the human-style unpacking shape for explanatory work')
   assert.match(prompts, /Do not over-collect sources after that shape is satisfied/, 'runtime prompt must prevent ambition from becoming endless source gathering')
-  assert.match(prompts, /quickly\|quick\|brief\|short\|concise/, 'complexity pre-estimate must keep explicitly lightweight requests lightweight')
+  assert.match(prompts, /quickly\|quick\|brief\|short/, 'complexity pre-estimate must keep explicitly lightweight requests lightweight')
+  assert.doesNotMatch(prompts, /quickly\|quick\|brief\|short\|concise/, 'concise output requests must not automatically force shallow research depth')
   assert.match(planManager, /Extract concrete evidence from pages you open/, 'research step guidance must require extraction beyond snippets')
   assert.match(planManager, /Unpack the angle before advancing/, 'research step guidance must ask the model to fill missing analytical gaps before advancing')
   assert.match(taskStrategy, /real evidence packet[\s\S]*targeted searches[\s\S]*concrete extracted details/, 'research strategy guidance must operationalize depth beyond source count')
-  assert.match(goalTracker, /requiredOpenedSourcesForDepth/, 'goal completion must require stronger opened-source depth for moderate explanatory research')
-  assert.match(goalTracker, /isExactSingleSourceLookup/, 'goal completion must preserve one-source behavior for exact official lookups')
+  assert.match(goalTracker, /researchDepthProfileForState/, 'goal completion must use the shared research-depth profile')
+  assert.match(goalTracker, /stepSourceDomainCounts\.size >= requiredOpenedSources/, 'goal completion must require opened source-domain breadth for substantive research')
+  assert.match(await readFile(join(root, 'src/lib/agent/ResearchDepth.ts'), 'utf8'), /isExactSingleSourceLookupText/, 'research depth must preserve one-source behavior for exact official lookups')
   assert.doesNotMatch(prompts, /1500\+|1500-word|Minimum 1500/, 'research reports must not have a blanket 1500-word requirement')
   assert.match(prompts, /Report length must match the user's request and task complexity/, 'deliverable length must be complexity-driven')
   assert.match(prompts, /Executive Summary[\s\S]*numbered thematic sections[\s\S]*Conclusion[\s\S]*References/, 'research report deliverables must default to the clean report structure')
@@ -1120,10 +1122,14 @@ import {
   splitTaskMessageContent,
 } from ${JSON.stringify(join(root, 'src/lib/stream/taskMessageContent.ts'))}
 import {
+  estimateTaskComplexity,
   getPlanningPrompt,
   getSystemPrompt,
 } from ${JSON.stringify(join(root, 'src/lib/prompts.ts'))}
 import { PolicyEngine } from ${JSON.stringify(join(root, 'src/lib/agent/PolicyEngine.ts'))}
+import {
+  researchDepthProfileForState,
+} from ${JSON.stringify(join(root, 'src/lib/agent/ResearchDepth.ts'))}
 import { ToolCache } from ${JSON.stringify(join(root, 'src/lib/agent/ToolCache.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
@@ -1476,6 +1482,15 @@ export async function runLedgerSmoke() {
   assert.equal(resolveStrategy([
     { role: 'user', content: 'look it up and cite the source' },
   ]).type, 'research')
+  assert.equal(resolveStrategy([
+    { role: 'user', content: 'Summarize the current state of artificial intelligence and real-world applications in a concise overview.' },
+  ]).type, 'research')
+  assert.equal(estimateTaskComplexity([
+    { role: 'user', content: 'quickly summarize what artificial intelligence means' },
+  ]), 1, 'explicit quick prompts should still stay quick')
+  assert.ok(estimateTaskComplexity([
+    { role: 'user', content: 'Summarize the current state of artificial intelligence, covering core technologies and real-world applications. Provide a clear, concise overview.' },
+  ]) >= 2, 'concise current-state synthesis should not be pre-classified as lightweight')
   const namedAiCompletion = detectBrowserTaskCompletion('Navigate to Gemini AI and initiate conversation', {
     success: true,
     url: 'https://gemini.google.com/app/test',
@@ -1616,6 +1631,47 @@ export async function runLedgerSmoke() {
     30,
   )
   assert.ok(finalNoToolActions.some((action) => action.message?.content?.includes('FINAL SYNTHESIS TOOL REQUIRED')), 'final synthesis must immediately require a concrete file/export tool after text-only drift')
+
+  const conciseCurrentAiDepthState = createInitialState(false, timeouts)
+  conciseCurrentAiDepthState.taskStrategy = 'research'
+  conciseCurrentAiDepthState.currentPhase = 'research'
+  conciseCurrentAiDepthState.originalUserRequest = 'Summarize the current state of artificial intelligence, covering its core technologies and real-world applications. Provide a clear, concise overview.'
+  conciseCurrentAiDepthState.currentPlanItems = ['Summarize current real-world applications', 'Write final answer']
+  conciseCurrentAiDepthState.currentPlanScopes = ['Gather multiple opened source domains across current AI applications and technology pillars.', 'Synthesize the final overview.']
+  conciseCurrentAiDepthState.currentStepIdx = 0
+  conciseCurrentAiDepthState.taskComplexity = estimateTaskComplexity([
+    { role: 'user', content: conciseCurrentAiDepthState.originalUserRequest },
+  ])
+  const conciseCurrentAiDepth = researchDepthProfileForState(conciseCurrentAiDepthState)
+  assert.equal(conciseCurrentAiDepth.substantive, true, 'current-state AI overview should be substantive research')
+  assert.ok(conciseCurrentAiDepth.requiredCalls >= 6, 'current-state AI overview needs more than a single search/read pair')
+  assert.ok(conciseCurrentAiDepth.requiredSourceBreadth >= 4, 'current-state AI overview needs distinct opened source-domain breadth')
+
+  const shallowCurrentAiState = createInitialState(false, timeouts)
+  shallowCurrentAiState.taskStrategy = 'research'
+  shallowCurrentAiState.currentPhase = 'research'
+  shallowCurrentAiState.originalUserRequest = conciseCurrentAiDepthState.originalUserRequest
+  shallowCurrentAiState.currentPlanItems = ['Summarize current real-world applications', 'Write final answer']
+  shallowCurrentAiState.currentPlanScopes = ['Gather multiple opened source domains across current AI applications and technology pillars.', 'Synthesize the final overview.']
+  shallowCurrentAiState.currentStepIdx = 0
+  shallowCurrentAiState.taskComplexity = conciseCurrentAiDepthState.taskComplexity
+  shallowCurrentAiState.stepToolCallCount = 2
+  shallowCurrentAiState.stepResearchCallCount = 2
+  shallowCurrentAiState.stepVisitedUrls.add('https://example.com/current-ai-applications')
+  shallowCurrentAiState.stepSourceDomainCounts.set('example.com', 1)
+  const shallowCurrentAiActions = policy.evaluate(
+    shallowCurrentAiState,
+    new Map(),
+    '',
+    true,
+    30,
+  )
+  assert.equal(shallowCurrentAiState.currentStepIdx, 0, 'current-state AI research must not advance after two actions and one opened source')
+  assert.ok(!shallowCurrentAiActions.some((action) => action.type === 'step_advance'), 'current-state AI research must block the shallow next_step pattern')
+  assert.ok(
+    shallowCurrentAiActions.some((action) => action.message?.content?.includes('Research still needs')),
+    'current-state AI research should ask for more source work before advancing',
+  )
 
   const incompleteDepthState = createInitialState(false, timeouts)
   incompleteDepthState.taskStrategy = 'research'

@@ -3,6 +3,7 @@ import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState } from './taskConstraints'
+import { isSubstantiveResearchState, researchDepthProfileForState } from './ResearchDepth'
 import type { ToolCallData } from './StreamProcessor'
 import {
   NO_TOOL_FORCE_ADVANCE,
@@ -30,8 +31,6 @@ import {
   LOOP_CHECK_WINDOW,
   REPLAN_MAX_TIMES,
   MIN_STEP_BUDGET,
-  MIN_RESEARCH_CALLS_BY_COMPLEXITY,
-  MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY,
 } from './config'
 
 export type PolicyActionType = 'inject_message' | 'step_advance' | 'terminate' | 'continue_loop'
@@ -143,7 +142,7 @@ function minToolCalls(state: AgentStateData): number {
   const c = state.taskComplexity as 1 | 2 | 3
   if (isResearchLikeStep(state)) {
     if (currentStepHasSingleWebSearchLimit(state)) return 1
-    return MIN_RESEARCH_CALLS_BY_COMPLEXITY[c] ?? MIN_TOOL_CALLS_BY_COMPLEXITY[c] ?? MIN_TOOL_CALLS_PER_STEP
+    return researchDepthProfileForState(state).requiredCalls
   }
   return MIN_TOOL_CALLS_BY_COMPLEXITY[c] ?? MIN_TOOL_CALLS_PER_STEP
 }
@@ -158,18 +157,6 @@ function isResearchLikeStep(state: AgentStateData): boolean {
   return state.taskStrategy === 'research' || state.currentPhase === 'research'
 }
 
-function isExactSingleSourceLookup(text: string): boolean {
-  return /\b(?:exact|official|primary|source[-\s]?specific|single source|one source|specific page|specific document|quote|verbatim|wording|date|timing|release|price|policy|docs?|documentation|spec|api reference|pep|standard)\b/i.test(text) &&
-    !/\b(?:compare|versus|vs\.?|across|rank|ranking|pros?|cons?|tradeoffs?|risks?|benefits?|why|how|evaluate|assess|analy[sz]e|synthesis|perspectives?|drivers?|ecosystem)\b/i.test(text)
-}
-
-function requiredOpenedSourcesForDepth(state: AgentStateData): number {
-  const stepText = currentStepText(state)
-  if (isExactSingleSourceLookup(stepText)) return 1
-  const c = state.taskComplexity as 1 | 2 | 3
-  return MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY[c] ?? 2
-}
-
 function researchDepthStatus(state: AgentStateData): {
   complete: boolean
   requiredCalls: number
@@ -179,17 +166,18 @@ function researchDepthStatus(state: AgentStateData): {
   message: string
 } {
   const fixedSearchLimit = currentStepWebSearchLimit(state)
-  const requiredCalls = fixedSearchLimit ?? minToolCalls(state)
-  const searchOnly = fixedSearchLimit !== null || currentStepHasSingleWebSearchLimit(state)
+  const profile = researchDepthProfileForState(state)
+  const requiredCalls = fixedSearchLimit ?? profile.requiredCalls
+  const searchOnly = profile.fixedSearchOnly
   const calls = state.stepResearchCallCount
   const pages = state.stepVisitedUrls.size
   const domains = state.stepSourceDomainCounts.size
   const missing: string[] = []
   if (calls < requiredCalls) missing.push(`${requiredCalls - calls} more research call${requiredCalls - calls === 1 ? '' : 's'}`)
   if (!searchOnly) {
-    const requiredSourceBreadth = requiredOpenedSourcesForDepth(state)
-    if (requiredSourceBreadth > 0 && pages < requiredSourceBreadth && domains < requiredSourceBreadth) {
-      missing.push(`${requiredSourceBreadth} opened source page${requiredSourceBreadth === 1 ? '' : 's'} or distinct source domain${requiredSourceBreadth === 1 ? '' : 's'}`)
+    const requiredSourceBreadth = profile.requiredSourceBreadth
+    if (requiredSourceBreadth > 0 && domains < requiredSourceBreadth) {
+      missing.push(`${requiredSourceBreadth} opened distinct source domain${requiredSourceBreadth === 1 ? '' : 's'}`)
     }
   }
   return {
@@ -366,6 +354,7 @@ function looksLikeCompleteInlineAnswer(content: string): boolean {
 function hasMinimumResearchEvidence(state: AgentStateData): boolean {
   const depth = researchDepthStatus(state)
   if (depth.complete) return true
+  if (isSubstantiveResearchState(state)) return false
   if (currentStepHasSingleWebSearchLimit(state)) {
     return state.stepSearchQueries.size >= 1 && state.stepResearchCallCount >= 1
   }
@@ -2440,6 +2429,18 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }
         if (isResearchLikeStep(state)) {
           const depth = researchDepthStatus(state)
+          if (!depth.complete && isSubstantiveResearchState(state)) {
+            state.perStepBudget = Math.max(state.perStepBudget + 2, state.stepIterationCount + 2)
+            actions.push({
+              type: 'inject_message',
+              message: {
+                role: 'system',
+                content: stepMsg(state, `${depth.message} This is a broad/current research phase, so do not move on with a shallow packet. Open and extract more distinct source domains before advancing.`),
+              },
+              continueLoop: true,
+            })
+            return actions
+          }
           if (!depth.complete && state.stepFailureCount < REPLAN_AFTER_FAILURES) {
             if (hasMinimumResearchEvidence(state)) {
               if (shouldRequestPhaseEndNarration(state, assistantContent)) {

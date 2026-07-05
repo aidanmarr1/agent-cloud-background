@@ -187,6 +187,7 @@ const TASK_PATTERNS: Array<{ type: TaskType; patterns: RegExp[] }> = [
     type: 'research',
     patterns: [
       /\b(research|find\s*out|investigate|compare|analy[sz]e|report\s*on|deep\s*dive|latest|current|recent|today|news|up[-\s]?to[-\s]?date|sources?|citations?|cite)\b/i,
+      /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?\s+of|use cases?|core technolog(?:y|ies)|key technolog(?:y|ies)|capabilities?|trends?|impact)\b/i,
       /\b(?:web\s*)?search(?:es|ing)?\b|\blook\s*(?:it\s*)?up\b/i,
     ],
   },
