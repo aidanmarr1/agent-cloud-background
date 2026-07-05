@@ -4,6 +4,8 @@ import { AuthUserError, findUserById } from '@/lib/auth/users'
 import { createApprovalRequestForUser } from '@/lib/auth/signupRequests'
 import { checkRateLimit } from '@/lib/rateLimit'
 
+export const preferredRegion = ['syd1', 'iad1']
+
 export async function POST(request: Request) {
   const originError = assertSameOriginRequest(request)
   if (originError) return originError

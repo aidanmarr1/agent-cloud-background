@@ -2,6 +2,8 @@ import { auth } from '@/auth'
 import { findUserById } from '@/lib/auth/users'
 import { findSignupRequestForUser } from '@/lib/auth/signupRequests'
 
+export const preferredRegion = ['syd1', 'iad1']
+
 export async function GET() {
   const session = await auth().catch(() => null)
   const userId = session?.user?.id

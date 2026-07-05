@@ -23,6 +23,8 @@ export const metadata: Metadata = {
   },
 };
 
+export const preferredRegion = ["syd1", "iad1"];
+
 export default async function RootLayout({
   children,
 }: Readonly<{

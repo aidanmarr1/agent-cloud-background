@@ -3,6 +3,8 @@ import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody }
 import { AuthUserError, createUser } from '@/lib/auth/users'
 import { checkRateLimit } from '@/lib/rateLimit'
 
+export const preferredRegion = ['syd1', 'iad1']
+
 const SignupSchema = z.object({
   name: z.string().trim().max(80).optional(),
   email: z.string().trim().email().max(254),

@@ -2,6 +2,8 @@ import { auth } from '@/auth'
 import { getServerCreditSnapshot } from '@/lib/serverCredits'
 import { getUserForAccess } from '@/lib/inviteAccess'
 
+export const preferredRegion = ['syd1', 'iad1']
+
 export async function GET() {
   const session = await auth().catch(() => null)
   const userId = session?.user?.id

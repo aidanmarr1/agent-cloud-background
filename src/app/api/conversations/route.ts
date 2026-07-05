@@ -9,6 +9,7 @@ import {
 } from '@/lib/conversations'
 
 export const runtime = 'nodejs'
+export const preferredRegion = ['syd1', 'iad1']
 
 const CONVERSATION_SYNC_BODY_LIMIT_BYTES = 30 * 1024 * 1024
 

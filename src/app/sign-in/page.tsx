@@ -154,7 +154,7 @@ export default function SignInPage() {
 
       <p className="mt-5 text-center text-[12.5px] text-text-secondary">
         No account yet?{' '}
-        <Link href="/sign-up" className="font-semibold text-text-primary hover:text-accent-blue">
+        <Link href="/sign-up" prefetch={false} className="font-semibold text-text-primary hover:text-accent-blue">
           Create one
         </Link>
       </p>

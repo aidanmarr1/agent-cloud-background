@@ -168,7 +168,7 @@ export default function SignUpPage() {
 
       <p className="mt-5 text-center text-[12.5px] text-text-secondary">
         Already have an account?{' '}
-        <Link href="/sign-in" className="font-semibold text-text-primary hover:text-accent-blue">
+        <Link href="/sign-in" prefetch={false} className="font-semibold text-text-primary hover:text-accent-blue">
           Sign in
         </Link>
       </p>
