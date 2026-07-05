@@ -61,8 +61,10 @@ async function assertSourceContracts() {
     userMessage,
     appLayout,
     authSessionProvider,
+    authUsers,
     authGate,
     inviteOnlyGate,
+    signInPage,
     homePage,
     chatPage,
     chatLoading,
@@ -149,8 +151,10 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/components/chat/UserMessage.tsx'), 'utf8'),
     readFile(join(root, 'src/app/layout.tsx'), 'utf8'),
     readFile(join(root, 'src/components/auth/AuthSessionProvider.tsx'), 'utf8'),
+    readFile(join(root, 'src/lib/auth/users.ts'), 'utf8'),
     readFile(join(root, 'src/components/auth/AuthGate.tsx'), 'utf8'),
     readFile(join(root, 'src/components/auth/InviteOnlyGate.tsx'), 'utf8'),
+    readFile(join(root, 'src/app/sign-in/page.tsx'), 'utf8'),
     readFile(join(root, 'src/app/page.tsx'), 'utf8'),
     readFile(join(root, 'src/app/chat/[id]/page.tsx'), 'utf8'),
     readFile(join(root, 'src/app/chat/[id]/loading.tsx'), 'utf8'),
@@ -336,6 +340,14 @@ async function assertSourceContracts() {
   assert.match(appLayout, /const session = await auth\(\)\.catch\(\(\) => null\)/, 'root layout must resolve the server session before hydrating the client provider')
   assert.match(appLayout, /<AuthSessionProvider session=\{session\}>/, 'root layout must pass the resolved session into SessionProvider')
   assert.match(authSessionProvider, /<SessionProvider session=\{session\}>/, 'SessionProvider must receive initial session state to avoid a permanent loading gate')
+  assert.match(authUsers, /function isMissingAuthSchemaError/, 'auth lookups must detect missing schema errors explicitly')
+  assert.match(authUsers, /async function withAuthSchemaFallback/, 'auth lookups must keep schema migration work out of the normal sign-in path')
+  assert.match(authUsers, /return withAuthSchemaFallback\(\(\) => queryUserByEmail\(normalizedEmail\)\)/, 'email sign-in lookup must query first and migrate only on missing schema')
+  assert.match(authUsers, /return withAuthSchemaFallback\(\(\) => queryUserById\(userId\)\)/, 'session user lookup must query first and migrate only on missing schema')
+  assert.doesNotMatch(authUsers, /export async function findUserByEmail[\s\S]*?await ensureAuthSchema\(\)[\s\S]*?queryUserByEmail/, 'email sign-in lookup must not run auth schema setup before every query')
+  assert.match(signInPage, /SIGN_IN_TIMEOUT_MS\s*=\s*10_000/, 'sign-in form must recover if the auth provider stalls')
+  assert.match(signInPage, /Promise\.race\(\[[\s\S]*signIn\('credentials'[\s\S]*window\.setTimeout[\s\S]*SIGN_IN_TIMEOUT_MS/, 'sign-in submit must race the provider call against a visible timeout')
+  assert.match(signInPage, /Sign-in is taking too long\. Please try again\./, 'sign-in timeout must show a retryable message instead of leaving the button stuck')
   assert.match(appFrame, /import \{ MainContent \} from '@\/components\/layout\/MainContent'/, 'main route wrapper must be a normal import so route children do not disappear during navigation')
   assert.doesNotMatch(appFrame, /const MainContent = dynamic/, 'main route wrapper must not use ssr:false dynamic import around route children')
   assert.match(uiStore, /routeHandoffPending: boolean/, 'ui store must expose a transient route handoff flag')
@@ -384,10 +396,13 @@ async function assertSourceContracts() {
   assert.doesNotMatch(mobileUnsupportedGate, /onClick|onClose|Escape|Close dialog|setVisible\(false\)/, 'mobile unsupported gate must be non-dismissible')
   assert.match(chatStoreSync, /useSession/, 'chat history sync must wait for the authenticated account')
   assert.match(chatStoreSync, /initializeChatStoreSync\(userId\)/, 'chat history sync must start with the authenticated user id')
+  assert.match(chatStoreSync, /window\.setTimeout\(startSync,\s*1_000\)/, 'chat history sync must defer initial account fetch until after first app boot')
+  assert.match(creditPillSource, /window\.setTimeout\(\(\) => \{[\s\S]*syncFromServer\(\)[\s\S]*\},\s*1_000\)/, 'credit sync must not compete with first app paint')
   assert.doesNotMatch(chatStoreIndex, /persist\(/, 'chat/task history must not use browser-local Zustand persistence as the source of truth')
   assert.doesNotMatch(chatStoreIndex, /debouncedIdbStorage|TASK_STORE_KEY/, 'chat store must not hydrate task history from IndexedDB storage')
   assert.match(chatStoreIndex, /initializeChatStoreServerSync\(userId,\s*useChatStore\)/, 'chat store must initialize account-scoped server persistence')
-  assert.match(chatServerSync, /SERVER_FETCH_TIMEOUT_MS\s*=\s*12_000/, 'account task history fetches must have a finite timeout so chat routes cannot skeleton forever')
+  assert.match(chatServerSync, /SERVER_FETCH_TIMEOUT_MS\s*=\s*4_000/, 'account task history fetches must have a short startup timeout so the tab cannot spin for many seconds')
+  assert.match(chatServerSync, /SERVER_WRITE_TIMEOUT_MS\s*=\s*5_000/, 'account task history writes must have a bounded timeout so large syncs cannot keep the tab loading indefinitely')
   assert.match(chatServerSync, /function fetchWithTimeout[\s\S]*AbortController[\s\S]*controller\.abort\(\)/, 'account task history fetches must abort stalled requests')
   assert.match(chatServerSync, /fetchWithTimeout\('\/api\/conversations'/, 'task index hydration must use the bounded fetch helper')
   assert.match(chatServerSync, /fetchWithTimeout\(`\/api\/conversations\?id=\$\{encodeURIComponent\(conversationId\)\}`/, 'single task body loading must use the bounded fetch helper')
@@ -395,7 +410,7 @@ async function assertSourceContracts() {
   assert.match(chatPersistence, /readLegacyChatPersistedState/, 'legacy local chat state should only be available for one-time DB migration')
   assert.match(chatPersistence, /clearLegacyChatPersistence/, 'legacy local chat state must be clearable after DB migration')
   assert.doesNotMatch(useHydration, /setTimeout/, 'task UI hydration must not time out into browser-local task state')
-  assert.match(chatServerSync, /fetch\('\/api\/conversations'/, 'client task sync must load and save through the account DB API')
+  assert.match(chatServerSync, /fetchWithTimeout\('\/api\/conversations'/, 'client task sync must load and save through the account DB API with bounded startup waits')
   assert.match(chatServerSync, /readLegacyChatPersistedState/, 'client task sync must import old local history only during migration')
   assert.match(chatServerSync, /getChangedConversations/, 'client task sync must upsert changed conversations instead of overwriting the whole account store')
   assert.match(chatServerSync, /getDeletedIds/, 'client task sync must send explicit deletes for account task rows')

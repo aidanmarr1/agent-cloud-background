@@ -9,6 +9,8 @@ import { AlertCircle, ArrowRight } from '@/components/icons'
 
 const RETURN_TO_STORAGE_KEY = 'agent-auth-return-to'
 const RETURN_TO_COOKIE = 'agent-auth-return-to'
+const SIGN_IN_TIMEOUT_MS = 10_000
+const SIGN_IN_TIMEOUT_ERROR = 'SIGN_IN_TIMEOUT'
 
 function safeReturnPath(value: string | null): string | null {
   const path = value?.trim()
@@ -88,22 +90,35 @@ export default function SignInPage() {
     setLoading(true)
 
     const returnPath = getSafeReturnPath()
-    const result = await signIn('credentials', {
-      email,
-      password,
-      redirect: false,
-    })
+    let timeout: number | null = null
 
-    setLoading(false)
+    try {
+      const result = await Promise.race([
+        signIn('credentials', {
+          email,
+          password,
+          redirect: false,
+        }),
+        new Promise<never>((_, reject) => {
+          timeout = window.setTimeout(() => reject(new Error(SIGN_IN_TIMEOUT_ERROR)), SIGN_IN_TIMEOUT_MS)
+        }),
+      ])
 
-    if (result?.error) {
-      setError('Email or password is incorrect.')
-      return
+      if (result?.error) {
+        setError('Email or password is incorrect.')
+        return
+      }
+
+      clearStoredReturnPath()
+      router.replace(returnPath)
+      router.refresh()
+    } catch (error) {
+      const timedOut = error instanceof Error && error.message === SIGN_IN_TIMEOUT_ERROR
+      setError(timedOut ? 'Sign-in is taking too long. Please try again.' : 'Could not sign in. Please try again.')
+    } finally {
+      if (timeout) window.clearTimeout(timeout)
+      setLoading(false)
     }
-
-    clearStoredReturnPath()
-    router.replace(returnPath)
-    router.refresh()
   }
 
   return (

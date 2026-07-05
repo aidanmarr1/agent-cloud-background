@@ -47,7 +47,10 @@ export function CreditPill() {
 
   useEffect(() => {
     refreshAllowances()
-    void syncFromServer()
+    const timeout = window.setTimeout(() => {
+      void syncFromServer()
+    }, 1_000)
+    return () => window.clearTimeout(timeout)
   }, [refreshAllowances, syncFromServer])
 
   useEffect(() => {

@@ -10,7 +10,9 @@ export function ChatStoreSync() {
 
   useEffect(() => {
     if (status !== 'authenticated' || !userId) return
-    initializeChatStoreSync(userId)
+    const startSync = () => initializeChatStoreSync(userId)
+    const timeout = window.setTimeout(startSync, 1_000)
+    return () => window.clearTimeout(timeout)
   }, [status, userId])
 
   return null

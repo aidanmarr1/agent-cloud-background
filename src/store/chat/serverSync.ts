@@ -34,7 +34,8 @@ interface ServerConversationBodyState {
 const SAVE_DEBOUNCE_MS = 250
 const REFRESH_INTERVAL_MS = 5_000
 const REFRESH_THROTTLE_MS = 1_500
-const SERVER_FETCH_TIMEOUT_MS = 12_000
+const SERVER_FETCH_TIMEOUT_MS = 4_000
+const SERVER_WRITE_TIMEOUT_MS = 5_000
 
 let storeApi: ChatStoreApi | null = null
 let currentUserId: string | null = null
@@ -95,9 +96,13 @@ function serverRecordToConversation(record: ServerConversationRecord, summary: b
   return normalizeConversationForPersistence(conversation)
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = SERVER_FETCH_TIMEOUT_MS,
+): Promise<Response> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), SERVER_FETCH_TIMEOUT_MS)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
   try {
     return await fetch(input, {
       ...init,
@@ -227,11 +232,11 @@ async function postSyncNow(): Promise<void> {
 
   saveInFlight = true
   try {
-    const response = await fetch('/api/conversations', {
+    const response = await fetchWithTimeout('/api/conversations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ conversations, deletedIds, folders }),
-    })
+    }, SERVER_WRITE_TIMEOUT_MS)
     if (!response.ok) {
       const body = await response.json().catch(() => null) as { error?: unknown } | null
       throw new Error(typeof body?.error === 'string' ? body.error : 'Could not save task history.')
@@ -457,9 +462,9 @@ export async function flushChatServerSync(): Promise<void> {
 }
 
 export async function clearServerConversations(): Promise<void> {
-  const response = await fetch('/api/conversations', {
+  const response = await fetchWithTimeout('/api/conversations', {
     method: 'DELETE',
-  })
+  }, SERVER_WRITE_TIMEOUT_MS)
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: unknown } | null
     throw new Error(typeof body?.error === 'string' ? body.error : 'Could not clear task history.')

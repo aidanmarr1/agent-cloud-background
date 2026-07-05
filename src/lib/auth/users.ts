@@ -36,6 +36,21 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase()
 }
 
+function isMissingAuthSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table:\s*users|no such column:\s*(profile_image_attachment_id|access_status)|table users has no column/i.test(message)
+}
+
+async function withAuthSchemaFallback<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query()
+  } catch (error) {
+    if (!isMissingAuthSchemaError(error)) throw error
+    await ensureAuthSchema()
+    return query()
+  }
+}
+
 export async function ensureAuthSchema(): Promise<void> {
   if (!authSchemaPromise) {
     authSchemaPromise = (async () => {
@@ -89,17 +104,7 @@ function toPublicUser(row: UserRow): PublicAuthUser | null {
   }
 }
 
-export async function findUserByEmail(email: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
-  const normalizedEmail = normalizeEmail(email)
-  if (!normalizedEmail) return null
-
-  await ensureAuthSchema()
-
-  const result = await tursoExecute(
-    'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where email = ? limit 1',
-    [normalizedEmail],
-  )
-  const row = result.rows[0] as UserRow | undefined
+function userWithPasswordFromRow(row: UserRow | undefined): (PublicAuthUser & { passwordHash: string }) | null {
   if (!row || typeof row.password_hash !== 'string') {
     return null
   }
@@ -113,28 +118,34 @@ export async function findUserByEmail(email: string): Promise<(PublicAuthUser & 
   }
 }
 
-export async function findUserById(id: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
-  const userId = id.trim()
-  if (!userId) return null
+async function queryUserByEmail(normalizedEmail: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
+  const result = await tursoExecute(
+    'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where email = ? limit 1',
+    [normalizedEmail],
+  )
+  return userWithPasswordFromRow(result.rows[0] as UserRow | undefined)
+}
 
-  await ensureAuthSchema()
-
+async function queryUserById(userId: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
   const result = await tursoExecute(
     'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where id = ? limit 1',
     [userId],
   )
-  const row = result.rows[0] as UserRow | undefined
-  if (!row || typeof row.password_hash !== 'string') {
-    return null
-  }
+  return userWithPasswordFromRow(result.rows[0] as UserRow | undefined)
+}
 
-  const publicUser = toPublicUser(row)
-  if (!publicUser) return null
+export async function findUserByEmail(email: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
+  const normalizedEmail = normalizeEmail(email)
+  if (!normalizedEmail) return null
 
-  return {
-    ...publicUser,
-    passwordHash: row.password_hash,
-  }
+  return withAuthSchemaFallback(() => queryUserByEmail(normalizedEmail))
+}
+
+export async function findUserById(id: string): Promise<(PublicAuthUser & { passwordHash: string }) | null> {
+  const userId = id.trim()
+  if (!userId) return null
+
+  return withAuthSchemaFallback(() => queryUserById(userId))
 }
 
 export async function createUser(input: {
