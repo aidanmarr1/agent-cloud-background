@@ -185,12 +185,15 @@ assert.match(taskFiles, /writeSandboxFileBytes/, 'sandbox restore must write dur
 
 const guardCallIndex = chatRoute.indexOf('const workerAvailabilityPromise = timedRoutePromise')
 const leaseIndex = chatRoute.indexOf('const creditRunId = randomUUID()')
+const accessStreamErrorIndex = chatRoute.indexOf('throw await taskAccessStreamError(accessResult.response)')
 const streamErrorIndex = chatRoute.indexOf('throw await taskWorkerUnavailableStreamError(unavailableWorker)')
 const enqueueIndex = chatRoute.indexOf('return enqueueTaskJob({')
 assert.ok(guardCallIndex > 0, 'chat route must call the worker availability guard')
 assert.ok(guardCallIndex > leaseIndex, 'worker guard must start immediately after run setup')
+assert.ok(accessStreamErrorIndex > guardCallIndex, 'task access failures must surface before enqueueing a background task')
 assert.ok(streamErrorIndex > guardCallIndex, 'worker guard failures must surface before enqueueing a background task')
 assert.ok(enqueueIndex > streamErrorIndex, 'background task enqueue must stay behind the worker availability guard')
+assert.ok(enqueueIndex > accessStreamErrorIndex, 'background task enqueue must stay behind the task access guard')
 
 assert.match(taskWorkerHeartbeat, /create table if not exists agent_task_workers/, 'worker heartbeats must be durable in Turso')
 assert.match(taskWorkerHeartbeat, /last_seen_at_ms integer not null/, 'worker heartbeat rows must store a last-seen timestamp')

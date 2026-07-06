@@ -297,7 +297,7 @@ async function taskWorkerUnavailableResponse(): Promise<Response | null> {
   return Response.json(body, { status: 503 })
 }
 
-async function taskWorkerUnavailableStreamError(response: Response): Promise<Error> {
+async function responseToStreamError(response: Response, fallback: string): Promise<Error> {
   let body: { error?: unknown; code?: unknown } | null = null
   try {
     body = await response.clone().json() as { error?: unknown; code?: unknown }
@@ -306,12 +306,20 @@ async function taskWorkerUnavailableStreamError(response: Response): Promise<Err
   }
   const message = typeof body?.error === 'string' && body.error.trim()
     ? body.error.trim()
-    : response.statusText || 'Background task worker is unavailable.'
+    : response.statusText || fallback
   const error = new Error(message)
   if (typeof body?.code === 'string' && body.code.trim()) {
     ;(error as Error & { code?: string }).code = body.code.trim()
   }
   return error
+}
+
+async function taskWorkerUnavailableStreamError(response: Response): Promise<Error> {
+  return responseToStreamError(response, 'Background task worker is unavailable.')
+}
+
+async function taskAccessStreamError(response: Response): Promise<Error> {
+  return responseToStreamError(response, 'Task access denied.')
 }
 
 function hasUnhydratedAttachments(messages: AgentLoopOptions['messages']): boolean {
@@ -1199,11 +1207,19 @@ export async function POST(request: Request) {
   let access: Awaited<ReturnType<typeof assertTaskAccess>> | null
 
   try {
-    ;[, messages, access] = await Promise.all([
-      creditsPromise,
-      messagesPromise,
-      accessPromise,
-    ])
+    if (useExternalWorker) {
+      ;[, messages] = await Promise.all([
+        creditsPromise,
+        messagesPromise,
+      ])
+      access = null
+    } else {
+      ;[, messages, access] = await Promise.all([
+        creditsPromise,
+        messagesPromise,
+        accessPromise,
+      ])
+    }
   } catch (error) {
     if (isOutOfCreditsError(error)) {
       return Response.json({
@@ -1217,7 +1233,7 @@ export async function POST(request: Request) {
   }
 
   const startIsolatedTaskSandbox = startFreshSandbox || (!directChat && !isContextualTaskUpdate(messages))
-  if (access && !access.ok) {
+  if (!useExternalWorker && access && !access.ok) {
     routeStartupAcknowledgementAbort.abort()
     routeStartupPlanAbort.abort()
     return access.response
@@ -1275,7 +1291,15 @@ export async function POST(request: Request) {
       seq: index + 1,
       runId: creditRunId,
     } as SSEEvent))
-    taskStartPromise = workerAvailabilityPromise.then(async (unavailableWorker) => {
+    taskStartPromise = Promise.all([
+      accessPromise,
+      workerAvailabilityPromise,
+    ]).then(async ([accessResult, unavailableWorker]) => {
+      if (accessResult && !accessResult.ok) {
+        routeStartupAcknowledgementAbort.abort()
+        routeStartupPlanAbort.abort()
+        throw await taskAccessStreamError(accessResult.response)
+      }
       if (unavailableWorker) {
         routeStartupAcknowledgementAbort.abort()
         routeStartupPlanAbort.abort()
