@@ -72,7 +72,8 @@ assert.match(useAgentStream, /if \(existingController && isAutoSend\) \{[\s\S]*?
 assert.doesNotMatch(useAgentStream, /Too many dispatch errors, aborting stream|controller\.abort\(\)[\s\S]*?Stream dispatcher failed repeatedly/, 'client-side stream dispatch errors must not abort the backend task')
 assert.match(useAgentStream, /Repeated dispatch errors; keeping stream alive so the backend task can finish/, 'dispatch failures should be visible but non-fatal')
 assert.doesNotMatch(chatRoute, /Promise\.all\(\[\s*accessPromise,\s*workerAvailabilityPromise\s*\]\)/, 'external-worker chat route must not hold durable job enqueue behind worker readiness checks')
-assert.match(chatRoute, /taskStartPromise = accessPromise\.then[\s\S]*enqueueTaskJob/, 'external-worker chat route must enqueue as soon as access passes so workers can claim immediately')
+assert.match(chatRoute, /taskStartPromise = enqueueTaskJob[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must enqueue immediately so workers can claim without waiting on slow access or readiness checks')
+assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'task access must still cancel a prefaced task when ownership validation fails')
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')
 assert.match(search, /\$\{SERPER_BASE_URL\}\/\$\{path\}/, 'web search must call the configured Serper endpoint')

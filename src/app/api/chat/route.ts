@@ -297,27 +297,6 @@ async function taskWorkerUnavailableResponse(): Promise<Response | null> {
   return Response.json(body, { status: 503 })
 }
 
-async function responseToStreamError(response: Response, fallback: string): Promise<Error> {
-  let body: { error?: unknown; code?: unknown } | null = null
-  try {
-    body = await response.clone().json() as { error?: unknown; code?: unknown }
-  } catch {
-    body = null
-  }
-  const message = typeof body?.error === 'string' && body.error.trim()
-    ? body.error.trim()
-    : response.statusText || fallback
-  const error = new Error(message)
-  if (typeof body?.code === 'string' && body.code.trim()) {
-    ;(error as Error & { code?: string }).code = body.code.trim()
-  }
-  return error
-}
-
-async function taskAccessStreamError(response: Response): Promise<Error> {
-  return responseToStreamError(response, 'Task access denied.')
-}
-
 function hasUnhydratedAttachments(messages: AgentLoopOptions['messages']): boolean {
   return messages.some((message) => (
     Array.isArray(message.attachments) &&
@@ -1302,20 +1281,37 @@ export async function POST(request: Request) {
       })
     })
 
-    taskStartPromise = accessPromise.then(async (accessResult) => {
+    let taskAccessDenied = false
+    void accessPromise.then(async (accessResult) => {
       if (accessResult && !accessResult.ok) {
+        taskAccessDenied = true
         routeStartupAcknowledgementAbort.abort()
         routeStartupPlanAbort.abort()
-        throw await taskAccessStreamError(accessResult.response)
+        await taskStartPromise.catch(() => undefined)
+        await cancelTaskJob(userId, creditRunId).catch((error) => {
+          console.warn('[AgentDiagnostics] Failed to cancel task after access denial', {
+            conversationId,
+            runId: creditRunId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
       }
-      return enqueueTaskJob({
-        runId: creditRunId,
-        userId,
+    }).catch((error) => {
+      console.warn('[AgentDiagnostics] Background task access check failed after stream open', {
         conversationId,
-        payload: taskPayload,
-        initialEvents,
+        runId: creditRunId,
+        error: error instanceof Error ? error.message : String(error),
       })
+    })
+
+    taskStartPromise = enqueueTaskJob({
+      runId: creditRunId,
+      userId,
+      conversationId,
+      payload: taskPayload,
+      initialEvents,
     }).then((result) => {
+      if (taskAccessDenied) throw new Error('Task access denied.')
       persistConversationAfterResponse({
         userId,
         conversationId,
