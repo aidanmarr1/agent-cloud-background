@@ -36,6 +36,8 @@ const FILE_PREVIEW_MIN_DELTA_CHARS = 160
 const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
 const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
 const INLINE_FINAL_TEXT_STREAM_CAP = 6000
+const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 14_000
+const FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 3_000
 const DISPLAY_FUTURE_ACTION_SENTENCE_RE =
   /(?:^|(?<=[.!?]\s))\s*(?:let\s+me|i(?:'|’)?ll|i\s+will|i(?:'|’)?m\s+going\s+to)\b[^.!?\n]*(?:research|search|look|gather|read|open|try|check|verify|move|continue|get|fetch|use|do|ground)\b[^.!?\n]*(?:[.!?]|$)/gi
 const DISPLAY_FUTURE_ACTION_TAIL_RE =
@@ -420,11 +422,14 @@ export class StreamProcessor {
       // because the model may pause between large argument chunks
       const isStreamingToolArgs = [...toolCalls.values()].some(tc => tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file')
       const effectiveInactivityMs = isStreamingToolArgs
-        ? this.tierTimeouts.inactivityTimeoutMs * 2  // Double tolerance during file writes
+        ? Math.max(this.tierTimeouts.inactivityTimeoutMs * 2, FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
         : this.tierTimeouts.inactivityTimeoutMs
+      const effectiveIterationMs = isStreamingToolArgs
+        ? Math.max(this.tierTimeouts.iterationTimeoutMs, FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)
+        : this.tierTimeouts.iterationTimeoutMs
       const inactivityExpired = now - lastChunkTime > effectiveInactivityMs
       const visibleInactivityExpired = now - lastVisibleActivityTime > effectiveInactivityMs
-      const iterationExpired = now - iterationStartTime > this.tierTimeouts.iterationTimeoutMs
+      const iterationExpired = now - iterationStartTime > effectiveIterationMs
       // Content-only timeout: only fire if the model is producing ONLY text (no tool calls
       // at all) and has stalled. Never fire if tool calls are being streamed.
       const contentOnlyStallMs = this.tierTimeouts.contentOnlyTimeoutMs === null

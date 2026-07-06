@@ -8,9 +8,7 @@
 import {
   ASSISTANT_SUPPORTS_IMAGE_INPUT,
   ASSISTANT_PROVIDER,
-  createCompletion,
   createStreamingCompletion,
-  type ChatCompletionResponse,
   type ChatCompletionTool,
   type ChatMessageParam,
   type StreamingChatCompletionChunk,
@@ -171,82 +169,6 @@ function assistantHistoryMessageForStreamResult(
   return message as ChatMessageParam
 }
 
-function completionResponseToStreamingIterable(
-  response: ChatCompletionResponse,
-): AsyncIterable<StreamingChatCompletionChunk> {
-  async function* chunks(): AsyncIterable<StreamingChatCompletionChunk> {
-    const choice = response.choices?.[0]
-    const message = choice?.message
-    const index = choice?.index ?? 0
-    const id = response.id
-
-    if (message?.reasoning_content) {
-      yield {
-        id,
-        choices: [{
-          index,
-          delta: { reasoning_content: message.reasoning_content },
-          finish_reason: null,
-        }],
-        usage: null,
-      }
-    }
-
-    if (message?.content) {
-      yield {
-        id,
-        choices: [{
-          index,
-          delta: { content: message.content },
-          finish_reason: null,
-        }],
-        usage: null,
-      }
-    }
-
-    const rawToolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
-    for (const [toolIndex, rawToolCall] of rawToolCalls.entries()) {
-      const tc = rawToolCall as {
-        id?: string
-        type?: string
-        function?: { name?: string; arguments?: string }
-      }
-      if (!tc.function?.name) continue
-      yield {
-        id,
-        choices: [{
-          index,
-          delta: {
-            tool_calls: [{
-              index: toolIndex,
-              id: tc.id || `completion_tool_${toolIndex}`,
-              type: 'function',
-              function: {
-                name: tc.function.name,
-                arguments: tc.function.arguments || '{}',
-              },
-            }],
-          },
-          finish_reason: null,
-        }],
-        usage: null,
-      }
-    }
-
-    yield {
-      id,
-      choices: [{
-        index,
-        delta: {},
-        finish_reason: choice?.finish_reason ?? 'stop',
-      }],
-      usage: response.usage ?? null,
-    }
-  }
-
-  return chunks()
-}
-
 function approximateStreamUsageForCompletedTurn(
   model: string,
   requestMessages: ChatMessageParam[],
@@ -279,10 +201,10 @@ function approximateStreamUsageForCompletedTurn(
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
 const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000
-const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_400
-const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 250
-const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 220
-const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 140
+const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_800
+const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 600
+const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 600
+const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 160
 const FAST_SOURCE_ACTION_MAX_TOKENS = 320
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
@@ -1073,9 +995,10 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       request ? `User request: ${request}.` : '',
       `Current final task: ${step}.`,
       `The existing file already contains ${pendingPartial.lines} lines / ${pendingPartial.chars} characters from a recovered clipped write.`,
+      'Begin the tool call immediately; do not internally outline, narrate, or wait to draft a full report before starting the append_file arguments.',
       'Do not call create_file, edit_file, read_file, list_files, export_pdf, or any research/browser tool.',
       'Do not write visible prose, a status update, a plan, a source summary, or a permission question.',
-      'Append only the next missing section or chunk. Do not repeat already-written content, and do not emit <next_step/> until after a successful append clears this partial-file state.',
+      'Append only the next missing complete section or paragraph-bounded chunk. End cleanly at a sentence or section boundary; never stop mid-sentence. Do not repeat already-written content, and do not emit <next_step/> until after a successful append clears this partial-file state.',
       'Use the full output budget for the append_file content so long reports and code files continue instead of restarting.',
     ].filter(Boolean).join(' ')
   }
@@ -1083,11 +1006,12 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     'FINAL SAVED DELIVERABLE NOW: make exactly one native file tool call immediately.',
     request ? `User request: ${request}.` : '',
     `Current final task: ${step}.`,
+    'Begin the tool call immediately; do not internally outline, narrate, or wait to draft the whole deliverable before starting the file-tool arguments.',
     'Do not write a status update, plan, source summary, or permission question.',
     'Use create_file for the first saved output; use append_file only after a file exists; use edit_file only for a targeted fix.',
     'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
     'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
-    'For the first create_file call, write only a fast opening chunk: title, short intro, and first useful section. The worker will continue with append_file chunks until the saved output is complete.',
+    'For the first create_file call, write only a fast opening chunk: title, short intro, and first useful complete section. End cleanly at a sentence or section boundary. The worker will continue with append_file chunks until the saved output is complete.',
   ].filter(Boolean).join(' ')
 }
 
@@ -2325,20 +2249,22 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
         ? [
             'PARTIAL FILE CONTINUATION TOOL CALL ONLY.',
             `Make exactly one native append_file call to "${pendingPartial.path}" now; do not write visible prose before it.`,
+            'Start the append_file call immediately; do not spend a hidden pass outlining the next section.',
             'Do not call create_file, edit_file, read_file, list_files, export_pdf, research tools, or browser tools.',
-            'Append the next missing section/chunk only. Do not repeat already-written content.',
+            'Append the next missing complete section or paragraph-bounded chunk only. End cleanly at a sentence or section boundary; never stop mid-sentence. Do not repeat already-written content.',
             'Do not emit <next_step/> until after a successful append clears the partial-file state.',
             'Use the full available output budget for this append so clipped long reports and code continue cleanly.',
           ].join(' ')
         : [
             'FINAL SAVED DELIVERABLE TOOL CALL ONLY.',
             'Make exactly one native create_file or append_file call now; do not write visible prose before it.',
+            'Start the file tool call immediately; do not spend a hidden pass outlining the deliverable first.',
             'For the first saved output, use create_file with action_label, plan_step_index, and path before content.',
             'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
             state.stepToolCallCount > 0 && !hasSavedFinalDeliverableCandidate(state)
               ? 'A previous final-write turn did not save a deliverable; make a shorter complete create_file call now instead of continuing to reason.'
               : '',
-            'Write the complete deliverable when it fits. If the provider clips the write, continue the same file with append_file on the next turn.',
+            'Write the complete deliverable when it fits. If it does not fit, write a clean opening chunk that ends at a sentence or section boundary, then continue the same file with append_file on the next turn.',
           ].filter(Boolean).join(' '),
     },
     {
@@ -2386,7 +2312,7 @@ function compactFinalTextDeliverableMessages(state: AgentStateData, allMessages:
         'Start with the title and content; do not write status, plan, action labels, source counts, or attachment/save narration.',
         'The app will save this exact text into the requested Markdown file after your response.',
         'Use the supplied evidence. If evidence is limited, include a short caveat inside the deliverable instead of searching again.',
-      ].join(' '),
+      ].filter(Boolean).join(' '),
     },
     {
       role: 'user',
@@ -2538,12 +2464,11 @@ const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
 const FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS = 420
 const FINAL_INLINE_ANSWER_MAX_TOKENS = 1_200
 const FINAL_INLINE_REPORT_MAX_TOKENS = 3_000
-const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 3_600
-const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 5_200
-const FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS = 8_500
-const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 5_000
-const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 650
-const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 650
+const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 2_200
+const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 3_200
+const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 9_000
+const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 900
+const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 900
 const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 220
 const FINAL_SAVED_DELIVERABLE_TEXT_REQUEST_TIMEOUT_MS = 6_500
 const FINAL_SAVED_DELIVERABLE_TEXT_ITERATION_TIMEOUT_MS = 24_000
@@ -2551,12 +2476,12 @@ const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 6_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
-const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 360
-const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 900
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_800
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 4_000
-const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 900
-const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 900
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 520
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_200
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_800
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
 const FORCED_NARRATION_MAX_TOKENS = 48
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
@@ -4484,8 +4409,6 @@ export class AgentLoop {
     let relaxRequiredToolChoice = false
     let lastShouldRequireToolCall = false
     for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
-      let finalSavedCompactCompletionParams: Parameters<typeof createCompletion>[0] | null = null
-      let finalSavedStreamTimeoutMs: number | null = null
       try {
         const budgetFraction = state.dynamicIterationLimit
           ? state.iterations / state.dynamicIterationLimit
@@ -4795,28 +4718,6 @@ export class AgentLoop {
           : fastActionTurn
             ? FAST_ACTION_REQUEST_TIMEOUT_MS
           : STREAM_REQUEST_TIMEOUT_MS
-        if (isFinalSavedDeliverableTurn) {
-          finalSavedStreamTimeoutMs = requestTimeoutMs
-          finalSavedCompactCompletionParams = {
-            model,
-            messages: requestMessages,
-            ...(modelTools.length > 0
-              ? { tools: modelTools as unknown as ChatCompletionTool[] }
-              : {}),
-            ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
-            temperature: requestTemperature,
-            parallel_tool_calls: false,
-            max_tokens: maxTokens,
-            ...requestReasoning,
-            includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
-            usage: { include: true },
-            requestTimeoutMs: FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS,
-            retryMaxAttempts: 0,
-            retryBaseDelayMs: STREAM_RETRY_BASE_MS,
-            retryMaxDelayMs: STREAM_RETRY_MAX_DELAY_MS,
-            abortSignal: this.options.signal,
-          }
-        }
         console.error('[AgentDiagnostics] Opening streaming model call', {
           iteration: state.iterations,
           phase: state.currentPhase,
@@ -4860,7 +4761,7 @@ export class AgentLoop {
         })
 
         if (attempt > 0) {
-          state.iterationDelayMs = Math.min(1200, state.iterationDelayMs + 500)
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
         }
 
         state.lastModelErrorForUser = null
@@ -4869,26 +4770,6 @@ export class AgentLoop {
         const status = (streamErr as { status?: number })?.status
         const errorText = `${(streamErr as { body?: string })?.body || ''}\n${streamErr instanceof Error ? streamErr.message : String(streamErr)}`
         if (isAssistantRequestTimeout(streamErr)) {
-          if (finalSavedCompactCompletionParams) {
-            try {
-              console.warn('[AgentDiagnostics] Final saved deliverable stream start timed out; using compact final-write completion', {
-                attempt: attempt + 1,
-                iteration: state.iterations,
-                phase: state.currentPhase,
-                step: state.currentStepIdx,
-                timeoutMs: finalSavedStreamTimeoutMs,
-              })
-              const completion = await createCompletion(finalSavedCompactCompletionParams)
-              return completionResponseToStreamingIterable(completion)
-            } catch (completionErr) {
-              console.warn('[AgentDiagnostics] Compact final-write completion also failed to start', {
-                iteration: state.iterations,
-                phase: state.currentPhase,
-                step: state.currentStepIdx,
-                error: sanitizeAgentServiceError(completionErr),
-              })
-            }
-          }
           this.options.diagnostics?.({
             type: 'stream_error',
             data: {
@@ -4951,7 +4832,7 @@ export class AgentLoop {
                 content: 'PROVIDER RECOVERY: The previous model attempt was rejected before streaming because a function/tool call used invalid JSON for function.arguments. Your next response must make exactly one native tool call with arguments as a strict JSON object. Use double quotes around every key and string value, no markdown, no comments, no trailing commas, no bare strings, and no prose outside the tool call. Example arguments: {"query":"specific search phrase"} or {"url":"https://example.com"}. If the current page is blocked by CAPTCHA, Cloudflare, access denial, or human verification, do not interact with it and do not retry the same URL; choose a different source route.',
               } as ChatMessageParam,
             ]
-            state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
+            state.iterationDelayMs = MIN_ITERATION_DELAY_MS
             continue
           }
           state.lastModelErrorForUser = null
@@ -4998,7 +4879,7 @@ export class AgentLoop {
                 content: providerToolModeRecoveryMessage(state, this.options.messages),
               } as ChatMessageParam,
             ]
-            state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
             continue
           }
           state.lastModelErrorForUser = null
@@ -5112,7 +4993,7 @@ export class AgentLoop {
             error: sanitizeAgentServiceError(streamErr),
           },
         })
-        state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
+        state.iterationDelayMs = MIN_ITERATION_DELAY_MS
         return null
       }
     }
@@ -5224,7 +5105,7 @@ export class AgentLoop {
     if (state.iterations < state.dynamicIterationLimit) {
       console.error('[Agent] Stream interrupted, retrying iteration...')
       state.lastIterationEnd = Date.now()
-      state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
+      state.iterationDelayMs = MIN_ITERATION_DELAY_MS
       return 'STREAMING'
     }
     this.emitter.error('The task stopped before it finished. Please try again.')

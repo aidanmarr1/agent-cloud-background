@@ -414,6 +414,11 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
 
   const content = lastUserMsg.content
   const wordCount = content.split(/\s+/).length
+  const toolOrArtifactWork =
+    /\b(?:research|investigate|compare|analy[sz]e|report|findings?|current|latest|recent|today|landscape|ecosystem|state\s+of|current\s+state|real[-\s]?world\s+applications?|use\s+cases?|sources?|citations?|cite|build|create|make|design|develop|implement|debug|fix|refactor|deploy|test|verify|browse|open|navigate|click|sign\s*in|fill|upload|download|website|web\s*app|dashboard|component|file|pdf|markdown|deliverable)\b/i.test(content)
+  const quickOnly =
+    /\b(?:very quickly|real quick|asap|super quick|quickly|quick|brief|briefly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/i.test(content) &&
+    !/\b(?:deep|comprehensive|thorough|detailed|citations?|sources?|cite|analysis|report|current|latest|build|create|implement|fix|deploy|file|pdf|markdown|deliverable)\b/i.test(content)
 
   if (/\b(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|deep[-\s]?dive|full report|serious analysis|strategic|technical|historical|cultural|comparative)\b/i.test(content) || wordCount > 120) {
     return 3
@@ -421,8 +426,7 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
 
   // Keep explicitly lightweight requests lightweight unless the user also asks
   // for a formal cited report or deep analysis.
-  if (/\b(very quickly|real quick|asap|super quick|quickly|quick|brief|short)\b/i.test(content) &&
-    !/\b(?:deep|comprehensive|thorough|detailed|citations?|sources?|cite|analysis)\b/i.test(content)) {
+  if (quickOnly) {
     return 1
   }
 
@@ -431,6 +435,10 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
     return 1
   }
 
-  // Default to moderate — let the LLM refine
+  if (toolOrArtifactWork || wordCount > 28) {
+    return 3
+  }
+
+  // Default to moderate for ordinary direct answers; tool work rounds up above.
   return 2
 }

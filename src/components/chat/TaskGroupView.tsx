@@ -122,7 +122,7 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
   const doneCount = visibleSubtasks.filter((s) => s.status === 'done').length
   const totalCount = visibleSubtasks.length
   const hasRunningVisibleSubtask = visibleSubtasks.some((s) => s.status === 'running')
-  const inlineThinkingEligible = isAppStreaming && isRunning && !hasRunningVisibleSubtask && streamingStatus !== 'startup'
+  const inlineThinkingEligible = isAppStreaming && isRunning && !hasRunningVisibleSubtask && streamingStatus === 'thinking'
   const showInlineThinking = inlineThinkingEligible && inlineThinkingReady
 
   useEffect(() => {
