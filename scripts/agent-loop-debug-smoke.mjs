@@ -34,6 +34,12 @@ function awaitableReadFile(path) {
 
 loadLocalEnv()
 
+const smokePrompt = process.env.AGENT_DEBUG_SMOKE_PROMPT ||
+  'research about ai broadly and cite multiple live sources'
+const smokeTimeoutMs = Number(process.env.AGENT_DEBUG_SMOKE_TIMEOUT_MS || 90_000)
+const smokeConversationId = process.env.AGENT_DEBUG_SMOKE_CONVERSATION_ID ||
+  'debug-agent-loop-smoke'
+
 const workDir = await mkdtemp(join(root, 'scripts/.agent-loop-debug-'))
 const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
@@ -41,7 +47,7 @@ const bundlePath = join(workDir, 'runner.mjs')
 try {
   await writeFile(runnerPath, `
 import { AgentLoop } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
-import { DEFAULT_OPENROUTER_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
+import { DEFAULT_DEEPSEEK_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
 
 type EventRecord = { type: string; [key: string]: unknown }
 
@@ -65,6 +71,7 @@ function makeEmitter() {
     terminalOutput(id: string, stream: 'stdout' | 'stderr', data: string) { events.push({ type: 'terminal_output', id, stream, data }) },
     fileContentStart(id: string, path: string, toolName?: string) { events.push({ type: 'file_content_start', id, path, toolName }) },
     fileContentDelta(id: string, content: string) { events.push({ type: 'file_content_delta', id, content }) },
+    browserFrame(frame: unknown) { events.push({ type: 'browser_frame', frame }) },
     plan(items: string[]) {
       events.push({ type: 'plan', items })
       console.log('[smoke] plan', items.join(' | '))
@@ -94,14 +101,14 @@ function makeEmitter() {
 async function runSmoke() {
   const emitter = makeEmitter()
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 90_000)
+  const timeout = setTimeout(() => controller.abort(), ${JSON.stringify(smokeTimeoutMs)})
   try {
     const loop = new AgentLoop(emitter as any, {
       messages: [
-        { role: 'user', content: 'research about ai broadly and cite multiple live sources' },
+        { role: 'user', content: ${JSON.stringify(smokePrompt)} },
       ],
-      model: process.env.OPENROUTER_MODEL || DEFAULT_OPENROUTER_MODEL,
-      conversationId: 'debug-agent-loop-smoke',
+      model: process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL,
+      conversationId: ${JSON.stringify(smokeConversationId)},
       signal: controller.signal,
     })
     await loop.run()
@@ -110,9 +117,16 @@ async function runSmoke() {
   }
 
   const toolStarts = emitter.events.filter(event => event.type === 'tool_start')
+  const textDeltas = emitter.events
+    .filter(event => event.type === 'text_delta' && typeof event.content === 'string' && event.content.trim())
+    .map(event => String(event.content).trim())
+  const stepAdvances = emitter.events.filter(event => event.type === 'step_advance')
   const errors = emitter.events.filter(event => event.type === 'error')
   console.log('[smoke] summary', JSON.stringify({
     toolStarts: toolStarts.map(event => event.name),
+    textDeltaCount: textDeltas.length,
+    textPreview: textDeltas.slice(0, 6),
+    stepAdvanceCount: stepAdvances.length,
     errors: errors.map(event => event.message),
     done: emitter.events.some(event => event.type === 'done'),
     eventCount: emitter.events.length,

@@ -1,3 +1,23 @@
+import { explicitlyRequestsInlineAnswer, taskDefaultsToMarkdownDeliverable } from '@/lib/agent/taskConstraints'
+
+function savedArtifactRequestedByFinalStep(text: string): boolean {
+  const cleaned = text
+    .replace(/\b(?:no|without)\s+(?:a\s+|an\s+)?(?:file|document|pdf|markdown|docx?|slides?|presentation|deck)\b/gi, ' ')
+    .replace(/\b(?:don'?t|do\s+not|never)\s+(?:create|make|save|export|generate|write|return|produce)\s+(?:a\s+|an\s+)?(?:file|document|pdf|markdown|docx?|slides?|presentation|deck)\b/gi, ' ')
+  const declinesSavedArtifact = explicitlyRequestsInlineAnswer(text)
+  const positiveArtifact = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
+    /\b(?:save|create|write|export|make|generate|deliver|return|produce)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|deliverable)\b/i.test(cleaned) ||
+    taskDefaultsToMarkdownDeliverable(text)
+  return positiveArtifact && !declinesSavedArtifact
+}
+
+function finalStepWantsInlineAnswer(step: string, scope?: string): boolean {
+  const text = `${step || ''} ${scope || ''}`
+  if (savedArtifactRequestedByFinalStep(text)) return false
+  return explicitlyRequestsInlineAnswer(text) ||
+    /\b(?:answer|respond|reply|summary|summarize|summarise|explain)\b/i.test(text)
+}
+
 export function buildStepMessage(planItems: string[], currentIdx: number, extra?: string, stepFindings?: Map<number, string>, complexity: number = 2, strategy: string = 'research', scope?: string): string {
   const progress = planItems
     .map((item, i) => {
@@ -27,9 +47,12 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
   }
 
   const isLastStep = currentIdx === planItems.length - 1
+  const inlineFinalAnswer = isLastStep && finalStepWantsInlineAnswer(planItems[currentIdx] || '', scope)
   const phaseBoundary = currentIdx > 0
     ? isLastStep
-      ? `\nFINAL PHASE SWITCH: Previous research/build/browser steps are closed. Start Step ${currentIdx + 1}'s deliverable now; do not continue Step ${currentIdx}'s research/browsing unless this final step explicitly needs a missing source.`
+      ? inlineFinalAnswer
+        ? `\nFINAL PHASE SWITCH: Previous research/build/browser steps are closed. Start Step ${currentIdx + 1}'s final answer now; do not continue Step ${currentIdx}'s research/browsing unless this final step explicitly needs a missing source.`
+        : `\nFINAL PHASE SWITCH: Previous research/build/browser steps are closed. Start Step ${currentIdx + 1}'s deliverable now; do not continue Step ${currentIdx}'s research/browsing unless this final step explicitly needs a missing source.`
       : `\nPHASE SWITCH: Previous steps are closed. Next tool call must start Step ${currentIdx + 1}, not continue Step ${currentIdx}.`
     : ''
 
@@ -61,8 +84,14 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
       instruction = `FINAL STEP — produce the creative deliverable.
 - Final pass for quality, style, and originality.
 - Deliver the prose in a single .md file. If the user requested PDF, export the completed source after the .md exists.`
+    } else if (inlineFinalAnswer) {
+      instruction = `FINAL STEP — answer directly in chat now.
+- Use prior findings in context and write the requested answer/report directly to the user.
+- Do not create, save, export, mention, or attach a file unless this final step explicitly requests one.
+- Start with the substantive answer, not a planning sentence, status update, or "I will/let me" preface.
+- Match requested depth and format. Use natural topic-specific headings when useful, and include citations only when requested or needed by the evidence.`
     } else {
-      // 'research', 'general', 'analysis' — the existing research-report path
+      // 'research', 'general', 'analysis' with an explicit saved artifact request
       instruction = `FINAL STEP — create the deliverable file now.
 - Start synthesis now; first substantive action must produce, inspect, or export the deliverable and must not continue prior research.
 - Use prior findings in context. Search/browse only if this final step explicitly names a critical missing source.
@@ -90,7 +119,7 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
     } else if (isBuildStrategy) {
       instruction = `Do only the specific asset/source gathering this build step requires. Prefer image_search for requested images/assets. Do NOT browse generic design best-practice articles, inspiration galleries, or template roundups unless the user explicitly asked for that research. Advance once the needed facts/assets are gathered.`
     } else {
-      instruction = `Research this step with the fewest strong source actions that satisfy it. Use web_search/browser_navigate for concrete evidence, not page counts. Extract dates, numbers, claims, technical details, caveats, and contradictions. For comparisons, cover each named entity before synthesizing. Report key findings in response text. Notes (.md) only AFTER real research.`
+      instruction = `Research this step with the fewest strong source actions that satisfy it. Use web_search to discover candidates, then read/extract the strongest source pages before searching more. Extract dates, numbers, claims, technical details, caveats, and contradictions. For comparisons, cover each named entity before synthesizing. Report key findings in response text. Notes (.md) only AFTER real research.`
     }
   }
 
@@ -124,7 +153,7 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
 
   const toolCallContract = `\nTOOL CALL CONTRACT:
 - Include plan_step_index: ${currentIdx + 1}. To work on another step, emit <next_step/> first with no tool call.
-- Include action_label: a model-authored visible action pill, 4-12 words, task-specific, no first person, no tool names, no raw JSON, no generic text.`
+- Include action_label: a model-authored visible action pill, 2-12 words, task-specific, starts with a capital letter, does not end with a period, no first person, no tool names, no raw JSON, no generic text.`
 
   return `PLAN PROGRESS:\n${progress}${findingsSummary}${phaseBoundary}\nStep ${currentIdx + 1}/${planItems.length}: "${planItems[currentIdx]}"${focusBlock}${modeBlock}\n${instruction}${toolCallContract}${extra ? '\n' + extra : ''}`
 }

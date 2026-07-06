@@ -9,13 +9,13 @@ const root = fileURLToPath(rootUrl)
 const args = process.argv.slice(2)
 const API_BASE = 'https://api.render.com/v1'
 const DEFAULT_WORKER_SERVICE_NAME = 'agent-worker'
-const DEFAULT_WORKER_REGION = 'oregon'
+const DEFAULT_WORKER_REGION = 'singapore'
 const DEFAULT_WORKER_PLAN = 'starter'
 const REQUIRED_LOCAL_KEYS = new Set([
   'AUTH_SECRET',
   'TURSO_DATABASE_URL',
   'TURSO_AUTH_TOKEN',
-  'OPENROUTER_API_KEY',
+  'DEEPSEEK_API_KEY',
   'E2B_API_KEY',
 ])
 

@@ -15,13 +15,11 @@ export function AppFrame({
   children,
   initialSidebarCollapsed,
   initialSidebarKnown,
-  initialAccessStatus,
   initialAccountDeleted,
 }: {
   children: React.ReactNode
   initialSidebarCollapsed: boolean
   initialSidebarKnown: boolean
-  initialAccessStatus?: 'pending' | 'approved'
   initialAccountDeleted?: boolean
 }) {
   const pathname = usePathname()
@@ -29,7 +27,7 @@ export function AppFrame({
 
   if (authRoute) {
     return (
-      <main id="main-content" className="app-main-content auth-main-content flex-1 min-h-screen ml-0 md:ml-0">
+      <main id="main-content" className="app-main-content auth-main-content flex-1 min-w-0 w-full min-h-screen ml-0 md:ml-0">
         {children}
       </main>
     )
@@ -38,7 +36,6 @@ export function AppFrame({
   return (
     <>
       <RootOverlays
-        initialAccessStatus={initialAccessStatus}
         initialAccountDeleted={initialAccountDeleted}
       />
       <Sidebar initialCollapsed={initialSidebarCollapsed} initialStateKnown={initialSidebarKnown} />

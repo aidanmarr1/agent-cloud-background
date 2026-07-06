@@ -10,6 +10,85 @@ interface ToolResultEvent {
   result: SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function stringField(record: Record<string, unknown> | null, field: string): string {
+  const value = record?.[field]
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function firstStringField(record: Record<string, unknown> | null, fields: string[]): string {
+  for (const field of fields) {
+    const value = stringField(record, field)
+    if (value) return value
+  }
+  return ''
+}
+
+function numberField(record: Record<string, unknown> | null, field: string): number | undefined {
+  const value = record?.[field]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function hostnameFromUrl(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+function fallbackTitleForSource(url: string, fallback: string): string {
+  const host = hostnameFromUrl(url)
+  if (!host) return fallback
+  try {
+    const parsed = new URL(url)
+    const lastPath = parsed.pathname.split('/').filter(Boolean).pop()?.replace(/[-_]+/g, ' ')
+    return lastPath ? `${host} · ${lastPath}` : host
+  } catch {
+    return host
+  }
+}
+
+function normalizeDocumentTitle(title: string, url: string, content: string, error = '', status?: number): string {
+  const genericTitle = !title || /^(?:document|untitled|page content)$/i.test(title)
+  const failureText = `${error} ${content}`.trim()
+  const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error) ||
+    /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(content)
+  if (internalRecovery) return 'Source needs browser rendering'
+
+  const failed = /^(?:error|blocked|request failed|failed to load|extraction blocked)\b/i.test(content) || !!error
+  if (failed) {
+    if (status === 401 || /\b(?:401|unauthorized|login required|authentication required)\b/i.test(failureText)) return 'Access required'
+    if (status === 403 || /\b(?:403|forbidden)\b/i.test(failureText)) return 'Source needs browser rendering'
+    if (status === 429 || /\b(?:429|rate limited|too many requests)\b/i.test(failureText)) return 'Temporarily rate limited'
+    return 'Source needs browser rendering'
+  }
+  if (genericTitle) return fallbackTitleForSource(url, 'Extracted page')
+  return title
+}
+
+function normalizeBrowseLikeResult(result: unknown, fallbackTitle: string): BrowseResult {
+  const record = asRecord(result)
+  const url = firstStringField(record, ['url', 'source', 'path'])
+  const error = firstStringField(record, ['error'])
+  const status = numberField(record, 'status')
+  const rawContent = firstStringField(record, ['content', 'text', 'markdown', 'body', 'error', 'statusText'])
+  const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error) ||
+    /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(rawContent)
+  const content = internalRecovery
+    ? 'This source needs to be opened as a rendered page before it can be read.'
+    : rawContent
+  const title = normalizeDocumentTitle(firstStringField(record, ['title', 'name']), url, content, error, status)
+  return {
+    title: title || fallbackTitleForSource(url, fallbackTitle),
+    content: content || 'No extracted text was returned for this source.',
+    url,
+  }
+}
+
 function resolvePanelType(name: string): ComputerPanelItem['type'] {
   if (name === 'image_search') return 'image_search'
   if (name === 'web_search') return 'search'
@@ -80,20 +159,20 @@ function transformPanelData(
   }
 
   if (name === 'read_document') {
-    const docResult = result as { title?: string; content?: string; source?: string }
-    return {
-      title: docResult.title || 'Document',
-      content: docResult.content || '',
-      url: docResult.source || '',
-    } as BrowseResult
+    return normalizeBrowseLikeResult(result, 'Extracted page')
   }
 
   if (name === 'http_request') {
-    const httpResult = result as { status?: number; statusText?: string; body?: string }
+    const httpResult = result as { status?: number; statusText?: string; body?: string; url?: string; source?: string; content?: string; text?: string; error?: string }
+    const status = typeof httpResult.status === 'number' ? httpResult.status : undefined
+    const statusText = httpResult.statusText || ''
+    const body = httpResult.body || httpResult.content || httpResult.text || httpResult.error || ''
+    const statusLabel = status !== undefined ? `HTTP ${status}${statusText ? ` ${statusText}` : ''}` : (statusText || 'HTTP response')
+    const url = httpResult.url || httpResult.source || ''
     return {
-      title: `HTTP ${httpResult.status || ''} ${httpResult.statusText || ''}`.trim(),
-      content: httpResult.body || '',
-      url: '',
+      title: statusLabel,
+      content: body || statusLabel,
+      url,
     } as BrowseResult
   }
 

@@ -5,7 +5,7 @@ import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult,
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useSettingsStore } from '@/store/settings'
-import { cleanThinkingTags, sanitizeNarrationText, stripToolActionNarration } from '@/lib/stream/cleaners'
+import { cleanThinkingTags, normalizeMarkdownForDisplay, sanitizeNarrationText, stripToolActionNarration } from '@/lib/stream/cleaners'
 import {
   toolNameToSubtaskType,
   BROWSER_TOOLS,
@@ -16,7 +16,7 @@ import {
   isIncompleteBrowserClickActivity,
   isBrowserPreflightBlockResult,
 } from '@/lib/stream/constants'
-import { describeActivity, describeCompletedActivity, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { playComplete, playError } from '@/lib/useSound'
 import { sendDesktopNotification } from '@/lib/notifications'
 import { useCreditStore } from '@/store/credits'
@@ -39,6 +39,12 @@ const MIN_TOOLS_BETWEEN_NARRATION_FLUSHES = 3
 const MAX_TOOLS_BETWEEN_NARRATION_FLUSHES = 4
 const TOOLS_BETWEEN_NARRATION_FLUSHES = MIN_TOOLS_BETWEEN_NARRATION_FLUSHES
 const SERVER_CREDIT_ACCOUNTING = true
+
+type ToolStartEvent = { id: string; name: string; args: Record<string, unknown> }
+
+function isDeferredBrowseToolStart(name: string): boolean {
+  return name === 'read_document' || name === 'http_request'
+}
 
 function isStaleFutureWorkAck(text: string): boolean {
   const normalized = text.trim().toLowerCase()
@@ -84,6 +90,22 @@ function selectBestStartupAcknowledgment(cached: string, current: string): strin
   }
 
   return bestScore >= 0 ? best : ''
+}
+
+function cleanStartupAcknowledgmentText(text: string): string {
+  return normalizeMarkdownForDisplay(cleanThinkingTags(text))
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function looksLikeDuplicatedSavedReport(text: string, savedFileCount: number): boolean {
+  if (savedFileCount <= 0) return false
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  return trimmed.length > 700 ||
+    /^#{1,6}\s+/m.test(trimmed) ||
+    /\b(?:Executive Summary|References|Conclusion|Research Report|Final Report)\b/i.test(trimmed)
 }
 
 function capStr(s: string, max: number): string {
@@ -211,6 +233,7 @@ export class EventDispatcher {
   private startupAcknowledgment = ''
   private toolsSinceLastNarration = 0
   private pendingNarrationTools: Array<{ toolName: string; result: unknown }> = []
+  private deferredBrowseToolStarts = new Map<string, ToolStartEvent>()
   private lastNarrationText = ''
   private seenToolStartIds = new Set<string>()
   private chargedToolIds = new Set<string>()
@@ -387,9 +410,7 @@ export class EventDispatcher {
 
   private cleanAcknowledgmentCandidate(content: string): string {
     const raw = extractTaskAcknowledgment(cleanThinkingTags(content))
-    return stripToolActionNarration(cleanThinkingTags(raw))
-      .replace(/\n{3,}/g, '\n\n')
-      .trim()
+    return cleanStartupAcknowledgmentText(raw)
   }
 
   private captureStartupAcknowledgment(): void {
@@ -443,18 +464,7 @@ export class EventDispatcher {
     useUIStore.getState().setStreamingStatus('thinking')
   }
 
-  private handleToolStart(event: { id: string; name: string; args: Record<string, unknown> }): void {
-    const modelActionLabel = strictActionLabelFromArgs(event.args)
-    const systemActivity = describeActivity(event.name, event.args)
-    const isHiddenActivity = isInternalActivityTool(event.name) ||
-      isIncompleteBrowserClickActivity({ toolName: event.name, label: modelActionLabel || systemActivity })
-    if (isHiddenActivity) {
-      // Internal visual context and incomplete preflight browser actions should
-      // not create visible task pills, panel focus changes, or credit charges.
-      return
-    }
-    if (!modelActionLabel) return
-
+  private prepareToolStart(event: ToolStartEvent): boolean {
     const firstStartForId = !this.seenToolStartIds.has(event.id)
     this.seenToolStartIds.add(event.id)
 
@@ -472,19 +482,38 @@ export class EventDispatcher {
         else this.discardNarrationBuffer()
       }
       this.postLastToolText = ''
-    }
-
-    if (firstStartForId) {
       this.chargeToolEvent(event.id, event.name)
-    }
-
-    if (!firstStartForId && this.narrationBuf.length > 0) {
+    } else if (this.narrationBuf.length > 0) {
       // A later execution-time tool_start may refine a provisional label.
       // It should not count as another tool call, but flushing keeps narration
       // ordered before the refined pill state if any text slipped in.
       if (this.flushNarration()) this.pendingNarrationTools = []
       else this.discardNarrationBuffer()
     }
+
+    return firstStartForId
+  }
+
+  private handleToolStart(event: ToolStartEvent): void {
+    const modelActionLabel = strictActionLabelFromArgs(event.args)
+    if (isInternalActivityTool(event.name)) return
+    if (!modelActionLabel) return
+
+    const isHiddenActivity = isIncompleteBrowserClickActivity({ toolName: event.name, label: modelActionLabel })
+    if (isHiddenActivity) {
+      // Internal visual context and incomplete preflight browser actions should
+      // not create visible task pills, panel focus changes, or credit charges.
+      return
+    }
+
+    if (isDeferredBrowseToolStart(event.name)) {
+      this.prepareToolStart(event)
+      this.deferredBrowseToolStarts.set(event.id, event)
+      useUIStore.getState().setStreamingStatus('analyzing')
+      return
+    }
+
+    this.prepareToolStart(event)
 
     // Update streaming status
     const tn = event.name
@@ -788,7 +817,7 @@ export class EventDispatcher {
             screenshotBase64: prev?.screenshotBase64,
             liveFrame: prev?.liveFrame,
             liveFrameUpdatedAt: prev?.liveFrameUpdatedAt,
-            action: describeActivity(event.name, event.args),
+            action: modelActionLabel,
           } as BrowserResult,
           timestamp: Date.now(),
           streaming: true,
@@ -802,6 +831,9 @@ export class EventDispatcher {
     // Flush queued Web IDE deltas before clearing streaming state, otherwise the
     // live editor can visibly drop the tail of a generated file.
     this.batch.flushSync()
+
+    const deferredStart = this.deferredBrowseToolStarts.get(event.id)
+    if (deferredStart) this.deferredBrowseToolStarts.delete(event.id)
 
     if (isHiddenInternalToolResult(event.name, event.result)) {
       this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
@@ -823,6 +855,19 @@ export class EventDispatcher {
     const searchTitle = completedSearchPanelTitle(event.name, previousPanelItem?.title)
     if (searchTitle) {
       panelItem = { ...panelItem, title: searchTitle }
+    }
+    if ((event.name === 'http_request' || event.name === 'read_document') && previousPanelItem?.type === 'browse') {
+      const previousBrowse = previousPanelItem.data as BrowseResult | undefined
+      const nextBrowse = panelItem.data as BrowseResult | undefined
+      if (nextBrowse && typeof nextBrowse === 'object' && previousBrowse?.url && !nextBrowse.url) {
+        panelItem = {
+          ...panelItem,
+          data: {
+            ...nextBrowse,
+            url: previousBrowse.url,
+          } satisfies BrowseResult,
+        }
+      }
     }
     const effectiveResult = this.withPreservedFilePanelContent(event, panelItem.data)
     if (effectiveResult !== event.result) {
@@ -872,24 +917,39 @@ export class EventDispatcher {
       const group = this.parsedGroups[this.currentGroupIdx]
       if (group) {
         const existingSubtask = group.subtasks.find(s => s.id === event.id)
-        const completedLabel = existingSubtask
-          ? existingSubtask.labelSource === 'model'
-            ? null
-            : describeCompletedActivity(event.name, effectiveResult, {
-              label: existingSubtask.label,
-              query: existingSubtask.query,
-              url: existingSubtask.url,
-              command: existingSubtask.command,
-              filePath: existingSubtask.filePath,
-            })
-          : null
-        const patch = completedLabel ? { label: completedLabel } : undefined
+        const deferredLabel = deferredStart ? strictActionLabelFromArgs(deferredStart.args) : null
 
-        this.actions.updateSubtaskInGroup(this.conversationId, this.currentGroupIdx, event.id, 'done', effectiveResult as Subtask['result'], patch)
-
-        const updatedSubtasks = group.subtasks.map(s =>
-          s.id === event.id ? { ...s, ...(patch || {}), status: 'done' as const, result: effectiveResult as Subtask['result'] } : s
-        )
+        let updatedSubtasks = group.subtasks
+        if (existingSubtask) {
+          this.actions.updateSubtaskInGroup(this.conversationId, this.currentGroupIdx, event.id, 'done', effectiveResult as Subtask['result'])
+          updatedSubtasks = group.subtasks.map(s =>
+            s.id === event.id ? { ...s, status: 'done' as const, result: effectiveResult as Subtask['result'] } : s
+          )
+        } else if (deferredStart && deferredLabel) {
+          const subtask: Subtask = {
+            id: event.id,
+            toolName: event.name,
+            type: (toolNameToSubtaskType[event.name] || 'browse') as SubtaskType,
+            label: deferredLabel,
+            query: deferredStart.args.query as string | undefined,
+            url: (deferredStart.args.url || deferredStart.args.source) as string | undefined,
+            command: deferredStart.args.command as string | undefined,
+            filePath: (deferredStart.args.path || deferredStart.args.output_path || deferredStart.args.source_path || deferredStart.args.directory) as string | undefined,
+            labelSource: 'model',
+            status: 'done',
+            startedAt: Date.now(),
+            result: effectiveResult as Subtask['result'],
+          }
+          updatedSubtasks = [
+            ...group.subtasks.map((s) => s.status === 'running' ? { ...s, status: 'done' as const } : s),
+            subtask,
+          ]
+          this.actions.setTaskGroups(this.conversationId, [
+            ...this.parsedGroups.slice(0, this.currentGroupIdx),
+            { ...group, subtasks: updatedSubtasks },
+            ...this.parsedGroups.slice(this.currentGroupIdx + 1),
+          ])
+        }
         this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
       }
 
@@ -1025,7 +1085,7 @@ export class EventDispatcher {
   }
 
   private handleStepAdvance(event: { status?: 'done' | 'incomplete'; reason?: string }): void {
-    if (this.flushNarration()) this.pendingNarrationTools = []
+    if (this.flushNarration(true)) this.pendingNarrationTools = []
     else {
       this.discardNarrationBuffer()
       if (event.status === 'incomplete') this.clearPendingNarrationTools(true)
@@ -1074,6 +1134,7 @@ export class EventDispatcher {
 
   private markRunningGroups(status: 'done' | 'error', errorMessage?: string): void {
     let changed = false
+    this.deferredBrowseToolStarts.clear()
     for (let gi = 0; gi < this.parsedGroups.length; gi++) {
       const group = this.parsedGroups[gi]
       if (group.status === 'running') {
@@ -1193,19 +1254,25 @@ export class EventDispatcher {
         summary = summaryLines.join('\n\n')
       }
 
-      const postToolAnswer = stripToolActionNarration(cleanThinkingTags(this.postLastToolText))
+      const postToolAnswer = normalizeMarkdownForDisplay(stripToolActionNarration(cleanThinkingTags(this.postLastToolText)))
         .replace(/\n{3,}/g, '\n\n')
         .trim()
+      const suppressDuplicateReportText = looksLikeDuplicatedSavedReport(postToolAnswer, uniqueFiles.length)
 
       // Set content cleanly: ACK + model synthesis when available; use the
       // generated handoff only as a fallback for file-deliverable tasks.
       let finalContent = ack
-      if (postToolAnswer && postToolAnswer !== ack) {
+      if (postToolAnswer && postToolAnswer !== ack && !suppressDuplicateReportText) {
         finalContent = ack ? `${ack}\n\n${postToolAnswer}` : postToolAnswer
       } else if (summary) {
         finalContent = ack ? `${ack}\n\n${summary}` : summary
       }
-      this.actions.setLastMessageContent(this.conversationId, finalContent)
+      const cleanedExistingContent = normalizeMarkdownForDisplay(cleanThinkingTags(currentContent)).trim()
+      if (finalContent.trim()) {
+        this.actions.setLastMessageContent(this.conversationId, finalContent)
+      } else if (cleanedExistingContent) {
+        this.actions.setLastMessageContent(this.conversationId, cleanedExistingContent)
+      }
 
       // Ensure document artifacts exist for created files.
       // The server emits artifact_created, but as a safety net, verify they're on the message.
@@ -1252,7 +1319,8 @@ export class EventDispatcher {
     return group.narrations.reduce((max, narration) => Math.max(max, narration.position), 0)
   }
 
-  private narrationInsertionPosition(group: TaskGroup): number | null {
+  private narrationInsertionPosition(group: TaskGroup, force = false): number | null {
+    if (force) return group.subtasks.length
     const lastPosition = this.lastNarrationPosition(group)
     const visibleGap = group.subtasks.length - lastPosition
     if (visibleGap < MIN_TOOLS_BETWEEN_NARRATION_FLUSHES) return null
@@ -1263,11 +1331,11 @@ export class EventDispatcher {
     return group.subtasks.length
   }
 
-  private addNarration(narrationText: string): boolean {
+  private addNarration(narrationText: string, force = false): boolean {
     if (this.currentGroupIdx < 0) return false
     const currentGroup = this.parsedGroups[this.currentGroupIdx]
     if (!currentGroup) return false
-    const currentPosition = this.narrationInsertionPosition(currentGroup)
+    const currentPosition = this.narrationInsertionPosition(currentGroup, force)
     if (currentPosition === null) return false
 
     if (currentGroup.narrations.some(narration => narration.position === currentPosition)) {
@@ -1293,12 +1361,12 @@ export class EventDispatcher {
     return true
   }
 
-  private flushNarration(): boolean {
-    if (!this.isNarrationCadenceReady()) return false
+  private flushNarration(force = false): boolean {
+    if (!force && !this.isNarrationCadenceReady()) return false
     const text = this.narrationBuf.flush()
     if (!text || this.currentGroupIdx < 0) return false
     const narrationText = this.normalizeNarrationText(text)
-    return narrationText ? this.addNarration(narrationText) : false
+    return narrationText ? this.addNarration(narrationText, force) : false
   }
 
   private discardNarrationBuffer(): void {

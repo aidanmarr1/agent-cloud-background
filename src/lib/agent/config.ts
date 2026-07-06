@@ -7,18 +7,22 @@ const IS_OLLAMA = false
 
 // --- Iteration & timing ---
 export const BASE_ITERATIONS = 36
-export const MAX_ITERATIONS = 112  // Hard runtime cap; dynamic budgets may grow up to this, not past it
-export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 28, 3: 64 } as const
+export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
+export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 24, 3: 64 } as const
 export const MIN_ITERATION_DELAY_MS = 0
 export const MAX_CONTEXT_MESSAGES = 8
-export const MAX_TIMEOUT_NUDGES = 2
+export const MAX_TIMEOUT_NUDGES = 1
 export const AGENT_RUN_MAX_DURATION_MS = 270_000
 export const AGENT_DEADLINE_FINALIZATION_BUFFER_MS = 150_000
-export const AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS = 45_000
-export const AGENT_DEADLINE_HARD_STOP_BUFFER_MS = 35_000
+export const AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS = 20_000
+export const AGENT_DEADLINE_HARD_STOP_BUFFER_MS = 18_000
+export const AGENT_WORKER_RUN_MAX_DURATION_MS = 900_000
+export const AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS = 120_000
+export const AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS = 28_000
+export const AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS = 20_000
 
 // --- Step budgets ---
-export const RESEARCH_STEP_BUDGET_MULTIPLIER = 0.6   // Research phases need enough turns to gather real source evidence
+export const RESEARCH_STEP_BUDGET_MULTIPLIER = 0.78  // Research phases need enough turns to gather real source evidence
 export const DELIVERABLE_BUDGET_FRACTION = 1.0       // Use all available iterations
 export const MIN_STEP_BUDGET = 6
 export const MIN_DELIVERABLE_BUDGET = 10
@@ -28,8 +32,8 @@ export const RESEARCH_NUDGE_ITERATION = IS_OLLAMA ? 6 : 4   // Start nudging non
 export const NO_TOOL_FORCE_ADVANCE = IS_OLLAMA ? 8 : 4      // Force advance after N consecutive no-tool iterations
 export const MIN_TOOL_CALLS_PER_STEP = 2    // Default minimum — overridden by complexity-aware lookup
 export const MIN_TOOL_CALLS_BY_COMPLEXITY = { 1: 1, 2: 3, 3: 4 } as const
-export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 2, 2: 5, 3: 8 } as const
-export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 1, 2: 2, 3: 3 } as const
+export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 3, 2: 6, 3: 11 } as const
+export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 2, 2: 4, 3: 6 } as const
 
 // --- Search & browse thresholds ---
 export const CONSECUTIVE_SEARCH_FAILURES_WARN = 4
@@ -44,6 +48,7 @@ export const LOOP_THRESHOLD = 3             // Same tool N times in window = loo
 // --- Content & narration ---
 export const NARRATION_THRESHOLD_DEFAULT = 3
 export const NARRATION_THRESHOLD_BROWSER = 3
+export const NARRATION_MAX_VISIBLE_ACTION_GAP = 4
 export const POST_COMPLETION_MAX_ITERATIONS = IS_OLLAMA ? 3 : 1
 export const NO_PLAN_RUNAWAY_LIMIT = 80
 
@@ -55,25 +60,25 @@ export const WORK_SUMMARY_RECENT_ACTIONS = 6
 
 // --- Timeouts (ms) ---
 export const TIER_TIMEOUTS = {
-  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 120_000,   // API streams should have enough room for tool-heavy turns
-  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 45_000,   // Allow realistic provider/tool latency before recovery
+  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 12_000,    // Keep API turns from looking frozen
+  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 1_200,    // Fail forward quickly from invisible provider stalls
   checkIntervalMs: 150,
   build: {
-    contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 8_000,
+    contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 1_200,
     contentOnlyMinChars: IS_OLLAMA ? 5000 : 1200,
   },
   research: {
-    contentOnlyTimeoutMs: IS_OLLAMA ? 90_000 : 8_000,
+    contentOnlyTimeoutMs: IS_OLLAMA ? 90_000 : 900,
     contentOnlyMinChars: IS_OLLAMA ? 5_000 : 700,
   },
 } as const
 
 // --- Tool execution ---
-export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 18_000
-export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 8_000
-export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 12_000
-export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 12_000
-export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 18_000
+export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
+export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 5_000
+export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 2_000
+export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 5_000
+export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
 
 // --- File & content limits ---
 export const MAX_TOOL_RESULT_CHARS = 1800
@@ -88,11 +93,11 @@ export const PLAN_MAX_RETRIES = 1
 export const PLAN_RETRY_BASE_MS = 350
 
 // --- Stream retries ---
-export const STREAM_MAX_RETRIES = 2
+export const STREAM_MAX_RETRIES = 0
 export const STREAM_RETRY_BASE_MS = 650
 export const STREAM_RETRY_EXPONENT = 1.2
-export const STREAM_REQUEST_TIMEOUT_MS = 150_000
-export const STREAM_RETRY_MAX_DELAY_MS = 4_000
+export const STREAM_REQUEST_TIMEOUT_MS = 2_400
+export const STREAM_RETRY_MAX_DELAY_MS = 1_500
 
 // --- Semantic loop detection ---
 export const SEMANTIC_LOOP_WINDOW = 6         // Check last N search queries for overlap
@@ -121,14 +126,17 @@ export const CROSS_TOOL_CYCLE_REPEATS = 2     // Must repeat N times to trigger
 
 // --- Tool type rate limiting per step ---
 export const TOOL_TYPE_RATE_LIMITS: Record<string, number> = {
-  web_search: 8,              // Max searches per step
-  browser_navigate: 10,       // Max navigations per step
+  web_search: 28,             // High ceiling, but not a target
+  read_document: 40,          // Extraction can be frequent in serious research, but still loop-guarded
+  browser_navigate: 24,       // Enough for source discovery and browser tasks without drifting
   browser_screenshot: 3,      // Screenshots are diagnostic; repeating them is usually a loop
-  image_search: 4,            // Image evidence should be sampled, not exhaustively looped
-  browser_get_content: 8,     // Enough page extraction for a phase without repeated dumps
-  create_file: 20,            // Generous for multi-part manuscripts/apps
-  append_file: 80,            // Long writing tasks should append many chunks
-  export_pdf: 20,             // Allow re-export after revisions without opening shell execution
+  image_search: 8,            // Image evidence can be broad when requested
+  browser_get_content: 24,    // Enough for rendered pages without repeated dumps
+  browser_find_text: 24,      // Allow targeted in-page evidence checks
+  browser_scroll: 40,         // Long pages and mobile flows need repeated reveals
+  create_file: 24,            // Enough for multi-part manuscripts/apps
+  append_file: 100,           // Long writing tasks can still append chunks
+  export_pdf: 16,             // Allow re-export after revisions
   edit_file: 60,              // Revisions across large manuscripts are expected
 }
 
@@ -194,9 +202,9 @@ export const STEP_BUDGET_BORROW_FRACTION = 0.3    // Can borrow up to 30% from n
 export const MIN_REMAINING_STEP_BUDGET = 3        // Never borrow below this threshold
 
 // --- Adaptive iteration timeout ---
-export const TIMEOUT_BUILD_MS = 120_000             // Build/write steps get room without multi-minute stalls
-export const TIMEOUT_RESEARCH_MS = 60_000           // Research steps should recover quickly without aborting synthesis
-export const TIMEOUT_BROWSER_MS = 35_000            // Browser actions recover before visible stalls feel broken
+export const TIMEOUT_BUILD_MS = 40_000              // Build/write steps get room without multi-minute stalls
+export const TIMEOUT_RESEARCH_MS = 25_000           // Research steps should recover quickly without aborting synthesis
+export const TIMEOUT_BROWSER_MS = 18_000            // Browser actions recover before visible stalls feel broken
 
 // --- Work summary ---
 export const WORK_SUMMARY_MAX_CHARS = 4000         // Compact summary keeps each model turn quick
@@ -206,7 +214,7 @@ export const URL_NORMALIZE_STRIP_PARAMS = ['utm_source', 'utm_medium', 'utm_camp
 
 // --- Search result scoring ---
 export const SEARCH_RESULT_MIN_SNIPPET_LENGTH = 20     // Minimum snippet length to consider useful
-export const SEARCH_MAX_RESULTS = 5                     // Max results to return per search
+export const SEARCH_MAX_RESULTS = 15                    // Max results to return per search
 
 // --- Tool result cache ---
 export const TOOL_CACHE_MAX_ENTRIES = 60
@@ -214,9 +222,9 @@ export const TOOL_CACHE_TTL_MS = 5 * 60 * 1000        // 5 minutes
 export const TOOL_CACHE_MAX_SIZE_CHARS = 250_000        // ~250KB total
 
 // --- Tool retry ---
-export const TOOL_RETRY_MAX = 1                         // Max retries for transient failures
-export const TOOL_RETRY_BASE_MS = 250                   // Base delay between retries
-export const TOOL_RETRY_MAX_DELAY_MS = 3_000            // Max delay cap
+export const TOOL_RETRY_MAX = 0                         // Max retries for transient failures
+export const TOOL_RETRY_BASE_MS = 120                   // Base delay between retries
+export const TOOL_RETRY_MAX_DELAY_MS = 600              // Max delay cap
 
 // --- Enhanced working memory ---
 export const WORKING_MEMORY_CORROBORATION_THRESHOLD = 0.6  // Token overlap to count as corroboration
@@ -240,7 +248,7 @@ export const GOAL_MAX_EVIDENCE_PER_STEP = 5
 export const GOAL_AUTO_ADVANCE_ON_MET = true
 
 // --- Output verification ---
-export const MAX_DELIVERABLE_REVISIONS = 3
+export const MAX_DELIVERABLE_REVISIONS = 6
 export const RESEARCH_MIN_WORDS_BY_COMPLEXITY = { 1: 180, 2: 400, 3: 900, 4: 1300, 5: 1800 } as const
 export const RESEARCH_MIN_CITATIONS = 4
 export const RESEARCH_MIN_PARAGRAPHS = 4

@@ -1,4 +1,10 @@
-import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
+import {
+  createCompletion,
+  createStreamingCompletion,
+  DEFAULT_MODEL,
+  type ChatMessageParam,
+  type StreamingChatCompletionChunk,
+} from '@/lib/llm'
 import type { FileResult } from '@/types'
 import { getPlanningPrompt } from '@/lib/prompts'
 import { effectiveTaskRequest } from '@/lib/conversationContext'
@@ -14,9 +20,11 @@ import {
 import { buildStepMessage } from './guards'
 import { computeTimeouts, getStrategy, type TaskType } from './TaskStrategy'
 import { PLAN_STARTUP_DELAY_MS, PLAN_MAX_RETRIES, PLAN_RETRY_BASE_MS, MIN_STEP_BUDGET, MIN_DELIVERABLE_BUDGET, RESEARCH_STEP_BUDGET_MULTIPLIER, DELIVERABLE_BUDGET_FRACTION, COMPLEXITY_BUDGET_MULTIPLIERS, MIN_RESEARCH_CALLS_BY_COMPLEXITY, MAX_ITERATIONS, REPLAN_MAX_TIMES as REPLAN_MAX_RETRIES, INFO_REPLAN_MIN_ITERATIONS, INFO_REPLAN_COOLDOWN_ITERATIONS } from './config'
-import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, isSingleWebSearchMarkdownTask } from './taskConstraints'
+import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit } from './taskConstraints'
 import { humanTopicLabel, requestSubject } from './taskText'
+import { analyzeTaskIntent } from './TaskIntent'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
+import { researchDepthProfileForState } from './ResearchDepth'
 
 export interface RequiredPlanStep {
   title: string
@@ -49,15 +57,32 @@ type PlanCreditPreflight = (label: string) => Promise<void>
 
 const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usage.'
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
-const PLANNER_ACK_MAX_TOKENS = 128
-const PLANNER_JSON_MAX_TOKENS = 1536
-const REPLAN_JSON_MAX_TOKENS = 768
+const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
+const PLANNER_QUALITY_REPAIR_ATTEMPTS = 3
+const PLANNER_ACK_MAX_TOKENS = 96
+const PLANNER_ACK_STREAM_TIMEOUT_MS = 4_200
+const PLANNER_ACK_DISPLAY_WAIT_MS = 150
+const PLANNER_SIMPLE_JSON_MAX_TOKENS = 420
+const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
+const PLANNER_JSON_MAX_TOKENS = 640
+const REPLAN_JSON_MAX_TOKENS = 520
+const PLANNER_JSON_REQUEST_TIMEOUT_MS = 3_800
+const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 4_600
+const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 3_500
+const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 3_800
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
+const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
+const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
+const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
 
 function redactPlannerErrorText(text: string): string {
   return text
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
     .replace(/\b(?:qwen|openai|anthropic|google|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
+    .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')
 }
 
@@ -81,8 +106,18 @@ function isPlannerQualityError(error: unknown): boolean {
   return error instanceof Error && error.message === PLANNER_QUALITY_ERROR
 }
 
+function plannerRepairExhaustedError(): Error {
+  return new Error(PLANNER_REPAIR_EXHAUSTED_ERROR)
+}
+
 function isBillableUsageError(error: unknown): boolean {
   return error instanceof Error && error.message === BILLABLE_USAGE_ERROR
+}
+
+function isPlannerRequestTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /Assistant request timed out after \d+ seconds/i.test(message) ||
+    /\b(?:timed out|timeout|ETIMEDOUT)\b/i.test(message)
 }
 
 function normalizeCompletionUsage(usage: RawCompletionUsage): CreditTokenUsage | null {
@@ -176,6 +211,15 @@ function parsePlannerResponse(raw: string): PlannerResponseObject | null {
   return null
 }
 
+function stringifyPlannerResponseForRepair(response: PlannerResponseObject | null): string {
+  if (!response) return ''
+  try {
+    return JSON.stringify(response)
+  } catch {
+    return ''
+  }
+}
+
 function isConcreteBuildStep(strategy: string | undefined, title: string | undefined): boolean {
   if (strategy !== 'build' && strategy !== 'code') return false
   const lower = (title || '').toLowerCase()
@@ -190,18 +234,6 @@ function isImageRetrievalStep(title: string | undefined, scope?: string | null):
     /\b(find|search|retrieve|return|download|select|get)\b/i.test(text)
 }
 
-function isLongWritingTask(messages: Array<{ role: string; content: string }>): boolean {
-  const lastUser = [...messages].reverse().find(m => m.role === 'user')
-  const text = lastUser?.content?.toLowerCase() || ''
-  if (!text) return false
-
-  const asksForWriting = /\b(write|draft|create|generate|make|compose)\b/.test(text)
-  const longForm = /\b(novel|book|manuscript|chapters?|story|stories|screenplay|100\s*pages?|50\s*pages?|long[-\s]?form|full[-\s]?length|pdf)\b/.test(text)
-  const noResearch = /\b(no research|straight to it|just write|start writing)\b/.test(text)
-
-  return asksForWriting && (longForm || noResearch)
-}
-
 function getLatestUserContent(messages: Array<{ role: string; content: string }>): string {
   return effectiveTaskRequest(messages).toLowerCase()
 }
@@ -213,15 +245,6 @@ function isWebsiteBuildTask(messages: Array<{ role: string; content: string }>):
   const wantsBuild = /\b(build|create|make|design|develop|implement|code|write|generate)\b/.test(text)
   const websiteTarget = /\b(website|web\s*site|webpage|web\s*page|landing\s*page|site|next\.?js|tsx|frontend|portfolio|dashboard|page)\b/.test(text)
   return wantsBuild && websiteTarget
-}
-
-function isBuildOrCodeTask(messages: Array<{ role: string; content: string }>): boolean {
-  const text = getLatestUserContent(messages)
-  if (!text) return false
-
-  if (isWebsiteBuildTask(messages)) return true
-  return /\b(build|create|make|develop|implement|code|write|fix|add|update|refactor)\b/.test(text) &&
-    /\b(app|application|component|feature|script|function|api|endpoint|class|module|code|typescript|javascript|python|react|next\.?js)\b/.test(text)
 }
 
 function isBrowserActionTask(messages: Array<{ role: string; content: string }>): boolean {
@@ -243,10 +266,6 @@ function isWebsitePreviewStep(title: string): boolean {
   const text = title.toLowerCase()
   return /\b(boot|run|start|open|launch|serve|local|localhost|server|preview|browser|visual|screenshot|responsive|mobile|desktop)\b/.test(text) &&
     /\b(preview|server|localhost|browser|responsive|visual|screenshot|mobile|desktop|local)\b/.test(text)
-}
-
-function isWebsiteDeliverStep(title: string): boolean {
-  return /\b(deliver|final|finish|handoff|usage|notes|summary|report what was built)\b/i.test(title)
 }
 
 function isSkillReadStep(title: string): boolean {
@@ -272,14 +291,47 @@ function sanitizePlannerAck(ack: string): string {
     .trim()
 }
 
+function ackWordCount(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length
+}
+
 function isUsablePlannerAck(ack: string): boolean {
   const normalized = ack.trim().toLowerCase()
   if (!normalized) return false
-  if (normalized.length < 18) return false
-  if (/^(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b.{0,120}\b(?:research|open|browse|search|work|start|check|look|review|analyze|analyse|compare|build|create|write|fix|make)\b/.test(normalized)) return false
+  if (normalized.length < 45) return false
+  if (normalized.length > 280) return false
+  if (containsPromptInstructionLeak(normalized)) return false
+  const words = ackWordCount(normalized)
+  if (words < 10 || words > 38) return false
+  const sentences = normalized
+    .split(/(?<=[.!?])\s+/)
+    .map(sentence => sentence.trim())
+    .filter(Boolean)
+  if (sentences.length < 1 || sentences.length > 2) return false
   if (/^(?:next|now|then|after that|moving forward|from here)[,\s]+(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b/.test(normalized)) return false
+  if (!/\b(?:research|source|compare|check|verify|read|gather|analy[sz]e|assess|review|build|create|write|draft|fix|test|inspect|summari[sz]e|deliver|report|answer|find|produce)\b/.test(normalized)) return false
+  if (!/\b(?:then|and|so|before|while|with|into|using|based on|against|across)\b/.test(normalized)) return false
   return !/\b(?:i(?:'|’)?ll|i will)\s+(?:open the site|work through this|start with the required|keep the task steps updated)\b/.test(normalized) &&
     !/\b(?:the requested task|the request|the site|the topic)\b.{0,80}\b(?:steps updated|visible steps)\b/.test(normalized)
+}
+
+function streamingChunkText(chunk: StreamingChatCompletionChunk): string {
+  const delta = chunk.choices?.[0]?.delta
+  const content = delta?.content
+  return typeof content === 'string' ? content : ''
+}
+
+function containsPromptInstructionLeak(text: string): boolean {
+  return /\b(?:conduct|perform|run|carry\s+out)\s+(?:the\s+)?(?:deepest\s+possible|maximum\s+depth)\s+(?:research|analysis|investigation)\b/i.test(text) ||
+    /\b(?:extremely|very)\s+deep\s+research\s+all\s+about\b/i.test(text) ||
+    /\bproduce\s+a\s+concise,\s+visually\s+rich\s+markdown\b/i.test(text)
+}
+
+function assertPlannerVisibleTextQuality(ack: string | undefined, titles: string[], scopes: Array<string | null>): void {
+  const visibleText = [ack || '', ...titles, ...scopes.map((scope) => scope || '')]
+  if (visibleText.some((text) => containsPromptInstructionLeak(text))) {
+    console.warn('[Plan] Planner visible text may contain copied prompt wording; accepting model-authored plan instead of blocking startup.')
+  }
 }
 
 function conciseTopicLabel(topic: string | null | undefined): string {
@@ -288,105 +340,6 @@ function conciseTopicLabel(topic: string | null | undefined): string {
 
 function conciseRequestSubject(messages: Array<{ role: string; content: string }>): string {
   return requestSubject(messages)
-}
-
-function fastStartAck(messages: Array<{ role: string; content: string }>, taskType: TaskType): string {
-  const subject = conciseRequestSubject(messages)
-  if (taskType === 'browse') return `Browser task is ready for ${subject}.`
-  if (taskType === 'build' || taskType === 'code') return `Workspace is ready for ${subject}.`
-  return `Researching ${subject} with live sources.`
-}
-
-function compactPlanSubject(subject: string, maxLength = 44): string {
-  if (subject.length <= maxLength) return subject
-  return subject.slice(0, maxLength).replace(/\s+\S*$/, '').trim() || subject.slice(0, maxLength).trim()
-}
-
-function fastStartPlannerSteps(
-  messages: Array<{ role: string; content: string }>,
-  taskType: TaskType,
-): { titles: string[]; scopes: (string | null)[] } {
-  const subject = conciseRequestSubject(messages)
-  const compact = compactPlanSubject(subject)
-
-  if (taskType === 'browse') {
-    return {
-      titles: [
-        `Open and inspect ${compact}`,
-        `Complete the requested browser action`,
-        `Verify the final page state`,
-      ],
-      scopes: [
-        `Open the target page or service for "${subject}" and inspect the current browser state before acting.`,
-        `Use visible controls to complete only the user's requested browser task for "${subject}".`,
-        `Confirm the resulting page state and report any blocker plainly.`,
-      ],
-    }
-  }
-
-  if (taskType === 'build' || taskType === 'code') {
-    const website = isWebsiteBuildTask(messages)
-    return {
-      titles: website
-        ? [
-            `Inspect project structure for ${compact}`,
-            `Build the requested UI`,
-            `Run local preview verification`,
-            `Deliver final implementation notes`,
-          ]
-        : [
-            `Inspect code context for ${compact}`,
-            `Implement the requested change`,
-            `Run validation and fix issues`,
-            `Summarize final changes`,
-          ],
-      scopes: website
-        ? [
-            `Check the relevant files, framework, styling system, and existing app conventions for "${subject}".`,
-            `Create or edit the actual UI files for "${subject}" using the existing project patterns.`,
-            `Run the local preview or relevant verification and fix visible or build issues.`,
-            `Summarize exactly what changed and any verification limits.`,
-          ]
-        : [
-            `Read the relevant files and existing patterns before changing code for "${subject}".`,
-            `Apply the requested code change with minimal, scoped edits.`,
-            `Run the most relevant tests, build, lint, or smoke checks and fix failures from this change.`,
-            `Summarize changed files and verification results.`,
-          ],
-    }
-  }
-
-  if (isLongWritingTask(messages)) {
-    return {
-      titles: [
-        `Define structure for ${compact}`,
-        `Draft the main content`,
-        `Refine continuity and completeness`,
-        `Create the final deliverable`,
-      ],
-      scopes: [
-        `Establish the structure, audience, and required sections for "${subject}".`,
-        `Write the substantive content requested by the user.`,
-        `Review the draft for completeness, consistency, and obvious gaps.`,
-        `Produce the final response or file in the requested format.`,
-      ],
-    }
-  }
-
-  return {
-    titles: [
-      `Define ${compact} scope and key questions`,
-      `Gather current ${compact} sources`,
-      `Compare evidence, limits, and tradeoffs`,
-      `Write the sourced ${compact} summary`,
-    ],
-    scopes: [
-      `Identify the core definitions, scope, and terminology for "${subject}".`,
-      `Collect current, credible sources and concrete evidence about "${subject}".`,
-      `Compare important themes, examples, limitations, and disagreements in the evidence.`,
-      `Synthesize the findings into the requested answer with sources or caveats where useful.`,
-    ],
-  }
 }
 
 const STEP_COUNT_WORDS: Record<string, number> = {
@@ -438,13 +391,7 @@ function requestedTargetLabel(
   const urlOrDomain = request.match(/\b(?:https?:\/\/)?(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[^\s]*)?/i)?.[0]
   if (urlOrDomain) return urlOrDomain.replace(/^https?:\/\//i, '').replace(/\/$/, '')
 
-  const cleaned = request
-    .replace(/\b(?:please|can you|could you|would you|i need you to|i want you to|make sure to|just)\b/gi, ' ')
-    .replace(/\b(?:build|create|make|design|develop|implement|code|write|draft|research|find|open|go to|navigate to|fix|add|update|refactor)\b/gi, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return conciseTopicLabel(cleaned || request || defaultLabel)
+  return requestSubject(messages) || defaultLabel
 }
 
 function nonDeliverableStepGuidance(
@@ -483,7 +430,8 @@ function nonDeliverableStepGuidance(
   }
 
   const noteGuidance = ''
-  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- Use the fewest strong source actions needed. Prefer web_search plus read_document/http extraction for normal research pages; use browser_navigate only when rendered state, screenshots, interaction, or page scripts are needed.\n- Add more source actions only for comparison coverage, current claims, contradictions, or evidence gaps.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only when rendering matters.'}${noteGuidance}\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
+  const depth = researchDepthProfileForState(state)
+  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Current depth profile: ${depth.label}; this phase should usually reach about ${depth.requiredCalls} research actions and ${depth.requiredSourceBreadth} distinct source domains unless the user explicitly limited scope or real blockers make that impossible.\n- Tool caps are ceilings, never targets. Do not try to use all available searches/extractions; stop as soon as the phase has the evidence packet its scope requires.\n- Use enough strong source actions to satisfy the request's actual depth. Prefer web_search plus read_document/http extraction for normal research pages; use browser_navigate only when rendered state, screenshots, interaction, or page scripts are needed.\n- Add source actions for comparison coverage, current claims, contradictions, named entities, or evidence gaps; stop when the phase has a credible evidence packet, not when an arbitrary small count is reached.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only when rendering matters.'}${noteGuidance}\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
 }
 
 function planAwareIterationFloor(
@@ -509,7 +457,9 @@ function planAwareIterationFloor(
     return fixedOverhead + (nonFinalSteps * browserStepFloor) + finalReportFloor
   }
 
-  const researchCalls = MIN_RESEARCH_CALLS_BY_COMPLEXITY[complexity] ?? 6
+  const researchCalls = researchDepthProfileForState(state).requiredCalls ||
+    MIN_RESEARCH_CALLS_BY_COMPLEXITY[complexity] ||
+    6
   const expectedVisibleActions = researchCalls + 1
   const narrationTurns = Math.ceil(expectedVisibleActions / 3)
   const researchStepFloor = Math.max(
@@ -532,7 +482,15 @@ export class PlanManager {
   private preflightCredit?: PlanCreditPreflight
   private skipAcknowledgement: boolean
   private usageSequence = 0
-
+  private acknowledgementEmitted = false
+  private acknowledgementPromise: Promise<boolean> | null = null
+  private acknowledgementDisplayPromise: Promise<boolean> | null = null
+  private resolveAcknowledgementDisplay: ((emitted: boolean) => void) | null = null
+  private acknowledgementDisplayResolved = false
+  private acknowledgementFirstVisiblePromise: Promise<boolean> | null = null
+  private resolveAcknowledgementFirstVisible: ((emitted: boolean) => void) | null = null
+  private acknowledgementFirstVisibleResolved = false
+  private suppressFurtherAcknowledgementDeltas = false
   constructor(
     emitter: AgentEventEmitter,
     messages: Array<{ role: string; content: string }>,
@@ -559,14 +517,82 @@ export class PlanManager {
       messages: this.messages.length,
       hasCustomInstructions: !!this.customInstructions,
     })
-    if (this.emitFastStartPlan()) {
-      this.planPromise = Promise.resolve(null)
-      return
+    if (!this.skipAcknowledgement && !this.acknowledgementPromise) {
+      this.acknowledgementDisplayResolved = false
+      this.acknowledgementDisplayPromise = new Promise<boolean>((resolve) => {
+        this.resolveAcknowledgementDisplay = resolve
+      })
+      this.acknowledgementFirstVisibleResolved = false
+      this.acknowledgementFirstVisiblePromise = new Promise<boolean>((resolve) => {
+        this.resolveAcknowledgementFirstVisible = resolve
+      })
+      this.acknowledgementPromise = this.emitModelGeneratedAcknowledgement('task')
+        .then((emitted) => {
+          this.settleAcknowledgementFirstVisible(emitted)
+          this.settleAcknowledgementDisplay(emitted)
+          return emitted
+        })
+        .catch((error) => {
+          console.warn('[AgentDiagnostics] Startup acknowledgement call failed', {
+            error: sanitizePlannerError(error),
+          })
+          this.settleAcknowledgementFirstVisible(false)
+          this.settleAcknowledgementDisplay(false)
+          return false
+        })
     }
     const start = PLAN_STARTUP_DELAY_MS > 0
       ? new Promise<null>(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
       : Promise.resolve(null)
-    this.planPromise = start.then(() => this.attemptPlanCall())
+    this.planPromise = start.then(() => this.attemptPlanCall(0, true))
+  }
+
+  usePrecomputedPlan(
+    state: AgentStateData,
+    plan: { items: string[]; scopes?: Array<string | null> },
+    options: { emitPlan?: boolean } = {},
+  ): boolean {
+    const titles = (plan.items || [])
+      .map((item) => typeof item === 'string' ? item.trim() : '')
+      .filter(Boolean)
+      .slice(0, 8)
+    if (titles.length === 0) return false
+
+    const scopes = titles.map((_, index) => {
+      const scope = plan.scopes?.[index]
+      return typeof scope === 'string' && scope.trim() ? scope.trim() : null
+    })
+    const alignedScopes = this.alignScopesToTitles(titles, scopes)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
+    const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
+
+    if (options.emitPlan !== false) this.emitter.plan(withRequired.titles)
+    state.planItems = withRequired.titles
+    state.planScopes = withRequired.scopes
+    state.planEmitted = true
+    this.acknowledgementEmitted = true
+    this.settleAcknowledgementFirstVisible(true)
+    this.settleAcknowledgementDisplay(true)
+    this.planPromise = Promise.resolve(null)
+    console.log('[AgentDiagnostics] Using route startup plan for worker', {
+      steps: withRequired.titles.length,
+      emitted: options.emitPlan !== false,
+    })
+    return true
+  }
+
+  private settleAcknowledgementFirstVisible(emitted: boolean): void {
+    if (this.acknowledgementFirstVisibleResolved) return
+    this.acknowledgementFirstVisibleResolved = true
+    this.resolveAcknowledgementFirstVisible?.(emitted)
+    this.resolveAcknowledgementFirstVisible = null
+  }
+
+  private settleAcknowledgementDisplay(emitted: boolean): void {
+    if (this.acknowledgementDisplayResolved) return
+    this.acknowledgementDisplayResolved = true
+    this.resolveAcknowledgementDisplay?.(emitted)
+    this.resolveAcknowledgementDisplay = null
   }
 
   async awaitPlan(state: AgentStateData): Promise<void> {
@@ -593,7 +619,12 @@ export class PlanManager {
 
     this.usageSequence += 1
     console.log(`[COST:PLAN] ${label} in=${normalized.promptTokens} out=${normalized.completionTokens} cost=$${(normalized.cost || 0).toFixed(6)}`)
-    await this.recordUsage?.(normalized, `plan:${label}:${this.usageSequence}`)
+    void this.recordUsage?.(normalized, `plan:${label}:${this.usageSequence}`).catch((error) => {
+      console.error('[AgentDiagnostics] Planner usage recording failed', {
+        label,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
   }
 
   private async assertCreditRunway(label: string): Promise<void> {
@@ -601,91 +632,191 @@ export class PlanManager {
   }
 
   private async emitModelGeneratedAcknowledgement(taskShape: string, priorInvalidAck?: string): Promise<boolean> {
-    if (this.emitter.isClosed) return false
+    if (this.emitter.isClosed || this.acknowledgementEmitted) return false
+    const ackStartedAt = Date.now()
     const request = effectiveTaskRequest(this.messages).slice(0, 1000)
+    console.log('[AgentDiagnostics] Startup acknowledgement call starting', {
+      taskShape,
+      requestChars: request.length,
+      retry: !!priorInvalidAck,
+    })
     await this.assertCreditRunway('ack')
-    const res = await createCompletion({
+    const afterCreditAt = Date.now()
+    const stream = await createStreamingCompletion({
       model: DEFAULT_MODEL,
       messages: [
         {
           role: 'system' as const,
-          content: `Write exactly one short acknowledgement for Agent before it starts a ${taskShape} task.
+          content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts a ${taskShape} task.
 Requirements:
-- One sentence, <=160 characters.
-- Specific to the user's concrete target/topic/artifact.
-- State the concrete work area in present-tense style; do not start with "I'll", "I will", "Let me", "I'm going to", "Next", or "Now".
+- One very brief paragraph, one or two short sentences, 12-38 words total.
+- Use plain words. Avoid fancy, inflated or formal phrasing.
+- Specific to the user's concrete target/topic/artifact and requested output.
+- Say what Agent will actually do for this task and the final answer/artifact shape.
+- Before writing, silently identify the real target, requested deliverable, likely work areas, and any important constraints. Output only the final paragraph.
+- Extract the real topic/artifact first. Do not echo command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", or "produce a concise report".
+- Direct first-person phrasing like "I'll..." is allowed when specific. Do not start with "Let me", "Next", or "Now".
 - No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
 - No markdown, no bullets, no refusal, no mention of being an AI.`,
         },
         {
           role: 'user' as const,
           content: priorInvalidAck
-            ? `USER REQUEST:\n${request}\n\nINVALID ACK TO REPLACE:\n${priorInvalidAck}\n\nWrite a better task-specific acknowledgement.`
+            ? `USER REQUEST:\n${request}\n\nINVALID ACK TO REPLACE:\n${priorInvalidAck}\n\nWrite a better task-specific acknowledgement paragraph.`
             : request,
         },
       ],
       temperature: 0.4,
       max_tokens: PLANNER_ACK_MAX_TOKENS,
-      reasoning: PLANNER_CONTROL_REASONING,
+      reasoning: PLANNER_ACK_REASONING,
       includeTemporalContext: false,
+      stream_options: { include_usage: true },
+      requestTimeoutMs: PLANNER_ACK_STREAM_TIMEOUT_MS,
+      retryMaxAttempts: 0,
     })
-    await this.recordCompletionUsage(res.usage, 'ack')
-    const ack = sanitizePlannerAck(res.choices[0]?.message?.content?.trim() || '')
-    if (isUsablePlannerAck(ack)) {
-      this.emitter.textDelta(ack + '\n\n')
+    console.log('[AgentDiagnostics] Startup acknowledgement stream opened', {
+      elapsedMs: Date.now() - ackStartedAt,
+      creditPreflightMs: afterCreditAt - ackStartedAt,
+    })
+
+    let ack = ''
+    let firstBuffer = ''
+    let pendingVisibleAck = ''
+    let startedVisibleText = false
+    let emittedAny = false
+    let ownsVisibleAcknowledgement = false
+    let usage: RawCompletionUsage
+
+    const emitVisible = async (content: string) => {
+      if (!content || this.emitter.isClosed) return
+      if (this.suppressFurtherAcknowledgementDeltas) return
+      if (this.acknowledgementEmitted && !ownsVisibleAcknowledgement) return
+      if (this.emitter.isClosed) return
+      if (this.suppressFurtherAcknowledgementDeltas) return
+      if (this.acknowledgementEmitted && !ownsVisibleAcknowledgement) return
+      ownsVisibleAcknowledgement = true
+      this.settleAcknowledgementFirstVisible(true)
+      this.emitter.textDelta(content)
+      this.acknowledgementEmitted = true
+      emittedAny = true
+    }
+
+    const flushPendingVisibleAck = async (force = false) => {
+      if (!pendingVisibleAck) return
+      const compact = pendingVisibleAck.replace(/\s+/g, ' ')
+      const trimmed = compact.trim()
+      if (!trimmed) {
+        pendingVisibleAck = ''
+        return
+      }
+      const endsCleanly = /[.!?]\s*$/.test(trimmed)
+      const hasUsefulClause = trimmed.length >= PLANNER_ACK_FOLLOWUP_FLUSH_CHARS && /\s$/.test(pendingVisibleAck)
+      if (!force && !endsCleanly && !hasUsefulClause) return
+      await emitVisible(compact)
+      pendingVisibleAck = ''
+    }
+
+    for await (const chunk of stream) {
+      if (chunk.usage) usage = chunk.usage
+      const delta = streamingChunkText(chunk)
+      if (!delta) continue
+      ack += delta
+
+      if (startedVisibleText) {
+        pendingVisibleAck += delta
+        await flushPendingVisibleAck(false)
+        continue
+      }
+
+      firstBuffer += delta
+      const cleanedFirst = sanitizePlannerAck(firstBuffer)
+      const hasCompleteSentence = cleanedFirst.length >= PLANNER_ACK_FIRST_FLUSH_CHARS &&
+        ackWordCount(cleanedFirst) >= PLANNER_ACK_FIRST_FLUSH_WORDS &&
+        /[.!?]\s*$/.test(cleanedFirst)
+      const readyToFlush = hasCompleteSentence
+      if (readyToFlush) {
+        startedVisibleText = true
+        await emitVisible(cleanedFirst)
+        console.log('[AgentDiagnostics] Startup acknowledgement first visible text emitted', {
+          elapsedMs: Date.now() - ackStartedAt,
+          chars: cleanedFirst.length,
+        })
+      }
+    }
+
+    await flushPendingVisibleAck(true)
+
+    if (!startedVisibleText) {
+      const cleaned = sanitizePlannerAck(firstBuffer || ack)
+      if (cleaned) await emitVisible(cleaned)
+    }
+
+    if (emittedAny && ownsVisibleAcknowledgement && !this.emitter.isClosed) {
+      this.emitter.textDelta('\n\n')
+      this.settleAcknowledgementDisplay(true)
+    }
+
+    const sanitizedAck = sanitizePlannerAck(ack.trim())
+    if (usage) {
+      await this.recordCompletionUsage(usage, 'ack')
+    } else if (!emittedAny) {
+      throw new Error(BILLABLE_USAGE_ERROR)
+    }
+
+    if (emittedAny) {
+      if (!isUsablePlannerAck(sanitizedAck)) {
+        console.warn('[AgentDiagnostics] Startup acknowledgement streamed but failed post-hoc quality check', {
+          length: sanitizedAck.length,
+          taskShape,
+        })
+      }
+      console.log('[AgentDiagnostics] Startup acknowledgement complete', {
+        elapsedMs: Date.now() - ackStartedAt,
+        chars: sanitizedAck.length,
+      })
       return true
     }
-    if (!priorInvalidAck) {
-      return this.emitModelGeneratedAcknowledgement(taskShape, ack || '(empty acknowledgement)')
-    }
+
+    this.settleAcknowledgementFirstVisible(false)
+    if (!priorInvalidAck) return this.emitModelGeneratedAcknowledgement(taskShape, sanitizedAck || '(empty acknowledgement)')
+    this.settleAcknowledgementDisplay(false)
     throw new Error(PLANNER_QUALITY_ERROR)
   }
 
   private async emitAcknowledgement(ack: string | undefined, taskShape: string): Promise<void> {
     if (this.skipAcknowledgement) return
+
+    if (this.acknowledgementEmitted) {
+      this.suppressFurtherAcknowledgementDeltas = true
+      this.settleAcknowledgementDisplay(true)
+      return
+    }
+
+    if (this.acknowledgementDisplayPromise) {
+      const displayed = await Promise.race([
+        this.acknowledgementDisplayPromise,
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), PLANNER_ACK_DISPLAY_WAIT_MS)),
+      ])
+      if (this.acknowledgementEmitted || displayed) {
+        this.suppressFurtherAcknowledgementDeltas = true
+        return
+      }
+    }
+
     const sanitized = typeof ack === 'string' ? sanitizePlannerAck(ack) : ''
     if (isUsablePlannerAck(sanitized)) {
       this.emitter.textDelta(sanitized + '\n\n')
+      this.acknowledgementEmitted = true
       return
+    }
+
+    if (this.acknowledgementPromise) {
+      const emitted = await this.acknowledgementPromise
+      if (this.acknowledgementEmitted || emitted) return
     }
 
     const emitted = await this.emitModelGeneratedAcknowledgement(taskShape)
     if (!emitted && !this.emitter.isClosed) throw new Error(PLANNER_QUALITY_ERROR)
-  }
-
-  private emitFastStartPlan(): boolean {
-    const state = this._stateRef
-    if (!state || state.planEmitted || this.emitter.isClosed) return false
-
-    const taskType = (state.taskStrategy === 'action' ? 'browse' : state.taskStrategy) as TaskType
-    const base = fastStartPlannerSteps(this.messages, taskType)
-    try {
-      const enforcedTitles = this.enforceMinSteps(base.titles)
-      const enforcedScopes = enforcedTitles.length === base.scopes.length
-        ? base.scopes
-        : enforcedTitles.map((_, index) => base.scopes[index] ?? null)
-      const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
-      const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
-      const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
-
-      if (!this.skipAcknowledgement) {
-        this.emitter.textDelta(fastStartAck(this.messages, taskType) + '\n\n')
-      }
-      this.emitter.plan(withRequired.titles)
-      state.planItems = withRequired.titles
-      state.planScopes = withRequired.scopes
-      state.planEmitted = true
-      console.log('[Plan] Fast-start plan emitted', {
-        steps: withRequired.titles.length,
-        taskType,
-      })
-      return true
-    } catch (error) {
-      console.warn('[Plan] Fast-start plan unavailable; falling back to planner call', {
-        error: error instanceof Error ? error.message : String(error),
-      })
-      return false
-    }
   }
 
   getStepInjection(state: AgentStateData, iterationLimit: number): { role: string; content: string } | null {
@@ -709,6 +840,7 @@ Requirements:
       state.currentPlanScopes = resolvedScopes
       state.currentStepIdx = 0
       state.stepIterationCount = 0
+      state.phaseNarrationEmittedThisStep = false
       updatePhase(state)
       setWorkLedgerObjective(state, resolvedPlan[0])
       setWorkLedgerRequirements(state, this.buildInitialRequirements(resolvedPlan, resolvedScopes))
@@ -734,7 +866,7 @@ Requirements:
       } else {
         const iterationsForWork = Math.floor(effectiveIterationLimit * deliverableBudgetFraction)
         const baseBudget = iterationsForWork / numSteps
-      const requiredResearchCalls = MIN_RESEARCH_CALLS_BY_COMPLEXITY[this.taskComplexity as keyof typeof MIN_RESEARCH_CALLS_BY_COMPLEXITY] ?? 3
+      const requiredResearchCalls = researchDepthProfileForState(state).requiredCalls
       const researchCadenceBudget = requiredResearchCalls + Math.ceil(requiredResearchCalls / 3) + 1
       const strategyStepFloor = state.taskStrategy === 'build' || state.taskStrategy === 'code'
         ? MIN_STEP_BUDGET + 4
@@ -819,7 +951,7 @@ Requirements:
     if (state.currentStepIdx >= state.currentPlanItems.length) {
       return {
         role: 'system',
-        content: 'ALL PLAN STEPS ARE COMPLETE. You are DONE. Write a natural final response, then STOP. Use plain paragraphs or bullets only when they genuinely help the user. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention they are attached below in one short sentence. Include concrete results, caveats, or next steps only when useful. Do not create, edit, browse, or research further.',
+        content: `ALL PLAN STEPS ARE COMPLETE. You are DONE. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Do not create, edit, browse, or research further.`,
       }
     }
 
@@ -832,7 +964,7 @@ Requirements:
     if (state.currentStepIdx >= state.currentPlanItems.length) {
       return {
         role: 'system',
-        content: 'ALL PLAN STEPS ARE COMPLETE. You are DONE. Write a natural final response, then STOP. Use plain paragraphs or bullets only when they genuinely help the user. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention they are attached below in one short sentence. Include concrete results, caveats, or next steps only when useful. Do not create, edit, browse, or research further.',
+        content: `ALL PLAN STEPS ARE COMPLETE. You are DONE. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Do not create, edit, browse, or research further.`,
       }
     }
     const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
@@ -894,10 +1026,12 @@ Requirements:
     if (typeof obj.complexity === 'number' && obj.complexity >= 1 && obj.complexity <= 5) {
       const llmComplexity = obj.complexity
       const mapped = llmComplexity <= 1 ? 1 : llmComplexity <= 3 ? 2 : 3
-      if (mapped !== this.taskComplexity) {
-        console.log(`[Plan] Agent complexity ${llmComplexity} (mapped ${mapped}) overrides regex guess ${this.taskComplexity}`)
+      if (mapped > this.taskComplexity) {
+        console.log(`[Plan] Agent complexity ${llmComplexity} (mapped ${mapped}) upgrades regex guess ${this.taskComplexity}`)
         this.taskComplexity = mapped
         state.taskComplexity = mapped
+      } else if (mapped < this.taskComplexity) {
+        console.log(`[Plan] Keeping higher regex complexity ${this.taskComplexity} over planner ${llmComplexity} (mapped ${mapped})`)
       }
     }
 
@@ -923,12 +1057,17 @@ Requirements:
             role: 'system' as const,
             content: `Repair an invalid task-planner response into a valid JSON object only.
 Schema:
-{"ack":"task-specific acknowledgement","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"5-15 word task-specific step","scope":"non-overlapping step scope"}]}
+{"ack":"very brief direct acknowledgement paragraph","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"5-15 word task-specific step","scope":"non-overlapping step scope"}]}
 
 Rules:
 - Return only JSON. No markdown, prose, or code fence.
+- First extract the user's actual target/topic/artifact and requested output. Treat command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", "produce a concise report", and "answer whether" as instructions, not as the topic.
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
+- Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
+- The ack must be one very brief direct paragraph, one or two short sentences and 12-38 words, using plain words and saying what Agent will do for the exact task and what it will deliver.
 - Step count is flexible: do not default to 3 or 4 steps. Use 1-2 steps for simple tasks, 3-5 for multi-faceted tasks, and 5+ only for deep/large tasks.
+- Scopes must be compact, usually 10-22 words. Preserve depth through the phase goal, not long scope prose.
+- Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
 - If saved custom instructions require todo.md or another tracking file, preserve that support step; otherwise do not invent tracking files.
 - If the broken response contains useful task details, preserve them. If it does not, derive a specific plan from the user request.
@@ -940,9 +1079,11 @@ Rules:
           },
         ],
         temperature: 0.1,
-        max_tokens: PLANNER_JSON_MAX_TOKENS,
+        max_tokens: this.plannerJsonMaxTokens(),
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
+        requestTimeoutMs: PLANNER_REPAIR_REQUEST_TIMEOUT_MS,
+        retryMaxAttempts: 0,
       }
       let res
       try {
@@ -969,6 +1110,13 @@ Rules:
     }
   }
 
+  private plannerJsonMaxTokens(): number {
+    const request = effectiveTaskRequest(this.messages)
+    if (this.taskComplexity <= 1 && request.length < 1200) return PLANNER_SIMPLE_JSON_MAX_TOKENS
+    if (this.taskComplexity <= 2 && request.length < 2200) return PLANNER_MEDIUM_JSON_MAX_TOKENS
+    return PLANNER_JSON_MAX_TOKENS
+  }
+
   private async emitParsedPlan(state: AgentStateData, obj: PlannerResponseObject): Promise<boolean> {
     const arrays = this.plannerStepArrays(obj.steps)
     if (!arrays) return false
@@ -992,6 +1140,7 @@ Rules:
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
+    assertPlannerVisibleTextQuality(obj.ack, withRequired.titles, withRequired.scopes)
 
     await this.emitAcknowledgement(obj.ack, mappedTaskType)
     this.emitter.plan(withRequired.titles)
@@ -1001,7 +1150,48 @@ Rules:
     return true
   }
 
-  private async attemptPlanCall(attempt = 0): Promise<null> {
+  private async emitParsedPlanWithModelRepair(
+    state: AgentStateData,
+    raw: string,
+    initialPlan: PlannerResponseObject | null,
+  ): Promise<boolean> {
+    let candidate = initialPlan
+    let repairInput = raw
+    let qualityIssue = initialPlan ? PLANNER_QUALITY_ERROR : undefined
+
+    for (let repairAttempt = 0; repairAttempt <= PLANNER_QUALITY_REPAIR_ATTEMPTS; repairAttempt++) {
+      if (candidate) {
+        try {
+          const emitted = await this.emitParsedPlan(state, candidate)
+          if (emitted) return true
+        } catch (qualityError) {
+          if (!isPlannerQualityError(qualityError)) throw qualityError
+          qualityIssue = PLANNER_QUALITY_ERROR
+        }
+      } else {
+        qualityIssue = qualityIssue || PLANNER_QUALITY_ERROR
+      }
+
+      if (this.emitter.isClosed || state.planEmitted) return true
+      if (repairAttempt >= PLANNER_QUALITY_REPAIR_ATTEMPTS) break
+
+      const serializedCandidate = stringifyPlannerResponseForRepair(candidate)
+      const nextRepairInput = serializedCandidate || repairInput || `USER REQUEST:\n${effectiveTaskRequest(this.messages).slice(0, 3000)}`
+      const repaired = await this.repairPlannerResponse(nextRepairInput, qualityIssue)
+      if (!repaired) {
+        repairInput = nextRepairInput
+        continue
+      }
+
+      candidate = repaired
+      repairInput = stringifyPlannerResponseForRepair(repaired) || nextRepairInput
+      qualityIssue = PLANNER_QUALITY_ERROR
+    }
+
+    return false
+  }
+
+  private async attemptPlanCall(attempt = 0, relaxedJsonMode = false): Promise<null> {
     const state = this._stateRef
     try {
       console.log('[AgentDiagnostics] Planner call starting', {
@@ -1017,17 +1207,23 @@ Rules:
           ...this.messages as ChatMessageParam[],
         ],
         temperature: 0.3,
-        max_tokens: PLANNER_JSON_MAX_TOKENS,
+        max_tokens: this.plannerJsonMaxTokens(),
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
+        requestTimeoutMs: relaxedJsonMode
+          ? PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS
+          : PLANNER_JSON_REQUEST_TIMEOUT_MS,
+        retryMaxAttempts: 0,
       }
       let res
       try {
         await this.assertCreditRunway('initial')
-        res = await createCompletion({
-          ...params,
-          response_format: { type: 'json_object' },
-        })
+        res = relaxedJsonMode
+          ? await createCompletion(params)
+          : await createCompletion({
+              ...params,
+              response_format: { type: 'json_object' },
+            })
       } catch (e) {
         const status = (e as { status?: number })?.status
         console.error('[AgentDiagnostics] Planner JSON-mode call failed', {
@@ -1050,22 +1246,11 @@ Rules:
       const raw = res.choices[0]?.message?.content?.trim() || ''
       console.log(`[Plan] Planner response received (${raw.length} chars)`)
       if (state && !state.planEmitted && !this.emitter.isClosed) {
-        const parsedPlan = parsePlannerResponse(raw) || await this.repairPlannerResponse(raw)
-        if (parsedPlan) {
-          try {
-            const emitted = await this.emitParsedPlan(state, parsedPlan)
-            if (emitted) return null
-          } catch (qualityError) {
-            if (!isPlannerQualityError(qualityError)) throw qualityError
-            const repaired = await this.repairPlannerResponse(raw, PLANNER_QUALITY_ERROR)
-            if (repaired) {
-              const emitted = await this.emitParsedPlan(state, repaired)
-              if (emitted) return null
-            }
-          }
-        }
+        const parsedPlan = parsePlannerResponse(raw)
+        const emitted = await this.emitParsedPlanWithModelRepair(state, raw, parsedPlan)
+        if (emitted) return null
 
-        throw new Error(PLANNER_QUALITY_ERROR)
+        throw plannerRepairExhaustedError()
       }
       return null
     } catch (e) {
@@ -1075,6 +1260,18 @@ Rules:
         console.log(`[Plan] 429 on attempt ${attempt + 1}, retrying in ${Math.round(backoff)}ms`)
         await new Promise(r => setTimeout(r, backoff))
         return this.attemptPlanCall(attempt + 1)
+      }
+      if (e instanceof Error && e.message === PLANNER_REPAIR_EXHAUSTED_ERROR && attempt < PLAN_MAX_RETRIES) {
+        const backoff = PLAN_RETRY_BASE_MS * (attempt + 1)
+        console.log(`[Plan] Planner quality repair exhausted on attempt ${attempt + 1}, retrying fresh planner call in ${Math.round(backoff)}ms`)
+        await new Promise(r => setTimeout(r, backoff))
+        return this.attemptPlanCall(attempt + 1)
+      }
+      if (isPlannerRequestTimeout(e) && attempt < PLAN_MAX_RETRIES) {
+        const backoff = 100
+        console.log(`[Plan] Planner start timed out on attempt ${attempt + 1}, retrying strict planner mode in ${backoff}ms`)
+        await new Promise(r => setTimeout(r, backoff))
+        return this.attemptPlanCall(attempt + 1, false)
       }
       if (isBillableUsageError(e)) throw e
       console.error('[AgentDiagnostics] Planner call failed', {
@@ -1124,6 +1321,8 @@ Generate an updated list of remaining steps (including a revised current step if
         max_tokens: REPLAN_JSON_MAX_TOKENS,
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
+        requestTimeoutMs: PLANNER_REPLAN_REQUEST_TIMEOUT_MS,
+        retryMaxAttempts: 0,
       })
 
       await this.recordCompletionUsage(res.usage, 'replan')
@@ -1170,86 +1369,10 @@ Generate an updated list of remaining steps (including a revised current step if
 
   /**
    * Keep planner output structurally valid without locally fabricating missing
-   * phases. Quality failures throw so the model repair path can produce a
-   * fresh task-specific plan.
+   * phases. The LLM owns the plan shape; this method intentionally avoids
+   * local step-count or template vetoes that can deadlock startup.
    */
   private enforceMinSteps(steps: string[]): string[] {
-    // Complexity 1 (trivial) can have any number of steps.
-    if (this.taskComplexity <= 1) return steps
-    if (steps.length === 1 && isImageRetrievalStep(steps[0])) return steps
-    if (isSingleWebSearchMarkdownTask(this.messages)) {
-      if (steps.length !== 2) throw new Error(PLANNER_QUALITY_ERROR)
-      const [searchStep, deliverableStep] = steps
-      const searchOnlyStep = /\b(?:web[_\s-]?search|search)\b/i.test(searchStep) &&
-        !/\b(?:browse|browser|open|visit|read page|scroll|navigate)\b/i.test(searchStep)
-      const markdownDeliverableStep = /\b(?:markdown|\.md|report|file|deliverable|write|create|save)\b/i.test(deliverableStep)
-      if (!searchOnlyStep || !markdownDeliverableStep) throw new Error(PLANNER_QUALITY_ERROR)
-      return steps
-    }
-    if (this.customInstructionVisibleStepCount() !== null && steps.length > 0) return steps
-
-    if (isBrowserActionTask(this.messages)) {
-      if (steps.length === 0) throw new Error(PLANNER_QUALITY_ERROR)
-      if (steps.length === 1) throw new Error(PLANNER_QUALITY_ERROR)
-
-      const repaired = steps.map((step) => {
-        const lower = step.toLowerCase()
-        const isResearchShaped = /\b(research|investigate|analyze|compare|gather sources|find sources|source evidence|write guide|compile guide)\b/.test(lower)
-        const isActionShaped = /\b(navigate|open|visit|click|select|choose|fill|type|submit|verify|download|upload|book|reserve|continue|confirm|complete|interact)\b/.test(lower)
-        if (isResearchShaped && !isActionShaped) throw new Error(PLANNER_QUALITY_ERROR)
-        return step
-      })
-
-      const hasFinalVerification = /\b(verify|confirm|report|final|deliver)\b/i.test(repaired[repaired.length - 1] || '')
-      if (!hasFinalVerification) {
-        throw new Error(PLANNER_QUALITY_ERROR)
-      }
-      return repaired
-    }
-
-    if (isBuildOrCodeTask(this.messages)) {
-      if (steps.length === 0) throw new Error(PLANNER_QUALITY_ERROR)
-      if (!isWebsiteBuildTask(this.messages)) {
-        if (steps.length === 1) throw new Error(PLANNER_QUALITY_ERROR)
-        return steps
-      }
-      if (steps.length < 3) {
-        throw new Error(PLANNER_QUALITY_ERROR)
-      }
-
-      const normalizedSteps = steps.map((step) => {
-        const lower = step.toLowerCase()
-        const suspiciousResearchPadding = /\b(cross[-\s]?validate|additional sources|gather additional|research)\b/.test(lower) &&
-          /\b(create|build|code|file|files|next\.?js|app\/|layout|page|globals|component)\b/.test(lower)
-        if (!suspiciousResearchPadding) return step
-        throw new Error(PLANNER_QUALITY_ERROR)
-      })
-
-      if (!isWebsiteBuildTask(this.messages)) return normalizedSteps
-
-      const finalStep = normalizedSteps[normalizedSteps.length - 1]
-      const finalIsDeliverOnly = isWebsiteDeliverStep(finalStep) && !isWebsitePreviewStep(finalStep)
-      const existingPreviewIdx = normalizedSteps.findIndex((step, index) =>
-        index < normalizedSteps.length - 1 && isWebsitePreviewStep(step)
-      )
-      if (existingPreviewIdx === normalizedSteps.length - 2 && finalIsDeliverOnly) return normalizedSteps
-      throw new Error(PLANNER_QUALITY_ERROR)
-    }
-
-    if (isLongWritingTask(this.messages) && steps.length === 0) {
-      throw new Error(PLANNER_QUALITY_ERROR)
-    }
-
-    if (isLongWritingTask(this.messages) && steps.length < 5) {
-      throw new Error(PLANNER_QUALITY_ERROR)
-    }
-
-    if (steps.length >= 2) return steps
-
-    if (steps.length === 1) {
-      throw new Error(PLANNER_QUALITY_ERROR)
-    }
-
     return steps
   }
 
@@ -1444,6 +1567,7 @@ Generate an updated list of remaining steps (starting from a revised current ste
         max_tokens: REPLAN_JSON_MAX_TOKENS,
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
+        retryMaxAttempts: 0,
       })
 
       await this.recordCompletionUsage(res.usage, 'info-replan')

@@ -236,7 +236,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
       {/* Mobile backdrop */}
       <button
         type="button"
-        className="fixed inset-0 bg-[var(--overlay-scrim)] z-25 md:hidden cursor-default"
+        className="fixed inset-0 bg-[var(--overlay-scrim)] z-[125] md:hidden cursor-default"
         onClick={() => useUIStore.getState().setComputerPanelOpen(false, { source: 'user' })}
         aria-label="Close computer panel"
       />
@@ -252,7 +252,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
 
       <div
         data-computer-panel=""
-        className="fixed bg-bg-primary border border-border-primary flex flex-col animate-panel-in z-30 overflow-hidden inset-0 rounded-none md:inset-auto md:right-2 md:top-2 md:bottom-2 md:rounded-2xl"
+        className="fixed bg-bg-primary border border-border-primary flex flex-col animate-panel-in z-[130] overflow-hidden inset-0 h-[100dvh] rounded-none md:inset-auto md:right-2 md:top-2 md:bottom-2 md:h-auto md:rounded-2xl md:z-30"
         style={{ boxShadow: 'var(--shadow-lg)' }}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
@@ -265,10 +265,10 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
         <PanelHeader />
 
         {webIdeMode && (
-          <div className="h-10 px-3 flex items-center gap-1 border-b border-border-primary flex-shrink-0">
+          <div className="h-10 px-2 flex items-center gap-1 border-b border-border-primary flex-shrink-0 overflow-x-auto scrollbar-none sm:px-3">
             <button
               onClick={() => setComputerActiveTab('activity')}
-              className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${
+              className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${
                 computerActiveTab === 'activity'
                   ? 'bg-bg-secondary text-accent-blue'
                   : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'
@@ -280,7 +280,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
             </button>
             <button
               onClick={() => setComputerActiveTab('webide')}
-              className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 min-w-0 ${
+              className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 min-w-0 ${
                 computerActiveTab === 'webide'
                   ? 'bg-bg-secondary text-accent-blue'
                   : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'
@@ -302,7 +302,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
         ) : (
           <>
             {/* Tab buttons */}
-            <div className="h-10 px-3 flex items-center gap-1 border-b border-border-primary flex-shrink-0">
+            <div className="h-10 px-2 flex items-center gap-1 border-b border-border-primary flex-shrink-0 overflow-x-auto scrollbar-none sm:px-3">
               {(() => {
                 const tc = (type: string) =>
                   filterType === type
@@ -312,14 +312,14 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                   <>
                     <button
                       onClick={() => { setComputerPanelActiveItemId(null); setFilterType('all'); setActiveIndex(visibleItems.length - 1) }}
-                      className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('all')}`}
+                      className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('all')}`}
                     >
                       All
                       <span className="tabular-nums opacity-70">{visibleItems.length}</span>
                     </button>
                     <button
                       onClick={() => { setComputerPanelActiveItemId(null); setFilterType('search'); setActiveIndex(Math.max(0, searchCount - 1)) }}
-                      className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('search')}`}
+                      className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('search')}`}
                     >
                       <Search size={12} />
                       <span className="tabular-nums">{searchCount}</span>
@@ -327,7 +327,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                     {imageSearchCount > 0 && (
                       <button
                         onClick={() => { setComputerPanelActiveItemId(null); setFilterType('image_search'); setActiveIndex(Math.max(0, imageSearchCount - 1)) }}
-                        className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('image_search')}`}
+                        className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('image_search')}`}
                       >
                         <ImageIcon size={12} />
                         <span className="tabular-nums">{imageSearchCount}</span>
@@ -335,14 +335,14 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                     )}
                     <button
                       onClick={() => { setComputerPanelActiveItemId(null); setFilterType('browse'); setActiveIndex(Math.max(0, browseCount - 1)) }}
-                      className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('browse')}`}
+                      className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('browse')}`}
                     >
                       <Globe size={12} />
                       <span className="tabular-nums">{browseCount}</span>
                     </button>
                     <button
                       onClick={() => { setComputerPanelActiveItemId(null); setFilterType('terminal'); setActiveIndex(Math.max(0, terminalCount - 1)) }}
-                      className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('terminal')}`}
+                      className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('terminal')}`}
                     >
                       <Terminal size={12} />
                       <span className="tabular-nums">{terminalCount}</span>
@@ -350,7 +350,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                     {fileCount > 0 && (
                       <button
                         onClick={() => { setComputerPanelActiveItemId(null); setFilterType('file'); setActiveIndex(Math.max(0, fileCount - 1)) }}
-                        className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('file')}`}
+                        className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('file')}`}
                       >
                         <FileText size={12} />
                         <span className="tabular-nums">{fileCount}</span>
@@ -359,7 +359,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                     {browserCount > 0 && (
                       <button
                         onClick={() => { setComputerPanelActiveItemId(null); setFilterType('browser'); setActiveIndex(Math.max(0, browserCount - 1)) }}
-                        className={`flex items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('browser')}`}
+                        className={`flex flex-shrink-0 items-center gap-1.5 text-[12px] font-medium pl-2.5 pr-2 h-8 rounded-md transition-all duration-150 ${tc('browser')}`}
                       >
                         <Monitor size={12} />
                         <span className="tabular-nums">{browserCount}</span>
@@ -402,7 +402,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
 
             {/* Timeline */}
             {filteredItems.length > 0 && (
-              <div className="h-11 border-t border-border-primary flex items-center px-3 gap-2 flex-shrink-0">
+              <div className="h-11 border-t border-border-primary flex items-center px-2 gap-1 flex-shrink-0 sm:px-3 sm:gap-2">
                 <button
                   onClick={() => { setComputerPanelActiveItemId(null); setActiveIndex(0) }}
                   className="w-8 h-8 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-muted transition-all duration-150"

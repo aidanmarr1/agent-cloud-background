@@ -4,8 +4,13 @@ import { constants } from 'fs'
 import { mkdir, open, unlink } from 'fs/promises'
 import { join } from 'path'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
+import { normalizeSearchQuery } from './searchQuery'
 
-// --- Helpers (same pattern as search.ts) ---
+const SERPER_API_KEY = process.env.SERPER_API_KEY
+const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
+const IMAGE_SEARCH_TIMEOUT_MS = 12_000
+const MAX_SEARCH_RESPONSE_BYTES = 2 * 1024 * 1024
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -14,8 +19,6 @@ const USER_AGENTS = [
 ]
 
 const MAX_REDIRECTS = 5
-const MAX_SEARCH_RESPONSE_BYTES = 2 * 1024 * 1024
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024
 
 function randomUA(): string {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
@@ -50,78 +53,59 @@ async function fetchWithTimeout(url: string, options: ImageFetchOptions, timeout
   }
 }
 
-async function fetchJsonWithTimeout(url: string, options: ImageFetchOptions, timeoutMs: number): Promise<unknown> {
+interface SerperImageResult {
+  title?: string
+  imageUrl?: string
+  thumbnailUrl?: string
+  source?: string
+  domain?: string
+  link?: string
+}
+
+interface SerperImagesResponse {
+  images?: SerperImageResult[]
+}
+
+function serperApiKey(): string {
+  const key = SERPER_API_KEY?.trim()
+  if (!key) throw new Error('SERPER_API_KEY is not configured')
+  return key
+}
+
+async function serperImages(rawQuery: unknown, count: number): Promise<SerperImagesResponse> {
+  const query = normalizeSearchQuery(rawQuery)
+  if (!query) throw new Error('Image search query is empty after cleanup')
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const timer = setTimeout(() => controller.abort(), IMAGE_SEARCH_TIMEOUT_MS)
   try {
-    const response = await guardedFetch(url, { ...options, signal: controller.signal, maxBytes: MAX_SEARCH_RESPONSE_BYTES })
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    const data = await response.json()
-    return data
+    const response = await fetch(`${SERPER_BASE_URL}/images`, {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': serperApiKey(),
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ q: query, num: count }),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      const body = (await response.text()).replace(/\s+/g, ' ').trim().slice(0, 220)
+      throw new Error(`Serper images HTTP ${response.status}${body ? `: ${body}` : ''}`)
+    }
+    const contentLength = response.headers.get('content-length')
+    if (contentLength) {
+      const parsedLen = Number.parseInt(contentLength, 10)
+      if (!Number.isFinite(parsedLen) || parsedLen < 0 || parsedLen > MAX_SEARCH_RESPONSE_BYTES) {
+        throw new Error('Serper image response exceeds size limit')
+      }
+    }
+    return (await response.json()) as SerperImagesResponse
   } finally {
     clearTimeout(timer)
   }
 }
 
-async function fetchTextWithTimeout(url: string, options: ImageFetchOptions, timeoutMs: number): Promise<{ ok: boolean; status: number; text: string }> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), timeoutMs)
-  try {
-    const response = await guardedFetch(url, { ...options, signal: controller.signal, maxBytes: MAX_SEARCH_RESPONSE_BYTES })
-    const text = response.ok ? await response.text() : ''
-    return { ok: response.ok, status: response.status, text }
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-// --- DuckDuckGo Image Search ---
-
-async function searchDuckDuckGoImages(query: string, count: number): Promise<ImageSearchResult[]> {
-  // Step 1: Get vqd token
-  const { ok, text: html } = await fetchTextWithTimeout(
-    `https://duckduckgo.com/?q=${encodeURIComponent(query)}&iax=images&ia=images`,
-    {
-      headers: {
-        'User-Agent': randomUA(),
-        'Accept': 'text/html',
-      },
-    },
-    10000
-  )
-  if (!ok) throw new Error('DuckDuckGo image page failed')
-
-  const vqdMatch = html.match(/vqd=["']?([^"'&]+)/)
-  if (!vqdMatch) throw new Error('Could not extract vqd token')
-  const vqd = vqdMatch[1]
-
-  // Step 2: Fetch image JSON
-  const data = await fetchJsonWithTimeout(
-    `https://duckduckgo.com/i.js?l=us-en&o=json&q=${encodeURIComponent(query)}&vqd=${vqd}`,
-    {
-      headers: {
-        'User-Agent': randomUA(),
-        'Accept': 'application/json',
-        'Referer': 'https://duckduckgo.com/',
-      },
-    },
-    10000
-  ) as { results?: Array<{ title?: string; thumbnail?: string; url?: string; image?: string }> }
-
-  const results = data.results || []
-  return results.slice(0, count).map((r) => ({
-    title: r.title || '',
-    thumbnailUrl: r.thumbnail || '',
-    sourceUrl: r.url || '',
-    imageUrl: r.image || r.thumbnail || '',
-  }))
-}
-
-// --- Main entry point ---
-
-const IMAGE_SEARCH_TIMEOUT_MS = 20_000
-
-export async function imageSearch(query: string, count: number = 5): Promise<ImageSearchResult[]> {
+export async function imageSearch(query: unknown, count: number = 5): Promise<ImageSearchResult[]> {
   count = Math.max(1, Math.min(20, count))
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
@@ -140,15 +124,17 @@ export async function imageSearch(query: string, count: number = 5): Promise<Ima
   }
 }
 
-async function imageSearchInner(query: string, count: number): Promise<ImageSearchResult[]> {
-  try {
-    const results = await searchDuckDuckGoImages(query, count)
-    if (results.length > 0) return results
-  } catch (error) {
-    console.error('DuckDuckGo image search error:', error)
-  }
-
-  return []
+async function imageSearchInner(query: unknown, count: number): Promise<ImageSearchResult[]> {
+  const data = await serperImages(query, count)
+  return (data.images || [])
+    .filter(result => result.imageUrl || result.thumbnailUrl)
+    .slice(0, count)
+    .map(result => ({
+      title: result.title || result.source || result.domain || '',
+      thumbnailUrl: result.thumbnailUrl || result.imageUrl || '',
+      sourceUrl: result.link || '',
+      imageUrl: result.imageUrl || result.thumbnailUrl || '',
+    }))
 }
 
 // --- Download images to sandbox ---

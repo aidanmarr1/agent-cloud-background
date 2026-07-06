@@ -18,7 +18,7 @@ interface TaskWorkerOptions {
   once?: boolean
 }
 
-const DEFAULT_WORKER_POLL_MS = 250
+const DEFAULT_WORKER_POLL_MS = 100
 const DEFAULT_WORKER_HEARTBEAT_MS = 15_000
 
 function finitePositiveInt(value: string | undefined, fallback: number): number {
@@ -43,7 +43,15 @@ function envBoolDefault(name: string, fallback: boolean): boolean {
 
 function e2bWarmPoolEnabled(): boolean {
   return env('AGENT_SANDBOX_PROVIDER').toLowerCase() === 'e2b' &&
-    envBoolDefault('AGENT_E2B_WARM_POOL_ENABLED', true)
+    envBoolDefault('AGENT_E2B_WARM_POOL_ENABLED', false)
+}
+
+function startE2BWorkerWarmup(): Promise<void> {
+  return Promise.resolve().then(() => prewarmE2BSandbox('worker-startup'))
+}
+
+function workerErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function validateWorkerRuntimeConfig(): void {
@@ -87,6 +95,10 @@ async function verifyE2BWorkerStartup(): Promise<void> {
   }
 }
 
+async function preloadAgentRuntime(): Promise<void> {
+  await import('@/lib/agent/AgentLoop')
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -127,11 +139,6 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   if (!turso.configured) {
     throw new Error(`Task worker requires Turso. Missing: ${turso.missing.join(', ')}`)
   }
-  if (e2bWarmPoolEnabled()) {
-    await prewarmE2BSandbox('worker-startup')
-  } else {
-    await verifyE2BWorkerStartup()
-  }
 
   const workerId = process.env.AGENT_TASK_WORKER_ID?.trim() || `worker-${randomUUID()}`
   const queueName = taskQueueName()
@@ -149,7 +156,24 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   let currentRunId: string | null = null
   let completedTasks = 0
   let stopping = false
+  let runtimePreloadStarted = false
+  let runtimePreloadFailure: unknown = null
+  let runtimePreloadPromise: Promise<void> | null = null
   const shutdownController = new AbortController()
+
+  const ensureAgentRuntimePreloaded = async () => {
+    if (!runtimePreloadStarted) {
+      runtimePreloadStarted = true
+      runtimePreloadPromise = preloadAgentRuntime().catch((error) => {
+        runtimePreloadFailure = error
+        console.error('[TaskWorker] Agent runtime preload failed', {
+          error: workerErrorMessage(error),
+        })
+      })
+    }
+    await runtimePreloadPromise
+    if (runtimePreloadFailure) throw runtimePreloadFailure
+  }
 
   const sendHeartbeat = (status: 'starting' | 'idle' | 'running' | 'stopping' | 'stopped') =>
     recordTaskWorkerHeartbeat({
@@ -187,6 +211,21 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
 
   console.log('[TaskWorker] Started', { workerId, queueName, pollMs, heartbeatMs, once: options.once === true })
 
+  const warmPoolEnabled = e2bWarmPoolEnabled()
+  const startupWarmupPromise = warmPoolEnabled
+    ? startE2BWorkerWarmup()
+    : verifyE2BWorkerStartup()
+  void startupWarmupPromise
+    .then(() => {
+      if (warmPoolEnabled) console.log('[TaskWorker] Background E2B warmup ready')
+    })
+    .catch((error) => {
+      console.error('[TaskWorker] Background E2B startup check failed; stopping worker', {
+        error: workerErrorMessage(error),
+      })
+      stop()
+    })
+
   try {
     while (!stopping) {
       const claim = await claimNextTaskJob(workerId)
@@ -210,14 +249,17 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
           return runBackgroundProbeTaskJob(claim.payload, emitter, signal)
         }
 
-        return runChatTaskJob({
-          ...claim.payload,
-          emitter,
-          signal,
-          conversationId: claim.conversationId,
-          userId: claim.userId,
-          creditRunId: claim.runId,
-        })
+        const chatPayload = claim.payload
+        return ensureAgentRuntimePreloaded().then(() =>
+          runChatTaskJob({
+            ...chatPayload,
+            emitter,
+            signal,
+            conversationId: claim.conversationId,
+            userId: claim.userId,
+            creditRunId: claim.runId,
+          }),
+        )
       }, { shutdownSignal: shutdownController.signal })
 
       if (taskResult === 'requeued') {

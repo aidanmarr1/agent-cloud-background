@@ -95,6 +95,17 @@ export default function ChatPage() {
     }
   }, [conversation, id])
 
+  const revealServerSummaryForReplay = useCallback(() => {
+    useChatStore.setState((state) => ({
+      conversations: state.conversations.map((item) => {
+        if (item.id !== id) return item
+        const { serverSummary, ...materialized } = item
+        void serverSummary
+        return { ...materialized, updatedAt: Date.now() }
+      }),
+    }))
+  }, [id])
+
   useEffect(() => {
     setActiveId(id)
     // A prior crashed/aborted stream must never leave the input disabled after
@@ -126,13 +137,25 @@ export default function ChatPage() {
 
     let cancelled = false
     setTaskBodyLoadFailed(false)
-    void loadConversationFromServer(id).then((loaded) => {
-      if (!cancelled && !loaded) setTaskBodyLoadFailed(true)
-    })
+    void (async () => {
+      const loaded = await loadConversationFromServer(id)
+      if (cancelled || loaded) return
+
+      const resumed = await resumeActiveTask({ includeTerminalReplay: true }).catch((error) => {
+        console.error('Task replay after body load failed:', error)
+        return false
+      })
+      if (cancelled) return
+      if (resumed) {
+        revealServerSummaryForReplay()
+        return
+      }
+      setTaskBodyLoadFailed(true)
+    })()
     return () => {
       cancelled = true
     }
-  }, [hydrated, id, conversation?.serverSummary])
+  }, [hydrated, id, conversation?.serverSummary, resumeActiveTask, revealServerSummaryForReplay])
 
   const handleRegenerate = useCallback(() => {
     if (!conversation) return
@@ -179,15 +202,24 @@ export default function ChatPage() {
       conversation.messages.length === 1 &&
       conversation.messages[0].role === 'user'
     ) {
+      if (hasActiveAgentStream(id)) {
+        hasSentRef.current = true
+        return
+      }
+
       hasSentRef.current = true
       let cancelled = false
 
       void (async () => {
-        const resumed = await resumeActiveTask().catch((error) => {
+        const resumed = await resumeActiveTask({ includeTerminalReplay: true }).catch((error) => {
           console.error('Initial task resume failed:', error)
           return false
         })
-        if (cancelled || resumed) return
+        if (cancelled) return
+        if (resumed) {
+          revealServerSummaryForReplay()
+          return
+        }
 
         const uiState = useUIStore.getState()
         uiState.setStreaming(true)
@@ -209,7 +241,7 @@ export default function ChatPage() {
         cancelled = true
       }
     }
-  }, [hydrated, conversation, resumeActiveTask, sendMessage])
+  }, [hydrated, id, conversation, resumeActiveTask, sendMessage, revealServerSummaryForReplay])
 
   // Get computer panel data from the last assistant message
   const lastAssistantMsg = conversation?.messages
@@ -265,7 +297,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex min-h-screen overflow-hidden">
+    <div className="flex h-[100dvh] min-h-[100dvh] overflow-hidden">
       {/* Main area */}
       {showComputerPanel && (
         <style>{`
@@ -276,23 +308,23 @@ export default function ChatPage() {
       )}
       <div
         data-chat-main=""
-        className="flex-1 flex flex-col min-h-screen min-w-0 overflow-hidden transition-[margin] duration-300"
+        className="flex-1 flex flex-col h-full min-h-0 min-w-0 overflow-hidden transition-[margin] duration-300"
         style={{ transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)' }}
       >
         {/* Top bar */}
-        <div className="h-12 flex items-center gap-4 pl-14 pr-4 border-b border-border-primary flex-shrink-0 relative z-40 bg-bg-primary backdrop-blur-xl md:px-6">
+        <div className="h-12 flex min-w-0 items-center gap-2 overflow-visible pl-14 pr-2 border-b border-border-primary flex-shrink-0 relative z-40 bg-bg-primary backdrop-blur-xl sm:gap-3 sm:pr-4 md:gap-4 md:px-6">
           <ModelSelector />
           <div className="flex-1 items-center gap-2.5 min-w-0 hidden md:flex">
             <span className="text-[14px] text-text-secondary truncate font-medium tracking-[0]">
               {conversation.title}
             </span>
           </div>
-          <div className="flex items-center gap-1 flex-shrink-0">
+          <div className="flex min-w-0 items-center gap-0.5 flex-shrink-0 sm:gap-1">
             {hasComputerPanelContent && (
               <button
                 onClick={() => toggleComputerPanel()}
                 aria-label={showComputerPanel ? 'Hide computer panel' : 'Show computer panel'}
-                className={`subtle-icon-button h-9 px-3 rounded-full flex items-center gap-2 transition-all duration-150 active:scale-[0.96] ${
+                className={`subtle-icon-button h-9 w-9 rounded-full flex items-center justify-center gap-2 transition-all duration-150 active:scale-[0.96] sm:w-auto sm:px-3 ${
                   showComputerPanel ? 'is-active' : ''
                 }`}
               >
@@ -394,7 +426,7 @@ export default function ChatPage() {
 
         {/* Credit cutoff banner */}
         {creditBlocked && (
-          <div className="flex-shrink-0 px-6 pb-2 animate-fade-in-up">
+          <div className="flex-shrink-0 px-3 pb-2 animate-fade-in-up sm:px-6">
             <div className="max-w-[810px] mx-auto bg-bg-card border border-border-primary rounded-2xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center" style={{ boxShadow: 'var(--shadow-sm)' }}>
               <div className="flex items-center gap-3 min-w-0 flex-1">
                 <div className="w-8 h-8 rounded-lg bg-bg-secondary flex items-center justify-center flex-shrink-0">
@@ -432,8 +464,8 @@ export default function ChatPage() {
 
         {/* Error banner */}
         {streamError && !creditBlocked && (
-          <div className="flex-shrink-0 px-6 pb-2 animate-fade-in-up">
-            <div className="max-w-[768px] mx-auto bg-accent-red/5 border border-accent-red/15 rounded-2xl px-4 py-3 flex items-center gap-3">
+          <div className="flex-shrink-0 px-3 pb-2 animate-fade-in-up sm:px-6">
+            <div className="max-w-[768px] mx-auto bg-accent-red/5 border border-accent-red/15 rounded-2xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center">
               <div className="w-7 h-7 rounded-lg bg-accent-red/10 flex items-center justify-center flex-shrink-0">
                 <AlertCircle size={14} className="text-accent-red" />
               </div>
@@ -459,7 +491,7 @@ export default function ChatPage() {
         )}
 
         {/* Input */}
-        <div className="flex-shrink-0 px-5 pt-3 pb-5">
+        <div className="flex-shrink-0 px-3 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-5 sm:pt-3 sm:pb-5">
           <div className="flex justify-center">
             <ChatInput
               onSubmit={(msg, attachments) => sendMessage(msg, attachments)}

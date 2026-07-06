@@ -1,9 +1,8 @@
-import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText } from './AgentState'
+import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, markPhaseNarrationEmitted, needsPhaseNarrationBeforeAdvance, stepOpenedSourceDomains } from './AgentState'
 import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
-import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState } from './taskConstraints'
-import { isSubstantiveResearchState, researchDepthProfileForState } from './ResearchDepth'
+import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import type { ToolCallData } from './StreamProcessor'
 import {
   NO_TOOL_FORCE_ADVANCE,
@@ -31,7 +30,11 @@ import {
   LOOP_CHECK_WINDOW,
   REPLAN_MAX_TIMES,
   MIN_STEP_BUDGET,
+  MIN_DELIVERABLE_BUDGET,
+  NARRATION_MAX_VISIBLE_ACTION_GAP,
+  NARRATION_THRESHOLD_DEFAULT,
 } from './config'
+import { isExactSingleSourceLookupText, researchDepthProfileForState } from './ResearchDepth'
 
 export type PolicyActionType = 'inject_message' | 'step_advance' | 'terminate' | 'continue_loop'
 
@@ -43,6 +46,9 @@ export interface PolicyAction {
   // Why the agent was terminated — for debugging
   reason?: string
 }
+
+const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
+const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function blockCurrentStep(state: AgentStateData, reason: string, code = 'step_blocked'): PolicyAction[] {
   const stepNumber = state.currentStepIdx + 1
@@ -96,22 +102,46 @@ function isAcceptableForcedNarration(content: string): boolean {
 }
 
 function visibleActionsAfterAcceptedNarration(visibleActions: number): number {
-  return Math.max(0, visibleActions - 4)
+  return Math.max(0, visibleActions - NARRATION_MAX_VISIBLE_ACTION_GAP)
 }
 
-function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent = ''): boolean {
-  return !!state.currentPlanItems &&
-    state.currentStepIdx < state.currentPlanItems.length - 1 &&
-    state.visibleToolActionsSinceLastNarration >= 3 &&
-    !isValidProgressNarration(assistantContent)
-}
-
-function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
+function missedCadenceNarrationAction(state: AgentStateData): PolicyAction {
   return {
     type: 'inject_message',
     message: {
       role: 'system',
-      content: stepMsg(state, 'PHASE-END NARRATION REQUIRED: This phase is ready to advance and has reached the 3-4 visible-action narration window. This applies across every phase and task type. Write one concise, result-first progress paragraph from the completed work, then emit <next_step/> with no tool call. This is valid even when no more tool calls remain in the phase; do not start the next phase before that paragraph.'),
+      content: stepMsg(
+        state,
+        'NARRATION CADENCE MISSED: the compact progress paragraph attempt was not usable. Do not write another status paragraph now. Make exactly one concrete tool call for the active phase; the narration window will open again after the next visible action.',
+      ),
+    },
+    continueLoop: true,
+  }
+}
+
+function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent = ''): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+
+  if (assistantContent.trim() && isAcceptableForcedNarration(assistantContent)) {
+    markPhaseNarrationEmitted(state)
+    state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
+    state.forceTextNextIteration = false
+    state.forcedNarrationRepairAttempts = 0
+    return false
+  }
+
+  return needsPhaseNarrationBeforeAdvance(state) || state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+}
+
+function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
+  state.phaseEndNarrationPending = true
+  state.forceTextNextIteration = true
+  state.forcedNarrationRepairAttempts = 0
+  return {
+    type: 'inject_message',
+    message: {
+      role: 'system',
+      content: stepMsg(state, 'PHASE-END NARRATION REQUIRED: This phase is ready to advance, but every phase must have at least one visible LLM-written progress paragraph before it starts the next phase. This applies across every phase and task type, even short phases with fewer than 3 tool actions. Write one concise, result-first progress paragraph from completed work, then emit <next_step/> with no tool call. Do not start the next phase before that paragraph.'),
     },
     continueLoop: true,
   }
@@ -120,9 +150,20 @@ function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
 function rewriteInvalidForcedNarrationAction(): PolicyAction {
   return {
     type: 'inject_message',
+      message: {
+        role: 'system',
+        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 15-20 words preferred, hard cap 34 words / 240 characters. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
+      },
+    continueLoop: true,
+  }
+}
+
+function forcedNarrationBeforeToolAction(state: AgentStateData): PolicyAction {
+  return {
+    type: 'inject_message',
     message: {
       role: 'system',
-      content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 15-20 words preferred, hard cap 34 words / 240 characters. Vary the opening verb and sentence shape; do not repeat the same starter pattern. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
+      content: stepMsg(state, 'NARRATION REQUIRED BEFORE NEXT ACTION: a visible-action cadence is overdue. Write exactly one concise, result-first progress paragraph from completed work. Do not call tools in this response, do not ask permission to continue, and do not describe future intent without a concrete completed result.'),
     },
     continueLoop: true,
   }
@@ -134,7 +175,7 @@ function releaseForcedNarrationForProgress(state: AgentStateData): void {
   state.iterationsSinceLastContent = 0
   // Leave the cadence close to the boundary so the next visible action gets
   // another chance to produce narration, but do not keep tools disabled.
-  state.visibleToolActionsSinceLastNarration = Math.min(2, state.visibleToolActionsSinceLastNarration)
+  state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
 }
 
 /** Get the minimum tool calls required for this task's complexity level */
@@ -157,6 +198,26 @@ function isResearchLikeStep(state: AgentStateData): boolean {
   return state.taskStrategy === 'research' || state.currentPhase === 'research'
 }
 
+function isExactSingleSourceLookup(text: string): boolean {
+  return isExactSingleSourceLookupText(text)
+}
+
+function requiredOpenedSourcesForDepth(state: AgentStateData): number {
+  const stepText = currentStepText(state)
+  if (isExactSingleSourceLookup(stepText)) return 1
+  return researchDepthProfileForState(state).requiredSourceBreadth
+}
+
+function briefResearchEvidenceSatisfied(state: AgentStateData): boolean {
+  const request = state.originalUserRequest || ''
+  if (!/\b(?:brief|briefly|quick|quickly|short|succinct|simple|small|tiny|fast)\b/i.test(request)) return false
+  if (taskDefaultsToMarkdownDeliverable(request)) return false
+  const openedOrExtractedSource = state.stepVisitedUrls.size > 0 || stepOpenedSourceDomains(state).size > 0
+  const usefulDiscovery = state.stepSearchQueries.size > 0 || state.stepSourceDomainCounts.size > 0
+  return openedOrExtractedSource ||
+    (state.stepResearchCallCount >= 2 && usefulDiscovery)
+}
+
 function researchDepthStatus(state: AgentStateData): {
   complete: boolean
   requiredCalls: number
@@ -166,18 +227,31 @@ function researchDepthStatus(state: AgentStateData): {
   message: string
 } {
   const fixedSearchLimit = currentStepWebSearchLimit(state)
-  const profile = researchDepthProfileForState(state)
-  const requiredCalls = fixedSearchLimit ?? profile.requiredCalls
-  const searchOnly = profile.fixedSearchOnly
+  const requiredCalls = fixedSearchLimit ?? minToolCalls(state)
+  const searchOnly = fixedSearchLimit !== null || currentStepHasSingleWebSearchLimit(state)
   const calls = state.stepResearchCallCount
   const pages = state.stepVisitedUrls.size
-  const domains = state.stepSourceDomainCounts.size
+  const domains = stepOpenedSourceDomains(state).size
+  if (briefResearchEvidenceSatisfied(state)) {
+    return {
+      complete: true,
+      requiredCalls: 1,
+      calls,
+      pages,
+      domains,
+      message: `Brief research depth is sufficient: ${calls} research call${calls === 1 ? '' : 's'} made for the requested quick answer.`,
+    }
+  }
   const missing: string[] = []
   if (calls < requiredCalls) missing.push(`${requiredCalls - calls} more research call${requiredCalls - calls === 1 ? '' : 's'}`)
   if (!searchOnly) {
-    const requiredSourceBreadth = profile.requiredSourceBreadth
+    const requiredSourceBreadth = requiredOpenedSourcesForDepth(state)
+    const requiredOpenedPages = Math.min(requiredSourceBreadth, Math.max(1, Math.ceil(requiredCalls / 3)))
+    if (requiredOpenedPages > 0 && pages < requiredOpenedPages) {
+      missing.push(`${requiredOpenedPages - pages} more opened/read source page${requiredOpenedPages - pages === 1 ? '' : 's'}`)
+    }
     if (requiredSourceBreadth > 0 && domains < requiredSourceBreadth) {
-      missing.push(`${requiredSourceBreadth} opened distinct source domain${requiredSourceBreadth === 1 ? '' : 's'}`)
+      missing.push(`${requiredSourceBreadth - domains} more distinct source domain${requiredSourceBreadth - domains === 1 ? '' : 's'}`)
     }
   }
   return {
@@ -267,10 +341,22 @@ function namesHardBrowserBlocker(content: string): boolean {
 function looksLikeFutureTenseWorkNarration(content: string): boolean {
   const text = content.trim().toLowerCase()
   if (!text) return false
-  if (/\b(i(?:'|’)?ll|i will|let me|now i(?:'|’)?ll|i(?:'|’)?m going to|i am going to)\b.{0,120}\b(build|create|write|research|implement|fix|add|start|run|check|verify|open|browse|search|continue|make)\b/.test(text)) {
+  if (/\b(i(?:'|’)?ll|i will|let me|now i(?:'|’)?ll|i(?:'|’)?m going to|i am going to|next,?\s+i(?:'|’)?ll|next,?\s+i will)\b.{0,140}\b(build|create|write|research|implement|fix|add|start|run|check|verify|open|browse|search|continue|make|get|fetch|load|read|visit)\b/.test(text)) {
     return true
   }
   return /\b(i(?:'|’)?ll|i will|let me|now i(?:'|’)?ll)\b.{0,80}\b(now|next|then)\b/.test(text)
+}
+
+function looksLikeProgressOrRecoveryOnly(content: string): boolean {
+  const text = content.trim().toLowerCase()
+  if (!text) return true
+  if (looksLikeFutureTenseWorkNarration(text)) return true
+  if (/\b(?:final answer required|final synthesis tool required|deliverable step|plan progress|tool call contract)\b/i.test(text)) return true
+  if (/^i (?:found|learned|sourced|researched|checked|reviewed)\b/.test(text) &&
+    /\b(?:homepage|page|html|source|sources|evidence|research|findings|read|search|browse|document|compressed|hard to read|sufficient|enough|instead)\b/.test(text)) {
+    return true
+  }
+  return /\b(?:let me|i(?:'|’)?ll|i will|next,?\s+i(?:'|’)?ll|next,?\s+i will)\b/i.test(text)
 }
 
 function hasConcreteStepProgress(state: AgentStateData): boolean {
@@ -319,23 +405,76 @@ function finalDeliverableRequired(state: AgentStateData): boolean {
     explicitSavedArtifactRequested(taskText)
 }
 
+function isFinalInlineAnswerStep(state: AgentStateData): boolean {
+  return !!state.currentPlanItems &&
+    state.currentStepIdx === state.currentPlanItems.length - 1 &&
+    !isBrowserActionTask(state) &&
+    !finalDeliverableRequired(state)
+}
+
+function shouldAcceptFinalInlineText(state: AgentStateData, content: string): boolean {
+  if (!isFinalInlineAnswerStep(state)) return false
+  const text = content.trim()
+  if (text.length < 40) return false
+  if (looksLikeFinalStatusUpdate(text) && text.length < 240) {
+    return false
+  }
+  return true
+}
+
+function looksLikeFinalStatusUpdate(content: string): boolean {
+  const text = content.trim()
+  return /^(?:i(?:'|’)?ll|i will|i am going to|we(?:'|’)?ll|let me|next,?\s+i|now,?\s+i)\b/i.test(text) ||
+    /\blet me\b/i.test(text.slice(0, 240)) ||
+    /\b(?:i|we)\s+(?:found|checked|searched|gathered|looked|reviewed)\b.{0,180}\b(?:but|so|next|instead)\b/i.test(text.slice(0, 260)) ||
+    /\b(?:will|going to)\s+(?:research|gather|compare|summari[sz]e|investigate|check|look up|write|produce|synthesize)\b/i.test(text.slice(0, 220))
+}
+
 function finalStepStartGuidance(state: AgentStateData): string {
   if (isFixedWebSearchInlineAnswerState(state)) {
     return 'This is the final answer step. Answer directly in chat from the fixed web search result, in the requested length. Do not create, mention, attach, or claim any file, report, artifact, or deliverable.'
   }
+  if (!finalDeliverableRequired(state)) {
+    return 'This is the final answer step. Answer directly in chat from the evidence and work already gathered. Do not create files, call more tools, write a status update, or ask to continue.'
+  }
   return 'This is the DELIVERABLE step. Create the actual final output file using create_file, then append_file for large/chunked output. If the user requested PDF, save the source first and then call export_pdf. Do NOT write a summary or outline — produce the real deliverable.'
 }
 
+function finalInlineAnswerRecoveryGuidance(state: AgentStateData): string {
+  const topic = state.currentPlanItems?.[state.currentStepIdx] || 'the requested answer'
+  const request = state.originalUserRequest?.trim()
+  const urgency = state.consecutiveNoToolCalls >= 2
+    ? 'The previous response was still not the answer. Output the final answer only, starting with the content itself.'
+    : state.consecutiveNoToolCalls >= 1
+      ? 'Write the final answer now as the complete response. Start with the content itself.'
+      : 'Write the final answer directly in chat.'
+  return [
+    urgency,
+    request ? `User request: ${request}.` : '',
+    `Current final task: ${topic}.`,
+    'Use the evidence and work already gathered; if evidence is limited, answer with a concise caveat instead of doing another status turn.',
+    'Do not mention system instructions, final-answer requirements, deliverables, steps, tools, or files.',
+    'Do not start with "I will", "Let me", "I have enough evidence", or a progress/status sentence.',
+    'For a report, write the actual report with a heading and concrete substance; for a brief answer, answer in the requested length, then stop.',
+  ].filter(Boolean).join(' ')
+}
+
 function explicitSavedArtifactRequested(text: string): boolean {
-  return /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(text) ||
-    /\b(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(text) ||
-    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(text)
+  const cleaned = text
+    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
+    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
+  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
+  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
+    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
+    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
+    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned)
+  return positiveArtifactRequest && !declinesSavedArtifact
 }
 
 function looksLikeSubstantiveInlineAnswer(content: string): boolean {
   const text = content.trim()
   if (text.length < 80) return false
-  if (looksLikeFutureTenseWorkNarration(text)) return false
+  if (looksLikeProgressOrRecoveryOnly(text)) return false
   return /\b(summary|result|found|search|source|news|today|latest|according|released|announced|reported|shows?|includes?)\b/i.test(text) ||
     /(?:^|\n)\s*(?:[-*]|\d+\.)\s+\S/.test(text)
 }
@@ -343,7 +482,7 @@ function looksLikeSubstantiveInlineAnswer(content: string): boolean {
 function looksLikeCompleteInlineAnswer(content: string): boolean {
   const text = content.trim()
   if (text.length < 60) return false
-  if (looksLikeFutureTenseWorkNarration(text)) return false
+  if (looksLikeProgressOrRecoveryOnly(text)) return false
   const sentences = text
     .split(/[.!?]+/)
     .map(sentence => sentence.trim())
@@ -351,13 +490,51 @@ function looksLikeCompleteInlineAnswer(content: string): boolean {
   return sentences.length >= 1 && /\b(?:is|are|has|have|shows?|suggests?|means?|matters?|challenge|trend|risk|benefit|because|however|therefore|key)\b/i.test(text)
 }
 
+function looksLikeUsableFinalInlineAnswer(content: string): boolean {
+  const text = content.trim()
+  if (text.length < 40) return false
+  if (looksLikeProgressOrRecoveryOnly(text)) return false
+  if (/\b(?:progress update|status update|i(?:'|’)?m checking|i(?:'|’)?m researching|i found enough to continue|next i)\b/i.test(text)) return false
+  return /[.!?)]\s*$/.test(text) ||
+    text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
+}
+
+function looksLikeSubstantialFinalInlineText(content: string): boolean {
+  const text = content.trim()
+  if (text.length < 120) return false
+  if (/^(?:i(?:'|’)?ll|i will|let me|next,?\s+i(?:'|’)?ll|next,?\s+i will)\b/i.test(text) && text.length < 260) {
+    return false
+  }
+  if (/\b(?:progress update|status update|final answer required|tool call contract|plan progress)\b/i.test(text)) return false
+  return text.length >= 260 ||
+    /[.!?)]\s*$/.test(text) ||
+    text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
+}
+
+function isBriefInlineResearchRequest(state: AgentStateData): boolean {
+  const text = [
+    state.originalUserRequest || '',
+    ...(state.currentPlanItems || []),
+    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
+  ].join(' ').toLowerCase()
+  if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|serious analysis|strategic|technical|comparative)\b/.test(text)) {
+    return false
+  }
+  const brief = /\b(?:brief|briefly|quick|quickly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/.test(text)
+  const inline = /\b(?:no file|no document|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/.test(text)
+  return (brief || inline) && !explicitSavedArtifactRequested(text)
+}
+
 function hasMinimumResearchEvidence(state: AgentStateData): boolean {
   const depth = researchDepthStatus(state)
   if (depth.complete) return true
-  if (isSubstantiveResearchState(state)) return false
   if (currentStepHasSingleWebSearchLimit(state)) {
     return state.stepSearchQueries.size >= 1 && state.stepResearchCallCount >= 1
   }
+  if (isBriefInlineResearchRequest(state)) {
+    return briefResearchEvidenceSatisfied(state)
+  }
+  if (taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')) return false
   if (state.taskComplexity >= 2) return false
   const hasDirectEvidence = state.stepVisitedUrls.size > 0 ||
     state.stepSearchQueries.size > 0
@@ -365,8 +542,217 @@ function hasMinimumResearchEvidence(state: AgentStateData): boolean {
   return hasDirectEvidence && state.stepResearchCallCount >= usefulCalls
 }
 
+function hasStalledResearchEvidence(state: AgentStateData): boolean {
+  const depth = researchDepthStatus(state)
+  if (depth.complete) return true
+  if (isSubstantiveResearchRequest(state)) return false
+  const profile = researchDepthProfileForState(state)
+  const reportResearchNeedsSources = taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')
+  if (reportResearchNeedsSources && state.stepVisitedUrls.size === 0 && stepOpenedSourceDomains(state).size === 0) return false
+  if (profile.label !== 'single-source' && profile.label !== 'light' && state.stepVisitedUrls.size === 0) return false
+  if (hasBreadthSaturatedResearchEvidence(state)) return true
+  const hasDirectEvidence = state.stepVisitedUrls.size > 0 ||
+    state.stepSearchQueries.size > 0 ||
+    stepOpenedSourceDomains(state).size > 0
+  if (!hasDirectEvidence) return false
+  const sourceBreadth = Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size)
+  const minimumUsefulBreadth = Math.min(2, requiredOpenedSourcesForDepth(state))
+  if (sourceBreadth < minimumUsefulBreadth) return false
+  const usefulCalls = Math.max(
+    profile.label === 'wide' ? 9 : profile.label === 'deep' ? 7 : 4,
+    Math.ceil(depth.requiredCalls * (profile.label === 'wide' || profile.label === 'deep' ? 0.8 : 0.7)),
+  )
+  return state.stepResearchCallCount >= usefulCalls
+}
+
+function hasLoopLimitedResearchEvidence(state: AgentStateData): boolean {
+  const depth = researchDepthStatus(state)
+  if (depth.complete) return true
+  return state.stepLoopDetections >= 2 && (
+    hasStalledResearchEvidence(state) ||
+    hasFailureLimitedResearchEvidence(state, depth)
+  )
+}
+
+function hasFailureLimitedResearchEvidence(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthStatus>,
+): boolean {
+  if (depth.complete) return true
+  if (!isResearchLikeStep(state)) return false
+  if (currentStepHasSingleWebSearchLimit(state)) return false
+
+  const profile = researchDepthProfileForState(state)
+  const calls = state.stepResearchCallCount
+  const searches = state.stepSearchQueries.size
+  const candidateDomains = state.stepSourceDomainCounts.size
+  const openedPages = state.stepVisitedUrls.size
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const reportResearchNeedsSources = taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')
+  const recentFailures = state.failureLog.slice(-8)
+  const sourceAccessFailures = recentFailures.filter(f =>
+    (f.tool === 'read_document' || f.tool === 'browser_navigate' || f.tool === 'browse_page' || f.tool === 'browser_get_content') &&
+    (f.category === 'access-block' || f.category === 'timeout' || f.category === 'service-down' || /404|403|not found|forbidden|timed out|timeout/i.test(f.error)),
+  ).length
+
+  if (state.stepFailureCount < 2 && state.stepLoopDetections < 2 && sourceAccessFailures < 2) return false
+  if (calls < Math.max(4, Math.ceil(depth.requiredCalls * 0.45))) return false
+  if (searches < 2 && candidateDomains < 3) return false
+
+  if (openedPages > 0 || openedDomains > 0) {
+    return calls >= Math.max(4, Math.ceil(depth.requiredCalls * 0.5)) &&
+      (openedDomains > 0 || candidateDomains >= Math.min(3, profile.requiredSourceBreadth))
+  }
+
+  if (reportResearchNeedsSources) {
+    return calls >= Math.max(6, Math.ceil(depth.requiredCalls * 0.65)) &&
+      searches >= 3 &&
+      candidateDomains >= Math.min(4, Math.max(2, profile.requiredSourceBreadth))
+  }
+
+  return calls >= Math.max(4, Math.ceil(depth.requiredCalls * 0.5)) &&
+    searches >= 2 &&
+    candidateDomains >= 2
+}
+
+function hasBreadthSaturatedResearchEvidence(state: AgentStateData): boolean {
+  const profile = researchDepthProfileForState(state)
+  if (profile.label === 'single-source' || profile.label === 'light') return false
+  const openedPages = state.stepVisitedUrls.size
+  const distinctDomains = stepOpenedSourceDomains(state).size
+  const uniqueSearches = state.stepSearchQueries.size
+  const usefulCalls = Math.max(
+    profile.label === 'wide' ? 9 : profile.label === 'deep' ? 7 : 4,
+    Math.ceil(profile.requiredCalls * 0.75),
+  )
+  const usefulOpenedPages = Math.min(
+    profile.requiredSourceBreadth,
+    Math.max(3, Math.ceil(profile.requiredSourceBreadth * 0.7)),
+  )
+  return state.stepResearchCallCount >= usefulCalls &&
+    uniqueSearches >= Math.min(usefulCalls, profile.label === 'wide' ? 7 : 5) &&
+    openedPages >= usefulOpenedPages &&
+    distinctDomains >= profile.requiredSourceBreadth
+}
+
+function shouldProtectRemainingPlanBudget(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
+  if (!state.dynamicIterationLimit) return false
+
+  const remainingIterations = Math.max(0, state.dynamicIterationLimit - state.iterations)
+  const remainingStepsAfterCurrent = state.currentPlanItems.length - state.currentStepIdx - 1
+  const remainingResearchSteps = Math.max(0, remainingStepsAfterCurrent - 1)
+  const researchReserve = remainingResearchSteps *
+    Math.max(MIN_STEP_BUDGET + 2, Math.ceil((state.perStepBudget || MIN_STEP_BUDGET) * 0.85))
+  const deliverableReserve = Math.max(
+    MIN_DELIVERABLE_BUDGET + 8,
+    Math.ceil((state.deliverableStepBudget || MIN_DELIVERABLE_BUDGET) * 0.85),
+  )
+  const transitionReserve = Math.min(10, remainingStepsAfterCurrent * 2)
+
+  return remainingIterations <= researchReserve + deliverableReserve + transitionReserve
+}
+
+function shouldAdvanceResearchAtBudgetBoundary(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthStatus>,
+): boolean {
+  if (isSubstantiveResearchRequest(state) && !depth.complete) {
+    return hasFailureLimitedResearchEvidence(state, depth)
+  }
+
+  const profile = researchDepthProfileForState(state)
+  const openedPages = state.stepVisitedUrls.size
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const uniqueSearches = state.stepSearchQueries.size
+  const calls = state.stepResearchCallCount
+  const reportResearchNeedsSources = taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')
+
+  const usefulCalls = Math.max(
+    profile.label === 'wide' ? 9 : profile.label === 'deep' ? 7 : 4,
+    Math.ceil(depth.requiredCalls * 0.75),
+  )
+  const usefulPages = Math.max(2, Math.ceil(profile.requiredSourceBreadth * 0.45))
+  const usefulDomains = Math.max(2, Math.ceil(profile.requiredSourceBreadth * 0.45))
+  const strongPacket = calls >= usefulCalls &&
+    (openedPages >= usefulPages || openedDomains >= usefulDomains) &&
+    (openedDomains > 0 || uniqueSearches >= 2)
+  const overWorkedPacket = calls >= depth.requiredCalls + 6 &&
+    (reportResearchNeedsSources
+      ? (openedPages >= 2 || openedDomains >= 2)
+      : (openedPages >= 2 || openedDomains >= 2 || uniqueSearches >= Math.max(4, Math.ceil(depth.requiredCalls * 0.5))))
+  const extensionWindowSpent = state.borrowedIterations >= 2 &&
+    calls >= Math.max(4, Math.ceil(depth.requiredCalls * 0.55)) &&
+    (reportResearchNeedsSources
+      ? (openedPages > 0 || openedDomains > 0)
+      : (openedPages > 0 || openedDomains > 0 || uniqueSearches >= 3))
+  const taskBudgetNeedsProtection = shouldProtectRemainingPlanBudget(state) &&
+    calls >= Math.max(3, Math.ceil(depth.requiredCalls * 0.45)) &&
+    (reportResearchNeedsSources
+      ? (openedPages > 0 || openedDomains > 0)
+      : (openedPages > 0 || openedDomains > 0 || uniqueSearches >= 2))
+
+  return strongPacket || overWorkedPacket || extensionWindowSpent || taskBudgetNeedsProtection ||
+    hasFailureLimitedResearchEvidence(state, depth)
+}
+
+function shouldAdvanceResearchForPlanBudget(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthStatus>,
+): boolean {
+  if (!shouldProtectRemainingPlanBudget(state)) return false
+  if (isSubstantiveResearchRequest(state) && !depth.complete) {
+    return hasFailureLimitedResearchEvidence(state, depth)
+  }
+  const profile = researchDepthProfileForState(state)
+  const openedPages = state.stepVisitedUrls.size
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const uniqueSearches = state.stepSearchQueries.size
+  const calls = state.stepResearchCallCount
+  const minimumUsefulCalls = Math.max(
+    profile.label === 'wide' ? 8 : profile.label === 'deep' ? 6 : 4,
+    Math.ceil(depth.requiredCalls * 0.4),
+  )
+
+  return (calls >= minimumUsefulCalls &&
+    (taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')
+      ? (openedPages > 0 || openedDomains > 0)
+      : (openedPages > 0 || openedDomains > 0 || uniqueSearches >= 2))) ||
+    hasFailureLimitedResearchEvidence(state, depth)
+}
+
+function advanceStalledResearchWithGap(
+  state: AgentStateData,
+  actions: PolicyAction[],
+  findingPrefix: string,
+  assistantContent = '',
+): PolicyAction[] {
+  if (shouldRequestPhaseEndNarration(state, assistantContent)) {
+    return [phaseEndNarrationAction(state)]
+  }
+  state.borrowedIterations = 0
+  state.consecutiveNoToolCalls = 0
+  state.researchNoToolRecoveryAttempts = 0
+  state.recentToolCalls = []
+  state.stepLoopDetections = 0
+  advanceStep(state, researchEvidenceFinding(state, findingPrefix))
+  actions.push({ type: 'step_advance' })
+  if (state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
+    const isNowLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
+    actions.push({
+      type: 'inject_message',
+      message: {
+        role: 'system',
+        content: stepMsg(state, isNowLastStep ? finalStepStartGuidance(state) : phaseStartGuidance(state)),
+      },
+      continueLoop: true,
+    })
+  }
+  return actions
+}
+
 function researchEvidenceFinding(state: AgentStateData, prefix: string): string {
-  const domains = [...state.stepSourceDomainCounts.keys()].slice(0, 3)
+  const domains = [...stepOpenedSourceDomains(state).keys()].slice(0, 3)
   const parts = [
     `${prefix}: ${state.stepResearchCallCount} research call${state.stepResearchCallCount === 1 ? '' : 's'}`,
     `${state.stepVisitedUrls.size} page${state.stepVisitedUrls.size === 1 ? '' : 's'}`,
@@ -444,6 +830,16 @@ function phaseStartGuidance(state: AgentStateData): string {
   return 'Continue with this step. Use the right tool for the current phase and do not repeat work from the previous phase.'
 }
 
+function isSubstantiveResearchRequest(state: AgentStateData): boolean {
+  if (!isResearchLikeStep(state)) return false
+  const text = [
+    state.originalUserRequest || '',
+    state.currentPlanItems?.[state.currentStepIdx] || '',
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+  ].join(' ')
+  return SUBSTANTIVE_RESEARCH_RE.test(text)
+}
+
 function researchZeroToolRecoveryGuidance(state: AgentStateData): string {
   const title = state.currentPlanItems?.[state.currentStepIdx] || 'the current research step'
   const scope = state.currentPlanScopes?.[state.currentStepIdx]
@@ -512,10 +908,93 @@ export class PolicyEngine {
     // Clear forced-text flag when the model produced text without tools — the
     // forced narration iteration succeeded. Must happen before checkNoToolCalls
     // since that method can return early and skip checkNarrationNudge.
+    if (
+      toolCalls.size === 0 &&
+      assistantContent.trim() &&
+      state.currentPlanItems &&
+      state.currentStepIdx === state.currentPlanItems.length - 1 &&
+      !isBrowserActionTask(state) &&
+      !finalDeliverableRequired(state) &&
+      (
+        shouldAcceptFinalInlineText(state, assistantContent) ||
+        looksLikeSubstantiveInlineAnswer(assistantContent) ||
+        looksLikeCompleteInlineAnswer(assistantContent) ||
+        looksLikeUsableFinalInlineAnswer(assistantContent) ||
+        looksLikeSubstantialFinalInlineText(assistantContent)
+      )
+    ) {
+      advanceStep(state, 'Answered inline in chat')
+      state.consecutiveNoToolCalls = 0
+      return [
+        { type: 'step_advance' },
+        { type: 'terminate', reason: 'inline_answer_complete' },
+      ]
+    }
+
+    if (
+      state.phaseEndNarrationPending &&
+      state.forceTextNextIteration &&
+      toolCalls.size === 0 &&
+      !assistantContent.trim()
+    ) {
+      state.iterationsSinceLastContent++
+      state.forcedNarrationRepairAttempts++
+      return [phaseEndNarrationAction(state)]
+    }
+
+    if (
+      state.phaseEndNarrationPending &&
+      state.forceTextNextIteration &&
+      toolCalls.size === 0 &&
+      assistantContent.trim() &&
+      !stepAdvancedThisIteration
+    ) {
+      const narrationFinding = sanitizeNarrationText(assistantContent, {
+        requireSignal: false,
+        maxSentences: 2,
+        maxLength: 300,
+      }) || assistantContent.trim().slice(0, 240)
+      markPhaseNarrationEmitted(state)
+      advanceStep(state, narrationFinding)
+      state.iterationsSinceLastContent = 0
+      state.consecutiveNoToolCalls = 0
+      state.forceTextNextIteration = false
+      state.forcedNarrationRepairAttempts = 0
+      const actions: PolicyAction[] = [{ type: 'step_advance' }]
+      if (state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
+        const isLast = state.currentStepIdx === state.currentPlanItems.length - 1
+        const stepHint = isLast
+          ? finalStepStartGuidance(state)
+          : isResearchLikeStep(state)
+            ? phaseStartGuidance(state)
+            : 'Use the next concrete action for this step. Keep it scoped, avoid repeat work, and advance once the objective is satisfied.'
+        actions.push({
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: stepMsg(state, stepHint),
+          },
+          continueLoop: true,
+        })
+      }
+      return actions
+    }
+
+    if (
+      state.phaseEndNarrationPending &&
+      state.forceTextNextIteration &&
+      toolCalls.size > 0
+    ) {
+      state.iterationsSinceLastContent++
+      state.forcedNarrationRepairAttempts++
+      return [phaseEndNarrationAction(state)]
+    }
+
     if (state.forceTextNextIteration && isAcceptableForcedNarration(assistantContent) && toolCalls.size === 0) {
       state.forceTextNextIteration = false
       state.forcedNarrationRepairAttempts = 0
       state.iterationsSinceLastContent = 0
+      markPhaseNarrationEmitted(state)
       state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
     }
 
@@ -524,9 +1003,14 @@ export class PolicyEngine {
       toolCalls.size === 0 &&
       !assistantContent.trim()
     ) {
-      releaseForcedNarrationForProgress(state)
+      state.forcedNarrationRepairAttempts++
+      state.iterationsSinceLastContent++
       state.consecutiveNoToolCalls = 0
-      return []
+      if (state.forcedNarrationRepairAttempts >= 2) {
+        releaseForcedNarrationForProgress(state)
+        return []
+      }
+      return [forcedNarrationBeforeToolAction(state)]
     }
 
     if (
@@ -535,14 +1019,42 @@ export class PolicyEngine {
       assistantContent.trim() &&
       state.currentPlanItems &&
       state.currentStepIdx < state.currentPlanItems.length &&
-      state.visibleToolActionsSinceLastNarration >= 3 &&
+      state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
       isValidProgressNarration(assistantContent)
     ) {
+      const narrationOnlyResearchTurn =
+        !stepAdvancedThisIteration &&
+        isResearchLikeStep(state) &&
+        state.currentStepIdx < state.currentPlanItems.length - 1
       state.iterationsSinceLastContent = 0
-      state.consecutiveNoToolCalls = 0
       state.forcedNarrationRepairAttempts = 0
+      markPhaseNarrationEmitted(state)
       state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
+      state.consecutiveNoToolCalls = 0
+      if (narrationOnlyResearchTurn) {
+        state.visibleToolActionsSinceLastNarration = 0
+        return []
+      }
       if (!stepAdvancedThisIteration) return []
+    }
+
+    if (
+      !state.forceTextNextIteration &&
+      toolCalls.size === 0 &&
+      assistantContent.trim() &&
+      state.currentPlanItems &&
+      state.currentStepIdx < state.currentPlanItems.length &&
+      state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
+      !isValidProgressNarration(assistantContent)
+    ) {
+      state.iterationsSinceLastContent++
+      state.forcedNarrationRepairAttempts++
+      if (state.forcedNarrationRepairAttempts >= 2) {
+        releaseForcedNarrationForProgress(state)
+        state.consecutiveNoToolCalls = 0
+        return [missedCadenceNarrationAction(state)]
+      }
+      return [rewriteInvalidForcedNarrationAction()]
     }
 
     if (
@@ -550,7 +1062,7 @@ export class PolicyEngine {
       assistantContent.trim() &&
       state.currentPlanItems &&
       state.currentStepIdx < state.currentPlanItems.length - 1 &&
-      state.visibleToolActionsSinceLastNarration >= 4 &&
+      state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP &&
       !isAcceptableForcedNarration(assistantContent)
     ) {
       state.forcedNarrationRepairAttempts++
@@ -577,8 +1089,7 @@ export class PolicyEngine {
         return []
       }
       state.iterationsSinceLastContent++
-      releaseForcedNarrationForProgress(state)
-      return []
+      return [rewriteInvalidForcedNarrationAction()]
     }
 
     if (state.forceTextNextIteration && toolCalls.size > 0) {
@@ -586,11 +1097,12 @@ export class PolicyEngine {
         state.forceTextNextIteration = false
         state.forcedNarrationRepairAttempts = 0
         state.iterationsSinceLastContent = 0
+        markPhaseNarrationEmitted(state)
         state.visibleToolActionsSinceLastNarration = Math.min(1, state.visibleToolActionsSinceLastNarration)
       } else {
-        // Do not block useful progress for a narration-only repair turn.
-        // The next request will still carry the cadence reminder.
-        releaseForcedNarrationForProgress(state)
+        state.forcedNarrationRepairAttempts++
+        state.iterationsSinceLastContent++
+        return [forcedNarrationBeforeToolAction(state)]
       }
     }
 
@@ -646,6 +1158,7 @@ export class PolicyEngine {
     } else {
       state.consecutiveNoToolCalls = 0
       state.browserNoToolRecoveryAttempts = 0
+      state.researchNoToolRecoveryAttempts = 0
     }
 
     const postComplete = this.checkPostCompletion(state)
@@ -687,6 +1200,43 @@ export class PolicyEngine {
     // ── Tier 3: Guidance and nudges (accumulated, never contradict tier 1/2) ──
 
     const tier3Actions: PolicyAction[] = []
+
+    if (
+      !stepAdvancedThisIteration &&
+      state.lastLoopSignal &&
+      state.currentPlanItems &&
+      state.currentStepIdx < state.currentPlanItems.length - 1 &&
+      isResearchLikeStep(state)
+    ) {
+      const depth = researchDepthStatus(state)
+      if (
+        hasLoopLimitedResearchEvidence(state) ||
+        shouldAdvanceResearchForPlanBudget(state, depth) ||
+        shouldAdvanceResearchAtBudgetBoundary(state, depth)
+      ) {
+        if (shouldRequestPhaseEndNarration(state, assistantContent)) {
+          return [phaseEndNarrationAction(state)]
+        }
+        return advanceStalledResearchWithGap(
+          state,
+          tier3Actions,
+          `Advanced after completed research and repeated ${state.lastLoopSignal.tool}`,
+          assistantContent,
+        )
+      } else {
+        state.lastLoopSignal = null
+        state.recentToolCalls = []
+        state.recentToolSequence = []
+        tier3Actions.push({
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: stepMsg(state, `Loop recovery: the previous repeated action did not add useful evidence. ${depth.message} Do not advance this phase yet. Use a materially different evidence action now: a new targeted web_search query, read_document on a different relevant result URL, browser_get_content for an already loaded useful page, or browser_find_text for a specific missing fact.`),
+          },
+          continueLoop: true,
+        })
+      }
+    }
 
     const narration = this.checkNarrationNudge(state, toolCalls, assistantContent)
     if (narration) tier3Actions.push(narration)
@@ -809,7 +1359,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
     if (!looksLikeFalseLiveAccessBlocker(assistantContent)) return null
     if (!isResearchLikeStep(state) && !isBrowserActionTask(state)) return null
 
-    console.log('[Policy] FALSE LIVE-ACCESS BLOCKER DETECTED — forcing source tool recovery')
+    console.log('[Policy] FALSE LIVE-ACCESS BLOCKER DETECTED — requiring model-selected source tool')
     const sourceToolHint = state.searchDisabled
       ? 'browser_navigate, read_document, http_request, browser_get_content, or browser_find_text'
       : 'web_search, browser_navigate, read_document, browser_get_content, browser_find_text, or http_request'
@@ -877,11 +1427,20 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
   ): PolicyAction[] | null {
     if (toolCalls.size > 0) return null
     if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+    if (isFinalInlineAnswerStep(state)) return null
     if (!hasConcreteStepProgress(state)) return null
     if (!looksLikeFutureTenseWorkNarration(assistantContent)) return null
 
+    state.consecutiveNoToolCalls++
+    state.forceTextNextIteration = false
+    state.phaseEndNarrationPending = false
+    state.visibleToolActionsSinceLastNarration = 0
+    state.forcedNarrationRepairAttempts = 0
+    if (isResearchLikeStep(state)) {
+      state.researchNoToolRecoveryAttempts++
+    }
+
     return [
-      { type: 'inject_message', message: { role: 'assistant', content: assistantContent || '' } },
       {
         type: 'inject_message',
         message: {
@@ -1123,6 +1682,9 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }]
       }
       console.log(`[Policy] ATOMIC STEP DRIFT — auto-advancing step ${state.currentStepIdx + 1} "${stepText}" after ${state.stepIterationCount} iterations`)
+      if (shouldRequestPhaseEndNarration(state, '')) {
+        return [phaseEndNarrationAction(state)]
+      }
       advanceStep(state, `Moved past atomic step after ${state.stepIterationCount} iterations`)
       if (state.currentStepIdx >= state.currentPlanItems.length) {
         return [{ type: 'step_advance' }]
@@ -1278,6 +1840,16 @@ Then make your first tool call. Your plan will be remembered across iterations o
       const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
 
       if (state.emittedImageArtifacts.size > 0 && currentStepWantsImageArtifact(state)) {
+        if (!isLastStep && shouldRequestPhaseEndNarration(state, assistantContent)) {
+          state.consecutiveNoToolCalls = 0
+          return [
+            {
+              type: 'inject_message',
+              message: { role: 'assistant', content: assistantContent || '' },
+            },
+            phaseEndNarrationAction(state),
+          ]
+        }
         advanceStep(state, `Image artifact already available: ${[...state.emittedImageArtifacts].slice(-3).join(', ')}`)
         state.consecutiveNoToolCalls = 0
         if (state.currentStepIdx >= state.currentPlanItems.length) {
@@ -1287,7 +1859,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
               type: 'inject_message',
               message: {
                 role: 'system',
-                content: 'The requested image artifact has already been downloaded and shown to the user. You are DONE. Write a natural final response and mention the attached image only if useful. Do NOT force **Summary** or **Deliverables** headings. Do NOT search again and do NOT browse.',
+                content: `The requested image artifact has already been downloaded and shown to the user. You are DONE. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Do NOT search again and do NOT browse.`,
               },
               continueLoop: true,
             },
@@ -1319,18 +1891,6 @@ Then make your first tool call. Your plan will be remembered across iterations o
           ]
         }
 
-        const threshold = NO_TOOL_FORCE_ADVANCE * 2
-        if (state.consecutiveNoToolCalls >= threshold) {
-          state.deliverableVerificationDone = true
-          state.pendingDeliverableRevision = null
-          advanceStep(state, `Saved final deliverable: ${finalDeliverable.path}`)
-          state.consecutiveNoToolCalls = 0
-          return [
-            { type: 'step_advance' },
-            { type: 'terminate', reason: 'deliverable_saved_after_revision_stall' },
-          ]
-        }
-
         return [
           {
             type: 'inject_message',
@@ -1348,10 +1908,16 @@ Then make your first tool call. Your plan will be remembered across iterations o
       }
 
       if (
-        isLastStep &&
-        !isBrowserActionTask(state) &&
-        (
-          (!finalDeliverableRequired(state) && looksLikeSubstantiveInlineAnswer(assistantContent)) ||
+          isLastStep &&
+          !isBrowserActionTask(state) &&
+          (
+          (!finalDeliverableRequired(state) && (
+            shouldAcceptFinalInlineText(state, assistantContent) ||
+            looksLikeSubstantiveInlineAnswer(assistantContent) ||
+            looksLikeCompleteInlineAnswer(assistantContent) ||
+            looksLikeUsableFinalInlineAnswer(assistantContent) ||
+            looksLikeSubstantialFinalInlineText(assistantContent)
+          )) ||
           (isFixedWebSearchInlineAnswerState(state) && looksLikeCompleteInlineAnswer(assistantContent))
         )
       ) {
@@ -1368,6 +1934,16 @@ Then make your first tool call. Your plan will be remembered across iterations o
           const finding = state.browserTaskCompletionEvidence.length > 0
             ? `Verified browser state: ${state.browserTaskCompletionEvidence.slice(0, 3).join('; ')}`
             : 'Verified current browser state satisfies this phase'
+          if (shouldRequestPhaseEndNarration(state, assistantContent)) {
+            state.consecutiveNoToolCalls = 0
+            return [
+              {
+                type: 'inject_message',
+                message: { role: 'assistant', content: assistantContent || '' },
+              },
+              phaseEndNarrationAction(state),
+            ]
+          }
           advanceStep(state, finding)
           state.consecutiveNoToolCalls = 0
           return [
@@ -1534,6 +2110,42 @@ Then make your first tool call. Your plan will be remembered across iterations o
       // text-only turns. Synthesis must start as saved work immediately after the
       // phase boundary; long prose belongs in create_file/append_file chunks.
       const threshold = isLastStep ? NO_TOOL_FORCE_ADVANCE * 2 : NO_TOOL_FORCE_ADVANCE
+      const repeatedIncompleteResearchNoTool =
+        !isLastStep &&
+        isResearchLikeStep(state) &&
+        !researchDepth.complete
+
+      if (
+        repeatedIncompleteResearchNoTool &&
+        state.consecutiveNoToolCalls >= Math.max(2, threshold - 1)
+      ) {
+        state.researchNoToolRecoveryAttempts++
+        if (
+          shouldAdvanceResearchAtBudgetBoundary(state, researchDepth) ||
+          (state.researchNoToolRecoveryAttempts >= 2 && hasStalledResearchEvidence(state))
+        ) {
+          return advanceStalledResearchWithGap(
+            state,
+            [],
+            'Advanced from repeated text-only research after gathered evidence',
+            assistantContent,
+          )
+        }
+      }
+
+      if (isLastStep && !finalDeliverableRequired(state)) {
+        state.consecutiveNoToolCalls = Math.min(state.consecutiveNoToolCalls, 2)
+        return [
+          {
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: finalInlineAnswerRecoveryGuidance(state),
+            },
+            continueLoop: true,
+          },
+        ]
+      }
 
       if (state.consecutiveNoToolCalls < threshold) {
         if (isLastStep) {
@@ -1641,26 +2253,36 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
       // Stop instead of skipping the unmet step. Repeated no-tool replies mean
       // the current requirement is unresolved, not that the next step is safe.
-      if (!isLastStep && isResearchLikeStep(state) && hasMinimumResearchEvidence(state)) {
-        advanceStep(state, researchEvidenceFinding(state, 'Advanced from gathered research evidence after repeated text-only replies'))
-        state.consecutiveNoToolCalls = 0
-        if (state.currentStepIdx < state.currentPlanItems.length) {
-          const isNowLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
-          return [
-            { type: 'step_advance' },
-            {
-              type: 'inject_message',
-              message: {
-                role: 'system',
-                content: stepMsg(state, isNowLastStep ? finalStepStartGuidance(state) : phaseStartGuidance(state)),
-              },
-              continueLoop: true,
-            },
-          ]
-        }
+      if (
+        !isLastStep &&
+        isResearchLikeStep(state) &&
+        (
+          hasMinimumResearchEvidence(state) ||
+          shouldAdvanceResearchAtBudgetBoundary(state, researchDepth) ||
+          (state.researchNoToolRecoveryAttempts >= 2 && hasStalledResearchEvidence(state))
+        )
+      ) {
+        return advanceStalledResearchWithGap(
+          state,
+          [],
+          'Advanced from gathered research evidence after repeated text-only replies',
+          assistantContent,
+        )
       }
       state.consecutiveNoToolCalls = 0
       if (!isLastStep && isResearchLikeStep(state)) {
+        state.researchNoToolRecoveryAttempts++
+        if (
+          state.researchNoToolRecoveryAttempts >= 3 &&
+          hasStalledResearchEvidence(state)
+        ) {
+          return advanceStalledResearchWithGap(
+            state,
+            [],
+            'Advanced from exhausted research no-tool recovery with recorded evidence gaps',
+            assistantContent,
+          )
+        }
         state.consecutiveNoToolCalls = Math.max(0, threshold - 1)
         return [
           {
@@ -1759,7 +2381,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
           if (state.forcedNarrationRepairAttempts >= 2) {
             state.forceTextNextIteration = false
             state.forcedNarrationRepairAttempts = 0
-            state.visibleToolActionsSinceLastNarration = Math.min(2, state.visibleToolActionsSinceLastNarration)
+            state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
             state.iterationsSinceLastContent = 0
             return null
           }
@@ -1767,14 +2389,15 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }
         return null
       }
-      // Narration before 3 visible actions is too early. Do not let it reset
-      // the mandatory 3-4 action cadence, otherwise the UI suppresses it and
+      // Narration before the visible action window is too early. Do not let it reset
+      // the mandatory cadence, otherwise the UI suppresses it and
       // the backend never forces a properly timed update.
-      if (visibleActions < 3 && !state.forceTextNextIteration) {
+      if (visibleActions < NARRATION_THRESHOLD_DEFAULT && !state.forceTextNextIteration) {
         state.iterationsSinceLastContent++
         return null
       }
       state.iterationsSinceLastContent = 0
+      markPhaseNarrationEmitted(state)
       state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(visibleActions)
       state.forceTextNextIteration = false
       state.forcedNarrationRepairAttempts = 0
@@ -1782,19 +2405,19 @@ Then make your first tool call. Your plan will be remembered across iterations o
       state.iterationsSinceLastContent++
     }
 
-    // After 4 completed visible action pills, force a text update. This is based
-    // on what the user actually sees, not on raw model iterations, so long
-    // browser/search loops cannot skip the narration cadence.
-    const threshold = 4
+    // After enough completed visible action pills, add cadence pressure based on
+    // what the user actually sees. AgentLoop handles this as a compact
+    // narration-first turn so the paragraph stays natural without dragging a
+    // full tool-selection pass into the same response.
+    const threshold = NARRATION_THRESHOLD_DEFAULT
 
     if (state.visibleToolActionsSinceLastNarration >= threshold && !state.forceTextNextIteration) {
-      state.forceTextNextIteration = true
       state.forcedNarrationRepairAttempts = 0
       return {
         type: 'inject_message',
         message: {
           role: 'system',
-          content: 'NARRATION CADENCE RECOVERY: four visible action pills have completed without a valid user-facing progress paragraph. This applies no matter the current phase or task type. The next turn is narration-only: write one concrete Manus-style paragraph from completed work, 15-20 words preferred, hard cap 34 words / 240 characters, and do not call tools.',
+          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 15-20 words preferred, hard cap 34 words / 240 characters. Keep it natural and result-first; the next action can continue immediately after.`,
         },
         continueLoop: true,
       }
@@ -1867,15 +2490,10 @@ Then make your first tool call. Your plan will be remembered across iterations o
   }
 
   /**
-   * Detect "same tool called N times" loops with per-step escalation:
-   *   1st detection: nudge (warn the model, let it recover)
-   *   2nd detection in same step: block the step (model didn't take the hint)
-   *   3rd detection: terminate the entire task
-   *
-   * Unlike the old consecutive-counter version, this counter is per-step (resets in
-   * advanceStep) and DOES NOT clear recentToolCalls — letting the natural sliding
-   * window age out the looping calls. Clearing it gave the model a "fresh start"
-   * that defeated escalation entirely.
+   * Detect repeated same-target tool loops. Loop detection is a steering signal:
+   * it narrows or redirects the next action, but it should not terminate a task by
+   * itself. User-facing runs should keep moving unless a concrete external
+   * blocker remains.
    */
   private checkLoopDetection(state: AgentStateData): PolicyAction[] | null {
     const loopCheck = detectToolCallLoop(state)
@@ -1886,6 +2504,9 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
     const isLastStep = !!state.currentPlanItems &&
       state.currentStepIdx === state.currentPlanItems.length - 1
+    if (!isLastStep && state.currentPlanItems && isResearchLikeStep(state)) {
+      state.suppressedResearchToolName = loopCheck.rawTool || loopCheck.tool
+    }
 
     if (isBrowserActionTask(state)) {
       state.recentToolCalls = []
@@ -1918,36 +2539,100 @@ Then make your first tool call. Your plan will be remembered across iterations o
       }]
     }
 
-    // Stage 3: terminate (model has had two chances to recover and didn't)
+    if (!isLastStep && state.currentPlanItems && isResearchLikeStep(state)) {
+      const depth = researchDepthStatus(state)
+      const canAdvanceLoopedResearch = hasLoopLimitedResearchEvidence(state) ||
+        shouldAdvanceResearchForPlanBudget(state, depth) ||
+        shouldAdvanceResearchAtBudgetBoundary(state, depth)
+      if (!canAdvanceLoopedResearch) {
+        // Continue to the normal loop escalation below.
+      } else {
+        if (shouldRequestPhaseEndNarration(state, '')) {
+          return [phaseEndNarrationAction(state)]
+        }
+        return advanceStalledResearchWithGap(
+          state,
+          [],
+          `Moved on after repeated ${loopCheck.tool} loop with recorded research gaps`,
+        )
+      }
+    }
+
+    // Stage 3: hard redirect, not termination. Keep the worker alive and force a
+    // different route so a bad model/tool-label cycle cannot end the task.
     if (state.stepLoopDetections >= 3) {
-      return [{ type: 'terminate', reason: 'loop_detected' }]
+      state.recentToolCalls = []
+      state.recentToolSequence = []
+      if (state.currentPlanItems && isLastStep) {
+        return [{
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: 'LOOP RECOVERY: Stop repeating the previous action. If a final artifact is requested, use create_file or append_file now with the available findings. If no file is requested, write the final answer directly from the gathered evidence. Do not browse, search, or retry the same tool again on this step.',
+          },
+          continueLoop: true,
+        }]
+      }
+      return [{
+        type: 'inject_message',
+        message: {
+          role: 'system',
+          content: stepMsg(state, `Loop recovery: "${loopCheck.tool}" repeated ${loopCheck.count} times. Use one materially different action now: a different tool, a different source target, or a narrower query that fills a specific missing evidence gap.`),
+        },
+        continueLoop: true,
+      }]
     }
 
-    // Stage 2 (last step only): terminate. There's no skip-forward escape on
-    // the last step, so a second loop detection means the agent is stuck and
-    // a second nudge would just waste another 3 calls.
+    // Stage 2 on the last step: redirect to finishing work rather than ending.
     if (state.stepLoopDetections >= 2 && isLastStep) {
-      return [{ type: 'terminate', reason: 'loop_detected_on_last_step' }]
+      state.recentToolCalls = []
+      state.recentToolSequence = []
+      return [{
+        type: 'inject_message',
+        message: {
+          role: 'system',
+          content: 'FINAL STEP LOOP RECOVERY: Stop repeating the previous tool. Use the gathered context to finish now. For saved deliverables, create_file starts the artifact and append_file continues it in chunks. For direct answers, respond with the final answer now. Do not spend extra turns browsing or retrying the same action.',
+        },
+        continueLoop: true,
+      }]
     }
 
-    // Stage 2: block the step (only on non-final steps)
+    // Stage 2: steer the step to a different concrete route.
     if (state.stepLoopDetections >= 2 && state.currentPlanItems && !isLastStep) {
       if (isResearchLikeStep(state)) {
         const depth = researchDepthStatus(state)
+        if (
+          shouldAdvanceResearchForPlanBudget(state, depth) ||
+          shouldAdvanceResearchAtBudgetBoundary(state, depth)
+        ) {
+          return advanceStalledResearchWithGap(
+            state,
+            [],
+            `Moved on after repeated ${loopCheck.tool} to preserve final synthesis budget`,
+          )
+        }
         if (!depth.complete) {
           state.recentToolCalls = []
-          state.stepLoopDetections = 1
           return [{
             type: 'inject_message',
             message: {
               role: 'system',
-              content: stepMsg(state, `Loop detected: "${loopCheck.tool}" repeated ${loopCheck.count} times. ${depth.message} Stop repeating the same action; use a relevant result URL, browser_get_content on the current article, browser_find_text for a useful section, or a different search angle.`),
+              content: stepMsg(state, `Loop detected: "${loopCheck.tool}" repeated ${loopCheck.count} times. ${depth.message} Make exactly one different evidence action now, using a new result URL, the current article content, a specific rendered-text lookup, or a different search angle.`),
             },
             continueLoop: true,
           }]
         }
       }
-      return blockCurrentStep(state, `loop detected ${state.stepLoopDetections}x on "${loopCheck.tool}"`, 'tool_loop_detected')
+      state.recentToolCalls = []
+      state.recentToolSequence = []
+      return [{
+        type: 'inject_message',
+        message: {
+          role: 'system',
+          content: stepMsg(state, `Loop recovery: "${loopCheck.tool}" repeated without useful progress. Keep this phase active and choose a materially different concrete action now.`),
+        },
+        continueLoop: true,
+      }]
     }
 
     // Stage 1: nudge (no longer clears recentToolCalls — natural window aging handles it)
@@ -1955,7 +2640,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
       type: 'inject_message',
       message: {
         role: 'system',
-        content: `CRITICAL: You are stuck in a loop — "${loopCheck.tool}" called ${loopCheck.count} times in ${LOOP_CHECK_WINDOW} actions. STOP. Use a DIFFERENT tool or approach entirely. Options: browse a URL you haven't visited, use browser_get_content or browser_find_text on the current page, or try a different search angle. Do not advance until the research-depth requirements are satisfied.`,
+        content: `CRITICAL: You are stuck in a loop — "${loopCheck.tool}" called ${loopCheck.count} times in ${LOOP_CHECK_WINDOW} actions. STOP. Use a different source target, tool, or approach. Options: read a different URL, browse a URL you haven't visited, use browser_get_content or browser_find_text on the current page, or try a different search angle. Do not advance until the research-depth requirements are satisfied.`,
       },
     }]
   }
@@ -2093,7 +2778,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
             type: 'inject_message',
             message: {
               role: 'system',
-              content: 'CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. Write a natural final response and mention attached files in one short sentence if useful. Do NOT force **Summary** or **Deliverables** headings. Then STOP.',
+              content: `CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`,
             },
           },
           { type: 'terminate', reason: 'rewrite_loop' },
@@ -2117,7 +2802,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. Write a natural final response and mention attached files in one short sentence if useful. Do NOT force **Summary** or **Deliverables** headings. Then STOP. Any further file operations will be blocked.',
+            content: `CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Any further file operations will be blocked.`,
           },
         },
         { type: 'terminate', reason: 'post_completion_rewrite' },
@@ -2291,6 +2976,35 @@ Then make your first tool call. Your plan will be remembered across iterations o
       }
       const depth = researchDepthStatus(state)
       if (!isCurrentLastStep && isResearchLikeStep(state) && !depth.complete) {
+        const canAdvanceWithAvailableEvidence =
+          hasStalledResearchEvidence(state) ||
+          hasLoopLimitedResearchEvidence(state) ||
+          hasFailureLimitedResearchEvidence(state, depth) ||
+          shouldAdvanceResearchAtBudgetBoundary(state, depth) ||
+          shouldAdvanceResearchForPlanBudget(state, depth)
+        if (canAdvanceWithAvailableEvidence) {
+          if (shouldRequestPhaseEndNarration(state, assistantContent)) {
+            return [phaseEndNarrationAction(state)]
+          }
+          advanceStep(state, researchEvidenceFinding(state, 'Research phase advanced with available evidence'))
+          actions.push({ type: 'step_advance' })
+          if (state.currentStepIdx < state.currentPlanItems.length) {
+            actions.push({
+              type: 'inject_message',
+              message: {
+                role: 'system',
+                content: stepMsg(
+                  state,
+                  state.currentStepIdx === state.currentPlanItems.length - 1
+                    ? finalStepStartGuidance(state)
+                    : phaseStartGuidance(state),
+                ),
+              },
+              continueLoop: true,
+            })
+          }
+          return actions
+        }
         actions.push({
           type: 'inject_message',
           message: {
@@ -2351,7 +3065,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'ALL PLAN STEPS ARE COMPLETE. You are DONE. Write a natural final response, then STOP. Use plain paragraphs or bullets only when they genuinely help the user. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention they are attached below in one short sentence. Include concrete results, caveats, or next steps only when useful. Do NOT create any more files, do NOT rewrite existing files, do NOT do any more research.',
+            content: `ALL PLAN STEPS ARE COMPLETE. You are DONE. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Do NOT create any more files, do NOT rewrite existing files, do NOT do any more research.`,
           },
         })
       } else {
@@ -2383,6 +3097,14 @@ Then make your first tool call. Your plan will be remembered across iterations o
     if (!isLastStep && isResearchLikeStep(state)) {
       const depth = researchDepthStatus(state)
       const notesSatisfied = !shouldRequireResearchNotes(state) || hasCurrentStepResearchNotes(state)
+      if (!depth.complete && shouldAdvanceResearchForPlanBudget(state, depth)) {
+        return advanceStalledResearchWithGap(
+          state,
+          actions,
+          'Moved on to preserve remaining plan and final synthesis budget',
+          assistantContent,
+        )
+      }
       if (depth.complete && notesSatisfied && state.stepResearchCallCount >= depth.requiredCalls) {
         if (shouldRequestPhaseEndNarration(state, assistantContent)) {
           return [phaseEndNarrationAction(state)]
@@ -2429,44 +3151,22 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }
         if (isResearchLikeStep(state)) {
           const depth = researchDepthStatus(state)
-          if (!depth.complete && isSubstantiveResearchState(state)) {
-            state.perStepBudget = Math.max(state.perStepBudget + 2, state.stepIterationCount + 2)
-            actions.push({
-              type: 'inject_message',
-              message: {
-                role: 'system',
-                content: stepMsg(state, `${depth.message} This is a broad/current research phase, so do not move on with a shallow packet. Open and extract more distinct source domains before advancing.`),
-              },
-              continueLoop: true,
-            })
-            return actions
-          }
-          if (!depth.complete && state.stepFailureCount < REPLAN_AFTER_FAILURES) {
-            if (hasMinimumResearchEvidence(state)) {
-              if (shouldRequestPhaseEndNarration(state, assistantContent)) {
-                return [phaseEndNarrationAction(state)]
-              }
-              state.borrowedIterations = 0
-              advanceStep(state, `Moved on at research budget with ${state.stepResearchCallCount} research actions and recorded gaps`)
-              actions.push({ type: 'step_advance' })
-              if (state.currentStepIdx < state.currentPlanItems.length) {
-                actions.push({
-                  type: 'inject_message',
-                  message: {
-                    role: 'system',
-                    content: stepMsg(state, phaseStartGuidance(state)),
-                  },
-                  continueLoop: true,
-                })
-              }
-              return actions
+          if (!depth.complete) {
+            if (shouldAdvanceResearchAtBudgetBoundary(state, depth)) {
+              return advanceStalledResearchWithGap(
+                state,
+                actions,
+                'Moved on at research budget with recorded evidence gaps',
+                assistantContent,
+              )
             }
-            state.perStepBudget = Math.max(state.perStepBudget + 2, state.stepIterationCount + 2)
+            state.borrowedIterations++
+            state.perStepBudget = Math.max(state.perStepBudget + 3, state.stepIterationCount + 3)
             actions.push({
               type: 'inject_message',
               message: {
                 role: 'system',
-                content: stepMsg(state, `${depth.message} Make one targeted research tool call now; if it still does not produce evidence, move on with the known gap.`),
+                content: stepMsg(state, `${depth.message} Continue this phase with exactly one targeted evidence action: open/read a relevant source domain not already used, or switch query/source route if the current source is blocked. This is extension ${state.borrowedIterations}/2 before the phase must preserve budget for the rest of the plan.`),
               },
               continueLoop: true,
             })
@@ -2544,7 +3244,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'ALL PLAN STEPS ARE COMPLETE. You are DONE. Write a natural final response and mention attached files/artifacts in one short sentence if useful. Do NOT force **Summary** or **Deliverables** headings. Then STOP. Do NOT create any more files or rewrite existing ones.',
+            content: `ALL PLAN STEPS ARE COMPLETE. You are DONE. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Do NOT create any more files or rewrite existing ones.`,
           },
         })
         state.currentStepIdx = state.currentPlanItems.length
@@ -2696,7 +3396,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: `PARTIAL FILE WRITE RECOVERED: ${p.path} was saved from an interrupted streamed ${p.toolName} call (${p.lines} lines, ${p.chars} chars). Do NOT recreate or overwrite this file. Continue from the saved file with append_file for the next chunk, or use edit_file only for a targeted correction. The user should never see the file restart from the top.`,
+          content: `PARTIAL FILE WRITE RECOVERED: ${p.path} was saved from an interrupted streamed ${p.toolName} call (${p.lines} lines, ${p.chars} chars). Do NOT recreate, overwrite, edit, read, export, or switch files yet. Continue from the saved file with exactly one append_file call for the next missing chunk. The user should never see the file restart from the top.`,
         },
       }
     }
@@ -2787,7 +3487,7 @@ When you do write the report, be short and factual. Never pretend success, but a
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'QUALITY CHECK: You are creating a deliverable but have very little research backing it. Before finalizing, verify your output is comprehensive and well-supported. If key claims lack evidence, do additional research now.',
+            content: 'QUALITY CHECK: You are creating a deliverable with thin evidence. Stay on the current deliverable phase and repair the saved output using existing evidence; if a claim is not supported, narrow it or add a clear caveat inside the deliverable. Do not switch back into source gathering from the final phase.',
           },
         }
       }

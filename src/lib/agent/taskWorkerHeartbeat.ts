@@ -39,6 +39,26 @@ export interface TaskWorkerHeartbeat {
   e2bPauseOnTaskEnd: boolean
 }
 
+function envBoolEnabled(name: string, fallback = false): boolean {
+  const value = process.env[name]?.trim().toLowerCase()
+  if (!value) return fallback
+  return value !== 'false' && value !== '0'
+}
+
+export function isLikelyLocalWorkerHostname(value: string | null | undefined): boolean {
+  const host = (value || '').trim().toLowerCase()
+  if (!host) return true
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
+  if (host.endsWith('.local') || host.endsWith('.localdomain')) return true
+  if (host.includes('macbook') || host.includes('imac') || host.includes('mac-mini')) return true
+  return false
+}
+
+export function workerHeartbeatIsHosted(worker: { hostname?: string | null }): boolean {
+  if (envBoolEnabled('AGENT_ALLOW_LOCAL_WORKER_HEARTBEAT', false)) return true
+  return !isLikelyLocalWorkerHostname(worker.hostname)
+}
+
 let schemaReady: Promise<void> | null = null
 
 async function addTaskWorkerHeartbeatColumn(sql: string): Promise<void> {
@@ -81,6 +101,11 @@ async function ensureTaskWorkerHeartbeatSchema(): Promise<void> {
     })()
   }
   await schemaReady
+}
+
+function isMissingHeartbeatSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /no such table|no such column|schema/i.test(message)
 }
 
 function rowBool(value: unknown): boolean {
@@ -181,21 +206,28 @@ export async function markTaskWorkerStopped(workerId: string): Promise<void> {
 }
 
 export async function getRecentTaskWorkerHeartbeats(maxAgeMs: number): Promise<TaskWorkerHeartbeat[]> {
-  await ensureTaskWorkerHeartbeatSchema()
   const threshold = Date.now() - Math.max(1, maxAgeMs)
   const queueName = taskQueueName()
-  const result = await tursoExecute(
-    `
-      select *
-      from agent_task_workers
-      where last_seen_at_ms >= ?
-        and queue_name = ?
-        and status != 'stopped'
-      order by last_seen_at_ms desc
-      limit 20
-    `,
-    [threshold, queueName],
-  )
+  const readRecent = () => tursoExecute(
+      `
+        select *
+        from agent_task_workers
+        where last_seen_at_ms >= ?
+          and queue_name = ?
+          and status != 'stopped'
+        order by last_seen_at_ms desc
+        limit 20
+      `,
+      [threshold, queueName],
+    )
+  let result: Awaited<ReturnType<typeof tursoExecute>>
+  try {
+    result = await readRecent()
+  } catch (error) {
+    if (!isMissingHeartbeatSchemaError(error)) throw error
+    await ensureTaskWorkerHeartbeatSchema()
+    result = await readRecent()
+  }
   return result.rows
     .map((row) => rowToHeartbeat(row as Record<string, unknown>))
     .filter((row): row is TaskWorkerHeartbeat => row !== null)

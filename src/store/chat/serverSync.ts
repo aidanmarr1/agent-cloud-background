@@ -34,7 +34,8 @@ interface ServerConversationBodyState {
 const SAVE_DEBOUNCE_MS = 250
 const REFRESH_INTERVAL_MS = 5_000
 const REFRESH_THROTTLE_MS = 1_500
-const SERVER_FETCH_TIMEOUT_MS = 12_000
+const SYNC_MANAGER_READY_WAIT_MS = 4_000
+const SYNC_MANAGER_READY_POLL_MS = 50
 
 let storeApi: ChatStoreApi | null = null
 let currentUserId: string | null = null
@@ -95,19 +96,6 @@ function serverRecordToConversation(record: ServerConversationRecord, summary: b
   return normalizeConversationForPersistence(conversation)
 }
 
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
-  const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), SERVER_FETCH_TIMEOUT_MS)
-  try {
-    return await fetch(input, {
-      ...init,
-      signal: controller.signal,
-    })
-  } finally {
-    clearTimeout(timeout)
-  }
-}
-
 function normalizeServerConversations(records: ServerConversationRecord[] | undefined, partial: boolean): Conversation[] {
   if (!Array.isArray(records)) return []
   return records
@@ -133,15 +121,20 @@ function mergeConversations(local: Conversation[], remote: Conversation[], delet
 
     if (isServerSummaryConversation(conversation)) {
       if (conversation.updatedAt > existing.updatedAt) {
-        byId.set(conversation.id, {
-          ...existing,
-          title: conversation.title,
-          starred: conversation.starred,
-          folder: conversation.folder,
-          createdAt: Math.min(existing.createdAt, conversation.createdAt),
-          updatedAt: conversation.updatedAt,
-          serverSummary: true,
-        })
+        if (isServerSummaryConversation(existing)) {
+          byId.set(conversation.id, conversation)
+        } else {
+          const { serverSummary: _serverSummary, ...existingBody } = existing
+          void _serverSummary
+          byId.set(conversation.id, {
+            ...existingBody,
+            title: conversation.title,
+            starred: conversation.starred,
+            folder: conversation.folder,
+            createdAt: Math.min(existing.createdAt, conversation.createdAt),
+            updatedAt: conversation.updatedAt,
+          })
+        }
       } else if (isServerSummaryConversation(existing) && conversation.updatedAt >= existing.updatedAt) {
         byId.set(conversation.id, conversation)
       }
@@ -168,7 +161,7 @@ function noteServerState(conversations: Conversation[], deletedIds: string[] = [
 }
 
 async function fetchServerState(): Promise<ServerConversationState> {
-  const response = await fetchWithTimeout('/api/conversations', {
+  const response = await fetch('/api/conversations', {
     cache: 'no-store',
   })
   if (!response.ok) {
@@ -179,7 +172,7 @@ async function fetchServerState(): Promise<ServerConversationState> {
 }
 
 async function fetchServerConversation(conversationId: string): Promise<Conversation | null> {
-  const response = await fetchWithTimeout(`/api/conversations?id=${encodeURIComponent(conversationId)}`, {
+  const response = await fetch(`/api/conversations?id=${encodeURIComponent(conversationId)}`, {
     cache: 'no-store',
   })
   if (!response.ok) {
@@ -271,6 +264,19 @@ async function waitForStoreHydration(): Promise<void> {
       unsubscribeHydration?.()
       resolve()
     })
+  })
+}
+
+async function waitForSyncManagerReady(): Promise<void> {
+  if (storeApi) return
+  const startedAt = Date.now()
+  await new Promise<void>((resolve) => {
+    const timer = window.setInterval(() => {
+      if (storeApi || Date.now() - startedAt >= SYNC_MANAGER_READY_WAIT_MS) {
+        window.clearInterval(timer)
+        resolve()
+      }
+    }, SYNC_MANAGER_READY_POLL_MS)
   })
 }
 
@@ -448,7 +454,9 @@ export async function loadConversationFromServer(conversationId: string): Promis
 }
 
 export async function flushChatServerSync(): Promise<void> {
+  await waitForSyncManagerReady()
   await waitForStoreHydration()
+  if (!storeApi || !hydrated) return
   if (saveTimer) {
     clearTimeout(saveTimer)
     saveTimer = null

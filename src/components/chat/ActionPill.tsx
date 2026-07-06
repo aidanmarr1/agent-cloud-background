@@ -3,6 +3,7 @@
 import { Search, Globe, Loader2 } from '@/components/icons'
 import { StepAction, BrowseResult } from '@/types'
 import { useUIStore } from '@/store/ui'
+import { formatVisibleActionLabel } from '@/lib/stream/ActivityDescriber'
 
 interface ActionPillProps {
   action: StepAction
@@ -25,21 +26,21 @@ export function ActionPill({ action }: ActionPillProps) {
 
   const getLabel = () => {
     if (action.type === 'search') {
-      return action.query || 'Searching…'
+      return formatVisibleActionLabel(action.query || 'Searching…')
     }
     const browseResult = action.result as BrowseResult | undefined
     if (browseResult?.title && browseResult.title !== 'Error loading page') {
-      return browseResult.title
+      return formatVisibleActionLabel(browseResult.title)
     }
     if (action.url) {
       try {
         const u = new URL(action.url)
-        return u.hostname.replace('www.', '')
+        return formatVisibleActionLabel(u.hostname.replace('www.', ''))
       } catch {
-        return action.url
+        return formatVisibleActionLabel(action.url)
       }
     }
-    return 'Browsing…'
+    return formatVisibleActionLabel('Browsing…')
   }
 
   return (

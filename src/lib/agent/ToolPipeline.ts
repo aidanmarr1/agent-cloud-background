@@ -15,6 +15,7 @@ import {
   trackSearchQuery,
   trackSourceDomain,
   trackVisitedSourceDomain,
+  stepOpenedSourceDomains,
   trackFailure,
   updateToolHealth,
   isToolDisabled,
@@ -42,7 +43,7 @@ interface WorkingMemoryLike {
 }
 import type { Logger } from './Logger'
 import { ErrorRecoveryEngine, type ToolFailure } from './recovery/ErrorRecoveryEngine'
-import { currentStepWebSearchLimit, hasSingleWebSearchLimit, requestsMarkdownDeliverable } from './taskConstraints'
+import { currentStepWebSearchLimit, hasSingleWebSearchLimit, requestsMarkdownDeliverable, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import {
   browserActionPreflight,
   browserNavigate,
@@ -72,7 +73,7 @@ import {
   isNextWebsiteProjectPath,
 } from '@/lib/tsxWebsitePreview'
 import { analyzeScreenshotQuality } from '@/lib/visualQuality'
-import { strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import {
   addResearchActivityToIndex,
@@ -99,9 +100,9 @@ import {
   WEB_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
   URL_NORMALIZE_STRIP_PARAMS,
   SEARCH_STOPWORDS,
-  TOOL_TYPE_RATE_LIMITS,
   CROSS_TOOL_PATTERN_WINDOW, CROSS_TOOL_CYCLE_LENGTH, CROSS_TOOL_CYCLE_REPEATS,
 } from './config'
+import { toolTypeRateLimitForState } from './ToolLimits'
 
 // Tools that count as actual research progress (not note-taking)
 const RESEARCH_TOOLS = new Set([
@@ -125,6 +126,28 @@ const FINAL_SYNTHESIS_CARRYOVER_TOOLS = new Set([
   'browse_page',
   'read_document',
   'http_request',
+  'youtube_transcript',
+])
+
+const SYNTHESIS_STEP_RESEARCH_TOOLS = new Set([
+  'web_search',
+  'image_search',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+  'browse_page',
+  'read_document',
+  'http_request',
+  'youtube_transcript',
+])
+
+const SOURCE_EXTRACTION_TOOLS = new Set([
+  'read_document',
+  'http_request',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+  'browse_page',
   'youtube_transcript',
 ])
 
@@ -192,6 +215,53 @@ function timeoutMsForTool(toolName: string): number {
   return TOOL_TIMEOUT_MS
 }
 
+function isDocumentLikeTool(toolName: string): boolean {
+  return toolName === 'read_document' || toolName === 'http_request' || toolName === 'youtube_transcript'
+}
+
+function isSearchTool(toolName: string): boolean {
+  return toolName === 'web_search' || toolName === 'image_search'
+}
+
+function searchExecutionRecoveryResult(toolName: string, args: Record<string, unknown>, errMsg: string): Record<string, unknown> | null {
+  if (!isSearchTool(toolName)) return null
+
+  const query =
+    typeof args.query === 'string'
+      ? args.query.trim()
+      : ''
+  const recoveryHint = `INTERNAL_RECOVERY: ${toolName} did not return results${query ? ` for "${query}"` : ''} because the search provider call failed or timed out. Do not show this to the user. If this phase still needs discovery, try one shorter, more specific search query; otherwise use a known source URL, opened page content, or existing evidence.`
+
+  return {
+    query,
+    results: [],
+    error: recoveryHint,
+    recoveryHint,
+    providerError: errMsg,
+  }
+}
+
+function documentTimeoutRecoveryResult(toolName: string, args: Record<string, unknown>, errMsg: string): Record<string, unknown> | null {
+  if (!isDocumentLikeTool(toolName) || !/\btimed out\b/i.test(errMsg)) return null
+
+  const source =
+    researchUrlFromToolCall(toolName, args) ||
+    (typeof args.source === 'string' ? args.source : '') ||
+    (typeof args.url === 'string' ? args.url : '')
+  const recoveryHint = `INTERNAL_RECOVERY: ${toolName} timed out while extracting ${source || 'the requested source'}. Do not show this to the user. If the exact source matters, use browser_navigate followed by browser_get_content; otherwise choose another strong source from the search results.`
+
+  return {
+    type: 'text',
+    title: 'Source needs browser rendering',
+    content: recoveryHint,
+    source,
+    url: source,
+    wordCount: 0,
+    error: recoveryHint,
+    recoveryHint,
+  }
+}
+
 const SINGLE_SEARCH_BLOCKED_WEB_TOOLS = new Set([
   'browser_navigate',
   'browser_get_content',
@@ -213,6 +283,49 @@ const UPLOADED_IMAGE_DIRECT_CONTEXT_BLOCKED_TOOLS = new Set([
 
 const TOOL_DISPLAY_CONTRACT_KEYS = ['action_label', 'plan_step_index'] as const
 
+function finalDeliverableContinuationNeedsLabel(
+  toolName: string,
+  state: AgentStateData,
+): boolean {
+  if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
+  if (state.currentStepIdx !== state.currentPlanItems.length - 1) return false
+  if (toolName !== 'append_file' && toolName !== 'edit_file') return false
+  return !!state.partialFileWriteRecoveryPending ||
+    state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable')
+}
+
+function currentStepActionLabel(state: AgentStateData): string {
+  const title = state.currentPlanItems?.[state.currentStepIdx] || 'Continue final deliverable'
+  return formatVisibleActionLabel(title)
+}
+
+function repairRuntimeDisplayContractArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string[] {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return []
+
+  const repairs: string[] = []
+  const rawStep = args.plan_step_index
+  const parsedStep = typeof rawStep === 'number'
+    ? rawStep
+    : typeof rawStep === 'string' && rawStep.trim()
+      ? Number(rawStep)
+      : NaN
+  if (!Number.isInteger(parsedStep)) {
+    args.plan_step_index = state.currentStepIdx + 1
+    repairs.push('plan_step_index')
+  }
+
+  if (!strictActionLabelFromArgs(args) && finalDeliverableContinuationNeedsLabel(toolName, state)) {
+    args.action_label = currentStepActionLabel(state)
+    repairs.push('action_label')
+  }
+
+  return repairs
+}
+
 function isTaskTrackingMarkdownPath(filePath: string): boolean {
   const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
   return /^(?:todo|todos|task|tasks|plan|plans|checklist|progress|status|scratch|notes?)\.md$/.test(base)
@@ -233,6 +346,20 @@ function fileWritePreflightBlockReason(
 ): string | null {
   if (FILE_WRITE_TOOLS.has(toolName) && state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length) {
     return 'BLOCKED: All steps are complete. Do NOT create or edit any more files. Write a brief final summary for the user, then STOP.'
+  }
+
+  if (state.partialFileWriteRecoveryPending && FILE_WRITE_TOOLS.has(toolName)) {
+    const pending = state.partialFileWriteRecoveryPending
+    const rawPath = typeof args.path === 'string' ? args.path : ''
+    const requestedPath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
+    if (!(toolName === 'append_file' && requestedPath === pending.path)) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+      if (toolName === 'append_file') {
+        return `INTERNAL_RECOVERY: A recovered partial write is pending for "${pending.path}". Do not append to "${requestedPath || 'a different/missing path'}"; make exactly one append_file call to "${pending.path}" with the next missing chunk.`
+      }
+
+      return `INTERNAL_RECOVERY: "${pending.path}" already has a recovered partial write (${pending.lines} lines, ${pending.chars} chars). Do not call ${toolName} yet. Make exactly one append_file call to "${pending.path}" with the next missing chunk, without repeating existing content.`
+    }
   }
 
   if (toolName === 'create_file') {
@@ -513,7 +640,7 @@ function planStepIndexBlockReason(args: Record<string, unknown>, state: AgentSta
 function actionLabelBlockReason(args: Record<string, unknown>, state: AgentStateData): string | null {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (strictActionLabelFromArgs(args)) return null
-  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label is required for the visible action pill. Retry the same intended tool only if it still belongs to the active step, and include a 4-12 word, task-specific objective label with no first person, no tool names, no raw JSON, and no gerund/tool-wrapper starts like Searching, Researching, Navigating, Reading, Reviewing, Scrolling, or Clicking.'
+  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be model-authored visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh 2-12 word purpose label from the task context. Start with a capital letter and do not end with a period. The label must say what the action is for, not expose raw JSON or tool syntax. No first person, no tool names, no raw URL, and no past-tense summary.'
 }
 
 function narrationCadenceBlockReason(
@@ -549,10 +676,15 @@ function narrationCadenceBlockReason(
     return null
   }
 
-  // Keep cadence soft. Blocking a useful tool call just to force a separate
-  // narration turn made the agent feel slow and caused out-of-order narration.
-  // AgentLoop already injects a same-turn narration reminder at 3-4 actions.
-  return null
+  // The 3-action window is advisory so the model can narrate and continue
+  // naturally. After 4 completed visible actions it becomes a hard gate:
+  // the next visible action must wait for a valid LLM-written progress
+  // paragraph, otherwise phases can silently run to 8-10 tools.
+  state.forceTextNextIteration = true
+  state.forcedNarrationRepairAttempts = 0
+  state.iterationsSinceLastContent++
+  state.visibleToolActionsSinceLastNarration = Math.max(state.visibleToolActionsSinceLastNarration, visibleActionsBeforeTool)
+  return 'INTERNAL_RECOVERY: this visible tool call was skipped because 4 visible actions have completed without a valid progress narration. Write exactly one concise, result-first progress paragraph from completed work now. Do not call tools in that narration response; continue with the active phase only after the paragraph is accepted.'
 }
 
 function topicFamiliesFor(text: string): Set<string> {
@@ -606,6 +738,11 @@ function phaseSemanticBlockReason(
   const actionText = visibleToolActionText(toolName, args)
   const actionFamilies = topicFamiliesFor(actionText)
   const currentFamilies = topicFamiliesFor(currentText)
+  const activeBroadResearchStep =
+    RESEARCH_TOOLS.has(toolName) &&
+    /\b(?:reviews?|analysis|analyses|comparisons?|compare|third[-\s]?party|expert|community|forums?|use cases?|case studies?|evidence|sources?)\b/i.test(currentText) &&
+    /\b(?:reviews?|analysis|analyses|comparisons?|compare|versus|vs\.?|third[-\s]?party|expert|community|forums?|use cases?|case studies?|evidence|sources?|agent|workflow|automation)\b/i.test(actionText)
+  if (activeBroadResearchStep && currentScore >= 0.08) return null
 
   if (state.currentStepIdx > 0 && state.currentStepIdx < state.currentPlanItems.length - 1 && state.stepResearchCallCount < 2) {
     let bestPreviousScore = 0
@@ -708,6 +845,45 @@ function singleWebSearchLimitBlockReason(
   return null
 }
 
+function totalOpenedSourceReads(state: AgentStateData): number {
+  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
+}
+
+function researchSourceBalanceBlockReason(
+  toolName: string,
+  state: AgentStateData,
+): string | null {
+  if (toolName !== 'web_search') return null
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
+  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return null
+  if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return null
+
+  const stepText = currentStepText(state)
+  const isResearchPhase =
+    state.currentPhase === 'research' ||
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    isResearchStepText(stepText)
+  if (!isResearchPhase) return null
+
+  const completedSearches = Math.max(
+    state.stepSearchQueries.size,
+    state.stepToolTypeCounts.get('web_search') || 0,
+  )
+  const openedSourceReads = totalOpenedSourceReads(state)
+  const sourceReadTools = [...SOURCE_EXTRACTION_TOOLS].join(', ')
+
+  if (completedSearches >= 1 && openedSourceReads === 0) {
+    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase has ${completedSearches} search result sets but no opened or extracted source pages yet. Use one of these source-reading tools next: ${sourceReadTools}. Extract concrete facts from the strongest result before searching again.`
+  }
+
+  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2)) {
+    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase is leaning too heavily on search previews (${completedSearches} searches, ${openedSourceReads} opened/extracted sources). Read or extract another strong source page with ${sourceReadTools} before searching again.`
+  }
+
+  return null
+}
+
 function isManagedLocalBrowserUrl(rawUrl: unknown): boolean {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false
   try {
@@ -735,8 +911,29 @@ function isBrowseFailureResult(result: unknown): boolean {
   const browseResult = result as {
     error?: string
     success?: boolean
+    url?: string
   }
-  return browseResult.success === false || typeof browseResult.error === 'string'
+  return browseResult.success === false ||
+    typeof browseResult.error === 'string' ||
+    /^chrome-error:\/\//i.test(String(browseResult.url || ''))
+}
+
+function isInternalRecoveryResult(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false
+  const obj = result as { error?: unknown; content?: unknown; body?: unknown }
+  return [obj.error, obj.content, obj.body].some(value =>
+    typeof value === 'string' && /^\s*INTERNAL_RECOVERY:/i.test(value),
+  )
+}
+
+function isToolExecutionErrorResult(toolName: string, result: unknown): boolean {
+  if (!result || typeof result !== 'object') return false
+  if ('error' in (result as Record<string, unknown>)) return true
+  if (isInternalRecoveryResult(result)) return true
+  if (toolName.startsWith('browser_') || toolName === 'browse_page') {
+    return isBrowseFailureResult(result)
+  }
+  return false
 }
 
 function allowNonDeliverableToolOnFinalStep(
@@ -776,6 +973,32 @@ function finalSynthesisCarryoverBlockReason(
   if (!FINAL_SYNTHESIS_CARRYOVER_TOOLS.has(toolName)) return null
   const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable step'
   return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${currentStep}") is the final synthesis/deliverable phase, not a continuation of the previous research phase. Do not mention this to the user. Use create_file for the initial deliverable, append_file for continuation chunks, edit_file for targeted revisions, read_file/list_files only to inspect existing work, or export_pdf after the source file exists.`
+}
+
+function stepIsSynthesisOnly(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.taskStrategy === 'browse') return false
+  if (state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
+
+  const stepText = [
+    state.currentPlanItems[state.currentStepIdx] || '',
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+  ].join(' ')
+  if (!/\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i.test(stepText)) {
+    return false
+  }
+
+  return !/\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look up|current|latest|image|asset|reference)\b/i.test(stepText)
+}
+
+function synthesisPhaseResearchBlockReason(
+  toolName: string,
+  state: AgentStateData,
+): string | null {
+  if (!stepIsSynthesisOnly(state)) return null
+  if (!SYNTHESIS_STEP_RESEARCH_TOOLS.has(toolName)) return null
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'the active synthesis step'
+  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${currentStep}") is for synthesizing, writing, or delivering from existing work, not gathering new sources. Stay inside this phase: write the answer/deliverable, inspect existing files only if needed, or emit <next_step/> if this phase is complete.`
 }
 
 async function applyVisualQualityGate(
@@ -885,7 +1108,7 @@ function userRequestedMarkdownDeliverable(state: AgentStateData, filePath: strin
     ...(state.currentPlanItems || []),
     ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
   ].join(' ')
-  return requestsMarkdownDeliverable(text)
+  return requestsMarkdownDeliverable(text) || taskDefaultsToMarkdownDeliverable(text)
 }
 
 function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', explicitDeliverable = false): WorkLedgerArtifactPurpose {
@@ -921,6 +1144,7 @@ function toolTargetFromArgs(args: Record<string, unknown>, result?: unknown): st
   const resultObj = result && typeof result === 'object' ? result as Record<string, unknown> : null
   for (const value of [
     args.url,
+    args.source,
     args.query,
     args.selector,
     args.path,
@@ -950,6 +1174,34 @@ function researchQueryFromToolArgs(toolName: string, args: Record<string, unknow
   if (toolName !== 'web_search') return undefined
   const query = typeof args.query === 'string' ? args.query.trim() : ''
   return query || undefined
+}
+
+function browserEvidenceLooksUsable(toolName: string, result: unknown): boolean {
+  if (!BROWSER_RESULT_TOOLS.has(toolName)) return true
+  const resultObj = result && typeof result === 'object'
+    ? result as { success?: unknown; url?: unknown; title?: unknown; content?: unknown; text?: unknown; error?: unknown }
+    : null
+  if (!resultObj || resultObj.success === false || resultObj.error) return false
+
+  const url = typeof resultObj.url === 'string' ? resultObj.url.trim() : ''
+  const title = typeof resultObj.title === 'string' ? resultObj.title.trim() : ''
+  const content = typeof resultObj.content === 'string'
+    ? resultObj.content.trim()
+    : (typeof resultObj.text === 'string' ? resultObj.text.trim() : '')
+  const combined = `${title}\n${content}`.toLowerCase()
+
+  if (!url || /^about:blank$/i.test(url)) return false
+  if (/\b(?:404|not found|page not found|access denied|forbidden)\b/i.test(title)) return false
+  if (/^\s*(?:404|not found|page not found|access denied|forbidden)\b/i.test(content)) return false
+  if (/\b(?:http 404|error 404|404 not found|this page could not be found)\b/i.test(combined)) return false
+
+  if (toolName === 'browser_get_content' || toolName === 'browse_page') {
+    return content.replace(/\s+/g, ' ').length >= 120
+  }
+  if (toolName === 'browser_find_text') {
+    return content.replace(/\s+/g, ' ').length > 0
+  }
+  return true
 }
 
 function researchActivityResultDetails(result: unknown): {
@@ -1336,7 +1588,12 @@ function buildToolStartArgsForExecution(toolName: string, args: Record<string, u
   const displayContractArgs = Object.fromEntries(
     TOOL_DISPLAY_CONTRACT_KEYS
       .filter(key => args[key] !== undefined)
-      .map(key => [key, args[key]]),
+      .map(key => [
+        key,
+        key === 'action_label' && typeof args[key] === 'string'
+          ? formatVisibleActionLabel(args[key])
+          : args[key],
+      ]),
   )
 
   if (toolName === 'create_file' || toolName === 'append_file') {
@@ -1488,6 +1745,32 @@ function pageLikeHttpRequestBlockReason(toolName: string, args: Record<string, u
   if (isLikelyStructuredEndpoint(url)) return null
 
   return `INTERNAL_RECOVERY: http_request GET/HEAD was skipped for a normal webpage URL (${url}). Do not mention this to the user. Use browser_navigate for rendered pages, read_document for PDFs/documents, or web_search for alternatives. Reserve http_request for structured API/data endpoints only.`
+}
+
+function duplicateSourceOpenBlockReason(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  const duplicateTrackedTools = new Set(['read_document', 'browser_navigate', 'browse_page'])
+  if (!duplicateTrackedTools.has(toolName)) return null
+  const url = researchUrlFromToolCall(toolName, args)
+  if (!url) return null
+  const normalized = normalizeUrl(url)
+  for (const visited of state.stepVisitedUrls) {
+    if (normalizeUrl(visited) === normalized) {
+      const verb = toolName === 'read_document' ? 'read' : 'opened'
+      return `INTERNAL_RECOVERY: ${url} was already ${verb} in this phase. Do not open the same URL again with ${toolName}. Use browser_get_content if the current rendered page needs content extraction, choose a different source, or emit <next_step/> if this phase has enough evidence.`
+    }
+  }
+  for (const failure of state.workLedger.failedRoutes) {
+    if (failure.stepIdx !== state.currentStepIdx) continue
+    if (failure.tool !== toolName) continue
+    if (normalizeUrl(failure.target) === normalized) {
+      return `INTERNAL_RECOVERY: ${url} was already attempted with ${toolName} in this phase and did not produce usable evidence. Do not retry the same URL. Use browser_get_content if the current rendered page needs content extraction, choose a different source, or emit <next_step/> if this phase has enough evidence.`
+    }
+  }
+  return null
 }
 
 function getIntegerIndex(value: unknown): number | null {
@@ -1656,6 +1939,63 @@ function detectToolCycle(sequence: string[], cycleLen: number, minRepeats: numbe
   return pattern
 }
 
+const TOOL_CYCLE_ENTRY_SEPARATOR = '\u001f'
+
+function normalizeToolCycleTarget(value: unknown): string {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (!trimmed) return ''
+  const httpUrl = coerceHttpUrl(trimmed)
+  return (httpUrl ? normalizeUrl(httpUrl) : trimmed)
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+}
+
+function toolCycleTargetFor(toolName: string, args: Record<string, unknown>): string {
+  if (toolName === 'web_search' || toolName === 'image_search') {
+    return normalizeToolCycleTarget(args.query)
+  }
+  if (toolName === 'read_document') {
+    return normalizeToolCycleTarget(researchUrlFromToolCall('read_document', args) || args.source)
+  }
+  if (toolName === 'http_request') {
+    const method = typeof args.method === 'string' && args.method.trim()
+      ? args.method.trim().toUpperCase()
+      : 'GET'
+    const url = normalizeToolCycleTarget(researchUrlFromToolCall('http_request', args) || args.url)
+    return url ? `${method} ${url}` : method
+  }
+  if (
+    toolName === 'browser_navigate' ||
+    toolName === 'browse_page' ||
+    toolName === 'browser_get_content'
+  ) {
+    return normalizeToolCycleTarget(args.url) || (toolName === 'browser_get_content' ? 'current-page' : '')
+  }
+  if (toolName === 'browser_find_text') {
+    const url = normalizeToolCycleTarget(args.url) || 'current-page'
+    const needle = normalizeToolCycleTarget(args.text || args.query || args.pattern)
+    return needle ? `${url} ${needle}` : url
+  }
+  if (toolName === 'create_file' || toolName === 'append_file' || toolName === 'edit_file' || toolName === 'read_file') {
+    return normalizeToolCycleTarget(args.path || args.source_path || args.output_path)
+  }
+  return ''
+}
+
+function toolCycleEntry(toolName: string, args: Record<string, unknown>): string {
+  const target = toolCycleTargetFor(toolName, args)
+  return target ? `${toolName}${TOOL_CYCLE_ENTRY_SEPARATOR}${target}` : toolName
+}
+
+function toolCycleEntryName(entry: string): string {
+  return entry.split(TOOL_CYCLE_ENTRY_SEPARATOR)[0] || entry
+}
+
+function formatToolCycle(cycle: string[]): string {
+  return cycle.map(toolCycleEntryName).join(' → ')
+}
+
 export class ToolPipeline {
   private emitter: AgentEventEmitter
   private conversationId: string | undefined
@@ -1821,13 +2161,14 @@ export class ToolPipeline {
       repeatReason?: string | null
     },
   ): Promise<boolean> {
-    const cachedIsError = !!(cached && typeof cached === 'object' && 'error' in (cached as Record<string, unknown>))
+    const cachedIsError = isToolExecutionErrorResult(tc.name, cached)
+    const usableCachedBrowserEvidence = !cachedIsError && browserEvidenceLooksUsable(tc.name, cached)
 
     trackToolCall(state, tc.name, JSON.stringify(args))
     state.stepToolCallCount++
     state.stepToolTypeCounts.set(tc.name, (state.stepToolTypeCounts.get(tc.name) || 0) + 1)
     if (tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') state.stepBrowseCount++
-    if (!cachedIsError && RESEARCH_TOOLS.has(tc.name)) state.stepResearchCallCount++
+    if (!cachedIsError && RESEARCH_TOOLS.has(tc.name) && (!BROWSER_RESULT_TOOLS.has(tc.name) || usableCachedBrowserEvidence)) state.stepResearchCallCount++
     updateToolHealth(state, tc.name, !cachedIsError)
 
     const cachedActivityUrl = researchUrlFromToolCall(tc.name, args, cached) || activity.url
@@ -1837,8 +2178,10 @@ export class ToolPipeline {
         kind: cachedIsError ? 'failure' : activity.kind,
         query: activity.query,
         url: cachedActivityUrl,
-        success: !cachedIsError,
-        error: cachedIsError ? String((cached as Record<string, unknown>).error || 'Cached tool error') : undefined,
+        success: !cachedIsError && usableCachedBrowserEvidence,
+        error: cachedIsError
+          ? String((cached as Record<string, unknown>).error || 'Cached tool error')
+          : (usableCachedBrowserEvidence ? undefined : 'Rendered page did not expose usable source content'),
         allowedRepeatReason: activity.repeatReason,
       })
     }
@@ -1882,7 +2225,7 @@ export class ToolPipeline {
       }
     } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
       const url = (args.url as string) || (cached as { url?: string } | undefined)?.url || ''
-      if (url) {
+      if (url && usableCachedBrowserEvidence) {
         state.visitedUrls.add(url)
         state.stepVisitedUrls.add(url)
         const normalized = normalizeUrl(url)
@@ -1899,7 +2242,7 @@ export class ToolPipeline {
       trackBrowseResult(state, false, url)
       logWork(state, `Used cached browser result: ${url}`)
       const browseContent = (cached as { content?: string })?.content || ''
-      if (browseContent) this.memory?.extractFromBrowse(url, browseContent, state.currentStepIdx)
+      if (browseContent && usableCachedBrowserEvidence) this.memory?.extractFromBrowse(url, browseContent, state.currentStepIdx)
     } else if (tc.name === 'http_request') {
       this.recordHttpRequestEvidence(args, cached, state, true)
     } else if (tc.name === 'read_document') {
@@ -1978,6 +2321,13 @@ export class ToolPipeline {
     ])
 
     if (url) {
+      state.visitedUrls.add(url)
+      state.stepVisitedUrls.add(url)
+      const normalized = normalizeUrl(url)
+      if (normalized !== url) {
+        state.visitedUrls.add(normalized)
+        state.stepVisitedUrls.add(normalized)
+      }
       trackVisitedSourceDomain(state, url)
       recordWorkLedgerSource(state, {
         url,
@@ -2907,11 +3257,13 @@ export class ToolPipeline {
             chars: partial.content.length,
             lines: recoveredLines,
           }
-          this.emitter.toolStart(tc.id, tc.name, {
-            path: partial.path,
-            contentCharCount: partial.content.length,
-            contentLineCount: recoveredLines,
-          })
+          if (!state.visibleNarrationToolStartIds.has(tc.id)) {
+            this.emitter.toolStart(tc.id, tc.name, {
+              path: partial.path,
+              contentCharCount: partial.content.length,
+              contentLineCount: recoveredLines,
+            })
+          }
 
           const result = tc.name === 'create_file'
             ? await createFileInSandbox(this.conversationId, partial.path, partial.content)
@@ -2991,6 +3343,17 @@ export class ToolPipeline {
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
 
+    const displayRepairs = repairRuntimeDisplayContractArgs(tc.name, args, state)
+    if (displayRepairs.length > 0) {
+      tc.arguments = JSON.stringify(args)
+      console.log('[ToolPipeline] Repaired runtime display contract for model-selected tool', {
+        tool: tc.name,
+        step: state.currentStepIdx + 1,
+        repairs: displayRepairs,
+        actionLabel: typeof args.action_label === 'string' ? args.action_label : undefined,
+      })
+    }
+
     // --- Pre-validation guards ---
 
     const isFinalDeliverableStep = !!state.currentPlanItems &&
@@ -3012,15 +3375,27 @@ export class ToolPipeline {
 
     const actionLabelReason = actionLabelBlockReason(args, state)
     if (actionLabelReason) {
-      const errorResult = { error: actionLabelReason }
+      state.displayContractRepairAttempts = (state.displayContractRepairAttempts || 0) + 1
+      const rawLabel = typeof args.action_label === 'string' ? args.action_label.replace(/\s+/g, ' ').trim() : ''
+      const errorResult = {
+        error: [
+          'INTERNAL_RECOVERY: display contract repair needed before executing this action.',
+          actionLabelReason,
+          rawLabel ? `Rejected action_label: "${rawLabel.slice(0, 140)}".` : 'No action_label was supplied.',
+          'Do not show this to the user.',
+        ].join(' '),
+      }
       recordWorkLedgerFailure(state, {
         tool: tc.name,
         target: toolTargetFromArgs(args),
         error: actionLabelReason,
       })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+    const modelActionLabel = strictActionLabelFromArgs(args)
+    if (modelActionLabel) {
+      args.action_label = modelActionLabel
+      tc.arguments = JSON.stringify(args)
     }
 
     const narrationCadenceReason = narrationCadenceBlockReason(tc.id, tc.name, args, state, assistantContent)
@@ -3107,6 +3482,20 @@ export class ToolPipeline {
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
 
+    const synthesisPhaseResearchReason = synthesisPhaseResearchBlockReason(tc.name, state)
+    if (synthesisPhaseResearchReason) {
+      const errorResult = { error: synthesisPhaseResearchReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: synthesisPhaseResearchReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
     if (
       isFinalDeliverableStep &&
       !DELIVERABLE_STEP_TOOLS.has(tc.name) &&
@@ -3140,6 +3529,20 @@ export class ToolPipeline {
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
 
+    const researchSourceBalanceReason = researchSourceBalanceBlockReason(tc.name, state)
+    if (researchSourceBalanceReason) {
+      const errorResult = { error: researchSourceBalanceReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: researchSourceBalanceReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
     const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
     if (browserPreflightBlock) return browserPreflightBlock
 
@@ -3154,6 +3557,21 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const duplicateSourceOpenReason = duplicateSourceOpenBlockReason(tc.name, args, state)
+    if (duplicateSourceOpenReason) {
+      const errorResult = { error: duplicateSourceOpenReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: duplicateSourceOpenReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.stepFailureCount++
+      state.lastLoopSignal = { type: 'near_dup_search', tool: tc.name }
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
 
@@ -3176,9 +3594,21 @@ export class ToolPipeline {
     // narration cadence from counting an action that did not really happen.
     const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
     if (directNavigationTarget) {
+      const modelActionLabel = strictActionLabelFromArgs(args)
+      if (!modelActionLabel) {
+        const errorResult = { error: actionLabelBlockReason(args, state) || 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be model-authored.' }
+        recordWorkLedgerFailure(state, {
+          tool: tc.name,
+          target: toolTargetFromArgs(args),
+          error: errorResult.error,
+        })
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
       const reroutedArgs = {
         url: directNavigationTarget.toString(),
-        action_label: `Open ${directNavigationTarget.hostname} directly`,
+        action_label: modelActionLabel,
         plan_step_index: state.currentStepIdx + 1,
       }
       const reroutedToolCall: ToolCallData = {
@@ -3190,11 +3620,38 @@ export class ToolPipeline {
       return this.executeSingle(reroutedToolCall, state)
     }
 
+    if (tc.name === 'web_search') {
+      const query = ((args.query as string) || '').toLowerCase().trim()
+      if (query && state.stepSearchQueries.has(query)) {
+        const errorMessage = `INTERNAL_RECOVERY: this web_search query already ran in the active phase. Do not show this to the user. Use a different query, read/extract a strong source from the existing results, or emit <next_step/> if the phase has enough evidence.`
+        const errorResult = { error: errorMessage }
+        await this.recordResearchActivity(state, {
+          tool: tc.name,
+          kind: 'failure',
+          query,
+          success: false,
+          error: errorMessage,
+        })
+        recordWorkLedgerFailure(state, {
+          tool: tc.name,
+          target: query,
+          error: errorMessage,
+        })
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.lastLoopSignal = { type: 'search_duplicate', tool: 'web_search' }
+        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      }
+    }
+
     // Emit tool_start after final-step/browser-action/file-write preflight so blocked
     // calls do not appear in the UI as if the agent actually acted.
     const startArgs = buildToolStartArgsForExecution(tc.name, args)
+    const alreadyVisibleFromStream = state.visibleNarrationToolStartIds.has(tc.id)
     countVisibleToolActionForNarration(tc.id, tc.name, startArgs, state)
-    this.emitter.toolStart(tc.id, tc.name, startArgs)
+    if (!alreadyVisibleFromStream) {
+      this.emitter.toolStart(tc.id, tc.name, startArgs)
+    }
 
     const toolContext: ToolContext = {
       conversationId: this.conversationId,
@@ -3315,7 +3772,7 @@ export class ToolPipeline {
     }
 
     // Tool type rate limiting per step
-    const rateLimit = TOOL_TYPE_RATE_LIMITS[tc.name]
+    const rateLimit = toolTypeRateLimitForState(state, tc.name)
     if (rateLimit !== undefined) {
       const count = state.stepToolTypeCounts.get(tc.name) || 0
       if (count >= rateLimit) {
@@ -3330,19 +3787,22 @@ export class ToolPipeline {
       }
     }
 
-    // Cross-tool cycle detection — detect search→browse→search→browse loops
-    state.recentToolSequence.push(tc.name)
+    // Cross-tool cycle detection — detect same-target search/read/browse loops
+    // without blocking legitimate research that opens several different sources
+    // with the same extraction tool.
+    state.recentToolSequence.push(toolCycleEntry(tc.name, args))
     if (state.recentToolSequence.length > CROSS_TOOL_PATTERN_WINDOW) {
       state.recentToolSequence = state.recentToolSequence.slice(-CROSS_TOOL_PATTERN_WINDOW)
     }
     const cycle = detectToolCycle(state.recentToolSequence, CROSS_TOOL_CYCLE_LENGTH, CROSS_TOOL_CYCLE_REPEATS)
     if (cycle) {
+      const cycleLabel = formatToolCycle(cycle)
       state.lastLoopSignal = { type: 'cross_tool_cycle', tool: tc.name }
       state.stepCrossToolCycleDetections = (state.stepCrossToolCycleDetections || 0) + 1
-      console.log(`[ToolPipeline] Cross-tool cycle detected: [${cycle.join(' → ')}] repeated ${CROSS_TOOL_CYCLE_REPEATS}x`)
+      console.log(`[ToolPipeline] Cross-tool cycle detected: [${cycleLabel}] repeated ${CROSS_TOOL_CYCLE_REPEATS}x`)
       if (state.stepCrossToolCycleDetections >= 2) {
         const errorResult = {
-          error: `Repeated tool cycle blocked: [${cycle.join(' → ')}]. Stop repeating this pattern. If the current phase has enough evidence, emit <next_step/>; otherwise use a materially different source, query, or tool.`,
+          error: `INTERNAL_RECOVERY: Repeated same-target tool cycle blocked: [${cycleLabel}]. Do not show this to the user. Stop repeating equivalent targets. If the current phase has enough evidence, emit <next_step/>; otherwise use a materially different source, query, or tool.`,
         }
         this.emitter.toolResult(tc.id, tc.name, errorResult as never)
         trackToolCall(state, tc.name, JSON.stringify(args))
@@ -3421,12 +3881,20 @@ export class ToolPipeline {
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error'
       if (errMsg === 'Tool execution aborted') throw error
-      const isTimeout = errMsg.includes('timed out')
-      const sideEffectWarning = isTimeout && ['create_file', 'execute_command', 'run_code', 'edit_file', 'append_file', 'export_pdf'].includes(tc.name)
-        ? ' Warning: the operation may have partially completed.'
-        : ''
-      result = {
-        error: `Tool execution failed: ${errMsg}${sideEffectWarning}`,
+      const searchRecovery = searchExecutionRecoveryResult(tc.name, args, errMsg)
+      const documentRecovery = documentTimeoutRecoveryResult(tc.name, args, errMsg)
+      if (searchRecovery) {
+        result = searchRecovery
+      } else if (documentRecovery) {
+        result = documentRecovery
+      } else {
+        const isTimeout = errMsg.includes('timed out')
+        const sideEffectWarning = isTimeout && ['create_file', 'execute_command', 'run_code', 'edit_file', 'append_file', 'export_pdf'].includes(tc.name)
+          ? ' Warning: the operation may have partially completed.'
+          : ''
+        result = {
+          error: `Tool execution failed: ${errMsg}${sideEffectWarning}`,
+        }
       }
     }
 
@@ -3480,9 +3948,9 @@ export class ToolPipeline {
 
     // Track search failures
     if (tc.name === 'web_search') {
-      const resultArr = result as Array<{ title: string }> | undefined
+      const resultArr = Array.isArray(result) ? result as Array<{ title: string }> : undefined
       const isFailure =
-        !resultArr ||
+        !Array.isArray(resultArr) ||
         resultArr.length === 0 ||
         (resultArr.length === 1 && resultArr[0]?.title === 'Search unavailable')
       trackSearchResult(state, isFailure)
@@ -3502,15 +3970,24 @@ export class ToolPipeline {
     if (tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') state.stepBrowseCount++
 
     // Check if error
-    const isError = result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)
+    const isError = isToolExecutionErrorResult(tc.name, result)
+    const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)
 
     // Real research calls only — note files don't count toward research progress
-    if (!isError && RESEARCH_TOOLS.has(tc.name)) {
+    if (!isError && RESEARCH_TOOLS.has(tc.name) && (!BROWSER_RESULT_TOOLS.has(tc.name) || usableBrowserEvidence)) {
       state.stepResearchCallCount++
     }
 
     // Update tool health for circuit breaker
     updateToolHealth(state, tc.name, !isError)
+    if (
+      !isError &&
+      state.suppressedResearchToolName &&
+      tc.name !== state.suppressedResearchToolName &&
+      RESEARCH_TOOLS.has(tc.name)
+    ) {
+      state.suppressedResearchToolName = null
+    }
 
     if (isError) {
       const activityFailureUrl = researchUrlFromToolCall(tc.name, args, result) || activityUrl
@@ -3578,7 +4055,7 @@ export class ToolPipeline {
       }
     } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
       const url = (args.url as string) || (result as { url?: string } | undefined)?.url || ''
-      if (url) {
+      if (url && usableBrowserEvidence) {
         state.visitedUrls.add(url)
         state.stepVisitedUrls.add(url)
         const normalized = normalizeUrl(url)
@@ -3588,7 +4065,7 @@ export class ToolPipeline {
         }
       }
       logWork(state, `Visited: ${url}`)
-      if (url) {
+      if (url && usableBrowserEvidence) {
         trackVisitedSourceDomain(state, url)
         recordWorkLedgerSource(state, {
           url,
@@ -3602,13 +4079,15 @@ export class ToolPipeline {
           tool: tc.name,
           kind: resultActivityKind,
           url: resultActivityUrl,
-          success: !isError,
-          error: isError ? String((result as Record<string, unknown>).error || 'Unknown tool failure') : undefined,
+          success: !isError && usableBrowserEvidence,
+          error: isError
+            ? String((result as Record<string, unknown>).error || 'Unknown tool failure')
+            : (usableBrowserEvidence ? undefined : 'Rendered page did not expose usable source content'),
           allowedRepeatReason: activityRepeatReason,
         })
       }
       // Extract from browse result
-      if (this.memory && !isError) {
+      if (this.memory && !isError && usableBrowserEvidence) {
         const browseContent = (result as { content?: string })?.content || ''
         if (browseContent) {
           this.memory.extractFromBrowse(url, browseContent, state.currentStepIdx)
@@ -3670,8 +4149,10 @@ export class ToolPipeline {
       }
     } else if (tc.name === 'read_document') {
       const resultActivityUrl = researchUrlFromToolCall(tc.name, args, result)
-      this.recordDocumentReadEvidence(args, result, state, false)
-      if (resultActivityUrl) {
+      if (!isError) {
+        this.recordDocumentReadEvidence(args, result, state, false)
+      }
+      if (!isError && resultActivityUrl) {
         await this.recordResearchActivity(state, {
           tool: tc.name,
           kind: 'extract',

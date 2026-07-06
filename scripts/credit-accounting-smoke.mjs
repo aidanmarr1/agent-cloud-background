@@ -27,15 +27,18 @@ async function assertSourceContracts() {
   ])
 
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*1000/, 'credit policy must define a stable credit-to-USD conversion')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'openai\/gpt-5\.4-mini'/, 'default model must be GPT-5.4 Mini')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.75/, 'GPT-5.4 Mini input pricing must match OpenRouter')
-  assert.match(modelPricing, /outputUsdPer1M:\s*4\.50/, 'GPT-5.4 Mini output pricing must match OpenRouter')
-  assert.match(modelPricing, /contextTokens:\s*400_000/, 'GPT-5.4 Mini context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*128_000/, 'GPT-5.4 Mini max output token cap must match OpenRouter')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3-flash-preview'/, 'default model must be Gemini 3 Flash Preview through OpenRouter')
+  assert.match(modelPricing, /inputUsdPer1M:\s*0\.50/, 'Gemini 3 Flash Preview input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.05/, 'Gemini 3 Flash Preview cache-read pricing must stay proportional when exact provider cost metadata is unavailable')
+  assert.match(modelPricing, /outputUsdPer1M:\s*3\.00/, 'Gemini 3 Flash Preview output pricing must match OpenRouter')
+  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Gemini 3 Flash Preview context window must match OpenRouter')
+  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Gemini 3 Flash Preview max output token cap must match OpenRouter')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
-  assert.match(creditPolicy, /BRAVE_SEARCH_USD_PER_1K_REQUESTS\s*=\s*5/, 'web search pricing must be anchored to Brave Search API request pricing')
-  assert.match(creditPolicy, /IMAGE_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0/, 'image search must not be charged as Brave Search traffic')
+  assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0\.30/, 'Serper search pricing must match provider public pricing')
+  assert.match(creditPolicy, /E2B_VCPU_USD_PER_SECOND\s*=\s*0\.000014/, 'E2B CPU pricing must be anchored to E2B per-second vCPU pricing')
+  assert.match(creditPolicy, /E2B_MEMORY_GIB_USD_PER_SECOND\s*=\s*0\.0000045/, 'E2B memory pricing must be anchored to E2B per-second GiB pricing')
+  assert.match(creditPolicy, /e2bSandboxRuntimeCreditCharge/, 'E2B runtime must have a central credit charge helper')
   assert.match(creditPolicy, /TASK_START_CREDITS\s*=\s*0/, 'task starts must not create a fixed upfront debit')
   assert.match(creditPolicy, /LOCAL_BROWSER_USD_PER_STEP\s*=\s*0/, 'local browser actions must not use Browser Use Cloud pricing')
   assert.match(creditPolicy, /ACTIVE_CREDITS_PER_MINUTE\s*=\s*0/, 'passive wall-clock runtime must not be billable')
@@ -52,6 +55,7 @@ async function assertSourceContracts() {
   assert.match(serverCredits, /chargeServerActiveTime/, 'active runtime credits must be server-recorded')
   assert.match(serverCredits, /chargeServerTool/, 'tool credits must be server-recorded at execution time')
   assert.match(serverCredits, /chargeServerTokenUsage/, 'token credits must be server-recorded from provider usage')
+  assert.match(serverCredits, /chargeServerE2BRuntime/, 'E2B sandbox runtime must be server-recorded when the external sandbox is used')
   assert.match(serverCredits, /OutOfCreditsError/, 'server credit ledger must expose a typed out-of-credits cutoff')
   assert.match(serverCredits, /requiredCredits = safeRequired/, 'server credit errors must expose the attempted required balance')
   assert.match(serverCredits, /MINIMUM_PROVIDER_CALL_CREDITS\s*=\s*0/, 'positive balances must be allowed to continue until a billable call drains them')
@@ -83,6 +87,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /emitServerToolCharge\(tc\.id,\s*tc\.name\)/, 'actual tool execution must emit a server charge after preflight/cache checks')
   assert.match(toolPipeline, /chargeServerTool\(this\.userId,\s*this\.conversationId,\s*toolName,\s*toolCallId,\s*this\.creditRunId\)/, 'tool pipeline must call the server credit ledger')
   assert.match(chatRoute, /chargeServerTaskStart/, 'chat route must charge task start on the server')
+  assert.match(chatRoute, /chargeServerE2BRuntime/, 'chat route must meter external E2B sandbox runtime')
   assert.match(chatRoute, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'chat route must guard passive active-time billing behind the disabled rate')
   assert.match(chatRoute, /assertServerCreditsAvailable\(userId\)/, 'chat route must reject new tasks before streaming when credits are already exhausted')
   assert.match(chatRoute, /for \(let attempt = 0; attempt <= DIRECT_CHAT_MAX_CONTINUATIONS; attempt\+\+\) \{[\s\S]*await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'direct chat continuations must preflight credit runway before each provider call')
@@ -103,7 +108,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /BILLABLE_USAGE_ERROR/, 'planning must fail closed when provider cost is missing')
   assert.match(agentLoop, /`tokens:\$\{state\.iterations\}`/, 'agent-loop tasks must charge model token usage each iteration so zero-credit cutoff is immediate')
   assert.match(agentLoop, /recordPlannerUsage/, 'planner and acknowledgement LLM calls must be charged through the server ledger')
-  assert.match(agentLoop, /assertPlannerCreditRunway[\s\S]*new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*customInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway\)/, 'AgentLoop must wire planner provider calls through credit runway preflight')
+  assert.match(agentLoop, /assertPlannerCreditRunway[\s\S]*new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*customInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire planner provider calls through credit runway preflight')
   assert.match(agentLoop, /await assertServerCreditsAvailable\(this\.options\.userId\)[\s\S]*createStreamingCompletion/, 'streaming agent model calls must preflight credit runway before provider work')
   assert.doesNotMatch(agentLoop, /chargeServerTokenUsage\(this\.options\.userId,\s*this\.options\.conversationId,\s*this\.options\.creditRunId,\s*totalUsage\)/, 'agent-loop tasks must not double-charge final cumulative token usage')
   assert.match(agentLoop, /this\.emitter\.done\(totalUsage\)/, 'agent-loop tasks must still report final cumulative token usage to the client')
@@ -122,12 +127,14 @@ async function assertPricingRuntime() {
 import assert from 'node:assert/strict'
 import {
   CREDIT_RATES,
+  e2bSandboxRuntimeCreditCharge,
   roundCreditAmount,
   tokenUsageCreditCharge,
   toolCreditCharge,
 } from ${JSON.stringify(join(root, 'src/lib/creditPolicy.ts'))}
 import {
   chargeServerActiveTime,
+  chargeServerE2BRuntime,
   chargeServerTaskStart,
   chargeServerTokenUsage,
   chargeServerTool,
@@ -141,13 +148,16 @@ import { rm } from 'node:fs/promises'
 
 export async function runCreditPricingSmoke() {
   assert.equal(CREDIT_RATES.creditsPerUsd, 1000)
-  assert.equal(CREDIT_RATES.webSearchCredits, 5)
-  assert.equal(CREDIT_RATES.imageSearchCredits, 0)
+  assert.equal(CREDIT_RATES.webSearchCredits, 0.3)
+  assert.equal(CREDIT_RATES.imageSearchCredits, 0.3)
   assert.equal(CREDIT_RATES.browserStepCredits, 0)
+  assert.equal(CREDIT_RATES.e2bDefaultVcpuCount, 2)
+  assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 0.5)
+  assert.equal(CREDIT_RATES.e2bSandboxUsdPerSecond, (2 * 0.000014) + (0.5 * 0.0000045))
   assert.equal(CREDIT_RATES.inputTokenCreditsPer1K, roundCreditAmount(CREDIT_RATES.modelInputUsdPer1M))
   assert.equal(CREDIT_RATES.outputTokenCreditsPer1K, roundCreditAmount(CREDIT_RATES.modelOutputUsdPer1M))
-  assert.equal(toolCreditCharge('web_search'), 5)
-  assert.equal(toolCreditCharge('image_search'), 0)
+  assert.equal(toolCreditCharge('web_search'), 0.3)
+  assert.equal(toolCreditCharge('image_search'), 0.3)
   assert.equal(toolCreditCharge('browser_navigate'), 0)
   assert.equal(toolCreditCharge('browser_click_at'), 0)
   assert.equal(toolCreditCharge('browser_screenshot'), 0)
@@ -155,6 +165,8 @@ export async function runCreditPricingSmoke() {
   assert.equal(toolCreditCharge('read_file'), 0)
   assert.equal(toolCreditCharge('unknown_local_tool'), 0)
   const expectedTokenCharge = roundCreditAmount(0.00123 * CREDIT_RATES.creditsPerUsd)
+  const expectedE2BCharge = roundCreditAmount(CREDIT_RATES.e2bSandboxUsdPerSecond * CREDIT_RATES.creditsPerUsd * 120)
+  assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
 
@@ -175,26 +187,28 @@ export async function runCreditPricingSmoke() {
     await chargeServerTool(userId, conversationId, 'web_search', 'tool-1', runId)
     await chargeServerTool(userId, conversationId, 'browser_navigate', 'tool-browser', runId)
     await chargeServerTool(userId, conversationId, 'browser_screenshot', 'tool-2', runId)
+    await chargeServerE2BRuntime(userId, conversationId, runId, 1_000_000, 1_120_000)
     await chargeServerTokenUsage(userId, conversationId, runId, { promptTokens: 1000, completionTokens: 1000, cost: 0.00123 })
     const ledger = await readServerCreditLedger(userId)
     assert.equal(ledger.entries.filter((entry) => entry.id === \`credit:\${runId}:task-start\`).length, 0)
     assert.ok(!ledger.entries.some((entry) => entry.category === 'time'))
-    assert.ok(ledger.entries.some((entry) => entry.toolName === 'web_search' && entry.amount === 5))
+    assert.ok(ledger.entries.some((entry) => entry.toolName === 'web_search' && entry.amount === CREDIT_RATES.webSearchCredits))
     assert.ok(!ledger.entries.some((entry) => entry.toolName === 'browser_navigate'))
     assert.ok(!ledger.entries.some((entry) => entry.toolName === 'browser_screenshot'))
+    assert.ok(ledger.entries.some((entry) => entry.toolName === 'e2b_sandbox' && entry.amount === expectedE2BCharge))
     assert.ok(ledger.entries.some((entry) => entry.category === 'tokens' && entry.amount === expectedTokenCharge))
 
     const overdrawUserId = \`\${conversationId}-overdraw\`
     const overdrawConversationId = \`\${conversationId}-overdraw-task\`
     await initializeAccountCredits(overdrawUserId, { monthlyAllowance: 2, monthlyBalance: 2 })
     await assert.rejects(
-      () => chargeServerTool(overdrawUserId, overdrawConversationId, 'web_search', 'tool-overdraw', 'run-overdraw'),
+      () => chargeServerTokenUsage(overdrawUserId, overdrawConversationId, 'run-overdraw', { promptTokens: 1000, completionTokens: 1000, cost: 0.01 }),
       (error) => isOutOfCreditsError(error) && error.code === 'OUT_OF_CREDITS' && error.balanceAfter === 0,
     )
     const overdrawSnapshot = await getServerCreditSnapshot(overdrawUserId)
     assert.equal(overdrawSnapshot.balance.monthly, 0)
     assert.ok(overdrawSnapshot.balance.monthly >= 0)
-    assert.ok(overdrawSnapshot.ledger.some((entry) => entry.id === 'credit:tool-overdraw:tool:web_search' && entry.amount === 2))
+    assert.ok(overdrawSnapshot.ledger.some((entry) => entry.id === 'credit:run-overdraw:tokens' && entry.amount === 2))
   } finally {
     await rm(getSandboxDirPath(conversationId), { recursive: true, force: true })
   }

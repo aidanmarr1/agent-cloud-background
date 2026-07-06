@@ -6,11 +6,14 @@ import { TaskGroup, Subtask, GroupNarration } from '@/types'
 import { useUIStore } from '@/store/ui'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import { isHiddenSubtaskActivity } from '@/lib/stream/constants'
+import { formatVisibleActionLabel } from '@/lib/stream/ActivityDescriber'
 import { MarkdownLite } from './MarkdownLite'
 
 interface TaskGroupViewProps {
   group: TaskGroup
 }
+
+const INLINE_THINKING_DELAY_MS = 1200
 
 const iconMap: Record<string, React.ReactNode> = {
   search: <Search size={13} className="flex-shrink-0" />,
@@ -70,7 +73,7 @@ const ActionPill = memo(function ActionPill({ subtask }: { subtask: Subtask }) {
   const isDone = subtask.status === 'done'
   const isRunning = subtask.status === 'running'
   const icon = iconMap[subtask.type] || <Globe size={13} className="flex-shrink-0" />
-  const label = subtask.label?.trim()
+  const label = formatVisibleActionLabel(subtask.label || '')
   if (!label) return null
 
   return (
@@ -109,6 +112,7 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
   const isIncomplete = group.status === 'incomplete'
   const isError = group.status === 'error'
   const [expanded, setExpanded] = useState(group.status !== 'pending')
+  const [inlineThinkingReady, setInlineThinkingReady] = useState(false)
 
   useEffect(() => {
     if (isRunning) setExpanded(true)
@@ -118,7 +122,18 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
   const doneCount = visibleSubtasks.filter((s) => s.status === 'done').length
   const totalCount = visibleSubtasks.length
   const hasRunningVisibleSubtask = visibleSubtasks.some((s) => s.status === 'running')
-  const showInlineThinking = isAppStreaming && isRunning && !hasRunningVisibleSubtask && (streamingStatus === 'thinking' || streamingStatus !== 'startup')
+  const inlineThinkingEligible = isAppStreaming && isRunning && !hasRunningVisibleSubtask && streamingStatus !== 'startup'
+  const showInlineThinking = inlineThinkingEligible && inlineThinkingReady
+
+  useEffect(() => {
+    if (!inlineThinkingEligible) {
+      setInlineThinkingReady(false)
+      return
+    }
+
+    const timer = window.setTimeout(() => setInlineThinkingReady(true), INLINE_THINKING_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [inlineThinkingEligible, group.id, totalCount])
 
   return (
     <div>

@@ -35,7 +35,7 @@ export function UserMenu() {
 
       {open && (
         <div
-          className="absolute top-full right-0 mt-2 menu-surface border border-border-primary rounded-2xl w-[260px] overflow-hidden z-50 animate-scale-in"
+          className="fixed left-3 right-3 top-12 mt-2 menu-surface border border-border-primary rounded-2xl w-auto overflow-hidden z-[100] animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[260px]"
           style={{ boxShadow: 'var(--shadow-lg)' }}
         >
           {/* User info */}

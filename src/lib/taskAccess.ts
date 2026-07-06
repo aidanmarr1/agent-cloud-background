@@ -70,6 +70,21 @@ async function ensureDatabaseTaskAccessSchema(): Promise<void> {
   return taskAccessSchemaPromise
 }
 
+function isMissingTaskAccessSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /no such table|no such column|schema/i.test(message)
+}
+
+async function withDatabaseTaskAccessSchemaRepair<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!isMissingTaskAccessSchemaError(error)) throw error
+    await ensureDatabaseTaskAccessSchema()
+    return operation()
+  }
+}
+
 function accessMarkerPath(taskId: string): string {
   return join(ACCESS_ROOT, `${taskId}.owner`)
 }
@@ -93,11 +108,10 @@ async function ensureAccessRoot(): Promise<boolean> {
 
 async function readPersistedOwner(taskId: string): Promise<string | null> {
   if (shouldUseDatabaseTaskAccess()) {
-    await ensureDatabaseTaskAccessSchema()
-    const result = await tursoExecute(
+    const result = await withDatabaseTaskAccessSchemaRepair(() => tursoExecute(
       'select owner_hash from task_access where task_id = ? limit 1',
       [taskId],
-    )
+    ))
     const ownerHash = result.rows[0]?.owner_hash
     return typeof ownerHash === 'string' && /^[a-f0-9]{64}$/i.test(ownerHash) ? ownerHash : null
   }
@@ -117,21 +131,21 @@ async function readPersistedOwner(taskId: string): Promise<string | null> {
   }
 }
 
-async function persistOwner(taskId: string, ownerHash: string): Promise<string> {
+async function persistOwner(taskId: string, ownerHash: string): Promise<{ owner: string; created: boolean }> {
   if (shouldUseDatabaseTaskAccess()) {
-    await ensureDatabaseTaskAccessSchema()
     const now = new Date().toISOString()
-    await tursoExecute(
+    const inserted = await withDatabaseTaskAccessSchemaRepair(() => tursoExecute(
       `
         insert or ignore into task_access (task_id, owner_hash, created_at, updated_at)
         values (?, ?, ?, ?)
       `,
       [taskId, ownerHash, now, now],
-    )
-    return (await readPersistedOwner(taskId)) || ''
+    ))
+    if (inserted.rowsAffected === 1) return { owner: ownerHash, created: true }
+    return { owner: (await readPersistedOwner(taskId)) || '', created: false }
   }
 
-  if (!await ensureAccessRoot()) return ''
+  if (!await ensureAccessRoot()) return { owner: '', created: false }
   const markerPath = accessMarkerPath(taskId)
 
   try {
@@ -142,13 +156,13 @@ async function persistOwner(taskId: string, ownerHash: string): Promise<string> 
     )
     try {
       await file.writeFile(ownerHash, 'utf-8')
-      return ownerHash
+      return { owner: ownerHash, created: true }
     } finally {
       await file.close()
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
-    return (await readPersistedOwner(taskId)) || ''
+    return { owner: (await readPersistedOwner(taskId)) || '', created: false }
   }
 }
 
@@ -193,7 +207,18 @@ export async function assertTaskAccess(
   const ownerHash = accountOwnerHash(options.userId)
   let owner = taskAccessState.taskOwners.get(taskId)
 
-  if (!owner) {
+  let createdOwner = false
+
+  if (!owner && options.allowCreate) {
+    try {
+      const persisted = await persistOwner(taskId, ownerHash)
+      owner = persisted.owner || undefined
+      createdOwner = persisted.created
+    } catch {
+      return { ok: false, response: unavailable() }
+    }
+    if (owner) taskAccessState.taskOwners.set(taskId, owner)
+  } else if (!owner) {
     try {
       owner = await readPersistedOwner(taskId) || undefined
     } catch {
@@ -207,23 +232,10 @@ export async function assertTaskAccess(
   }
 
   if (!owner) {
-    if (!options.allowCreate) {
-      return { ok: false, response: forbidden('Task access denied') }
-    }
-    let persistedOwner: string
-    try {
-      persistedOwner = await persistOwner(taskId, ownerHash)
-    } catch {
-      return { ok: false, response: unavailable() }
-    }
-    if (persistedOwner && persistedOwner !== ownerHash) {
-      taskAccessState.taskOwners.set(taskId, persistedOwner)
-      return { ok: false, response: forbidden('Task access denied') }
-    }
-    if (!persistedOwner) {
-      return { ok: false, response: forbidden('Task access denied') }
-    }
-    taskAccessState.taskOwners.set(taskId, ownerHash)
+    return { ok: false, response: forbidden('Task access denied') }
+  }
+
+  if (createdOwner) {
     await rm(taskSandboxPath(taskId), { recursive: true, force: true }).catch(() => {})
   }
 

@@ -39,7 +39,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'create_file',
-      description: 'Create a workspace file; append long chunks.',
+      description: 'Create a workspace file. Put path before content; write the largest complete useful version that fits. Use append_file only for genuine continuation chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -111,7 +111,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'append_file',
-      description: 'Append content to a workspace file.',
+      description: 'Append a complete continuation section to an existing workspace file. Put path before content; do not repeat already-written content.',
       parameters: {
         type: 'object',
         properties: {
@@ -453,7 +453,7 @@ const executionToolDefinitions: ChatCompletionTool[] = shouldExposeExecutionTool
 
 const TOOL_ACTION_LABEL_PARAMETER = {
   type: 'string',
-  description: 'Visible action label, 4-12 words.',
+  description: 'Model-authored visible action pill text, 2-12 words. Start with a capital letter and do not end with a period. Describe the action purpose from task context; do not use a local template, tool name, raw query/source/path, or generic verb plus literal target.',
 }
 
 const TOOL_PLAN_STEP_INDEX_PARAMETER = {

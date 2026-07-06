@@ -47,7 +47,6 @@ async function cleanupUser() {
 
   try {
     await client.execute('delete from users where email like ?', ['auth-smoke-%@example.com'])
-    await client.execute('delete from signup_requests where email like ?', ['auth-smoke-%@example.com']).catch(() => undefined)
   } finally {
     client.close?.()
   }
@@ -66,7 +65,6 @@ async function readLocalEnv() {
 
 try {
   const env = await readLocalEnv()
-  const publicSignupEnabled = env.AGENT_PUBLIC_SIGNUP === 'true' || process.env.AGENT_PUBLIC_SIGNUP === 'true'
   const origin = new URL(baseUrl).origin
   const signupResponse = await fetch(`${baseUrl}/api/auth/signup`, {
     method: 'POST',
@@ -80,19 +78,6 @@ try {
       password,
     }),
   })
-
-  if (!publicSignupEnabled && signupResponse.status === 202) {
-    const body = await signupResponse.json().catch(() => ({}))
-    if (body?.status !== 'pending') {
-      throw new Error('Invite-gated signup did not return pending status')
-    }
-    if (body?.adminEmailSent !== true) {
-      throw new Error('Invite-gated signup did not report admin email delivery')
-    }
-    await cleanupUser()
-    console.log(JSON.stringify({ ok: true, signup: false, reason: 'invite_request_pending', adminEmailSent: true }))
-    process.exit(0)
-  }
 
   if (!signupResponse.ok) {
     throw new Error(`Sign-up failed with HTTP ${signupResponse.status}`)

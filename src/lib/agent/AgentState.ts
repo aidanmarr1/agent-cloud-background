@@ -6,6 +6,10 @@ import type { BrowserActionRecord } from '@/lib/browserIntelligence'
 import { createResearchActivityIndex, type ResearchActivityIndex } from './ResearchActivityLog'
 import {
   MIN_ITERATION_DELAY_MS,
+  AGENT_RUN_MAX_DURATION_MS,
+  AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
+  AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+  AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
   RECENT_TOOL_CALL_WINDOW,
   LOOP_CHECK_WINDOW,
   LOOP_THRESHOLD,
@@ -41,6 +45,10 @@ export interface WorkLedger {
 export interface AgentStateData {
   iterations: number
   runStartedAtMs: number
+  runMaxDurationMs: number
+  deadlineFinalizationBufferMs: number
+  deadlineModelTurnTimeoutMs: number
+  deadlineHardStopBufferMs: number
   deadlineFinalizationStarted: boolean
   lastIterationEnd: number
   iterationDelayMs: number
@@ -61,8 +69,10 @@ export interface AgentStateData {
   iterationsSinceLastContent: number
   visibleToolActionsSinceLastNarration: number
   visibleNarrationToolStartIds: Set<string>
+  phaseNarrationEmittedThisStep: boolean
   forceTextNextIteration: boolean
   forcedNarrationRepairAttempts: number
+  phaseEndNarrationPending: boolean
   exactExtractionGuardPending: boolean
   exactExtractionGuardPrompt: string | null
   exactExtractionGuardAttempts: number
@@ -105,6 +115,7 @@ export interface AgentStateData {
   distinctSourceDomains: Set<string>  // domains that returned useful results
   sourceDomainCounts: Map<string, number>
   stepSourceDomainCounts: Map<string, number>
+  stepOpenedSourceDomainCounts: Map<string, number>  // domains actually opened/read this step
 
   // Failure diagnosis
   failureLog: Array<{ tool: string; error: string; category: string }>
@@ -157,12 +168,14 @@ export interface AgentStateData {
   loopDetectionCount: number
   stepLoopDetections: number  // Resets per-step; escalates loop response faster than the legacy consecutive counter
   stepCrossToolCycleDetections: number
+  suppressedResearchToolName: string | null
 
   // Consecutive null stream responses (model not responding)
   consecutiveNullStreams: number
   lastModelErrorForUser: string | null
   pendingToolJsonRecovery: boolean
   toolJsonRecoveryCount: number
+  displayContractRepairAttempts: number
 
   // Code execution tracking
   lastCodeExitCode: number | null
@@ -182,6 +195,7 @@ export interface AgentStateData {
   browserTaskCompleted: boolean
   browserTaskCompletionEvidence: string[]
   browserNoToolRecoveryAttempts: number
+  researchNoToolRecoveryAttempts: number
 
   // Step reflection escalation
   stepResearchCallsAtReflection: number  // Snapshot of stepResearchCallCount when Stage 1 reflection nudge fired
@@ -244,7 +258,7 @@ export interface AgentStateData {
   // Per-step tool type counters — for rate limiting
   stepToolTypeCounts: Map<string, number>
 
-  // Cross-tool pattern tracking — ordered list of tool names for cycle detection
+  // Cross-tool pattern tracking — ordered list of tool/target signatures for cycle detection
   recentToolSequence: string[]
 
   // Diminishing returns tracking — new facts per iteration window
@@ -299,6 +313,10 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
   return {
     iterations: 0,
     runStartedAtMs: Date.now(),
+    runMaxDurationMs: AGENT_RUN_MAX_DURATION_MS,
+    deadlineFinalizationBufferMs: AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
+    deadlineModelTurnTimeoutMs: AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+    deadlineHardStopBufferMs: AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
     deadlineFinalizationStarted: false,
     lastIterationEnd: 0,
     iterationDelayMs: MIN_ITERATION_DELAY_MS,
@@ -315,8 +333,10 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     iterationsSinceLastContent: 0,
     visibleToolActionsSinceLastNarration: 0,
     visibleNarrationToolStartIds: new Set(),
+    phaseNarrationEmittedThisStep: false,
     forceTextNextIteration: false,
     forcedNarrationRepairAttempts: 0,
+    phaseEndNarrationPending: false,
     exactExtractionGuardPending: false,
     exactExtractionGuardPrompt: null,
     exactExtractionGuardAttempts: 0,
@@ -358,6 +378,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     distinctSourceDomains: new Set(),
     sourceDomainCounts: new Map(),
     stepSourceDomainCounts: new Map(),
+    stepOpenedSourceDomainCounts: new Map(),
     failureLog: [],
     researchCompletenessNudged: false,
     deliverableQualityNudged: false,
@@ -384,10 +405,12 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     loopDetectionCount: 0,
     stepLoopDetections: 0,
     stepCrossToolCycleDetections: 0,
+    suppressedResearchToolName: null,
     consecutiveNullStreams: 0,
     lastModelErrorForUser: null,
     pendingToolJsonRecovery: false,
     toolJsonRecoveryCount: 0,
+    displayContractRepairAttempts: 0,
     lastCodeExitCode: null,
     lastCodeError: null,
     consecutiveCodeErrors: 0,
@@ -403,6 +426,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     browserTaskCompleted: false,
     browserTaskCompletionEvidence: [],
     browserNoToolRecoveryAttempts: 0,
+    researchNoToolRecoveryAttempts: 0,
     stepResearchCallsAtReflection: 0,
     stepToolCallsAtReflection: 0,
     stepMicroPlan: null,
@@ -530,9 +554,11 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.stepToolCallCount = 0
   state.stepBrowseCount = 0
   state.stepResearchCallCount = 0
+  state.stepFailureCount = 0
   state.stepSearchQueries = new Set()
   state.stepVisitedUrls = new Set()
   state.stepSourceDomainCounts = new Map()
+  state.stepOpenedSourceDomainCounts = new Map()
   state.consecutiveNoToolCalls = 0  // Reset so nudges don't carry across steps
   state.lastBrowserStateHash = null  // Fresh page tracking per step
   state.consecutiveNoProgressClicks = 0  // Stuck-click counter resets per step
@@ -543,6 +569,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.browserTaskCompleted = false
   state.browserTaskCompletionEvidence = []
   state.browserNoToolRecoveryAttempts = 0
+  state.researchNoToolRecoveryAttempts = 0
   state.partialFileWriteRecoveryNudged = false
   // Phase 11: do NOT clear recentBrowserStateHashes on step advance — keeping
   // it across steps lets us detect "re-navigated to homepage to start step 2
@@ -551,10 +578,15 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   // still works after a few new pages.
   state.stepLoopDetections = 0  // Per-step loop counter resets
   state.stepCrossToolCycleDetections = 0
+  state.suppressedResearchToolName = null
+  state.displayContractRepairAttempts = 0
+  state.lastLoopSignal = null
   state.stepResearchCallsAtReflection = 0  // Reflection snapshot resets
   state.stepToolCallsAtReflection = 0      // Reflection snapshot resets
   state.stepMicroPlan = null  // Fresh micro-plan on each step
   state.stepMicroPlanRequested = false
+  state.phaseNarrationEmittedThisStep = false
+  state.phaseEndNarrationPending = false
   state.forcedNarrationRepairAttempts = 0
   state.stepToolTypeCounts = new Map()  // Rate limit counters reset per step
   state.iterationNewFactCounts = []     // Diminishing returns resets per step
@@ -571,6 +603,16 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   // Update phase based on new step
   updatePhase(state)
   setWorkLedgerObjective(state)
+}
+
+export function markPhaseNarrationEmitted(state: AgentStateData): void {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return
+  state.phaseNarrationEmittedThisStep = true
+}
+
+export function needsPhaseNarrationBeforeAdvance(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  return !state.phaseNarrationEmittedThisStep
 }
 
 // --- Work log ---
@@ -879,7 +921,7 @@ export function getWorkSummary(state: AgentStateData): string {
 
   if (state.partialFileWriteRecoveryPending) {
     const p = state.partialFileWriteRecoveryPending
-    parts.push(`PARTIAL FILE WRITE RECOVERED: ${p.path} (${p.lines} lines, ${p.chars} chars). Continue this file with append_file or edit_file; do not recreate it from scratch.`)
+    parts.push(`PARTIAL FILE WRITE RECOVERED: ${p.path} (${p.lines} lines, ${p.chars} chars). Continue this file with append_file only; do not recreate, edit, read, export, or switch files until the append clears the partial state.`)
   }
 
   if (state.workLedger.currentObjective) {
@@ -959,9 +1001,20 @@ export function trackSearchQuery(state: AgentStateData, query: string): void {
 export function trackSourceDomain(state: AgentStateData, results: Array<{ url?: string }>): void {
   for (const r of results) {
     if (r.url) {
-      try { state.distinctSourceDomains.add(new URL(r.url).hostname) } catch { /* skip */ }
+      const domain = normalizeSourceDomain(r.url)
+      if (!domain) continue
+      state.distinctSourceDomains.add(domain)
+      state.sourceDomainCounts.set(domain, (state.sourceDomainCounts.get(domain) || 0) + 1)
+      state.stepSourceDomainCounts.set(domain, (state.stepSourceDomainCounts.get(domain) || 0) + 1)
     }
   }
+}
+
+export function stepOpenedSourceDomains(state: AgentStateData): Map<string, number> {
+  if (!state.stepOpenedSourceDomainCounts) {
+    state.stepOpenedSourceDomainCounts = new Map()
+  }
+  return state.stepOpenedSourceDomainCounts
 }
 
 function normalizeSourceDomain(url: string): string | null {
@@ -978,6 +1031,8 @@ export function trackVisitedSourceDomain(state: AgentStateData, url: string): vo
   state.distinctSourceDomains.add(domain)
   state.sourceDomainCounts.set(domain, (state.sourceDomainCounts.get(domain) || 0) + 1)
   state.stepSourceDomainCounts.set(domain, (state.stepSourceDomainCounts.get(domain) || 0) + 1)
+  const openedDomains = stepOpenedSourceDomains(state)
+  openedDomains.set(domain, (openedDomains.get(domain) || 0) + 1)
 }
 
 export function trackFailure(state: AgentStateData, tool: string, error: string): void {
@@ -1025,12 +1080,20 @@ export function getFailureDiagnosis(state: AgentStateData): string | null {
 
 import { CIRCUIT_BREAKER_FAILURE_THRESHOLD, CIRCUIT_BREAKER_COOLDOWN_MS } from './config'
 
+const CIRCUIT_BREAKER_EXEMPT_TOOLS = new Set([
+  // read_document failures are usually per-source web access outcomes
+  // such as 403/404/429, not evidence that extraction is globally broken.
+  'read_document',
+])
+
 export function updateToolHealth(state: AgentStateData, toolName: string, success: boolean): void {
   let health = state.toolHealth.get(toolName)
   if (!health) {
     health = { successes: 0, failures: 0, consecutiveFailures: 0, disabledUntil: 0 }
     state.toolHealth.set(toolName, health)
   }
+
+  const canTripCircuitBreaker = !CIRCUIT_BREAKER_EXEMPT_TOOLS.has(toolName)
 
   if (success) {
     health.successes++
@@ -1039,9 +1102,11 @@ export function updateToolHealth(state: AgentStateData, toolName: string, succes
     health.disabledUntil = 0
   } else {
     health.failures++
-    health.consecutiveFailures++
+    health.consecutiveFailures = canTripCircuitBreaker
+      ? health.consecutiveFailures + 1
+      : 0
     // Trip circuit breaker
-    if (health.consecutiveFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD && health.disabledUntil === 0) {
+    if (canTripCircuitBreaker && health.consecutiveFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD && health.disabledUntil === 0) {
       health.disabledUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS
     }
   }
@@ -1102,8 +1167,8 @@ export function updatePhase(state: AgentStateData): void {
  * Improved loop detection: checks tool name + arguments to distinguish
  * "same search 3 times" from "3 different searches".
  */
-export function detectToolCallLoop(state: AgentStateData): { looping: boolean; tool: string; count: number } {
-  if (state.recentToolCalls.length < 3) return { looping: false, tool: '', count: 0 }
+export function detectToolCallLoop(state: AgentStateData): { looping: boolean; tool: string; rawTool: string; count: number } {
+  if (state.recentToolCalls.length < 3) return { looping: false, tool: '', rawTool: '', count: 0 }
   const recent = state.recentToolCalls.slice(-LOOP_CHECK_WINDOW)
   const counts = new Map<string, number>()
 
@@ -1115,6 +1180,11 @@ export function detectToolCallLoop(state: AgentStateData): { looping: boolean; t
       try {
         const parsed = JSON.parse(call.args)
         if (parsed.query) key = `web_search:${parsed.query.toLowerCase().trim()}`
+      } catch { /* use plain name */ }
+    } else if (call.name === 'read_document') {
+      try {
+        const parsed = JSON.parse(call.args)
+        if (parsed.source) key = `read_document:${String(parsed.source).toLowerCase().trim()}`
       } catch { /* use plain name */ }
     } else if (call.name === 'browser_navigate' || call.name === 'browse_page') {
       try {
@@ -1202,16 +1272,16 @@ export function detectToolCallLoop(state: AgentStateData): { looping: boolean; t
   }
 
   for (const [tool, count] of counts) {
-    // Only exempt stateless info-fetching tools (screenshot, get_content). browser_scroll
-    // used to be exempt but the agent abused it — scrolling 7+ times without clicking
-    // anything is the textbook indecisive-flailing pattern and SHOULD trip the loop detector.
-    if (tool === 'browser_screenshot' || tool === 'browser_get_content') continue
+    // Only exempt screenshots. Repeated browser_get_content calls on the same
+    // page are a common expensive research stall and must trip recovery.
+    if (tool === 'browser_screenshot') continue
     if (count >= LOOP_THRESHOLD) {
       const displayName = tool.includes(':') ? tool.split(':')[0] + ' (same target)' : tool
-      return { looping: true, tool: displayName, count }
+      const rawTool = tool.includes(':') ? tool.split(':')[0] : tool
+      return { looping: true, tool: displayName, rawTool, count }
     }
   }
-  return { looping: false, tool: '', count: 0 }
+  return { looping: false, tool: '', rawTool: '', count: 0 }
 }
 
 /**

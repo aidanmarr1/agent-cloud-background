@@ -153,7 +153,7 @@ export function getTaskUsageSummaries(
 }
 
 const STORE_KEY = 'agent-credit-store'
-const MONTHLY_ALLOWANCE = 1000
+const AGENT_CREDIT_ALLOWANCE = 0
 const MAX_HEARTBEAT_MS = 30_000
 const MAX_LEDGER_ENTRIES = 200
 const CREDIT_SYNC_MIN_INTERVAL_MS = 30_000
@@ -340,7 +340,7 @@ function normalizeServerUsageSummary(summary: CreditServerSnapshot['usageSummary
 const now = Date.now()
 
 export const CREDIT_POLICY = {
-  monthlyAllowance: MONTHLY_ALLOWANCE,
+  monthlyAllowance: AGENT_CREDIT_ALLOWANCE,
   taskStartCredits: TASK_START_CREDITS,
   activeCreditsPerMinute: ACTIVE_CREDITS_PER_MINUTE,
   model: CREDIT_RATES.model,
@@ -361,18 +361,18 @@ export const useCreditStore = create<CreditStore>()(
   persist(
     (set, get) => ({
       balance: {
-        monthly: MONTHLY_ALLOWANCE,
+        monthly: AGENT_CREDIT_ALLOWANCE,
       },
       ledger: [],
       usageSummary: null,
       activeSession: null,
       lastMonthlyRefresh: monthKey(now),
-      monthlyAllowance: MONTHLY_ALLOWANCE,
+      monthlyAllowance: AGENT_CREDIT_ALLOWANCE,
 
       refreshAllowances: (time = Date.now()) => set((state) => {
         const nextMonthly = monthKey(time)
         const nextBalance = {
-          monthly: roundCredits(finiteCreditNumber(state.balance.monthly, MONTHLY_ALLOWANCE)),
+          monthly: roundCredits(finiteCreditNumber(state.balance.monthly, AGENT_CREDIT_ALLOWANCE)),
         }
         const updates: Partial<CreditStore> = {}
 
@@ -455,7 +455,7 @@ export const useCreditStore = create<CreditStore>()(
 
       hydrateFromServer: (snapshot) => set((state) => {
         const balance: CreditBalance = {
-          monthly: roundCredits(finiteCreditNumber(snapshot.balance?.monthly, MONTHLY_ALLOWANCE)),
+          monthly: roundCredits(finiteCreditNumber(snapshot.balance?.monthly, AGENT_CREDIT_ALLOWANCE)),
         }
         const balanceAfter = totalBalance(balance)
         const ledger = (snapshot.ledger || [])
@@ -468,7 +468,7 @@ export const useCreditStore = create<CreditStore>()(
           ledger,
           usageSummary: normalizeServerUsageSummary(snapshot.usageSummary),
           activeSession: state.activeSession,
-          monthlyAllowance: roundCredits(finiteCreditNumber(snapshot.monthlyAllowance, MONTHLY_ALLOWANCE)) || MONTHLY_ALLOWANCE,
+          monthlyAllowance: roundCredits(finiteCreditNumber(snapshot.monthlyAllowance, AGENT_CREDIT_ALLOWANCE)),
           lastMonthlyRefresh: snapshot.lastMonthlyRefresh || monthKey(now),
         }
       }),
@@ -553,12 +553,12 @@ export const useCreditStore = create<CreditStore>()(
           lastDailyRefresh?: string
           dailyAllowance?: number
         }
-        const monthlyBalance = roundCredits(finiteCreditNumber(
+        const creditBalance = roundCredits(finiteCreditNumber(
           state.balance?.monthly ??
           state.balance?.free ??
           state.balance?.daily ??
-          MONTHLY_ALLOWANCE,
-          MONTHLY_ALLOWANCE,
+          AGENT_CREDIT_ALLOWANCE,
+          AGENT_CREDIT_ALLOWANCE,
         ))
         const ledger = Array.isArray(state.ledger)
           ? state.ledger
@@ -573,7 +573,7 @@ export const useCreditStore = create<CreditStore>()(
                   category: category as CreditCategory,
                   reason: typeof entry.reason === 'string' ? entry.reason : 'Credit usage',
                   bucketDebits: entry.bucketDebits && typeof entry.bucketDebits === 'object' ? entry.bucketDebits : {},
-                  balanceAfter: roundCredits(finiteCreditNumber(entry.balanceAfter, monthlyBalance)),
+                  balanceAfter: roundCredits(finiteCreditNumber(entry.balanceAfter, creditBalance)),
                 }
                 if (typeof entry.conversationId === 'string') normalized.conversationId = entry.conversationId
                 if (typeof entry.toolName === 'string') normalized.toolName = entry.toolName
@@ -584,11 +584,11 @@ export const useCreditStore = create<CreditStore>()(
           : []
 
         return {
-          balance: { monthly: monthlyBalance },
+          balance: { monthly: creditBalance },
           ledger,
           usageSummary: normalizeServerUsageSummary(state.usageSummary),
           lastMonthlyRefresh: state.lastMonthlyRefresh || monthKey(now),
-          monthlyAllowance: MONTHLY_ALLOWANCE,
+          monthlyAllowance: AGENT_CREDIT_ALLOWANCE,
         }
       },
     }

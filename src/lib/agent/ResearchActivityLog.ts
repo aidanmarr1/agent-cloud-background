@@ -395,8 +395,19 @@ export async function appendResearchActivityEntry(entry: ResearchActivityEntry):
   )
 }
 
-export async function clearResearchActivityForTask(userId: string, conversationId: string): Promise<void> {
+export async function clearResearchActivityForTask(
+  userId: string,
+  conversationId: string,
+  beforeCreatedAt?: number,
+): Promise<void> {
   await ensureResearchActivitySchema()
+  if (Number.isFinite(beforeCreatedAt)) {
+    await tursoExecute(
+      'delete from task_research_activity where user_id = ? and conversation_id = ? and created_at < ?',
+      [userId, conversationId, Math.max(0, Math.floor(beforeCreatedAt || 0))],
+    )
+    return
+  }
   await tursoExecute(
     'delete from task_research_activity where user_id = ? and conversation_id = ?',
     [userId, conversationId],

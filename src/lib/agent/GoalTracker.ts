@@ -6,16 +6,15 @@
  * focused on what actually needs to be done.
  */
 
-import { currentStepText, isResearchStepText, type AgentStateData } from './AgentState'
+import { currentStepText, isResearchStepText, stepOpenedSourceDomains, type AgentStateData } from './AgentState'
 import type { ToolExecutionResult } from './ToolPipeline'
 import type { WorkingMemory } from './WorkingMemory'
 import {
   GOAL_MAX_EVIDENCE_PER_STEP,
   MIN_TOOL_CALLS_BY_COMPLEXITY,
-  MIN_RESEARCH_CALLS_BY_COMPLEXITY,
 } from './config'
-import { isSubstantiveResearchState, researchDepthProfileForState } from './ResearchDepth'
-import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit } from './taskConstraints'
+import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { isExactSingleSourceLookupText, researchDepthProfileForState } from './ResearchDepth'
 
 export type GoalStatus = 'pending' | 'active' | 'achieved' | 'blocked'
 
@@ -25,6 +24,15 @@ export interface SubGoal {
   status: GoalStatus
   stepIdx: number
   evidence: string[]
+}
+
+function isExactSingleSourceLookup(text: string): boolean {
+  return isExactSingleSourceLookupText(text)
+}
+
+function requiredOpenedSourcesForDepth(state: AgentStateData, stepText: string): number {
+  if (isExactSingleSourceLookup(stepText)) return 1
+  return researchDepthProfileForState(state).requiredSourceBreadth
 }
 
 export class GoalTracker {
@@ -163,10 +171,16 @@ export class GoalTracker {
       isResearchStepText(stepText)
     const fixedSearchLimit = currentStepWebSearchLimit(state)
     const fixedSearchOnly = fixedSearchLimit !== null || currentStepHasSingleWebSearchLimit(state)
-    const researchDepth = researchDepthProfileForState(state)
-    const substantiveResearch = isSubstantiveResearchState(state)
+    const reportResearchNeedsSources =
+      researchLike &&
+      !fixedSearchOnly &&
+      taskDefaultsToMarkdownDeliverable(state.originalUserRequest || '')
+    const researchNeedsOpenedEvidence =
+      researchLike &&
+      !fixedSearchOnly &&
+      (complexity > 1 || reportResearchNeedsSources)
     const minCalls = researchLike
-      ? (fixedSearchLimit ?? researchDepth.requiredCalls)
+      ? (fixedSearchLimit ?? researchDepthProfileForState(state).requiredCalls)
       : (MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 3)
     let met = false
 
@@ -184,19 +198,18 @@ export class GoalTracker {
     } else {
       // Research step: complex phases need both enough actions and actual source
       // extraction, otherwise shallow search snippets can tick off the plan.
+      const openedSourceDomains = stepOpenedSourceDomains(state)
       const openedSourceEvidence =
         state.stepVisitedUrls.size > 0 ||
-        state.stepSourceDomainCounts.size > 0
+        openedSourceDomains.size > 0
       const directResearchEvidence =
-        (fixedSearchOnly || !researchLike || (complexity <= 1 && !substantiveResearch))
+        !researchNeedsOpenedEvidence
           ? state.stepSearchQueries.size > 0 || goal.evidence.length > 0 || openedSourceEvidence
           : openedSourceEvidence
-      const requiredOpenedSources = researchDepth.requiredSourceBreadth
+      const requiredOpenedSources = requiredOpenedSourcesForDepth(state, stepText)
       const sourceBreadthSatisfied =
-        fixedSearchOnly ||
-        !researchLike ||
-        (complexity <= 1 && !substantiveResearch) ||
-        state.stepSourceDomainCounts.size >= requiredOpenedSources
+        !researchNeedsOpenedEvidence ||
+        openedSourceDomains.size >= requiredOpenedSources
       met = state.stepResearchCallCount >= minCalls &&
         (!researchLike || (directResearchEvidence && sourceBreadthSatisfied))
     }
@@ -246,7 +259,7 @@ export class GoalTracker {
     const complexity = state.taskComplexity as 1 | 2 | 3
     const fixedSearchLimit = currentStepWebSearchLimit(state)
     const minCalls = state.taskStrategy === 'research' || state.currentPhase === 'research'
-      ? (fixedSearchLimit ?? MIN_RESEARCH_CALLS_BY_COMPLEXITY[complexity] ?? MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 3)
+      ? (fixedSearchLimit ?? researchDepthProfileForState(state).requiredCalls)
       : (MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 3)
     const evidenceProgress = goal.evidence.length / Math.max(2, minCalls)
     const callProgress = state.stepResearchCallCount / Math.max(1, minCalls)

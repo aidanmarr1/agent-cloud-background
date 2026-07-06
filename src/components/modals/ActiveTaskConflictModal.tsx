@@ -22,7 +22,7 @@ export function ActiveTaskConflictModal() {
     <Modal
       open={!!modal}
       onClose={dismiss}
-      title="Task already running"
+      title="Task could not start"
       panelClassName="max-w-[420px] max-h-[85vh]"
     >
       <div className="px-6 py-5">
@@ -31,9 +31,6 @@ export function ActiveTaskConflictModal() {
         </div>
         <p className="text-[14px] leading-relaxed text-text-secondary">
           {modal.message}
-        </p>
-        <p className="mt-2 text-[12.5px] leading-relaxed text-text-tertiary">
-          Only one task can run per account at a time, even across different browsers.
         </p>
         <div className="mt-5 flex justify-end gap-2">
           {modal.activeConversationId && (

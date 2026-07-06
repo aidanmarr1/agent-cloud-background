@@ -7,7 +7,7 @@ export type { TaskType } from '@/agent/guards/taskDetection'
 export { getTierTimeouts } from '@/agent/guards/timeouts'
 export type { TierTimeouts } from '@/agent/guards/timeouts'
 export { buildStepMessage } from '@/agent/guards/stepMessages'
-export { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens } from '@/agent/guards/sanitization'
+export { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding } from '@/agent/guards/sanitization'
 export {
   PROMPT_INJECTION_PATTERNS, isPromptInjection,
   LEAKAGE_FINGERPRINTS, checkForLeakage,

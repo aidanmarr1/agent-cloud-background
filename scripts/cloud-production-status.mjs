@@ -180,7 +180,7 @@ const local = {
   signedReadinessSecret: envPresent('AGENT_INTERNAL_HEALTH_SECRET') || envPresent('AUTH_SECRET'),
   e2bApiKey: envPresent('E2B_API_KEY'),
   turso: envPresent('TURSO_DATABASE_URL') && envPresent('TURSO_AUTH_TOKEN'),
-  openRouter: envPresent('OPENROUTER_API_KEY'),
+  deepSeek: envPresent('DEEPSEEK_API_KEY'),
   deploymentVersion: envPresent('AGENT_DEPLOYMENT_VERSION'),
   deploymentVersionRequired: envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION'),
 }
@@ -189,14 +189,21 @@ const vercel = skipVercel ? { ok: false, checked: false, skipped: true } : await
 const readiness = await checkReadiness(baseUrl, timeoutMs)
 const errors = readinessErrors(readiness)
 const liveReady = readiness.ok
+const readinessChecks = typeof readiness.body === 'object' && readiness.body !== null && readiness.body.checks
+  ? readiness.body.checks
+  : {}
+const localWorkerModeAllowed = readinessChecks.hostedWorkerRequired === false
+const vercelValueMismatches = vercel.checked
+  ? (vercel.valueMismatches || []).filter((name) => !(localWorkerModeAllowed && name === 'AGENT_REQUIRE_HOSTED_TASK_WORKER'))
+  : []
 
 const nextActions = []
 if (!local.e2bApiKey) nextActions.push('Create an E2B runtime API key and set E2B_API_KEY locally.')
 if (vercel.checked && vercel.missingRequired?.length > 0) {
   nextActions.push(`Add missing Vercel production env values with npm run cloud:vercel-env -- --apply (${vercel.missingRequired.join(', ')}).`)
 }
-if (vercel.checked && vercel.valueMismatches?.length > 0) {
-  nextActions.push(`Repair Vercel env value drift with npm run cloud:vercel-env -- --apply --verify-values --replace-drift (${vercel.valueMismatches.join(', ')}).`)
+if (vercel.checked && vercelValueMismatches.length > 0) {
+  nextActions.push(`Repair Vercel env value drift with npm run cloud:vercel-env -- --apply --verify-values --replace-drift (${vercelValueMismatches.join(', ')}).`)
 }
 if (vercel.checked && vercel.missingRequired?.length === 0 && !liveReady && errors.some((error) => /E2B_API_KEY/i.test(error))) {
   nextActions.push('Redeploy Vercel so the latest E2B_API_KEY is active: vercel deploy --prod --yes.')
@@ -217,7 +224,7 @@ console.log('Secret values are never printed.')
 console.log('\nLocal prerequisites')
 printLine(local.signedReadinessSecret, 'signed readiness secret is available locally')
 printLine(local.turso, 'Turso queue credentials are available locally')
-printLine(local.openRouter, 'OpenRouter API key is available locally')
+printLine(local.deepSeek, 'DeepSeek API key is available locally')
 printLine(local.e2bApiKey, 'E2B_API_KEY is available locally')
 if (local.deploymentVersionRequired) {
   printLine(local.deploymentVersion, 'AGENT_DEPLOYMENT_VERSION is set because worker version matching is required locally')
@@ -231,9 +238,12 @@ if (vercel.skipped) {
 } else if (!vercel.checked) {
   printLine(false, vercel.error || 'Vercel env check failed')
 } else {
-  printLine(vercel.ok, `required Vercel env names present; missing required: ${formatList(vercel.missingRequired)}`)
+  printLine(vercel.ok || (vercelValueMismatches.length === 0 && vercel.missingRequired?.length === 0), `required Vercel env names present; missing required: ${formatList(vercel.missingRequired)}`)
   if (vercel.missingOptional?.length > 0) console.log(`INFO optional missing names: ${vercel.missingOptional.join(', ')}`)
-  if (vercel.valueMismatches?.length > 0) console.log(`FAIL Vercel env value drift: ${vercel.valueMismatches.join(', ')}`)
+  if (vercelValueMismatches.length > 0) console.log(`FAIL Vercel env value drift: ${vercelValueMismatches.join(', ')}`)
+  if (localWorkerModeAllowed && vercel.valueMismatches?.includes('AGENT_REQUIRE_HOSTED_TASK_WORKER')) {
+    console.log('INFO AGENT_REQUIRE_HOSTED_TASK_WORKER=false is intentional for local-worker mode.')
+  }
 }
 
 console.log('\nLive worker readiness')

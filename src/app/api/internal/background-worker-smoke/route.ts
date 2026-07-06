@@ -8,7 +8,7 @@ import {
   findActiveTaskJobForConversation,
 } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
-import { getRecentTaskWorkerHeartbeats } from '@/lib/agent/taskWorkerHeartbeat'
+import { getRecentTaskWorkerHeartbeats, isLikelyLocalWorkerHostname, workerHeartbeatIsHosted } from '@/lib/agent/taskWorkerHeartbeat'
 import { parseSSE } from '@/lib/stream'
 import type { SSEEvent } from '@/types'
 
@@ -80,6 +80,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isCloudCapableWorker(worker: {
+  hostname?: string | null
+  taskWorkerMode?: string | null
+  sandboxProvider?: string | null
+  deploymentVersion?: string | null
+  e2bApiKeyConfigured?: boolean
+  e2bBrowserRuntimeConfigured?: boolean
+}, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
+  const versionMatches = !requireDeploymentVersion ||
+    (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
+
+  return worker.taskWorkerMode === 'external' &&
+    worker.sandboxProvider === 'e2b' &&
+    worker.e2bApiKeyConfigured === true &&
+    worker.e2bBrowserRuntimeConfigured === true &&
+    workerHeartbeatIsHosted(worker) &&
+    versionMatches
+}
+
+function isE2BCapableWorker(worker: {
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
@@ -184,10 +203,19 @@ export async function GET(request: NextRequest) {
   }
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')
+  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
   const cloudCapableWorkers = workers.filter((worker) =>
     isCloudCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
-  if (cloudCapableWorkers.length === 0) {
-    const error = requireDeploymentVersion
+  const e2bCapableWorkers = workers.filter((worker) =>
+    isE2BCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
+  const acceptedWorkers = requireHostedWorker ? cloudCapableWorkers : e2bCapableWorkers
+  if (acceptedWorkers.length === 0) {
+    const localOnlyWorkerHosts = e2bCapableWorkers
+      .filter((worker) => isLikelyLocalWorkerHostname(worker.hostname))
+      .map((worker) => worker.hostname)
+    const error = requireHostedWorker && localOnlyWorkerHosts.length > 0
+      ? `Only local background worker heartbeats were found (${localOnlyWorkerHosts.join(', ')}). Start a hosted worker before running this smoke.`
+      : requireDeploymentVersion
       ? `No E2B-capable live background worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}".`
       : 'No E2B-capable live background worker heartbeat found.'
     return NextResponse.json({ ok: false, error }, { status: 503 })
@@ -293,6 +321,7 @@ export async function GET(request: NextRequest) {
       status: worker.status,
       currentRunId: worker.currentRunId,
       lastSeenAtMs: worker.lastSeenAtMs,
+      hostname: worker.hostname,
       taskWorkerMode: worker.taskWorkerMode,
       sandboxProvider: worker.sandboxProvider,
       deploymentVersion: worker.deploymentVersion,

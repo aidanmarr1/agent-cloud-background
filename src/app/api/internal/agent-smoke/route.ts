@@ -53,14 +53,14 @@ function preview(value: unknown, maxLength = 280): string {
   }
 }
 
-function createSmokeEmitter() {
+function createSmokeEmitter(startedAt: number) {
   const events: SmokeEvent[] = []
   let closed = false
   let terminalStatus: 'done' | 'error' | null = null
 
   const push = (event: SmokeEvent) => {
     if (closed && event.type !== 'done' && event.type !== 'error') return
-    events.push(event)
+    events.push({ elapsedMs: Date.now() - startedAt, ...event })
   }
 
   return {
@@ -139,7 +139,7 @@ export async function GET(request: NextRequest) {
   const startedAt = Date.now()
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), SMOKE_TIMEOUT_MS)
-  const { events, emitter } = createSmokeEmitter()
+  const { events, emitter } = createSmokeEmitter(startedAt)
   const diagnostics: Array<{ type: string; data: Record<string, unknown> }> = []
 
   try {
@@ -171,6 +171,9 @@ export async function GET(request: NextRequest) {
       .filter(event => event.type === 'plan')
       .map(event => event.items)
     const browserFrames = events.filter(event => event.type === 'browser_frame').length
+    const firstTextMs = events.find(event => event.type === 'text_delta')?.elapsedMs ?? null
+    const planMs = events.find(event => event.type === 'plan')?.elapsedMs ?? null
+    const firstToolMs = events.find(event => event.type === 'tool_start')?.elapsedMs ?? null
 
     console.log('[AgentSmoke] Production agent smoke finished', {
       conversationId,
@@ -178,6 +181,9 @@ export async function GET(request: NextRequest) {
       events: events.length,
       toolStarts: toolStarts.length,
       browserFrames,
+      firstTextMs,
+      planMs,
+      firstToolMs,
       errors: errors.length,
       durationMs: Date.now() - startedAt,
     })
@@ -186,6 +192,9 @@ export async function GET(request: NextRequest) {
       ok: emitter.terminalStatus === 'done',
       terminalStatus: emitter.terminalStatus,
       durationMs: Date.now() - startedAt,
+      firstTextMs,
+      planMs,
+      firstToolMs,
       eventCount: events.length,
       browserFrames,
       plan: plans[0] || null,

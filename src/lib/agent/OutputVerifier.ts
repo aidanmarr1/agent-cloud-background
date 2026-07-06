@@ -16,6 +16,7 @@ import {
   PLACEHOLDER_PATTERNS,
   OUTLINE_ONLY_THRESHOLD,
 } from './config'
+import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 export interface VerificationResult {
   passed: boolean
@@ -62,11 +63,31 @@ export class OutputVerifier {
       score -= 0.3
     }
 
+    const trimmedContent = fileContent.trim()
+    if (/(?:^|\n)\s*(?:\*\*|__|#{1,6}|[-*]\s*)$/.test(trimmedContent) ||
+      /(?:[,;:]|\b(?:and|or|but|because|with|including|such as|to|of|the|a|an|in|on|for|from|by|as|that|which))$/i.test(trimmedContent)) {
+      failures.push('Content appears cut off or unfinished at the end')
+      suggestions.push('Finish the final section cleanly before delivering')
+      score -= 0.25
+    }
+
+    const savedMarkdownReport = filePath.toLowerCase().endsWith('.md') &&
+      taskDefaultsToMarkdownDeliverable(originalRequest)
+
+    if (savedMarkdownReport) {
+      const headingCount = (fileContent.match(/^#{1,3}\s+\S/gm) || []).length
+      if (headingCount < 2) {
+        failures.push('Saved Markdown report needs a clear title and at least one substantive section')
+        suggestions.push('Add a proper report structure before delivering')
+        score -= 0.2
+      }
+    }
+
     // --- Strategy-specific checks ---
     switch (strategy) {
       case 'research':
       case 'analysis':
-        this.checkResearch(fileContent, originalRequest, taskComplexity, workingMemory, failures, suggestions)
+        this.checkResearch(fileContent, filePath, originalRequest, taskComplexity, workingMemory, failures, suggestions)
         break
       case 'build':
       case 'code':
@@ -79,7 +100,9 @@ export class OutputVerifier {
         this.checkBrowseAction(fileContent, failures, suggestions)
         break
       default:
-        // General: just apply universal checks above
+        if (savedMarkdownReport) {
+          this.checkResearch(fileContent, filePath, originalRequest, taskComplexity, workingMemory, failures, suggestions)
+        }
         break
     }
 
@@ -92,6 +115,7 @@ export class OutputVerifier {
 
   private checkResearch(
     content: string,
+    filePath: string,
     originalRequest: string,
     taskComplexity: number,
     workingMemory: WorkingMemory | null,
@@ -100,7 +124,7 @@ export class OutputVerifier {
   ): void {
     // Word count
     const words = content.split(/\s+/).filter(w => w.length > 0).length
-    const minWords = this.researchMinimumWords(originalRequest, taskComplexity)
+    const minWords = this.researchMinimumWords(originalRequest, taskComplexity, filePath)
     if (words < minWords) {
       failures.push(`Word count ${words}, minimum ${minWords} for this task depth`)
       suggestions.push('Expand only enough to match the requested depth and complexity')
@@ -152,7 +176,7 @@ export class OutputVerifier {
     }
   }
 
-  private researchMinimumWords(originalRequest: string, taskComplexity: number): number {
+  private researchMinimumWords(originalRequest: string, taskComplexity: number, filePath: string): number {
     const request = originalRequest.toLowerCase()
     const explicitWordTarget = request.match(/\b(\d{2,5})\s*(?:\+?\s*)?words?\b/)
     if (explicitWordTarget) {
@@ -163,7 +187,8 @@ export class OutputVerifier {
     }
 
     if (/\b(?:brief|quick|short|concise|summary|summarise|summarize|one[-\s]?page|1[-\s]?page)\b/.test(request)) {
-      return 180
+      const savedResearchReport = filePath.toLowerCase().endsWith('.md') && taskDefaultsToMarkdownDeliverable(originalRequest)
+      return savedResearchReport ? 400 : 180
     }
 
     const normalizedComplexity = Math.min(5, Math.max(1, Math.round(taskComplexity))) as keyof typeof RESEARCH_MIN_WORDS_BY_COMPLEXITY

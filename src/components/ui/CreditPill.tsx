@@ -88,7 +88,7 @@ export function CreditPill() {
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-label={`Credit balance: ${formatCredits(total)} credits`}
-        className={`h-9 rounded-full border border-border-primary bg-bg-primary px-2.5 text-text-secondary transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 active:scale-[0.97] ${
+        className={`h-9 rounded-full border border-border-primary bg-bg-primary px-2 text-text-secondary transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 active:scale-[0.97] sm:px-2.5 ${
           activeSession ? 'text-text-primary' : ''
         }`}
       >
@@ -116,13 +116,13 @@ export function CreditPill() {
 
       {open && (
         <div
-          className="absolute right-0 top-full z-[100] mt-2 w-[316px] overflow-hidden rounded-2xl border border-border-primary menu-surface animate-scale-in"
+          className="fixed left-3 right-3 top-12 z-[100] mt-2 w-auto overflow-hidden rounded-2xl border border-border-primary menu-surface animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[316px]"
           style={{ boxShadow: 'var(--shadow-xl)' }}
         >
           <div className="border-b border-border-primary px-4 py-3.5">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-text-muted">Credits</div>
+                <div className="text-[11px] font-bold uppercase tracking-[0.12em] text-text-muted">Agent Credits</div>
                 <div className="mt-1 flex items-baseline gap-2">
                   <span className="text-[28px] font-semibold tabular-nums text-text-primary tracking-[0]">
                     {formatCredits(total)}
@@ -133,7 +133,7 @@ export function CreditPill() {
             </div>
             <div className="mt-3 flex items-center gap-2 rounded-xl border border-border-primary bg-bg-secondary px-3 py-2 text-[11.5px] leading-relaxed text-text-tertiary">
               <Zap size={13} className="flex-shrink-0 text-accent-blue" strokeWidth={2.2} />
-              One monthly credit balance. Task totals update as the agent works.
+              Agent Credits change when an admin adds them or tasks spend them.
             </div>
           </div>
 

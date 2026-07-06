@@ -158,6 +158,21 @@ async function ensureActiveTaskSchema(): Promise<void> {
   return activeTaskSchemaPromise
 }
 
+function isMissingActiveTaskSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /no such table|no such column|schema/i.test(message)
+}
+
+async function withActiveTaskSchemaRepair<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!isMissingActiveTaskSchemaError(error)) throw error
+    await ensureActiveTaskSchema()
+    return operation()
+  }
+}
+
 export async function acquireActiveTaskLease(
   userId: string,
   conversationId: string,
@@ -181,7 +196,22 @@ export async function acquireActiveTaskLease(
     return { acquired: true, lease }
   }
 
-  await ensureActiveTaskSchema()
+  const fastInsert = await withActiveTaskSchemaRepair(() => tursoExecute(
+    `
+      insert or ignore into user_active_task_leases (
+        queue_name, user_id, conversation_id, run_id, started_at_ms, updated_at_ms, expires_at_ms
+      )
+      values (?, ?, ?, ?, ?, ?, ?)
+    `,
+    [queueName, userId, conversationId, runId, startedAt, startedAt, expiresAt],
+  ))
+  if (fastInsert.rowsAffected === 1) {
+    return {
+      acquired: true,
+      lease: { userId, queueName, conversationId, runId, startedAt, updatedAt: startedAt, expiresAt },
+    }
+  }
+
   return tursoTransaction('write', async (transaction) => {
     await transaction.execute({
       sql: 'delete from user_active_task_leases where expires_at_ms <= ? or updated_at_ms <= ?',
@@ -267,15 +297,14 @@ export async function refreshActiveTaskLease(userId: string, runId: string): Pro
     return
   }
 
-  await ensureActiveTaskSchema()
-  await tursoExecute(
+  await withActiveTaskSchemaRepair(() => tursoExecute(
     `
       update user_active_task_leases
       set updated_at_ms = ?, expires_at_ms = ?
       where queue_name = ? and user_id = ? and run_id = ?
     `,
     [updatedAt, expiresAt, queueName, userId, runId],
-  )
+  ))
 }
 
 export async function releaseActiveTaskLease(userId: string, runId: string): Promise<void> {
@@ -289,11 +318,10 @@ export async function releaseActiveTaskLease(userId: string, runId: string): Pro
     return
   }
 
-  await ensureActiveTaskSchema()
-  await tursoExecute(
+  await withActiveTaskSchemaRepair(() => tursoExecute(
     'delete from user_active_task_leases where queue_name = ? and user_id = ? and run_id = ?',
     [queueName, userId, runId],
-  )
+  ))
 }
 
 export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveTaskLease | null> {
@@ -307,12 +335,11 @@ export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveT
     return lease && lease.expiresAt > now ? lease : null
   }
 
-  await ensureActiveTaskSchema()
-  await tursoExecute(
+  await withActiveTaskSchemaRepair(() => tursoExecute(
     'delete from user_active_task_leases where expires_at_ms <= ? or updated_at_ms <= ?',
     [now, now - ACTIVE_TASK_STALE_DELETE_MS],
-  )
-  const rows = await tursoExecute(
+  ))
+  const rows = await withActiveTaskSchemaRepair(() => tursoExecute(
     `
       select queue_name, user_id, conversation_id, run_id, started_at_ms, updated_at_ms, expires_at_ms
       from user_active_task_leases
@@ -320,7 +347,7 @@ export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveT
       limit 1
     `,
     [queueName, userId, now],
-  )
+  ))
   const lease = rowToLease(rows.rows[0] as ActiveTaskRow | undefined)
   if (!lease) return null
 

@@ -11,6 +11,7 @@
 
 import type { TierTimeouts } from '@/agent/guards/timeouts'
 import { effectiveTaskRequest } from '@/lib/conversationContext'
+import { analyzeTaskIntent } from './TaskIntent'
 import {
   TEMPERATURE_CODE, TEMPERATURE_RESEARCH, TEMPERATURE_DEFAULT, TEMPERATURE_CREATIVE,
   TIMEOUT_BUILD_MS, TIMEOUT_RESEARCH_MS,
@@ -48,7 +49,7 @@ const STRATEGIES: Record<TaskType, TaskStrategyConfig> = {
     temperature: TEMPERATURE_RESEARCH,
     iterationTimeoutMs: TIMEOUT_RESEARCH_MS,
     narrationThreshold: NARRATION_THRESHOLD_DEFAULT,
-    researchBudgetMultiplier: 0.75,  // Reserve budget for synthesis while leaving room for opened source evidence
+    researchBudgetMultiplier: RESEARCH_STEP_BUDGET_MULTIPLIER,
     deliverableBudgetFraction: DELIVERABLE_BUDGET_FRACTION,
     allowParallelTools: false,
     preferredPhaseOrder: ['research', 'research', 'deliver'],
@@ -187,7 +188,7 @@ const TASK_PATTERNS: Array<{ type: TaskType; patterns: RegExp[] }> = [
     type: 'research',
     patterns: [
       /\b(research|find\s*out|investigate|compare|analy[sz]e|report\s*on|deep\s*dive|latest|current|recent|today|news|up[-\s]?to[-\s]?date|sources?|citations?|cite)\b/i,
-      /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?\s+of|use cases?|core technolog(?:y|ies)|key technolog(?:y|ies)|capabilities?|trends?|impact)\b/i,
+      /\b(?:current\s+state|state\s+of|landscape|ecosystem|real[-\s]?world\s+applications?|use\s+cases?)\b/i,
       /\b(?:web\s*)?search(?:es|ing)?\b|\blook\s*(?:it\s*)?up\b/i,
     ],
   },
@@ -214,6 +215,7 @@ export function resolveStrategy(
   messages: Array<{ role: string; content: string }>
 ): TaskStrategyConfig {
   const content = effectiveTaskRequest(messages)
+  const intent = analyzeTaskIntent(messages)
 
   for (const { type, patterns } of TASK_PATTERNS) {
     if (!['build', 'code', 'analysis', 'creative'].includes(type)) continue
@@ -228,6 +230,13 @@ export function resolveStrategy(
   const browsePatterns = TASK_PATTERNS.find(item => item.type === 'browse')?.patterns || []
   if (browsePatterns.some(p => p.test(content))) {
     return STRATEGIES.browse
+  }
+
+  // A plain "write/report on X" request is a writing/output task first. It can
+  // still use light grounding in the plan, but should not inherit the formal
+  // cited-research workflow unless the user asked for sources, recency or depth.
+  if (intent.isPlainInlineReport) {
+    return STRATEGIES.general
   }
 
   for (const { type, patterns } of TASK_PATTERNS) {

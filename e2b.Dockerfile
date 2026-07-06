@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     fonts-liberation \
     git \
+    file \
+    imagemagick \
     jq \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -27,10 +29,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxrandr2 \
     openssh-client \
+    poppler-utils \
     procps \
     python3 \
     python3-pip \
     python3-venv \
+    tesseract-ocr \
+    tesseract-ocr-eng \
     unzip \
     wget \
     xdg-utils \

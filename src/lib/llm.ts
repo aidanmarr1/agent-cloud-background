@@ -1,9 +1,15 @@
-import { DEFAULT_OPENROUTER_MODEL } from '@/lib/modelPricing'
+import {
+  DEFAULT_DEEPSEEK_MODEL,
+  DEFAULT_OPENROUTER_MODEL,
+  estimateUsageCost,
+} from '@/lib/modelPricing'
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
-const CHAT_COMPLETIONS_URL = `${OPENROUTER_BASE_URL}/chat/completions`
 const GENERATION_URL = `${OPENROUTER_BASE_URL}/generation`
+const DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
 const ASSISTANT_LOG_LABEL = 'Agent'
+
+type AssistantProvider = 'deepseek' | 'openrouter'
 
 function trimmedEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
@@ -18,22 +24,52 @@ function booleanEnv(value: string | undefined, fallback: boolean): boolean {
   return fallback
 }
 
-export const DEFAULT_MODEL = trimmedEnv(process.env.OPENROUTER_MODEL) || DEFAULT_OPENROUTER_MODEL
+function normalizeProvider(value: string | undefined): AssistantProvider {
+  const normalized = (value || '').trim().toLowerCase()
+  if (normalized === 'openrouter') return 'openrouter'
+  if (normalized === 'deepseek') return 'deepseek'
+  return trimmedEnv(process.env.DEEPSEEK_API_KEY) ? 'deepseek' : 'openrouter'
+}
+
+export const ASSISTANT_PROVIDER = normalizeProvider(process.env.LLM_PROVIDER || process.env.ASSISTANT_PROVIDER)
+export const ASSISTANT_SUPPORTS_IMAGE_INPUT = ASSISTANT_PROVIDER !== 'deepseek'
+
+function defaultModelForProvider(provider: AssistantProvider): string {
+  return provider === 'deepseek' ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_OPENROUTER_MODEL
+}
+
+function modelEnvForProvider(provider: AssistantProvider): string | undefined {
+  return provider === 'deepseek'
+    ? trimmedEnv(process.env.DEEPSEEK_MODEL)
+    : trimmedEnv(process.env.OPENROUTER_MODEL)
+}
+
+export const DEFAULT_MODEL = modelEnvForProvider(ASSISTANT_PROVIDER) || defaultModelForProvider(ASSISTANT_PROVIDER)
 
 type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
-function normalizeReasoningEffort(value: string | undefined): ReasoningEffort {
-  const normalized = (value || 'minimal').toLowerCase().trim().replace(/[\s-]+/g, '_')
+function normalizeReasoningEffort(value: string | undefined, fallback: ReasoningEffort): ReasoningEffort {
+  const normalized = (value || fallback).toLowerCase().trim().replace(/[\s-]+/g, '_')
   if (normalized === 'none') return 'minimal'
   if (['x_high', 'extra_high'].includes(normalized)) return 'xhigh'
   if (['minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)) {
     return normalized as ReasoningEffort
   }
-  return 'minimal'
+  return fallback
 }
 
-const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(process.env.OPENROUTER_REASONING_EFFORT)
+function reasoningEnvForProvider(provider: AssistantProvider): string | undefined {
+  return provider === 'deepseek'
+    ? trimmedEnv(process.env.DEEPSEEK_REASONING_EFFORT)
+    : trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT)
+}
+
+const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
+  reasoningEnvForProvider(ASSISTANT_PROVIDER),
+  ASSISTANT_PROVIDER === 'deepseek' ? 'high' : 'minimal',
+)
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
+const DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv(process.env.DEEPSEEK_THINKING_ENABLED, true)
 
 export type ChatMessageParam = {
   role: string
@@ -73,6 +109,7 @@ export type ChatCompletionParams = {
   parallel_tool_calls?: unknown
   tool_choice?: unknown
   thinking?: { type: 'enabled' | 'disabled' }
+  reasoning_effort?: 'high' | 'max'
   reasoning?: {
     effort?: ReasoningEffort
     max_tokens?: number
@@ -106,6 +143,9 @@ export type ChatCompletionResponse = {
     completion_tokens?: number
     total_tokens?: number
     cost?: number
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
+    completion_tokens_details?: { reasoning_tokens?: number }
   }
   [key: string]: unknown
 }
@@ -122,6 +162,9 @@ export type StreamingChatCompletionChunk = {
     completion_tokens?: number
     total_tokens?: number
     cost?: number
+    prompt_cache_hit_tokens?: number
+    prompt_cache_miss_tokens?: number
+    completion_tokens_details?: { reasoning_tokens?: number }
   } | null
   [key: string]: unknown
 }
@@ -242,12 +285,20 @@ const BASE_DELAY_MS = 2000
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const MAX_ERROR_BODY_CHARS = 2000
 
-function getOpenRouterApiKey(): string {
-  const apiKey = trimmedEnv(process.env.OPENROUTER_API_KEY)
+function getAssistantApiKey(): string {
+  const apiKey = ASSISTANT_PROVIDER === 'deepseek'
+    ? trimmedEnv(process.env.DEEPSEEK_API_KEY)
+    : trimmedEnv(process.env.OPENROUTER_API_KEY)
   if (!apiKey) {
     throw new Error('Missing assistant service credentials.')
   }
   return apiKey
+}
+
+function chatCompletionsUrl(): string {
+  return ASSISTANT_PROVIDER === 'deepseek'
+    ? `${DEEPSEEK_BASE_URL}/chat/completions`
+    : `${OPENROUTER_BASE_URL}/chat/completions`
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -264,15 +315,21 @@ function redactSecrets(text: string): string {
   if (openRouterKey) {
     redacted = redacted.split(openRouterKey).join('[redacted-assistant-key]')
   }
-  const braveKey = process.env.BRAVE_SEARCH_API_KEY
-  if (braveKey) {
-    redacted = redacted.split(braveKey).join('[redacted-brave-key]')
+  const deepSeekKey = process.env.DEEPSEEK_API_KEY
+  if (deepSeekKey) {
+    redacted = redacted.split(deepSeekKey).join('[redacted-assistant-key]')
+  }
+  const serperKey = process.env.SERPER_API_KEY
+  if (serperKey) {
+    redacted = redacted.split(serperKey).join('[redacted-search-key]')
   }
   if (DEFAULT_MODEL) {
     redacted = redacted.split(DEFAULT_MODEL).join('[assistant-route]')
   }
   redacted = redacted
     .replace(/\b(?:qwen|openai|anthropic|google|gemini|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
+    .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')
   return redacted
 }
@@ -441,7 +498,7 @@ async function fetchGenerationMetadata(id: string, signal?: AbortSignal): Promis
   const response = await fetch(url, {
     method: 'GET',
     headers: {
-      Authorization: `Bearer ${getOpenRouterApiKey()}`,
+      Authorization: `Bearer ${getAssistantApiKey()}`,
       'Content-Type': 'application/json',
     },
     signal,
@@ -460,6 +517,7 @@ export async function fetchGenerationUsage(
   id: string | undefined,
   signal?: AbortSignal,
 ): Promise<ChatCompletionUsage | null> {
+  if (ASSISTANT_PROVIDER !== 'openrouter') return null
   const generationId = typeof id === 'string' ? id.trim() : ''
   if (!generationId) return null
 
@@ -473,6 +531,9 @@ export async function fetchGenerationUsage(
         await sleep(400 + attempt * 350, signal)
         continue
       }
+      if (status === 404 || status === 429 || (status !== undefined && status >= 500)) {
+        return null
+      }
       throw error
     }
   }
@@ -485,6 +546,91 @@ function completionHasBillableUsage(usage: ChatCompletionResponse['usage']): boo
     Number.isFinite(usage.prompt_tokens) &&
     Number.isFinite(usage.completion_tokens) &&
     Number.isFinite(usage.cost)
+}
+
+type UsageWithCost = NonNullable<ChatCompletionResponse['usage']>
+
+function normalizeUsageCost<T extends ChatCompletionResponse['usage'] | StreamingChatCompletionChunk['usage']>(
+  usage: T,
+  model = DEFAULT_MODEL,
+): T {
+  if (!usage || typeof usage !== 'object') return usage
+  if (Number.isFinite(usage.cost)) return usage
+  const cost = estimateUsageCost({ ...usage, model })
+  if (cost === null) return usage
+  return { ...usage, cost } as T
+}
+
+function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCost | null }>(data: T): T {
+  if (!data.usage) return data
+  return {
+    ...data,
+    usage: normalizeUsageCost(data.usage, data.model || DEFAULT_MODEL),
+  }
+}
+
+function textOnlyMessages(messages: ChatMessageParam[]): ChatMessageParam[] {
+  if (ASSISTANT_SUPPORTS_IMAGE_INPUT) return messages
+  return messages.map((message) => {
+    if (!Array.isArray(message.content)) return message
+    const content = message.content
+      .map((part) => {
+        if (part.type === 'text') return part.text || ''
+        if (part.type === 'image_url') {
+          return '[Image payload omitted: the active DeepSeek API route accepts text and tools, not direct image input. Use extracted text, page content, interactive element labels, or ask the user for a description if the image itself is required.]'
+        }
+        return ''
+      })
+      .filter(Boolean)
+      .join('\n\n')
+      .trim()
+    return {
+      ...message,
+      content: content || '[Non-text message content omitted for the active text-only model route.]',
+    }
+  })
+}
+
+function deepSeekHistoryHasAssistantWithoutReasoning(messages: ChatMessageParam[]): boolean {
+  if (ASSISTANT_PROVIDER !== 'deepseek') return false
+  return messages.some(message => {
+    if (message.role !== 'assistant') return false
+    const record = message as unknown as { reasoning_content?: unknown }
+    return typeof record.reasoning_content !== 'string' || record.reasoning_content.length === 0
+  })
+}
+
+function deepSeekReasoningEffort(effort: ReasoningEffort | undefined): 'high' | 'max' {
+  return effort === 'xhigh' ? 'max' : 'high'
+}
+
+function providerReasoningPayload(
+  reasoning: ChatCompletionParams['reasoning'],
+  options?: { disableDeepSeekThinking?: boolean },
+): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
+  if (ASSISTANT_PROVIDER !== 'deepseek') {
+    return {
+      reasoning: reasoning ?? {
+        effort: DEFAULT_REASONING_EFFORT,
+        exclude: DEFAULT_REASONING_EXCLUDE,
+      },
+    }
+  }
+
+  const effort = reasoning?.effort ?? DEFAULT_REASONING_EFFORT
+  const disabled = options?.disableDeepSeekThinking === true ||
+    reasoning?.enabled === false ||
+    DEFAULT_DEEPSEEK_THINKING_ENABLED === false ||
+    (effort === 'minimal' && reasoning?.exclude === true)
+
+  if (disabled) {
+    return { thinking: { type: 'disabled' } }
+  }
+
+  return {
+    thinking: { type: 'enabled' },
+    reasoning_effort: deepSeekReasoningEffort(effort),
+  }
 }
 
 function withPinnedModel(
@@ -501,19 +647,34 @@ function withPinnedModel(
     model: _model,
     reasoning: _reasoning,
     messages,
+    tool_choice: _toolChoice,
+    usage: _usage,
+    reasoning_effort: _reasoningEffort,
     ...rest
   } = params
 
+  const contextualMessages = includeTemporalContext === false
+    ? messages
+    : withCurrentTemporalContext(messages)
+  const providerMessages = textOnlyMessages(contextualMessages)
+  const hasNativeTools = Array.isArray(params.tools) && params.tools.length > 0
+  const hasNonThinkingAssistantHistory = deepSeekHistoryHasAssistantWithoutReasoning(providerMessages)
+
   return {
     ...rest,
-    messages: includeTemporalContext === false ? messages : withCurrentTemporalContext(messages),
+    messages: providerMessages,
     model: DEFAULT_MODEL,
     stream,
-    usage: { include: true },
-    reasoning: _reasoning ?? {
-      effort: DEFAULT_REASONING_EFFORT,
-      exclude: DEFAULT_REASONING_EXCLUDE,
-    },
+    ...(ASSISTANT_PROVIDER === 'openrouter' ? { usage: { include: true } } : {}),
+    ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
+    ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
+    ...providerReasoningPayload(_reasoning, {
+      disableDeepSeekThinking: ASSISTANT_PROVIDER === 'deepseek' && (
+        hasNativeTools ||
+        _toolChoice !== undefined ||
+        hasNonThinkingAssistantHistory
+      ),
+    }),
   }
 }
 
@@ -522,10 +683,10 @@ async function postChatCompletion(
   stream: boolean,
   signal?: AbortSignal,
 ): Promise<Response> {
-  const response = await fetch(CHAT_COMPLETIONS_URL, {
+  const response = await fetch(chatCompletionsUrl(), {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${getOpenRouterApiKey()}`,
+      Authorization: `Bearer ${getAssistantApiKey()}`,
       'Content-Type': 'application/json',
       'HTTP-Referer': 'http://localhost:3000',
       'X-Title': ASSISTANT_LOG_LABEL,
@@ -563,7 +724,7 @@ function parseSseEvent(event: string): StreamingChatCompletionChunk | 'DONE' | n
   if (!data) return null
   if (data === '[DONE]') return 'DONE'
 
-  return JSON.parse(data) as StreamingChatCompletionChunk
+  return normalizeResponseUsage(JSON.parse(data) as StreamingChatCompletionChunk)
 }
 
 function createSseIterable(
@@ -654,7 +815,7 @@ export async function createCompletion(
 
     try {
       const response = await postChatCompletion(params, false, controller.signal)
-      const data = await response.json() as ChatCompletionResponse
+      const data = normalizeResponseUsage(await response.json() as ChatCompletionResponse)
       if (!completionHasBillableUsage(data.usage)) {
         const usage = await fetchGenerationUsage(data.id, controller.signal)
         if (usage) data.usage = usage

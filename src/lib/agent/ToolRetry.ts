@@ -31,10 +31,10 @@ const DEFAULT_CONFIG: RetryConfig = {
 const TOOL_RETRY_CONFIGS: Record<string, Partial<RetryConfig>> = {
   web_search: { maxRetries: 0, baseDelayMs: 600 },
   browser_navigate: { maxRetries: 0, baseDelayMs: 750 },
-  read_document: { maxRetries: 1, baseDelayMs: 500 },
-  youtube_transcript: { maxRetries: 1, baseDelayMs: 500 },
-  http_request: { maxRetries: 1, baseDelayMs: 750 },
-  image_search: { maxRetries: 1, baseDelayMs: 750 },
+  read_document: { maxRetries: 0, baseDelayMs: 500 },
+  youtube_transcript: { maxRetries: 0, baseDelayMs: 500 },
+  http_request: { maxRetries: 0, baseDelayMs: 750 },
+  image_search: { maxRetries: 0, baseDelayMs: 750 },
 }
 
 // Tools that should never be retried

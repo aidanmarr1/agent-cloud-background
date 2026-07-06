@@ -114,7 +114,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Reasoning/Thinking visualization */}
       {message.reasoning && (
-        <div className="ml-[42px]">
+        <div className="ml-0 sm:ml-[42px]">
           <ThinkingView
             reasoning={message.reasoning}
             isStreaming={!!isStreaming}
@@ -125,14 +125,14 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Acknowledgment text — always visible above groups */}
       {(hasGroups || hasSteps) && acknowledgment && (
-        <div className="ml-[42px] mb-2 chat-reading-text text-text-primary">
+        <div className="ml-0 mb-2 chat-reading-text text-text-primary sm:ml-[42px]">
           {acknowledgment}
         </div>
       )}
 
       {/* Task Groups */}
       {hasGroups && (
-        <div className="ml-[42px] mb-3 space-y-1">
+        <div className="ml-0 mb-3 space-y-1 sm:ml-[42px]">
           {activeGroups.map((group) => (
             <TaskGroupView key={group.id} group={group} />
           ))}
@@ -141,7 +141,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Legacy Steps (old conversations) */}
       {!hasGroups && hasSteps && (
-        <div className="ml-[42px] mb-3">
+        <div className="ml-0 mb-3 sm:ml-[42px]">
           <div className="space-y-0.5">
             {steps.map((step) => (
               <TaskStep key={step.index} step={step} />
@@ -152,7 +152,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Completion banner */}
       {showCompletion && (
-        <div className="ml-[42px]">
+        <div className="ml-0 sm:ml-[42px]">
           <CompletionBanner
             completedSteps={taskGroups.filter((g) => g.status === 'done').length}
             totalSteps={taskGroups.length}
@@ -165,21 +165,21 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Final content */}
       {showFinalContent && finalContent && (
-        <div className="ml-[42px] markdown-content chat-reading-text text-text-primary">
+        <div className="ml-0 mt-4 markdown-content chat-reading-text text-text-primary sm:ml-[42px]">
           <MarkdownLite>{finalContent}</MarkdownLite>
         </div>
       )}
 
       {/* Live activity indicator — shows immediately while the first agent turn is booting/planning */}
       {isStreaming && !hasGroups && !hasSteps && (
-        <div className="ml-[42px] mt-3">
+        <div className="ml-0 mt-3 sm:ml-[42px]">
           <TypingIndicator />
         </div>
       )}
 
       {/* Document previews */}
       {showFinalContent && documentArtifacts.length > 0 && (
-        <div className="ml-[42px] mt-4 space-y-3">
+        <div className="ml-0 mt-4 space-y-3 sm:ml-[42px]">
           {[...documentArtifacts].reverse().map((artifact) => (
             <DocumentPreview key={artifact.id} artifact={artifact} conversationId={conversationId} />
           ))}
@@ -189,8 +189,8 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
       {/* Image previews */}
       {showFinalContent && imageArtifacts.length > 0 && (
         <div className={imageArtifacts.length > 1
-          ? 'ml-[42px] mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-[760px]'
-          : 'ml-[42px] mt-4 space-y-3'
+          ? 'ml-0 mt-4 grid grid-cols-1 gap-3 max-w-[760px] sm:ml-[42px] sm:grid-cols-2'
+          : 'ml-0 mt-4 space-y-3 sm:ml-[42px]'
         }>
           {[...imageArtifacts].reverse().map((artifact) => (
             <ImagePreview key={artifact.id} artifact={artifact} compact={imageArtifacts.length > 1} />
@@ -200,7 +200,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
       {/* Follow-up suggestions */}
       {followUps.length > 0 && !isStreaming && onFollowUp && (
-        <div className="ml-[42px]">
+        <div className="ml-0 sm:ml-[42px]">
           <FollowUpSuggestions suggestions={followUps} onSelect={onFollowUp} />
         </div>
       )}

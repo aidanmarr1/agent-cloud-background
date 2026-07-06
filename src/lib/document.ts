@@ -1,6 +1,7 @@
 import { constants } from 'fs'
 import { open } from 'fs/promises'
 import { join } from 'path'
+import { browsePage, parseReadableHtml } from './browse'
 import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 
@@ -11,11 +12,16 @@ export interface DocumentResult {
   pageCount?: number
   wordCount: number
   source: string
+  error?: string
+  status?: number
+  statusText?: string
+  recoveryHint?: string
 }
 
 const MAX_CONTENT_CHARS = 40_000
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50MB
 const MAX_REDIRECTS = 5
+const URL_FETCH_TIMEOUT_MS = 12_000
 
 function detectType(pathOrUrl: string, contentType?: string): 'pdf' | 'docx' | 'text' {
   if (contentType) {
@@ -30,6 +36,48 @@ function detectType(pathOrUrl: string, contentType?: string): 'pdf' | 'docx' | '
 
 function isUrl(source: string): boolean {
   return /^https?:\/\//i.test(source.trim())
+}
+
+function wordCount(content: string): number {
+  return content.split(/\s+/).filter(Boolean).length
+}
+
+function truncateContent(content: string): string {
+  if (content.length <= MAX_CONTENT_CHARS) return content
+  return content.slice(0, MAX_CONTENT_CHARS) + '\n... [truncated]'
+}
+
+function extractionBlockedResult(input: {
+  source: string
+  title: string
+  type?: 'pdf' | 'docx' | 'text'
+  status?: number
+  statusText?: string
+  error?: string
+}): DocumentResult {
+  const statusLabel = input.status
+    ? `HTTP ${input.status}${input.statusText ? ` ${input.statusText}` : ''}`
+    : (input.error || 'request failed')
+  const recoveryHint = 'INTERNAL_RECOVERY: direct text extraction was blocked for this URL. Do not show this to the user. If this exact source matters, use browser_navigate followed by browser_get_content; otherwise choose a different strong source from the search results.'
+  const content = `INTERNAL_RECOVERY: source extraction blocked (${statusLabel}). Use a rendered browser read or a different strong source; do not report this internal extraction failure to the user.`
+  return {
+    type: input.type || 'text',
+    title: input.title || 'Source needs browser rendering',
+    content,
+    wordCount: wordCount(content),
+    source: input.source,
+    error: recoveryHint,
+    status: input.status,
+    statusText: input.statusText,
+    recoveryHint,
+  }
+}
+
+function browseResultIsBlocked(page: { title?: string; content?: string }): boolean {
+  const title = page.title || ''
+  const content = page.content || ''
+  return /^(?:page blocked|blocked|error loading page)$/i.test(title.trim()) ||
+    /\b(?:blocks automated access|request failed with status|returned\s+(?:401|403|429|451|503)|timed out loading|failed to load)\b/i.test(content)
 }
 
 async function parsePdf(buffer: Buffer): Promise<{ text: string; pages: number }> {
@@ -50,6 +98,8 @@ export async function readDocument(source: string, conversationId?: string): Pro
     let buffer: Buffer
     let docType: 'pdf' | 'docx' | 'text'
     let title = source.split('/').pop()?.split('?')[0] || 'document'
+    let contentType = ''
+    let resolvedSource = source
 
     if (isUrl(source)) {
       // SSRF protection
@@ -61,7 +111,7 @@ export async function readDocument(source: string, conversationId?: string): Pro
       }
 
       const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 30_000)
+      const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS)
       try {
         // Manual redirect loop with per-hop SSRF re-validation. fetch's default
         // redirect handling does NOT re-check the host, so an attacker-controlled
@@ -87,15 +137,43 @@ export async function readDocument(source: string, conversationId?: string): Pro
           const parsedRedirect = validateHttpUrl(currentUrl)
           await checkHost(parsedRedirect.hostname)
         }
+        resolvedSource = currentUrl
         if (!res) {
           clearTimeout(timeout)
-          return { type: 'text', title, content: 'Error: no response', wordCount: 0, source }
+          return extractionBlockedResult({ source, title, error: 'no response' })
         }
         if (!res.ok) {
+          resolvedSource = currentUrl
+          contentType = res.headers.get('content-type') || ''
+          const failedDocType = detectType(resolvedSource, contentType)
           clearTimeout(timeout)
-          return { type: 'text', title, content: `Error: HTTP ${res.status} ${res.statusText}`, wordCount: 0, source }
+          const canTryReadablePage =
+            failedDocType === 'text' &&
+            (res.status === 401 || res.status === 403 || res.status === 429 || res.status === 451 || res.status === 503)
+
+          if (canTryReadablePage) {
+            const page = await browsePage(resolvedSource)
+            if (!browseResultIsBlocked(page) && page.content.trim()) {
+              const content = truncateContent(page.content)
+              return {
+                type: 'text',
+                title: page.title || title,
+                content,
+                wordCount: wordCount(content),
+                source: page.url || resolvedSource,
+              }
+            }
+          }
+
+          return extractionBlockedResult({
+            source: resolvedSource,
+            title: 'Source needs browser rendering',
+            type: failedDocType,
+            status: res.status,
+            statusText: res.statusText,
+          })
         }
-        const contentType = res.headers.get('content-type') || ''
+        contentType = res.headers.get('content-type') || ''
         docType = detectType(source, contentType)
         const contentLength = res.headers.get('content-length')
         if (contentLength) {
@@ -104,18 +182,25 @@ export async function readDocument(source: string, conversationId?: string): Pro
           // bandwidth on a download that the post-fetch size check will reject anyway.
           if (!Number.isFinite(parsed) || parsed < 0 || parsed > MAX_FILE_BYTES) {
             clearTimeout(timeout)
-            return { type: docType, title, content: 'Error: file exceeds 50MB limit or has invalid Content-Length', wordCount: 0, source }
+            return {
+              type: docType,
+              title,
+              content: 'Error: file exceeds 50MB limit or has invalid Content-Length',
+              wordCount: 0,
+              source,
+              error: 'file exceeds 50MB limit or has invalid Content-Length',
+            }
           }
         }
         const arrayBuf = await res.arrayBuffer()
         clearTimeout(timeout)
         if (arrayBuf.byteLength > MAX_FILE_BYTES) {
-          return { type: docType, title, content: 'Error: file exceeds 50MB limit', wordCount: 0, source }
+          return { type: docType, title, content: 'Error: file exceeds 50MB limit', wordCount: 0, source, error: 'file exceeds 50MB limit' }
         }
         buffer = Buffer.from(arrayBuf)
       } catch (err) {
         clearTimeout(timeout)
-        return { type: 'text', title, content: `Error: ${(err as Error).message}`, wordCount: 0, source }
+        return extractionBlockedResult({ source, title, error: (err as Error).message })
       }
     } else {
       // Local file in sandbox
@@ -161,18 +246,20 @@ export async function readDocument(source: string, conversationId?: string): Pro
       pageCount = result.pages
     } else if (docType === 'docx') {
       content = await parseDocx(buffer)
+    } else if (isUrl(resolvedSource) && /(?:text\/html|application\/xhtml\+xml)/i.test(contentType)) {
+      const page = parseReadableHtml(buffer.toString('utf-8'), resolvedSource)
+      title = page.title || title
+      content = page.content || ''
     } else {
       content = buffer.toString('utf-8')
     }
 
-    if (content.length > MAX_CONTENT_CHARS) {
-      content = content.slice(0, MAX_CONTENT_CHARS) + '\n... [truncated]'
-    }
+    content = truncateContent(content)
 
-    const wordCount = content.split(/\s+/).filter(Boolean).length
+    const words = wordCount(content)
 
-    return { type: docType, title, content, pageCount, wordCount, source }
+    return { type: docType, title, content, pageCount, wordCount: words, source: resolvedSource }
   } catch (err) {
-    return { type: 'text', title: 'document', content: `Error: ${(err as Error).message}`, wordCount: 0, source }
+    return { type: 'text', title: 'document', content: `Error: ${(err as Error).message}`, wordCount: 0, source, error: (err as Error).message }
   }
 }

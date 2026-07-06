@@ -1,6 +1,7 @@
 'use client'
 
 import type { ReactNode } from 'react'
+import { normalizeMarkdownForDisplay } from '@/lib/stream/cleaners'
 import { CodeBlock } from './CodeBlock'
 import { CollapsibleCodeBlock } from './CollapsibleCodeBlock'
 import { EnhancedTable, EnhancedThead } from './EnhancedTable'
@@ -264,7 +265,7 @@ function renderMarkdownBlocks(markdown: string): ReactNode[] {
 }
 
 export function MarkdownLite({ children = '', className }: MarkdownLiteProps) {
-  const content = renderMarkdownBlocks(children)
+  const content = renderMarkdownBlocks(normalizeMarkdownForDisplay(children))
   if (className) return <div className={className}>{content}</div>
   return <>{content}</>
 }

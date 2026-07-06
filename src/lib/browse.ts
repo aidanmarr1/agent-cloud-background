@@ -1,5 +1,3 @@
-import { JSDOM } from 'jsdom'
-import { Readability } from '@mozilla/readability'
 import { BrowseResult } from '@/types'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 
@@ -15,9 +13,71 @@ const GOOGLEBOT_UA = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google
 
 const MAX_REDIRECTS = 5
 const MAX_PAGE_BYTES = 4 * 1024 * 1024
+const HTML_ENTITIES: Record<string, string> = {
+  amp: '&',
+  apos: "'",
+  gt: '>',
+  lt: '<',
+  nbsp: ' ',
+  quot: '"',
+}
 
 function randomUA(): string {
   return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)]
+}
+
+function decodeHtmlEntities(value: string): string {
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, entity: string) => {
+    const fromCode = (code: number) => {
+      try {
+        return Number.isFinite(code) ? String.fromCodePoint(code) : match
+      } catch {
+        return match
+      }
+    }
+    const normalized = entity.toLowerCase()
+    if (normalized.startsWith('#x')) return fromCode(Number.parseInt(normalized.slice(2), 16))
+    if (normalized.startsWith('#')) return fromCode(Number.parseInt(normalized.slice(1), 10))
+    return HTML_ENTITIES[normalized] ?? match
+  })
+}
+
+function htmlAttributeValue(html: string, pattern: RegExp): string {
+  const match = html.match(pattern)
+  return decodeHtmlEntities(match?.[1] || '').replace(/\s+/g, ' ').trim()
+}
+
+function htmlTagText(html: string, tag: string): string {
+  const re = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i')
+  const match = html.match(re)
+  if (!match?.[1]) return ''
+  return decodeHtmlEntities(match[1].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim()
+}
+
+function extractMainHtml(html: string): string {
+  const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1]
+  if (article) return article
+  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
+  if (main) return main
+  return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] || html
+}
+
+function htmlToText(html: string): string {
+  return decodeHtmlEntities(
+    html
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<(script|style|noscript|svg|canvas|iframe)\b[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<(nav|footer|aside|form)\b[\s\S]*?<\/\1>/gi, ' ')
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(?:p|div|section|article|main|header|h[1-6]|tr|table|blockquote)>/gi, '\n\n')
+      .replace(/<li\b[^>]*>/gi, '\n- ')
+      .replace(/<\/li>/gi, '\n')
+      .replace(/<[^>]+>/g, ' ')
+  )
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
 }
 
 async function fetchPage(url: string, userAgent: string, timeoutMs: number): Promise<{ ok: boolean; status: number; statusText: string; html: string }> {
@@ -66,38 +126,14 @@ async function fetchPage(url: string, userAgent: string, timeoutMs: number): Pro
   }
 }
 
-function parseHTML(html: string, url: string): BrowseResult {
-  const dom = new JSDOM(html, { url })
-  const doc = dom.window.document
+export function parseReadableHtml(html: string, url: string): BrowseResult {
+  const metaDescription = htmlAttributeValue(html, /<meta\b(?=[^>]*(?:name|property)=["'](?:description|og:description)["'])[^>]*content=["']([^"']*)["'][^>]*>/i)
+  const ogTitle = htmlAttributeValue(html, /<meta\b(?=[^>]*property=["']og:title["'])[^>]*content=["']([^"']*)["'][^>]*>/i)
+  const publishedDate = htmlAttributeValue(html, /<meta\b(?=[^>]*property=["']article:published_time["'])[^>]*content=["']([^"']*)["'][^>]*>/i)
+    || htmlAttributeValue(html, /<time\b[^>]*datetime=["']([^"']*)["'][^>]*>/i)
 
-  // Extract metadata before Readability destroys the DOM
-  const metaDescription = doc.querySelector('meta[name="description"]')?.getAttribute('content')
-    || doc.querySelector('meta[property="og:description"]')?.getAttribute('content')
-    || ''
-  const ogTitle = doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || ''
-  const publishedDate = doc.querySelector('meta[property="article:published_time"]')?.getAttribute('content')
-    || doc.querySelector('time[datetime]')?.getAttribute('datetime')
-    || ''
-
-  // Remove noisy elements before parsing
-  const noiseSelectors = ['nav', 'footer', '.sidebar', '.ad', '.advertisement', '.cookie-banner', '.popup', '#comments', '.social-share']
-  for (const sel of noiseSelectors) {
-    try {
-      doc.querySelectorAll(sel).forEach(el => el.remove())
-    } catch { /* skip invalid selectors */ }
-  }
-
-  // Try Readability first
-  const reader = new Readability(doc)
-  const article = reader.parse()
-
-  let title = article?.title || ogTitle || doc.title || url
-  let content = article?.textContent || ''
-
-  // Fallback to body text
-  if (!content.trim()) {
-    content = doc.body?.textContent || ''
-  }
+  let title = ogTitle || htmlTagText(html, 'title') || url
+  let content = htmlToText(extractMainHtml(html))
 
   // Clean up whitespace but preserve paragraph breaks
   content = content
@@ -181,7 +217,7 @@ async function browsePageInner(url: string): Promise<BrowseResult> {
     const response = await fetchPage(url, randomUA(), 20000)
 
     if (response.ok) {
-      return parseHTML(response.html, url)
+      return parseReadableHtml(response.html, url)
     }
 
     // Attempt 2: Retry 403/429 with Googlebot UA
@@ -189,7 +225,7 @@ async function browsePageInner(url: string): Promise<BrowseResult> {
       try {
         const retryResponse = await fetchPage(url, GOOGLEBOT_UA, 20000)
         if (retryResponse.ok) {
-          return parseHTML(retryResponse.html, url)
+          return parseReadableHtml(retryResponse.html, url)
         }
       } catch {
         // Fall through to error

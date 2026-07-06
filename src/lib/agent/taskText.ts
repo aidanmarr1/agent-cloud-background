@@ -1,5 +1,4 @@
 import { effectiveTaskRequest } from '@/lib/conversationContext'
-import type { TaskType } from './TaskStrategy'
 
 export function latestUserTaskText(messages: Array<{ role: string; content: string }>): string {
   const latest = [...messages].reverse().find((message) => message.role === 'user' && typeof message.content === 'string')
@@ -19,16 +18,32 @@ export function conciseTaskSubject(text: string, maxLength = 84): string {
   return clipped || cleaned.slice(0, maxLength).trim()
 }
 
+export function cleanTaskSubjectText(text: string): string {
+  return text
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
+    .replace(/^(?:i\s+(?:need|want)\s+you\s+to|make\s+sure\s+to|just)\s+/i, '')
+    .replace(/^(?:conduct|do|perform|run|carry\s+out)\s+(?:the\s+)?(?:(?:deepest\s+possible|deep|comprehensive|thorough|detailed|in[-\s]?depth|extensive|complete|full)\s+)*(?:research|investigation|analysis)\s+(?:all\s+)?(?:about|on|into|regarding|for)\s+/i, '')
+    .replace(/^(?:a\s+|an\s+|the\s+)?(?:(?:extremely|really|very|super|ultra|highly|incredibly)\s+)*(?:(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|extensive|complete|full)\s+)*(?:research|investigation|analysis|overview|guide|report|write[-\s]?up)\s+(?:all\s+)?(?:about|on|into|regarding|for)\s+/i, '')
+    .replace(/^(?:a\s+|an\s+|the\s+)?(?:(?:extremely|really|very|super|ultra|highly|incredibly)\s+)*(?:(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|extensive|complete|full)\s+)*(?:research|find\s+out|look\s+up|investigate|analy[sz]e|explain|tell\s+me|write|draft|compose|prepare|create|build|make|implement|fix|update)\s+(?:all\s+)?(?:about\s+)?/i, '')
+    .replace(/\s+(?:and|then)\s+(?:produce|create|write|draft|deliver|make|prepare)\b[\s\S]*$/i, '')
+    .replace(/\s+that\s+(?:answers?|explains?|covers?|includes?)\b[\s\S]*$/i, '')
+    .replace(/^(?:a\s+|an\s+|the\s+)?(?:quick|brief|concise|short)\s+/i, '')
+    .replace(/^(?:a\s+|an\s+|the\s+)?(?:report|write[-\s]?up|memo|overview|brief)\s+(?:on|about|for)\s+/i, '')
+    .replace(/\b(?:very quickly|real quick|asap|super quick|quickly|quick|briefly|brief|short|concise|succinct)\b/gi, ' ')
+    .replace(/^(?:all\s+)?(?:about\s+)/i, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.!?]+$/g, '')
+    .trim()
+}
+
 export function requestSubject(messages: Array<{ role: string; content: string }>, maxLength = 72): string {
   const request = effectiveTaskRequest(messages)
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  const cleaned = request
-    .replace(/^(?:please\s+)?(?:can|could|would)\s+you\s+/i, '')
-    .replace(/^(?:please\s+)?(?:research|find out|look up|investigate|analy[sz]e|explain|tell me|write|create|build|make|implement|fix|update)\s+(?:all\s+)?(?:about\s+)?/i, '')
-    .replace(/^(?:all\s+)?(?:about\s+)/i, '')
-    .trim()
+  const cleaned = cleanTaskSubjectText(request)
   return humanTopicLabel(cleaned || request, 'the requested topic', maxLength)
 }
 
@@ -40,16 +55,21 @@ export function humanTopicLabel(topic: string | null | undefined, fallback = 'th
     .trim()
 
   if (!cleaned) return fallback
-  cleaned = cleaned.slice(0, maxLength).replace(/\s+\S*$/, '').trim() || cleaned.slice(0, maxLength).trim()
+  cleaned = cleaned.length > maxLength
+    ? (cleaned.slice(0, maxLength).replace(/\s+\S*$/, '').trim() || cleaned.slice(0, maxLength).trim())
+    : cleaned
   cleaned = cleaned
     .replace(/\bai\b/gi, 'AI')
     .replace(/\bml\b/gi, 'machine learning')
+    .replace(/\biphones?\b/gi, (match) => match.toLowerCase().endsWith('s') ? 'iPhones' : 'iPhone')
 
   const words = cleaned.split(/\s+/)
-  if (/^[a-z0-9][a-z0-9\s'&./-]*$/i.test(cleaned) && words.length <= 5) {
+  const hasPhraseStopword = /\b(?:a|an|the|of|for|and|or|to|in|on|with|about)\b/i.test(cleaned)
+  if (/^[a-z0-9][a-z0-9\s'&./-]*$/i.test(cleaned) && words.length <= 5 && !hasPhraseStopword) {
     return words
       .map((word) => {
         if (/^(AI|API|UI|UX|ML)$/i.test(word)) return word.toUpperCase()
+        if (/^iPhones?$/.test(word)) return word
         if (/^[a-z][a-z'-]*$/.test(word)) return `${word[0].toUpperCase()}${word.slice(1)}`
         return word
       })
@@ -57,25 +77,4 @@ export function humanTopicLabel(topic: string | null | undefined, fallback = 'th
   }
 
   return cleaned
-}
-
-export function sandboxReadyAcknowledgementForTask(
-  messages: Array<{ role: string; content: string }>,
-  taskType?: TaskType | 'action',
-): string {
-  const raw = effectiveTaskRequest(messages) || latestUserTaskText(messages)
-  const subject = requestSubject(messages, 64)
-  const lower = raw.toLowerCase()
-  const resolvedType = taskType === 'action' ? 'browse' : taskType
-
-  if (resolvedType === 'build' || resolvedType === 'code') {
-    return `Building ${subject} in the workspace, then running the relevant checks.`
-  }
-  if (resolvedType === 'browse') {
-    return `Working through ${subject}, then verifying the final state.`
-  }
-  if (/\b(?:research|find out|look up|investigate|compare|current|latest|source|sources)\b/.test(lower)) {
-    return `Researching ${subject} with current sources, then comparing the evidence and summarizing the findings.`
-  }
-  return `Starting ${subject} and keeping the work focused on the request.`
 }

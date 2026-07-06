@@ -24,6 +24,7 @@ const ChatMessageSchema = z.object({
     content: z.string().max(MAX_ATTACHMENT_CONTENT_CHARS).optional(),
     contentEncoding: z.enum(['text', 'data-url']).optional(),
     url: z.string().max(500).optional(),
+    sandboxPath: z.string().max(500).optional(),
     persisted: z.boolean().optional(),
     preview: z.string().max(MAX_ATTACHMENT_CONTENT_CHARS).optional(),
   })).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),

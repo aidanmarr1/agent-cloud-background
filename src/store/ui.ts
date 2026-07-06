@@ -275,7 +275,7 @@ export const useUIStore = create<UIStore>()(
       },
       showActiveTaskConflict: (modal = {}) => set({
         activeTaskConflictModal: {
-          message: modal.message || 'A task is already running. Finish or stop the current task before starting another.',
+          message: modal.message || 'The task could not start. Please try again.',
           activeConversationId: modal.activeConversationId,
         },
       }),

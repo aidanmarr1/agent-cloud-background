@@ -4,10 +4,13 @@ import { existsSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn, spawnSync } from 'node:child_process'
+import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const lockPath = join(projectRoot, '.next', 'dev', 'lock')
 const nextBin = join(projectRoot, 'node_modules', 'next', 'dist', 'bin', 'next')
+
+loadLocalEnvFiles(new URL('../', import.meta.url))
 
 const rawArgs = process.argv.slice(2)
 const mode = rawArgs.includes('--stop')
@@ -211,7 +214,10 @@ const nextArgs = [
 const child = spawn(process.execPath, nextArgs, {
   cwd: projectRoot,
   stdio: 'inherit',
-  env: process.env,
+  env: {
+    ...process.env,
+    AGENT_TASK_WORKER_MODE: process.env.AGENT_TASK_WORKER_MODE || 'local',
+  },
 })
 
 function forwardSignal(signal) {

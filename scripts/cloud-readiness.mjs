@@ -163,7 +163,7 @@ async function checkLiveDatabase() {
 function checkEnvironment() {
   requireEnv('TURSO_DATABASE_URL', 'persistent task queue and event replay')
   requireEnv('TURSO_AUTH_TOKEN', 'persistent task queue and event replay')
-  requireEnv('OPENROUTER_API_KEY', 'agent LLM calls from the worker')
+  requireEnv('DEEPSEEK_API_KEY', 'agent LLM calls from the worker')
   requireEnv('AUTH_SECRET', 'auth/session signing')
   requireEnv('E2B_API_KEY', 'cloud microVM sandbox creation and resume')
 

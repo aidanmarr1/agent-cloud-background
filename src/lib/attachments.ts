@@ -3,6 +3,7 @@ import { extname } from 'path'
 import { tursoExecute } from '@/lib/db/turso'
 import { deleteObject, getObject, putObject } from '@/lib/storage'
 import { isExtractableDocument } from '@/lib/attachmentTypes'
+import { writeSandboxFileBytes } from '@/lib/sandbox'
 
 export type AttachmentKind = 'image' | 'text' | 'archive' | 'skill' | 'file'
 
@@ -46,6 +47,23 @@ export interface PublicAttachment {
   createdAt: string
   content?: string
   contentEncoding?: 'text'
+}
+
+type MessageAttachment = {
+  id?: string
+  name: string
+  type: string
+  size: number
+  content?: string
+  contentEncoding?: 'text' | 'data-url'
+  url?: string
+  sandboxPath?: string
+  persisted?: boolean
+  preview?: string
+}
+
+type MessageWithAttachments = {
+  attachments?: MessageAttachment[]
 }
 
 const SAFE_SEGMENT = /[^a-zA-Z0-9._-]+/g
@@ -148,6 +166,26 @@ function safeSegment(value: string): string {
 
 function extensionForName(fileName: string): string {
   return extname(fileName).replace(/[^a-zA-Z0-9.]/g, '').slice(0, 16)
+}
+
+function sandboxUploadPath(attachment: MessageAttachment, messageIndex: number, attachmentIndex: number): string {
+  const fileName = attachment.name.trim() || 'attachment'
+  const ext = extensionForName(fileName)
+  const base = safeSegment(fileName.replace(/\.[^.]+$/, ''))
+  const unique = safeSegment(attachment.id || `${messageIndex + 1}-${attachmentIndex + 1}`)
+  return `uploads/${unique}-${base}${ext}`
+}
+
+function decodeDataUrlContent(content: string): Buffer | null {
+  const match = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,([\s\S]*)$/i.exec(content)
+  if (!match) return null
+  const body = match[3] || ''
+  if (match[2]) return Buffer.from(body, 'base64')
+  try {
+    return Buffer.from(decodeURIComponent(body), 'utf8')
+  } catch {
+    return Buffer.from(body, 'utf8')
+  }
 }
 
 export function getAttachmentKind(fileName: string, mimeType: string): AttachmentKind {
@@ -379,4 +417,52 @@ export async function hydrateMessageAttachmentsForUser<
   }
 
   return hydrated
+}
+
+export function withMessageAttachmentSandboxPaths<TMessage extends MessageWithAttachments>(messages: TMessage[]): TMessage[] {
+  return messages.map((message, messageIndex) => {
+    if (!message.attachments?.length) return message
+
+    const attachments = message.attachments.map((attachment, attachmentIndex) => {
+      if (attachment.type === 'application/x-agent-skill') return attachment
+      if (attachment.sandboxPath) return attachment
+      return {
+        ...attachment,
+        sandboxPath: sandboxUploadPath(attachment, messageIndex, attachmentIndex),
+      }
+    })
+
+    return {
+      ...message,
+      attachments,
+    }
+  })
+}
+
+export async function materializeMessageAttachmentsToSandbox<TMessage extends MessageWithAttachments>(
+  messages: TMessage[],
+  userId: string,
+  conversationId: string,
+): Promise<void> {
+  for (const message of messages) {
+    if (!message.attachments?.length) continue
+
+    for (const attachment of message.attachments) {
+      const sandboxPath = attachment.sandboxPath
+      if (!sandboxPath) continue
+
+      let body: Buffer | null = null
+      if (attachment.id) {
+        const record = await getAttachmentForUser(userId, attachment.id)
+        if (record) body = await readAttachmentBody(record)
+      } else if (attachment.contentEncoding === 'data-url' && attachment.content) {
+        body = decodeDataUrlContent(attachment.content)
+      } else if (attachment.content && attachment.contentEncoding !== 'data-url') {
+        body = Buffer.from(attachment.content, 'utf8')
+      }
+
+      if (!body) continue
+      await writeSandboxFileBytes(conversationId, sandboxPath, body)
+    }
+  }
 }

@@ -1,15 +1,47 @@
 import { SearchResult } from '@/types'
+import { normalizeSearchQuery, simplifiedSearchQuery } from './searchQuery'
 
-const BRAVE_API_KEY = process.env.BRAVE_SEARCH_API_KEY
+const SERPER_API_KEY = process.env.SERPER_API_KEY
+const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
+const WEB_SEARCH_RESULT_COUNT = 15
+const WEB_SEARCH_REQUEST_TIMEOUT_MS = 5_000
+const WEB_SEARCH_PAGE_TWO_TIMEOUT_MS = 2_200
 
-interface BraveWebResult {
-  title: string
-  description: string
-  url: string
+interface SerperOrganicResult {
+  title?: string
+  link?: string
+  snippet?: string
+  date?: string
+  source?: string
+  position?: number
 }
 
-interface BraveSearchResponse {
-  web?: { results?: BraveWebResult[] }
+interface SerperSearchResponse {
+  organic?: SerperOrganicResult[]
+  news?: SerperOrganicResult[]
+  places?: Array<{
+    title?: string
+    website?: string
+    address?: string
+    rating?: number
+    ratingCount?: number
+  }>
+  answerBox?: {
+    title?: string
+    answer?: string
+    snippet?: string
+    link?: string
+  }
+}
+
+class SerperHttpError extends Error {
+  constructor(
+    readonly path: 'search',
+    readonly status: number,
+    detail: string,
+  ) {
+    super(`Serper ${path} HTTP ${status}${detail ? `: ${detail}` : ''}`)
+  }
 }
 
 const TRUSTED_DOMAINS = new Set([
@@ -17,9 +49,6 @@ const TRUSTED_DOMAINS = new Set([
   'github.com', 'stackoverflow.com', 'arxiv.org', 'nature.com', 'sciencedirect.com',
   'developer.mozilla.org', 'docs.python.org', 'docs.microsoft.com',
 ])
-
-const WEB_SEARCH_REQUEST_TIMEOUT_MS = 6500
-const WEB_SEARCH_RESULT_COUNT = 5
 
 const HTML_ENTITIES: Record<string, string> = {
   amp: '&',
@@ -40,12 +69,8 @@ function decodeHtmlEntities(value: string): string {
       }
     }
     const normalized = entity.toLowerCase()
-    if (normalized.startsWith('#x')) {
-      return fromCode(Number.parseInt(normalized.slice(2), 16))
-    }
-    if (normalized.startsWith('#')) {
-      return fromCode(Number.parseInt(normalized.slice(1), 10))
-    }
+    if (normalized.startsWith('#x')) return fromCode(Number.parseInt(normalized.slice(2), 16))
+    if (normalized.startsWith('#')) return fromCode(Number.parseInt(normalized.slice(1), 10))
     return HTML_ENTITIES[normalized] ?? match
   })
 }
@@ -87,62 +112,208 @@ function isObviousBrokenResultUrl(rawUrl: string): boolean {
   }
 }
 
-export async function webSearch(query: string): Promise<SearchResult[]> {
-  if (!BRAVE_API_KEY) {
-    return [{
-      title: 'Search unavailable',
-      snippet: 'BRAVE_SEARCH_API_KEY is not set in .env.local.',
-      url: '',
-    }]
+function markTrustedSource(result: SearchResult): SearchResult {
+  try {
+    const hostname = new URL(result.url).hostname.replace(/^www\./, '')
+    if (TRUSTED_DOMAINS.has(hostname) || [...TRUSTED_DOMAINS].some((d) => hostname.endsWith(`.${d}`))) {
+      result.source = result.source ? `${result.source},trusted` : 'trusted'
+    }
+  } catch {
+    // Ignore malformed result URLs.
+  }
+  return result
+}
+
+function queryTokens(query: string): string[] {
+  const stop = new Set(['the', 'and', 'for', 'with', 'from', 'latest', 'current', 'news', 'about', 'into', 'what', 'why', 'how'])
+  return cleanSearchText(query.toLowerCase(), 200)
+    .split(/[^a-z0-9]+/i)
+    .filter(token => token.length >= 3 && !stop.has(token))
+    .slice(0, 12)
+}
+
+function scoreResultForQuery(result: SearchResult, query: string): number {
+  const tokens = queryTokens(query)
+  if (tokens.length === 0) return 0
+  const title = result.title.toLowerCase()
+  const snippet = result.snippet.toLowerCase()
+  let host = ''
+  try {
+    host = new URL(result.url).hostname.toLowerCase()
+  } catch {
+    // Ignore malformed hosts; they will be filtered elsewhere.
   }
 
+  let score = 0
+  const phrase = cleanSearchText(query.toLowerCase(), 160)
+  if (phrase && title.includes(phrase)) score += 8
+  if (phrase && snippet.includes(phrase)) score += 4
+  for (const token of tokens) {
+    if (title.includes(token)) score += 3
+    if (snippet.includes(token)) score += 1
+    if (host.includes(token)) score += 1
+  }
+  return score
+}
+
+function dedupeResults(results: SearchResult[], query = ''): SearchResult[] {
+  const seen = new Set<string>()
+  const candidates: SearchResult[] = []
+  for (const result of results) {
+    if (!result.url || isObviousBrokenResultUrl(result.url)) continue
+    const key = result.url.replace(/#.*$/, '').replace(/\/+$/, '')
+    if (seen.has(key)) continue
+    seen.add(key)
+    candidates.push(markTrustedSource(result))
+    if (candidates.length >= WEB_SEARCH_RESULT_COUNT * 5) break
+  }
+  if (!query.trim()) return candidates.slice(0, WEB_SEARCH_RESULT_COUNT)
+
+  const scored = candidates.map((result, index) => ({
+    result,
+    index,
+    score: scoreResultForQuery(result, query),
+  }))
+  const positive = scored.filter(item => item.score > 0)
+  const pool = positive.length > 0 ? positive : scored
+  return pool
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, WEB_SEARCH_RESULT_COUNT)
+    .map(item => item.result)
+}
+
+function serperApiKey(): string {
+  const key = SERPER_API_KEY?.trim()
+  if (!key) throw new Error('SERPER_API_KEY is not configured')
+  return key
+}
+
+function compactSerperErrorBody(body: string): string {
+  return body
+    .replace(/\s+/g, ' ')
+    .replace(/[^\x20-\x7e]+/g, ' ')
+    .trim()
+    .slice(0, 260)
+}
+
+async function serperPost<T>(path: 'search', body: Record<string, unknown>, timeoutMs = WEB_SEARCH_REQUEST_TIMEOUT_MS): Promise<T> {
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), WEB_SEARCH_REQUEST_TIMEOUT_MS)
-
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const res = await fetch(
-      `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${WEB_SEARCH_RESULT_COUNT}`,
-      {
-        headers: {
-          Accept: 'application/json',
-          'Accept-Encoding': 'gzip',
-          'X-Subscription-Token': BRAVE_API_KEY,
-        },
-        signal: controller.signal,
+    const response = await fetch(`${SERPER_BASE_URL}/${path}`, {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': serperApiKey(),
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
       },
-    )
-
-    if (!res.ok) throw new Error(`Brave API ${res.status}`)
-
-    const data = (await res.json()) as BraveSearchResponse
-    return (data.web?.results || [])
-      .filter((r) => r.url && !isObviousBrokenResultUrl(r.url))
-      .map((r) => {
-        const result: SearchResult = {
-          title: cleanSearchText(r.title || '', 180),
-          snippet: cleanSearchText(r.description || '', 240),
-          url: r.url,
-        }
-
-        try {
-          const hostname = new URL(r.url).hostname.replace(/^www\./, '')
-          if (TRUSTED_DOMAINS.has(hostname) || [...TRUSTED_DOMAINS].some((d) => hostname.endsWith(`.${d}`))) {
-            result.source = 'trusted'
-          }
-        } catch {
-          // Ignore malformed result URLs.
-        }
-
-        return result
-      })
-  } catch (error) {
-    console.error('Brave search error:', error)
-    return [{
-      title: 'Search failed',
-      snippet: `Search error: ${error instanceof Error ? error.message : 'unknown'}. Try browser_navigate to a known URL instead.`,
-      url: '',
-    }]
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+    const responseText = await response.text()
+    if (!response.ok) {
+      throw new SerperHttpError(path, response.status, compactSerperErrorBody(responseText))
+    }
+    const contentType = response.headers.get('content-type') || ''
+    if (!contentType.includes('application/json')) {
+      throw new Error(`Serper ${path} returned ${contentType || 'unknown content type'}`)
+    }
+    return JSON.parse(responseText) as T
   } finally {
     clearTimeout(timer)
   }
+}
+
+function shouldRetryWithSimplifiedQuery(error: unknown): boolean {
+  return error instanceof SerperHttpError && error.status === 400
+}
+
+async function serperSearchPage(query: string, page = 1): Promise<SerperSearchResponse> {
+  return serperPost<SerperSearchResponse>('search', {
+    q: query,
+    num: WEB_SEARCH_RESULT_COUNT,
+    ...(page > 1 ? { page } : {}),
+  }, page > 1 ? WEB_SEARCH_PAGE_TWO_TIMEOUT_MS : WEB_SEARCH_REQUEST_TIMEOUT_MS)
+}
+
+async function firstSerperSearchPage(query: string): Promise<SerperSearchResponse> {
+  try {
+    return await serperSearchPage(query)
+  } catch (error) {
+    const simplified = simplifiedSearchQuery(query)
+    if (!shouldRetryWithSimplifiedQuery(error) || !simplified || simplified === query) {
+      throw error
+    }
+    return serperSearchPage(simplified)
+  }
+}
+
+function resultFromOrganic(item: SerperOrganicResult, source: string): SearchResult | null {
+  if (!item.link) return null
+  return {
+    title: cleanSearchText(item.title || item.link, 180),
+    snippet: cleanSearchText([item.snippet, item.date].filter(Boolean).join(' '), 260),
+    url: item.link,
+    source,
+  }
+}
+
+function resultsFromAnswerBox(answerBox: SerperSearchResponse['answerBox']): SearchResult[] {
+  if (!answerBox?.link) return []
+  return [{
+    title: cleanSearchText(answerBox.title || answerBox.link, 180),
+    snippet: cleanSearchText(answerBox.answer || answerBox.snippet || '', 260),
+    url: answerBox.link,
+    source: 'serper-answer',
+  }]
+}
+
+function resultsFromPlaces(places: SerperSearchResponse['places']): SearchResult[] {
+  return (places || [])
+    .filter(place => place.website)
+    .map(place => ({
+      title: cleanSearchText(place.title || place.website || '', 180),
+      snippet: cleanSearchText([
+        place.address,
+        typeof place.rating === 'number' ? `Rating ${place.rating}` : '',
+        typeof place.ratingCount === 'number' ? `${place.ratingCount} reviews` : '',
+      ].filter(Boolean).join(' '), 260),
+      url: place.website || '',
+      source: 'serper-places',
+    }))
+}
+
+function searchResultsFromResponse(data: SerperSearchResponse): SearchResult[] {
+  const organic = (data.organic || [])
+    .map(item => resultFromOrganic(item, 'serper-organic'))
+    .filter((item): item is SearchResult => Boolean(item))
+  const news = (data.news || [])
+    .map(item => resultFromOrganic(item, 'serper-news'))
+    .filter((item): item is SearchResult => Boolean(item))
+
+  return [
+    ...resultsFromAnswerBox(data.answerBox),
+    ...organic,
+    ...news,
+    ...resultsFromPlaces(data.places),
+  ]
+}
+
+export async function webSearch(rawQuery: unknown): Promise<SearchResult[]> {
+  const query = normalizeSearchQuery(rawQuery)
+  if (!query) throw new Error('Search query is empty after cleanup')
+
+  const firstPage = await firstSerperSearchPage(query)
+  const rawResults = searchResultsFromResponse(firstPage)
+
+  if (rawResults.length < WEB_SEARCH_RESULT_COUNT) {
+    try {
+      const secondPage = await serperSearchPage(query, 2)
+      rawResults.push(...searchResultsFromResponse(secondPage))
+    } catch (error) {
+      console.warn('[Search] Serper page 2 did not return usable results:', error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  return dedupeResults(rawResults, query)
 }

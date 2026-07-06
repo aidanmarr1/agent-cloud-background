@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto'
 import { hashPassword, verifyPassword } from '@/lib/auth/password'
 import { getAttachmentForUser } from '@/lib/attachments'
 import { tursoExecute } from '@/lib/db/turso'
-import { ACCOUNT_MONTHLY_CREDITS, ensureAccountCredits, grantMonthlyAccountCredits, initializeAccountCredits } from '@/lib/serverCredits'
+import { ACCOUNT_STARTING_CREDITS, initializeAccountCredits } from '@/lib/serverCredits'
 
 export type UserAccessStatus = 'pending' | 'approved'
 
@@ -71,6 +71,11 @@ export async function ensureAuthSchema(): Promise<void> {
   return authSchemaPromise
 }
 
+function isMissingAuthSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table|no such column|schema/i.test(message)
+}
+
 function toPublicUser(row: UserRow): PublicAuthUser | null {
   if (typeof row.id !== 'string' || typeof row.email !== 'string') {
     return null
@@ -85,7 +90,7 @@ function toPublicUser(row: UserRow): PublicAuthUser | null {
     name: typeof row.name === 'string' && row.name.trim() ? row.name : null,
     imageAttachmentId,
     image: imageAttachmentId ? `/api/attachments/${imageAttachmentId}` : null,
-    accessStatus: row.access_status === 'pending' ? 'pending' : 'approved',
+    accessStatus: 'approved',
   }
 }
 
@@ -117,12 +122,20 @@ export async function findUserById(id: string): Promise<(PublicAuthUser & { pass
   const userId = id.trim()
   if (!userId) return null
 
-  await ensureAuthSchema()
-
-  const result = await tursoExecute(
-    'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where id = ? limit 1',
-    [userId],
-  )
+  let result: Awaited<ReturnType<typeof tursoExecute>>
+  try {
+    result = await tursoExecute(
+      'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where id = ? limit 1',
+      [userId],
+    )
+  } catch (error) {
+    if (!isMissingAuthSchemaError(error)) throw error
+    await ensureAuthSchema()
+    result = await tursoExecute(
+      'select id, name, email, password_hash, profile_image_attachment_id, access_status from users where id = ? limit 1',
+      [userId],
+    )
+  }
   const row = result.rows[0] as UserRow | undefined
   if (!row || typeof row.password_hash !== 'string') {
     return null
@@ -159,7 +172,7 @@ export async function createUserWithPasswordHash(input: {
 }): Promise<PublicAuthUser> {
   const email = normalizeEmail(input.email)
   const name = input.name?.trim() || null
-  const accessStatus = input.accessStatus === 'pending' ? 'pending' : 'approved'
+  const accessStatus: UserAccessStatus = 'approved'
 
   if (!email || !input.passwordHash.startsWith('pbkdf2_sha256$')) {
     throw new AuthUserError('INVALID_INPUT')
@@ -198,14 +211,10 @@ export async function createUserWithPasswordHash(input: {
     throw error
   }
 
-  if (accessStatus === 'pending') {
-    await initializeAccountCredits(user.id, {
-      monthlyAllowance: ACCOUNT_MONTHLY_CREDITS,
-      monthlyBalance: 0,
-    })
-  } else {
-    await ensureAccountCredits(user.id)
-  }
+  await initializeAccountCredits(user.id, {
+    creditAllowance: ACCOUNT_STARTING_CREDITS,
+    creditBalance: ACCOUNT_STARTING_CREDITS,
+  })
 
   return user
 }
@@ -229,7 +238,7 @@ export async function verifyUserCredentials(email: string, password: string): Pr
 
 export async function approveUserAccess(
   userId: string,
-  options: { creditGrantId?: string; acceptedAt?: number } = {},
+  options: { acceptedAt?: number } = {},
 ): Promise<PublicAuthUser> {
   const id = userId.trim()
   if (!id) throw new AuthUserError('INVALID_INPUT')
@@ -240,12 +249,9 @@ export async function approveUserAccess(
     'update users set access_status = ?, updated_at = ? where id = ?',
     ['approved', new Date(acceptedAt).toISOString(), id],
   )
-  await grantMonthlyAccountCredits(id, {
-    monthlyAllowance: ACCOUNT_MONTHLY_CREDITS,
-    monthlyBalance: ACCOUNT_MONTHLY_CREDITS,
-    grantId: options.creditGrantId,
-    reason: 'Agent Admin credit grant',
-    timestamp: acceptedAt,
+  await initializeAccountCredits(id, {
+    creditAllowance: ACCOUNT_STARTING_CREDITS,
+    creditBalance: ACCOUNT_STARTING_CREDITS,
   })
 
   const user = await findUserById(id)

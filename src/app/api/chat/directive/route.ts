@@ -2,12 +2,12 @@ import { z } from 'zod'
 import { checkRateLimit } from '@/lib/rateLimit'
 import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody } from '@/lib/api'
 import { assertTaskAccess } from '@/lib/taskAccess'
+import { findActiveTaskJobForConversation } from '@/lib/agent/taskJobs'
 import {
   enqueueLiveDirective,
   getLiveDirectiveQueueLength,
 } from '@/lib/liveDirectives'
 import { auth } from '@/auth'
-import { assertInviteAccessApproved } from '@/lib/inviteAccess'
 import { clampTaskInput } from '@/lib/inputLimits'
 
 const DIRECTIVE_JSON_BODY_LIMIT_BYTES = 32 * 1024
@@ -40,12 +40,17 @@ export async function POST(request: Request) {
   if (!userId) {
     return Response.json({ error: 'Authentication required' }, { status: 401 })
   }
-  const inviteAccessError = await assertInviteAccessApproved(userId)
-  if (inviteAccessError) return inviteAccessError
-
   const { conversationId, content } = validation.data
   const access = await assertTaskAccess(request, conversationId, { userId })
   if (!access.ok) return access.response
+
+  const activeJob = await findActiveTaskJobForConversation(userId, conversationId)
+  if (!activeJob) {
+    return Response.json({
+      error: 'That task is no longer running. Send a new message instead.',
+      code: 'NO_ACTIVE_TASK_FOR_DIRECTIVE',
+    }, { status: 409 })
+  }
 
   const directive = enqueueLiveDirective(conversationId, content, userId)
   return Response.json({

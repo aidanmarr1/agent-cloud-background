@@ -87,10 +87,14 @@ function validatePositiveInteger(value) {
 
 requireRealEnv('TURSO_DATABASE_URL', 'Turso database URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso auth token', validateNonShortToken)
+requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key', validateNonShortToken)
+requireExact('OPENROUTER_MODEL', 'google/gemini-3-flash-preview', 'Gemini 3 Flash Preview model route')
+requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'Gemini 3 Flash Preview fast reasoning effort')
 requireRealEnv('AUTH_SECRET', 'Auth.js signing secret', validateSecret)
 requireRealEnv('AGENT_INTERNAL_HEALTH_SECRET', 'internal health signing secret', validateSecret)
 requireRealEnv('E2B_API_KEY', 'E2B runtime API key', validateNonShortToken)
+requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
 
 requireExact('AGENT_TASK_WORKER_MODE', 'external', 'web requests must enqueue durable background tasks')
 requireRealEnv('AGENT_TASK_QUEUE_NAME', 'deployment queue namespace', validateQueueName)

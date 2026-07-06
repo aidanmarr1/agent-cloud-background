@@ -921,6 +921,14 @@ function detectErrorPage(opts: {
   }
   // 4. Body text patterns — only if the body is short (real pages have lots of text)
   const body = opts.bodyText.replace(/\s+/g, ' ').trim().toLowerCase()
+  const bodyHead = body.slice(0, 1000)
+  const strongBodyStartPatterns = [
+    /^(?:[\W_]{0,80})?(?:404|error\s*404|page not found|not found)\b/,
+    /^(?:[\W_]{0,80})?sorry,?\s+(?:this|the)\s+page\s+(?:doesn'?t exist|isn'?t available|can'?t be found|is missing)\b/,
+  ]
+  for (const re of strongBodyStartPatterns) {
+    if (re.test(bodyHead)) return `Page body starts with error message`
+  }
   if (body.length < 600) {
     const bodyPatterns = [
       /\bthis page can'?t be reached\b/,
@@ -4994,11 +5002,28 @@ export async function browserGetContent(
     const title = await session.page.title()
 
     let content = await session.page.innerText('body')
+    const finalUrl = session.page.url()
+    const errorReason = detectErrorPage({ status: 0, finalUrl, title, bodyText: content })
     if (content.length > 8000) content = content.slice(0, 8000) + '\n...[truncated]'
+
+    if (errorReason) {
+      const normFinal = normalizeNavUrl(finalUrl)
+      session.failedNavigations.set(normFinal, errorReason)
+      session.pageBlocker = errorReason
+      return {
+        success: false,
+        recoverable: true,
+        url: finalUrl,
+        title,
+        error: `Current page is an error page: ${errorReason}.`,
+        content: navigationRecoveryContent(errorReason, finalUrl, finalUrl, title, content, '') || undefined,
+        action: `Error page content: ${title || finalUrl}`,
+      }
+    }
 
     return {
       success: true,
-      url: session.page.url(),
+      url: finalUrl,
       title,
       content,
       action: 'Got page content',

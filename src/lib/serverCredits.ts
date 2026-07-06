@@ -1,12 +1,15 @@
 import { randomUUID } from 'crypto'
 import {
   ACTIVE_CREDITS_PER_MINUTE,
+  E2B_DEFAULT_MEMORY_GIB,
+  E2B_DEFAULT_VCPU_COUNT,
   OUT_OF_CREDITS_CODE,
   OUT_OF_CREDITS_MESSAGE,
   TASK_START_CREDITS,
   type CreditCategory,
   type CreditLedgerEvent,
   type CreditTokenUsage,
+  e2bSandboxRuntimeCreditCharge,
   finiteCreditNumber,
   roundCreditAmount,
   tokenUsageCreditCharge,
@@ -102,11 +105,23 @@ type TaskCreditSpendRow = {
   updated_at?: unknown
 }
 
-export const ACCOUNT_MONTHLY_CREDITS = 1000
+type AccountCreditOptions = {
+  creditAllowance?: number
+  creditBalance?: number
+  monthlyAllowance?: number
+  monthlyBalance?: number
+}
+
+export const ACCOUNT_STARTING_CREDITS = 0
 export const MINIMUM_PROVIDER_CALL_CREDITS = 0
 const SERVER_LEDGER_MAX_ENTRIES = 200
 const accountLocks = new Map<string, Promise<void>>()
 let creditSchemaPromise: Promise<void> | null = null
+
+function envPositiveNumber(name: string, fallback: number): number {
+  const parsed = Number(process.env[name])
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
 
 function monthKey(time = Date.now()): string {
   return new Date(time).toISOString().slice(0, 7)
@@ -196,6 +211,21 @@ async function ensureCreditSchema(): Promise<void> {
   return creditSchemaPromise
 }
 
+function isMissingCreditSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /no such table|no such column|schema/i.test(message)
+}
+
+async function withCreditSchemaRepair<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation()
+  } catch (error) {
+    if (!isMissingCreditSchemaError(error)) throw error
+    await ensureCreditSchema()
+    return operation()
+  }
+}
+
 async function withAccountLock<T>(userId: string, fn: () => Promise<T>): Promise<T> {
   const previous = accountLocks.get(userId) ?? Promise.resolve()
   let release!: () => void
@@ -245,23 +275,29 @@ async function readAccountRow(userId: string): Promise<CreditAccountRow | null> 
 
 async function createAccountIfMissing(
   userId: string,
-  options: { monthlyAllowance?: number; monthlyBalance?: number } = {},
+  options: AccountCreditOptions = {},
 ): Promise<void> {
   const now = new Date().toISOString()
-  const monthlyAllowance = roundCreditAmount(Math.max(0, finiteCreditNumber(options.monthlyAllowance, ACCOUNT_MONTHLY_CREDITS)))
-  const monthlyBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(options.monthlyBalance, monthlyAllowance)))
+  const creditAllowance = roundCreditAmount(Math.max(
+    0,
+    finiteCreditNumber(options.creditAllowance ?? options.monthlyAllowance, ACCOUNT_STARTING_CREDITS),
+  ))
+  const creditBalance = roundCreditAmount(Math.max(
+    0,
+    finiteCreditNumber(options.creditBalance ?? options.monthlyBalance, creditAllowance),
+  ))
   await tursoExecute(
     `
       insert or ignore into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
       values (?, ?, ?, ?, ?, ?)
     `,
-    [userId, monthlyAllowance, monthlyBalance, monthKey(), now, now],
+    [userId, creditAllowance, creditBalance, monthKey(), now, now],
   )
 }
 
 export async function initializeAccountCredits(
   userId: string,
-  options: { monthlyAllowance?: number; monthlyBalance?: number } = {},
+  options: AccountCreditOptions = {},
 ): Promise<void> {
   if (!userId) {
     throw new Error('Missing user id for credit account')
@@ -273,126 +309,26 @@ export async function initializeAccountCredits(
   })
 }
 
-export async function grantMonthlyAccountCredits(
-  userId: string,
-  options: {
-    monthlyAllowance?: number
-    monthlyBalance?: number
-    grantId?: string
-    reason?: string
-    timestamp?: number
-  } = {},
-): Promise<ServerCreditSnapshot['balance']> {
-  if (!userId) {
-    throw new Error('Missing user id for credit account')
-  }
-
-  await ensureCreditSchema()
-  return withAccountLock(userId, async () => {
-    const grantTimestamp = finiteCreditNumber(options.timestamp, Date.now())
-    const now = new Date(grantTimestamp).toISOString()
-    const monthlyAllowance = roundCreditAmount(Math.max(0, finiteCreditNumber(options.monthlyAllowance, ACCOUNT_MONTHLY_CREDITS)))
-    const monthlyBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(options.monthlyBalance, monthlyAllowance)))
-    const periodKey = monthKey(grantTimestamp)
-    const grantId = options.grantId
-    const grantReason = options.reason || 'Agent Admin credit grant'
-
-    if (grantId) {
-      return tursoTransaction('write', async (transaction) => {
-        await transaction.execute({
-          sql: `
-            insert or ignore into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
-            values (?, ?, ?, ?, ?, ?)
-          `,
-          args: [userId, monthlyAllowance, 0, periodKey, now, now],
-        })
-
-        const existingGrant = await transaction.execute({
-          sql: 'select id from credit_ledger where user_id = ? and id = ? limit 1',
-          args: [userId, grantId],
-        })
-        const accountResult = await transaction.execute({
-          sql: 'select user_id, monthly_allowance, monthly_balance, period_key from credit_accounts where user_id = ? limit 1',
-          args: [userId],
-        })
-        const account = accountResult.rows[0] as CreditAccountRow | undefined
-        const currentBalance = roundCreditAmount(finiteCreditNumber(account?.monthly_balance, 0))
-
-        if (existingGrant.rows.length > 0) {
-          return { monthly: currentBalance }
-        }
-
-        const nextBalance = roundCreditAmount(currentBalance + monthlyBalance)
-        await transaction.execute({
-          sql: `
-            update credit_accounts
-            set monthly_allowance = ?, monthly_balance = round(monthly_balance + ?, 2), period_key = ?, updated_at = ?
-            where user_id = ?
-          `,
-          args: [monthlyAllowance, monthlyBalance, periodKey, now, userId],
-        })
-        const updatedAccountResult = await transaction.execute({
-          sql: 'select monthly_balance from credit_accounts where user_id = ? limit 1',
-          args: [userId],
-        })
-        const updatedBalance = roundCreditAmount(finiteCreditNumber((updatedAccountResult.rows[0] as CreditAccountRow | undefined)?.monthly_balance, nextBalance))
-        await transaction.execute({
-          sql: `
-            insert into credit_ledger (
-              id, user_id, conversation_id, run_id, amount, category, reason, tool_name, timestamp, balance_after
-            )
-            values (?, ?, null, null, ?, 'adjustment', ?, null, ?, ?)
-          `,
-          args: [
-            grantId,
-            userId,
-            -monthlyBalance,
-            grantReason,
-            grantTimestamp,
-            updatedBalance,
-          ],
-        })
-
-        return { monthly: updatedBalance }
-      })
-    }
-
-    await tursoExecute(
-      `
-        insert into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
-        values (?, ?, ?, ?, ?, ?)
-        on conflict(user_id) do update set
-          monthly_allowance = excluded.monthly_allowance,
-          monthly_balance = excluded.monthly_balance,
-          period_key = excluded.period_key,
-          updated_at = excluded.updated_at
-      `,
-      [userId, monthlyAllowance, monthlyBalance, periodKey, now, now],
-    )
-
-    return { monthly: monthlyBalance }
-  })
-}
-
-async function updateMonthlyPeriodIfNeeded(userId: string, row: CreditAccountRow): Promise<CreditAccountRow> {
+async function updateAccountPeriodIfNeeded(userId: string, row: CreditAccountRow): Promise<CreditAccountRow> {
   const currentPeriod = monthKey()
   const storedPeriod = typeof row.period_key === 'string' ? row.period_key : currentPeriod
   if (storedPeriod === currentPeriod) return row
 
   const now = new Date().toISOString()
+  const preservedBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS)))
   await tursoExecute(
     `
       update credit_accounts
       set monthly_allowance = ?, monthly_balance = ?, period_key = ?, updated_at = ?
       where user_id = ?
     `,
-    [ACCOUNT_MONTHLY_CREDITS, ACCOUNT_MONTHLY_CREDITS, currentPeriod, now, userId],
+    [ACCOUNT_STARTING_CREDITS, preservedBalance, currentPeriod, now, userId],
   )
 
   return {
     user_id: userId,
-    monthly_allowance: ACCOUNT_MONTHLY_CREDITS,
-    monthly_balance: ACCOUNT_MONTHLY_CREDITS,
+    monthly_allowance: ACCOUNT_STARTING_CREDITS,
+    monthly_balance: preservedBalance,
     period_key: currentPeriod,
   }
 }
@@ -407,15 +343,15 @@ export async function ensureAccountCredits(userId: string): Promise<ServerCredit
     const period = monthKey()
     await createAccountIfMissing(userId)
 
-    const row = await updateMonthlyPeriodIfNeeded(userId, (await readAccountRow(userId)) || {
+    const row = await updateAccountPeriodIfNeeded(userId, (await readAccountRow(userId)) || {
       user_id: userId,
-      monthly_allowance: ACCOUNT_MONTHLY_CREDITS,
-      monthly_balance: ACCOUNT_MONTHLY_CREDITS,
+      monthly_allowance: ACCOUNT_STARTING_CREDITS,
+      monthly_balance: ACCOUNT_STARTING_CREDITS,
       period_key: period,
     })
 
     return {
-      monthly: roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_MONTHLY_CREDITS)),
+      monthly: roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS)),
     }
   })
 }
@@ -433,9 +369,27 @@ export async function assertServerCreditsAvailable(
   userId: string,
   minimumCredits = MINIMUM_PROVIDER_CALL_CREDITS,
 ): Promise<ServerCreditSnapshot['balance']> {
+  if (!userId) {
+    throw new Error('Missing user id for credit account')
+  }
+
+  const requiredBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(minimumCredits)))
+  try {
+    const row = await readAccountRow(userId)
+    if (row && row.period_key === monthKey()) {
+      const currentBalance = roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS))
+      if (currentBalance <= 0 || currentBalance < requiredBalance) {
+        throw new OutOfCreditsError(undefined, Math.max(0, currentBalance), requiredBalance)
+      }
+      return { monthly: currentBalance }
+    }
+  } catch (error) {
+    if (isOutOfCreditsError(error)) throw error
+    if (!isMissingCreditSchemaError(error)) throw error
+  }
+
   const balance = await ensureAccountCredits(userId)
   const currentBalance = roundCreditAmount(finiteCreditNumber(balance.monthly))
-  const requiredBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(minimumCredits)))
   if (currentBalance <= 0 || currentBalance < requiredBalance) {
     throw new OutOfCreditsError(undefined, Math.max(0, currentBalance), requiredBalance)
   }
@@ -452,15 +406,14 @@ async function recordServerCreditEvent(
   }
 
   return withAccountLock(userId, async () => {
-    await ensureCreditSchema()
-    const result = await tursoTransaction('write', async (transaction) => {
+    const result = await withCreditSchemaRepair(() => tursoTransaction('write', async (transaction) => {
       const now = new Date().toISOString()
       await transaction.execute({
         sql: `
           insert or ignore into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
           values (?, ?, ?, ?, ?, ?)
         `,
-        args: [userId, ACCOUNT_MONTHLY_CREDITS, ACCOUNT_MONTHLY_CREDITS, monthKey(), now, now],
+        args: [userId, ACCOUNT_STARTING_CREDITS, ACCOUNT_STARTING_CREDITS, monthKey(), now, now],
       })
 
       const existingResult = await transaction.execute({
@@ -494,23 +447,24 @@ async function recordServerCreditEvent(
       const currentPeriod = monthKey()
       const storedPeriod = typeof row.period_key === 'string' ? row.period_key : currentPeriod
       if (storedPeriod !== currentPeriod) {
+        const preservedBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS)))
         await transaction.execute({
           sql: `
             update credit_accounts
             set monthly_allowance = ?, monthly_balance = ?, period_key = ?, updated_at = ?
             where user_id = ?
           `,
-          args: [ACCOUNT_MONTHLY_CREDITS, ACCOUNT_MONTHLY_CREDITS, currentPeriod, now, userId],
+          args: [ACCOUNT_STARTING_CREDITS, preservedBalance, currentPeriod, now, userId],
         })
         row = {
           user_id: userId,
-          monthly_allowance: ACCOUNT_MONTHLY_CREDITS,
-          monthly_balance: ACCOUNT_MONTHLY_CREDITS,
+          monthly_allowance: ACCOUNT_STARTING_CREDITS,
+          monthly_balance: preservedBalance,
           period_key: currentPeriod,
         }
       }
 
-      const currentBalance = roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_MONTHLY_CREDITS))
+      const currentBalance = roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS))
       const requestedAmount = roundCreditAmount(finiteCreditNumber(entry.amount))
       const isCharge = requestedAmount > 0
       if (isCharge && currentBalance <= 0) {
@@ -583,7 +537,7 @@ async function recordServerCreditEvent(
         isCharge,
         requestedAmount,
       }
-    })
+    }))
 
     if (result.isCharge && result.balanceAfter <= 0) {
       throw new OutOfCreditsError(result.record, result.balanceAfter, result.requestedAmount)
@@ -691,7 +645,7 @@ export async function getServerCreditSnapshot(userId: string): Promise<ServerCre
     balance,
     ledger: ledger.entries,
     usageSummary,
-    monthlyAllowance: roundCreditAmount(finiteCreditNumber(row?.monthly_allowance, ACCOUNT_MONTHLY_CREDITS)),
+    monthlyAllowance: roundCreditAmount(finiteCreditNumber(row?.monthly_allowance, ACCOUNT_STARTING_CREDITS)),
     lastMonthlyRefresh: typeof row?.period_key === 'string' ? row.period_key : monthKey(),
   }
 }
@@ -730,6 +684,33 @@ export async function chargeServerActiveTime(
     amount,
     category: 'time',
     reason: 'Active agent processing',
+  }))
+}
+
+export async function chargeServerE2BRuntime(
+  userId: string,
+  conversationId: string,
+  runId: string,
+  startedAtMs: number,
+  endedAtMs = Date.now(),
+): Promise<ServerCreditRecord | null> {
+  const elapsedMs = Math.max(0, finiteCreditNumber(endedAtMs) - finiteCreditNumber(startedAtMs))
+  const amount = e2bSandboxRuntimeCreditCharge({
+    elapsedMs,
+    vcpuCount: envPositiveNumber('AGENT_E2B_VCPU_COUNT', E2B_DEFAULT_VCPU_COUNT),
+    memoryGiB: envPositiveNumber('AGENT_E2B_MEMORY_GIB', E2B_DEFAULT_MEMORY_GIB),
+  })
+  if (amount <= 0) return null
+
+  const elapsedSeconds = Math.max(0, Math.round(elapsedMs / 1000))
+  return recordServerCreditEvent(userId, conversationId, makeEntry({
+    id: `credit:${runId}:e2b-runtime`,
+    runId,
+    conversationId,
+    amount,
+    category: 'tool',
+    reason: `E2B sandbox runtime (${elapsedSeconds}s)`,
+    toolName: 'e2b_sandbox',
   }))
 }
 

@@ -48,6 +48,7 @@ export interface FileAttachment {
   content?: string
   contentEncoding?: 'text' | 'data-url'
   url?: string
+  sandboxPath?: string
   persisted?: boolean
   preview?: string
 }

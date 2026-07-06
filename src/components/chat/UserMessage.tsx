@@ -17,7 +17,7 @@ export function UserMessage({ message }: UserMessageProps) {
         variant="user"
         onCopy={() => navigator.clipboard.writeText(message.content)}
       />
-      <div className="bg-bg-message-user rounded-2xl px-5 py-4 max-w-[88%] md:max-w-[75%] ml-auto transition-all duration-200 border border-border-primary">
+      <div className="bg-bg-message-user rounded-2xl px-4 py-3.5 max-w-[calc(100vw-2rem)] overflow-hidden ml-auto transition-all duration-200 border border-border-primary sm:max-w-[88%] sm:px-5 sm:py-4 md:max-w-[75%]">
         {message.attachments && attachmentCount > 0 && (
           <div className="mb-3 flex max-h-[212px] flex-col gap-1.5 overflow-y-auto rounded-xl border border-border-primary bg-bg-secondary p-1.5">
             <div className="flex h-6 items-center px-1">
@@ -34,7 +34,7 @@ export function UserMessage({ message }: UserMessageProps) {
             ))}
           </div>
         )}
-        <p className="chat-user-text text-text-primary whitespace-pre-wrap">
+        <p className="chat-user-text text-text-primary whitespace-pre-wrap break-words">
           {message.content}
         </p>
       </div>

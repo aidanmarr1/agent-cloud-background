@@ -33,15 +33,18 @@ export const TASK_START_CREDITS = 0
 export const ACTIVE_CREDITS_PER_MINUTE = 0
 
 // Public provider rates used to keep in-app credits anchored to real spend.
-// Current route: openai/gpt-5.4-mini on OpenRouter.
+// Current route: google/gemini-3-flash-preview on OpenRouter.
 export const MODEL_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.inputUsdPer1M
 export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens
 export const MODEL_LONG_CONTEXT_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.longContextInputUsdPer1M
 export const MODEL_LONG_CONTEXT_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.longContextOutputUsdPer1M
-export const BRAVE_SEARCH_USD_PER_1K_REQUESTS = 5
-export const IMAGE_SEARCH_USD_PER_1K_REQUESTS = 0
+export const SERPER_SEARCH_USD_PER_1K_REQUESTS = 0.30
 export const LOCAL_BROWSER_USD_PER_STEP = 0
+export const E2B_DEFAULT_VCPU_COUNT = 2
+export const E2B_DEFAULT_MEMORY_GIB = 0.5
+export const E2B_VCPU_USD_PER_SECOND = 0.000014
+export const E2B_MEMORY_GIB_USD_PER_SECOND = 0.0000045
 
 export function finiteCreditNumber(value: unknown, fallback = 0): number {
   const number = typeof value === 'number' ? value : Number(value)
@@ -70,13 +73,18 @@ export const CREDIT_RATES = {
   modelMaxCompletionTokens: DEFAULT_MODEL_PRICING.maxCompletionTokens,
   activeModelInputUsdPer1M: MODEL_INPUT_USD_PER_1M,
   activeModelOutputUsdPer1M: MODEL_OUTPUT_USD_PER_1M,
-  braveSearchUsdPer1KRequests: BRAVE_SEARCH_USD_PER_1K_REQUESTS,
-  imageSearchUsdPer1KRequests: IMAGE_SEARCH_USD_PER_1K_REQUESTS,
+  serperSearchUsdPer1KRequests: SERPER_SEARCH_USD_PER_1K_REQUESTS,
   localBrowserUsdPerStep: LOCAL_BROWSER_USD_PER_STEP,
+  e2bDefaultVcpuCount: E2B_DEFAULT_VCPU_COUNT,
+  e2bDefaultMemoryGiB: E2B_DEFAULT_MEMORY_GIB,
+  e2bVcpuUsdPerSecond: E2B_VCPU_USD_PER_SECOND,
+  e2bMemoryGiBUsdPerSecond: E2B_MEMORY_GIB_USD_PER_SECOND,
+  e2bSandboxUsdPerSecond: (E2B_DEFAULT_VCPU_COUNT * E2B_VCPU_USD_PER_SECOND) +
+    (E2B_DEFAULT_MEMORY_GIB * E2B_MEMORY_GIB_USD_PER_SECOND),
   inputTokenCreditsPer1K: usdToCredits(MODEL_INPUT_USD_PER_1M / 1000),
   outputTokenCreditsPer1K: usdToCredits(MODEL_OUTPUT_USD_PER_1M / 1000),
-  webSearchCredits: usdToCredits(BRAVE_SEARCH_USD_PER_1K_REQUESTS / 1000),
-  imageSearchCredits: usdToCredits(IMAGE_SEARCH_USD_PER_1K_REQUESTS / 1000),
+  webSearchCredits: usdToCredits(SERPER_SEARCH_USD_PER_1K_REQUESTS / 1000),
+  imageSearchCredits: usdToCredits(SERPER_SEARCH_USD_PER_1K_REQUESTS / 1000),
   browserStepCredits: usdToCredits(LOCAL_BROWSER_USD_PER_STEP),
 } as const
 
@@ -151,4 +159,21 @@ export function tokenUsageCreditCharge(usage: CreditTokenUsage | number): number
     return roundCreditAmount(Math.max(0, finiteCreditNumber(usage.cost)) * CREDITS_PER_USD)
   }
   return 0
+}
+
+export function e2bSandboxRuntimeCreditCharge(input: {
+  elapsedMs: number
+  vcpuCount?: number
+  memoryGiB?: number
+}): number {
+  const elapsedSeconds = Math.max(0, finiteCreditNumber(input.elapsedMs) / 1000)
+  if (elapsedSeconds <= 0) return 0
+
+  const vcpuCount = Math.max(0, finiteCreditNumber(input.vcpuCount, E2B_DEFAULT_VCPU_COUNT))
+  const memoryGiB = Math.max(0, finiteCreditNumber(input.memoryGiB, E2B_DEFAULT_MEMORY_GIB))
+  const amountUsd = elapsedSeconds * (
+    (vcpuCount * E2B_VCPU_USD_PER_SECOND) +
+    (memoryGiB * E2B_MEMORY_GIB_USD_PER_SECOND)
+  )
+  return usdToCredits(amountUsd)
 }

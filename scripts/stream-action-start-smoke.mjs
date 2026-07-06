@@ -57,6 +57,11 @@ async function* editChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'with another line\\\"}' } }] } }] }
 }
 
+async function* wrongStepFileChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_wrong_step', function: { name: 'create_file', arguments: '{\\"action_label\\":\\"Write final report draft\\",\\"plan_step_index\\":1,\\"path\\":\\"deliverables/report.md\\",\\"content\\":\\"' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '# Report\\\\n\\\\nThis stale-step write should not be visible.\\\"}' } }] } }] }
+}
+
 async function* longTextThenUsageChunks() {
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
@@ -75,6 +80,8 @@ async function* longTextThenUsageChunks() {
 export async function runSmoke() {
   const emitter = makeEmitter()
   const state = createInitialState(true, timeouts)
+  state.currentPlanItems = ['Write code']
+  state.currentStepIdx = 0
   const processor = new StreamProcessor(emitter as any, timeouts)
   const result = await processor.processStream(chunks() as any, state)
 
@@ -103,6 +110,8 @@ export async function runSmoke() {
 
   const editEmitter = makeEmitter()
   const editState = createInitialState(true, timeouts)
+  editState.currentPlanItems = ['Revise code']
+  editState.currentStepIdx = 0
   const editProcessor = new StreamProcessor(editEmitter as any, timeouts)
   await editProcessor.processStream(editChunks() as any, editState)
 
@@ -122,6 +131,18 @@ export async function runSmoke() {
     'Updated copy\\nwith another line',
     'edit_file deltas must stream the replacement text incrementally',
   )
+
+  const wrongStepEmitter = makeEmitter()
+  const wrongStepState = createInitialState(true, timeouts)
+  wrongStepState.currentPlanItems = ['Research sources', 'Write final report']
+  wrongStepState.currentStepIdx = 1
+  const wrongStepProcessor = new StreamProcessor(wrongStepEmitter as any, timeouts)
+  const wrongStepResult = await wrongStepProcessor.processStream(wrongStepFileChunks() as any, wrongStepState)
+
+  assert.equal(wrongStepResult.toolCalls.size, 1, 'stale-step tool call should still be captured for policy recovery')
+  assert.equal(wrongStepEmitter.events.filter(e => e.type === 'tool_start').length, 0, 'stale-step streamed file write must not show a visible action pill')
+  assert.equal(wrongStepEmitter.events.filter(e => e.type === 'file_content_start').length, 0, 'stale-step streamed file write must not start a visible file preview')
+  assert.equal(wrongStepEmitter.events.filter(e => e.type === 'file_content_delta').length, 0, 'stale-step streamed file write must not leak invisible rejected content')
 
   const textEmitter = makeEmitter()
   const textState = createInitialState(true, timeouts)

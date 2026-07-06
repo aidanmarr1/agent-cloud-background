@@ -2,10 +2,10 @@
 
 import { memo } from 'react'
 import { Loader2, Check, Search, Globe, Terminal, FilePlus, FileText, Trash2, FolderOpen, Monitor, Edit3, BookOpen, AlertTriangle } from '@/components/icons'
-import { TaskGroup, Subtask, GroupNarration, BrowseResult, BrowserResult } from '@/types'
+import { TaskGroup, Subtask, GroupNarration } from '@/types'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import { isHiddenSubtaskActivity } from '@/lib/stream/constants'
-import { describeActivity } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel } from '@/lib/stream/ActivityDescriber'
 
 interface ActionFeedProps {
   taskGroups: TaskGroup[]
@@ -26,57 +26,20 @@ const iconMap: Record<string, React.ReactNode> = {
 }
 
 function getActionLabel(subtask: Subtask): string {
-  if (subtask.label) return subtask.label
-
-  switch (subtask.type) {
-    case 'search':
-      return describeActivity('web_search', { query: subtask.query })
-    case 'browse': {
-      if (subtask.url) {
-        return describeActivity('browser_navigate', { url: subtask.url })
-      }
-      const browseResult = subtask.result as BrowseResult | undefined
-      if (browseResult?.title && browseResult.title !== 'Error loading page') {
-        return describeActivity('browse_page', { url: browseResult.url })
-      }
-      return 'Review source context'
-    }
-    case 'terminal':
-      return describeActivity('execute_command', { command: subtask.command })
-    case 'create_file':
-      return describeActivity('create_file', { path: subtask.filePath })
-    case 'append_file':
-      return describeActivity('append_file', { path: subtask.filePath })
-    case 'export_pdf':
-      return describeActivity('export_pdf', { output_path: subtask.filePath })
-    case 'read_file':
-      return describeActivity('read_file', { path: subtask.filePath })
-    case 'read_skill':
-      return describeActivity('read_skill', { path: subtask.filePath })
-    case 'delete_file':
-      return describeActivity('delete_file', { path: subtask.filePath })
-    case 'list_files':
-      return describeActivity('list_files', { directory: subtask.filePath })
-    case 'browser': {
-      const br = subtask.result as BrowserResult | undefined
-      if (subtask.toolName) return describeActivity(subtask.toolName, { url: subtask.url, query: subtask.query, command: subtask.command })
-      if (subtask.url || br?.url) return describeActivity('browser_navigate', { url: subtask.url || br?.url })
-      return 'Use the browser for the current page step'
-    }
-    default:
-      return 'Processing...'
-  }
+  return formatVisibleActionLabel(subtask.label || '')
 }
 
 const ActionPill = memo(function ActionPill({ subtask }: { subtask: Subtask }) {
   const isRunning = subtask.status === 'running'
   const icon = iconMap[subtask.type] || <Globe size={13} className="flex-shrink-0" />
+  const label = getActionLabel(subtask)
+  if (!label) return null
 
   return (
     <div className="inline-flex items-center gap-2 rounded-lg bg-bg-secondary border border-border-primary px-3 h-8 max-w-full overflow-hidden cursor-default">
       <span className="text-text-tertiary flex-shrink-0">{icon}</span>
       <span className={`text-[12.5px] font-medium truncate ${isRunning ? 'text-text-primary' : 'text-text-secondary'}`}>
-        {getActionLabel(subtask)}
+        {label}
       </span>
       {isRunning && (
         <Loader2
@@ -95,7 +58,7 @@ export function ActionFeed({ taskGroups }: ActionFeedProps) {
   return (
     <div className="space-y-3">
       {taskGroups.map((group) => {
-        const visibleSubtasks = group.subtasks.filter(s => !isHiddenSubtaskActivity(s))
+        const visibleSubtasks = group.subtasks.filter(s => !isHiddenSubtaskActivity(s) && getActionLabel(s))
         const doneCount = visibleSubtasks.filter(s => s.status === 'done').length
 
         return (

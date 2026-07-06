@@ -230,7 +230,7 @@ const TASK_CAPABILITY_PRIORITY: Record<string, ToolCapability[]> = {
 function inferCapabilities(name: string): ToolCapability[] {
   const caps: ToolCapability[] = []
 
-  if (name === 'web_search') caps.push('search')
+  if (name === 'web_search') caps.push('search', 'network')
   if (name === 'image_search') caps.push('search', 'media')
   if (name === 'browse_page') caps.push('browse')
   if (name === 'read_document') caps.push('document')

@@ -3,7 +3,7 @@ services:
     name: agent-web
     runtime: node
     plan: starter
-    region: oregon
+    region: singapore
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /api/health
@@ -25,12 +25,24 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_REASONING_EFFORT
+        value: high
+      - key: DEEPSEEK_THINKING_ENABLED
+        value: "true"
       - key: OPENROUTER_API_KEY
         sync: false
-      - key: BRAVE_SEARCH_API_KEY
+      - key: SERPER_API_KEY
         sync: false
+      - key: SERPER_BASE_URL
+        value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: openai/gpt-5.4-mini
+        value: google/gemini-3-flash-preview
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -55,6 +67,8 @@ services:
         value: "false"
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
         value: "true"
+      - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
+        value: "true"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
       - key: E2B_API_KEY
@@ -78,13 +92,13 @@ services:
       - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
         value: "30000"
       - key: AGENT_E2B_WARM_POOL_ENABLED
-        value: "true"
+        value: "false"
 
   - type: worker
     name: agent-worker
     runtime: node
     plan: starter
-    region: oregon
+    region: singapore
     buildCommand: npm ci && npm run build
     startCommand: npm run worker:cloud
     maxShutdownDelaySeconds: 300
@@ -103,12 +117,24 @@ services:
         sync: false
       - key: TURSO_AUTH_TOKEN
         sync: false
+      - key: LLM_PROVIDER
+        value: openrouter
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: DEEPSEEK_REASONING_EFFORT
+        value: high
+      - key: DEEPSEEK_THINKING_ENABLED
+        value: "true"
       - key: OPENROUTER_API_KEY
         sync: false
-      - key: BRAVE_SEARCH_API_KEY
+      - key: SERPER_API_KEY
         sync: false
+      - key: SERPER_BASE_URL
+        value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: openai/gpt-5.4-mini
+        value: google/gemini-3-flash-preview
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -124,7 +150,7 @@ services:
       - key: AGENT_TASK_WORKER_ID
         value: render-worker-1
       - key: AGENT_TASK_WORKER_POLL_MS
-        value: "250"
+        value: "100"
       - key: AGENT_TASK_WORKER_HEARTBEAT_MS
         value: "15000"
       - key: AGENT_TASK_WORKER_STALE_MS
@@ -136,6 +162,8 @@ services:
       - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION
         value: "false"
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
+        value: "true"
+      - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
         value: "true"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
@@ -160,7 +188,7 @@ services:
       - key: AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS
         value: "30000"
       - key: AGENT_E2B_WARM_POOL_ENABLED
-        value: "true"
+        value: "false"
       - key: AGENT_E2B_VERIFY_ON_WORKER_STARTUP
         value: "true"
       - key: AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP

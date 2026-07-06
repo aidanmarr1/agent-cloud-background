@@ -764,7 +764,7 @@ textarea:focus-visible {
 
 /* Document preview card */
 .document-preview {
-  background: var(--bg-card);
+  background: transparent;
 }
 .document-preview .markdown-content {
   color: var(--text-secondary);

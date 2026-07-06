@@ -18,6 +18,7 @@ import {
   DIMINISHING_RETURNS_NEW_FACT_MIN,
   DIMINISHING_RETURNS_TRIGGER_ITERATION,
 } from './config'
+import { researchDepthProfileForState } from './ResearchDepth'
 
 export interface ReflectionResult {
   progressScore: number
@@ -152,7 +153,9 @@ export class ReflectionEngine {
     } else if (consecutiveLow >= REFLECTION_CONSECUTIVE_LOW_TRIGGER && recommendation === 'continue') {
       recommendation = 'try_alternative'
     } else if (progressScore > 0.7 && !isDeliverableStep && recommendation === 'continue') {
-      const minCalls = MIN_TOOL_CALLS_BY_COMPLEXITY[state.taskComplexity as 1 | 2 | 3] ?? 3
+      const minCalls = researchDepthProfileForState(state).requiredCalls ||
+        MIN_TOOL_CALLS_BY_COMPLEXITY[state.taskComplexity as 1 | 2 | 3] ||
+        3
       if (state.stepResearchCallCount >= minCalls) {
         recommendation = 'advance_step'
       }

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
 import { createFileInSandbox, getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
 import { buildLocalWebsiteLaunch, stopLocalWebsiteServer } from ${JSON.stringify(join(root, 'src/lib/localWebsiteServer.ts'))}
-import { browserActionPreflight, browserNavigate, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
+import { browserActionPreflight, browserGetContent, browserNavigate, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
@@ -150,7 +150,12 @@ export async function runSmoke() {
     \`)
     const errorNav = await browserNavigate(conversationId, errorLaunch.url)
     assert.equal(errorNav.success, false)
-    assert.match(String(errorNav.error), /ERROR PAGE DETECTED|Page body contains error message|Page title/i)
+    assert.match(String(errorNav.error), /ERROR PAGE DETECTED|Page body contains error message|Page body starts with error message|Page title/i)
+
+    const errorContent = await browserGetContent(conversationId)
+    assert.equal(errorContent.success, false, 'content extraction from an error page must not look like useful evidence')
+    assert.match(String(errorContent.error), /Current page is an error page/)
+    assert.match(String(errorContent.content), /Do not click elements on this error page/)
 
     const errorSnapshot = await browserActionPreflight(conversationId)
     assert.ok(errorSnapshot.pageBlocker, 'expected failed page blocker state')

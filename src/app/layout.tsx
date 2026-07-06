@@ -35,7 +35,6 @@ export default async function RootLayout({
   const sidebarCookie = cookieStore.get("agent-sidebar-collapsed")?.value;
   const initialSidebarKnown = sidebarCookie === "0" || sidebarCookie === "1";
   const initialSidebarCollapsed = sidebarCookie === "1";
-  const initialAccessStatus = session?.user?.accessStatus;
   const initialAccountDeleted = session?.user?.accountDeleted === true;
 
   return (
@@ -167,7 +166,6 @@ export default async function RootLayout({
             <AppFrame
               initialSidebarCollapsed={initialSidebarCollapsed}
               initialSidebarKnown={initialSidebarKnown}
-              initialAccessStatus={initialAccessStatus}
               initialAccountDeleted={initialAccountDeleted}
             >
               <ErrorBoundary>

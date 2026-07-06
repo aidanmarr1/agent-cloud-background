@@ -1,5 +1,5 @@
 import type { AgentStateData } from './AgentState'
-import { requestsMarkdownDeliverable } from './taskConstraints'
+import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 export interface CompletionAuditResult {
   complete: boolean
@@ -11,16 +11,6 @@ export interface CompletionAuditResult {
 function hasFinalDeliverable(state: AgentStateData): boolean {
   return state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable') ||
     state.emittedImageArtifacts.size > 0
-}
-
-function hasSavedRequestedMarkdownDeliverable(state: AgentStateData): boolean {
-  if (!requestsMarkdownDeliverable(currentTaskText(state))) return false
-  const requestedSearch = /\b(?:web\s*)?search(?:es)?\b/i.test(state.originalUserRequest || '')
-  if (requestedSearch && state.searchQueries.size === 0 && state.workLedger.searchResults.length === 0) return false
-  return state.workLedger.deliverableCandidates.some(item =>
-    item.purpose === 'deliverable' &&
-    item.path.toLowerCase().endsWith('.md')
-  )
 }
 
 function currentTaskText(state: AgentStateData): string {
@@ -44,9 +34,16 @@ function requiresFinalDeliverable(state: AgentStateData): boolean {
 }
 
 function explicitSavedArtifactRequested(text: string): boolean {
-  return /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(text) ||
-    /\b(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/i.test(text) ||
-    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(text)
+  const cleaned = text
+    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/gi, ' ')
+    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/gi, ' ')
+  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
+  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
+    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/i.test(cleaned) ||
+    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/i.test(cleaned) ||
+    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned) ||
+    taskDefaultsToMarkdownDeliverable(text)
+  return positiveArtifactRequest && !declinesSavedArtifact
 }
 
 function isWebsiteLike(state: AgentStateData): boolean {
@@ -70,9 +67,9 @@ export function auditAgentCompletion(
 ): CompletionAuditResult {
   const missing: string[] = []
   const totalSteps = state.currentPlanItems?.length || 0
-  const savedRequestedMarkdownDeliverable = hasSavedRequestedMarkdownDeliverable(state)
+  const completedInlineAnswer = /(?:^|_)inline_answer_complete$/.test(terminalReason)
 
-  if (totalSteps > 0 && state.currentStepIdx < totalSteps && !savedRequestedMarkdownDeliverable) {
+  if (totalSteps > 0 && state.currentStepIdx < totalSteps) {
     missing.push(`only ${state.currentStepIdx} of ${totalSteps} plan steps were completed`)
   }
 
@@ -81,11 +78,11 @@ export function auditAgentCompletion(
     missing.push(`${unresolvedSteps.join(', ')} did not complete`)
   }
 
-  if (requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
+  if (!completedInlineAnswer && requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
     missing.push('no successful final deliverable artifact was saved')
   }
 
-  if (requiresFinalDeliverable(state) && hasFinalDeliverable(state) && !state.deliverableVerificationDone && !savedRequestedMarkdownDeliverable) {
+  if (!completedInlineAnswer && requiresFinalDeliverable(state) && hasFinalDeliverable(state) && !state.deliverableVerificationDone) {
     missing.push('the final deliverable was saved but did not pass completion verification')
   }
 

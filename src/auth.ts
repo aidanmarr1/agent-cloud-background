@@ -1,6 +1,6 @@
 import NextAuth from 'next-auth'
 import Credentials from 'next-auth/providers/credentials'
-import { findUserById, normalizeEmail, verifyUserCredentials } from '@/lib/auth/users'
+import { normalizeEmail, verifyUserCredentials } from '@/lib/auth/users'
 import { checkRateLimit } from '@/lib/rateLimit'
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
@@ -77,27 +77,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     async session({ session, token }) {
       if (session.user && typeof token.id === 'string') {
         session.user.id = token.id
-        let dbUser: Awaited<ReturnType<typeof findUserById>> | undefined
-        try {
-          dbUser = await findUserById(token.id)
-        } catch {
-          dbUser = undefined
-        }
-        if (dbUser) {
-          session.user.name = dbUser.name
-          session.user.email = dbUser.email
-          session.user.image = dbUser.image
-          session.user.accessStatus = dbUser.accessStatus
-          session.user.accountDeleted = false
-          return session
-        }
-        if (dbUser === null) {
-          session.user.accountDeleted = true
-          session.user.accessStatus = 'pending'
-          return session
-        }
       }
       if (session.user) {
+        if (typeof token.name === 'string') session.user.name = token.name
+        if (typeof token.email === 'string') session.user.email = token.email
         session.user.image = typeof token.image === 'string' ? token.image : null
         session.user.accessStatus = token.accessStatus === 'pending' ? 'pending' : 'approved'
         session.user.accountDeleted = token.accountDeleted === true

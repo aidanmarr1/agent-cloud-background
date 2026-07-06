@@ -43,7 +43,7 @@ export async function POST(request: Request) {
   try {
     const user = await createUser({
       ...parsed.data,
-      accessStatus: process.env.AGENT_PUBLIC_SIGNUP === 'true' ? 'approved' : 'pending',
+      accessStatus: 'approved',
     })
     return Response.json({ user }, { status: 201 })
   } catch (error) {

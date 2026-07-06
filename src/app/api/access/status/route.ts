@@ -1,6 +1,5 @@
 import { auth } from '@/auth'
 import { findUserById } from '@/lib/auth/users'
-import { findSignupRequestForUser } from '@/lib/auth/signupRequests'
 
 export const preferredRegion = ['syd1', 'iad1']
 
@@ -24,17 +23,12 @@ export async function GET() {
     })
   }
 
-  const request = await findSignupRequestForUser({
-    userId: user.id,
-    email: user.email,
-  }).catch(() => null)
-
   return Response.json({
-    accessStatus: user.accessStatus,
-    creditsLocked: user.accessStatus !== 'approved',
-    requestStatus: request?.status ?? null,
-    requested: request?.status === 'pending',
-    approvedAt: request?.status === 'accepted' ? request.decidedAt : null,
+    accessStatus: 'approved',
+    creditsLocked: false,
+    requestStatus: null,
+    requested: false,
+    approvedAt: null,
   }, {
     headers: {
       'Cache-Control': 'no-store',

@@ -1,8 +1,7 @@
 import { auth } from '@/auth'
 import { assertSameOriginRequest } from '@/lib/api'
 import { getActiveTaskLeaseForUser } from '@/lib/activeTasks'
-import { findActiveTaskJobForConversation } from '@/lib/agent/taskJobs'
-import { assertInviteAccessApproved } from '@/lib/inviteAccess'
+import { findActiveTaskJobForConversation, findReplayableTaskJobForConversation, shouldUseExternalTaskWorker } from '@/lib/agent/taskJobs'
 import { assertTaskAccess } from '@/lib/taskAccess'
 
 export const runtime = 'nodejs'
@@ -15,6 +14,7 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url)
   const conversationId = url.searchParams.get('conversationId') || ''
+  const includeTerminalReplay = url.searchParams.get('includeTerminalReplay') === '1'
   if (!SAFE_TASK_ID.test(conversationId)) {
     return Response.json({ error: 'Invalid task id' }, { status: 400 })
   }
@@ -24,9 +24,6 @@ export async function GET(request: Request) {
   if (!userId) {
     return Response.json({ error: 'Authentication required' }, { status: 401 })
   }
-
-  const inviteAccessError = await assertInviteAccessApproved(userId)
-  if (inviteAccessError) return inviteAccessError
 
   const access = await assertTaskAccess(request, conversationId, { userId })
   if (!access.ok) return access.response
@@ -40,10 +37,36 @@ export async function GET(request: Request) {
       conversationId: job.conversationId,
       queueName: job.queueName,
       status: job.status,
+      terminal: false,
       startedAt: job.startedAt,
       updatedAt: job.updatedAt,
       attempts: job.attempts,
     })
+  }
+
+  if (includeTerminalReplay) {
+    const replayable = await findReplayableTaskJobForConversation(userId, conversationId)
+    if (replayable) {
+      return Response.json({
+        active: true,
+        source: 'replay',
+        replay: true,
+        terminal: replayable.status === 'done' || replayable.status === 'error' || replayable.status === 'cancelled' || !!replayable.terminalStatus,
+        runId: replayable.runId,
+        conversationId: replayable.conversationId,
+        queueName: replayable.queueName,
+        status: replayable.status,
+        terminalStatus: replayable.terminalStatus ?? null,
+        terminalError: replayable.terminalError ?? null,
+        startedAt: replayable.startedAt,
+        updatedAt: replayable.updatedAt,
+        attempts: replayable.attempts,
+      })
+    }
+  }
+
+  if (shouldUseExternalTaskWorker()) {
+    return Response.json({ active: false })
   }
 
   const lease = await getActiveTaskLeaseForUser(userId)

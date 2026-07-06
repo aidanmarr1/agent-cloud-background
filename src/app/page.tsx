@@ -12,6 +12,7 @@ import { flushChatServerSync, useChatStore } from '@/store/chat'
 import { useUIStore } from '@/store/ui'
 import { bindAttachmentsToTask } from '@/lib/attachmentUpload'
 import type { FileAttachment } from '@/types'
+import { startInitialAgentTask } from '@/stream/client/useAgentStream'
 
 const DEFAULT_TIME_DISPLAY: TimeDisplay = {
   band: 'afternoon',
@@ -43,7 +44,11 @@ export default function HomePage() {
     const uiState = useUIStore.getState()
     uiState.setStreaming(true)
     uiState.setStreamingStatus('startup')
-    uiState.setRouteHandoffPending(true)
+    uiState.setRouteHandoffPending(false)
+    void startInitialAgentTask(id).catch((error) => {
+      console.error('[Home] Failed to start task immediately after submit:', error)
+      addToast('Failed to start task. Please try again.', 'error')
+    })
     router.push(`/chat/${id}`)
 
     const chatState = useChatStore.getState()
@@ -55,10 +60,20 @@ export default function HomePage() {
     void (async () => {
       try {
         await bindAttachmentsToTask(attachments, id, firstMessageId)
+      } catch (error) {
+        console.error('[Home] Failed to bind attachments after navigation:', error)
+        addToast('Task opened, but attachment syncing is still having trouble.', 'error')
+      }
+
+      try {
         await flushChatServerSync()
       } catch (error) {
         console.error('[Home] Failed to sync new task after navigation:', error)
-        addToast('Task opened, but attachment syncing is still having trouble.', 'error')
+        window.setTimeout(() => {
+          void flushChatServerSync().catch((retryError) => {
+            console.error('[Home] Retried task history sync failed:', retryError)
+          })
+        }, 1_500)
       }
     })()
   }

@@ -1,5 +1,6 @@
 import { isDynamicKnowledgeQuestion } from './dynamicKnowledge'
 import { isContextualTaskUpdate } from './conversationContext'
+import { isAgentIdentityDisclosureQuestion } from './agentIdentity'
 
 export interface DirectChatRouteMessage {
   role: string
@@ -78,6 +79,7 @@ export function shouldUseDirectChat(messages: DirectChatRouteMessage[]): boolean
   if (messageHasAttachments(lastUser)) return false
   if (hasPriorAttachments(messages, lastUser) && PRIOR_ATTACHMENT_REFERENCE_PATTERN.test(content)) return false
 
+  if (isAgentIdentityDisclosureQuestion(content)) return true
   if (URL_OR_DOMAIN_PATTERN.test(content)) return false
   if (requestsExternalWork(content)) return false
 

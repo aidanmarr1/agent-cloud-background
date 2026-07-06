@@ -48,7 +48,7 @@ export function DocumentPreview({ artifact, conversationId }: DocumentPreviewPro
   })
 
   return (
-    <div className="document-preview animate-fade-in">
+    <div className="document-preview max-w-[760px] animate-fade-in rounded-2xl">
       <div
         role="button"
         tabIndex={conversationId && artifact.filePath ? 0 : -1}
@@ -56,7 +56,7 @@ export function DocumentPreview({ artifact, conversationId }: DocumentPreviewPro
         onKeyDown={handleKeyDown}
         aria-label={`Open ${artifact.fileName} in project files`}
         aria-disabled={!conversationId || !artifact.filePath}
-        className="group flex w-full max-w-[760px] cursor-pointer items-center gap-3 rounded-xl px-1.5 py-2 text-left transition-colors duration-150 hover:bg-bg-secondary aria-disabled:cursor-default aria-disabled:hover:bg-transparent"
+        className="group flex w-full cursor-pointer items-center gap-3 rounded-2xl border border-border-primary bg-bg-secondary px-3 py-3 text-left transition-colors duration-150 hover:border-border-tertiary hover:bg-bg-tertiary aria-disabled:cursor-default aria-disabled:hover:border-border-primary aria-disabled:hover:bg-bg-secondary"
       >
         <FileBadge name={artifact.fileName} />
         <div className="flex-1 min-w-0">

@@ -89,9 +89,13 @@ if (env('AGENT_TASK_QUEUE_NAME') === 'default') {
 
 requireRealEnv('TURSO_DATABASE_URL', 'Turso task queue URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso task queue token', validateNonShortToken)
+requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key for task execution', validateNonShortToken)
+requireExact('OPENROUTER_MODEL', 'google/gemini-3-flash-preview', 'Gemini 3 Flash Preview model route')
+requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'Gemini 3 Flash Preview fast reasoning effort')
 requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'Manus-style cloud computer execution')
 requireRealEnv('E2B_API_KEY', 'E2B runtime API key for cloud sandboxes', validateNonShortToken)
+requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
 
 if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
   pass('E2B browser runtime source is configured')
@@ -112,7 +116,11 @@ if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowe
 }
 
 requireRecommendedTrue('AGENT_E2B_PAUSE_ON_TASK_END', 'idle E2B sandbox cost bounded')
-requireRecommendedTrue('AGENT_E2B_WARM_POOL_ENABLED', 'first task can adopt an already-ready sandbox and browser')
+if (['true', '1'].includes(env('AGENT_E2B_WARM_POOL_ENABLED').toLowerCase())) {
+  warn('AGENT_E2B_WARM_POOL_ENABLED is on; warm sandbox runtime should be treated as billable startup latency for the adopting task')
+} else {
+  pass('AGENT_E2B_WARM_POOL_ENABLED is off by default, so E2B starts only when a task can be billed')
+}
 requireRecommendedTrue('AGENT_E2B_VERIFY_ON_WORKER_STARTUP', 'invalid E2B keys or templates failing before worker heartbeat')
 requireRecommendedTrue('AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', 'Chromium browser template failures surfacing before worker heartbeat')
 

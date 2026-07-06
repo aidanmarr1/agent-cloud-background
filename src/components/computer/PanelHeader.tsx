@@ -27,7 +27,7 @@ export function PanelHeader() {
       : "Agent's Computer"
 
   return (
-    <div className="h-12 flex items-center justify-between px-4 border-b border-border-primary flex-shrink-0">
+    <div className="h-12 flex items-center justify-between px-3 border-b border-border-primary flex-shrink-0 sm:px-4">
       <div className="flex items-center gap-2.5 min-w-0">
         <span className="text-[14.5px] font-semibold text-text-primary [font-family:var(--font-display)] tracking-[0] truncate">
           {headerText}

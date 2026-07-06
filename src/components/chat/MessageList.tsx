@@ -218,11 +218,11 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
     return (
       <div
         ref={containerRef}
-        className="flex-1 overflow-y-auto px-5 md:px-7 py-10 relative"
+        className="flex-1 overflow-y-auto px-3 py-5 relative sm:px-5 sm:py-10 md:px-7"
         role="log"
         aria-live="polite"
       >
-        <div className="max-w-[810px] mx-auto space-y-7">
+        <div className="max-w-[810px] w-full mx-auto space-y-7">
           {messages.map((msg, i) => renderMessage(msg, i))}
           {showTyping && (
             <div className="py-6">
@@ -266,11 +266,11 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
   return (
     <div
       ref={containerRef}
-      className="flex-1 overflow-y-auto px-5 md:px-7 py-10 relative"
+      className="flex-1 overflow-y-auto px-3 py-5 relative sm:px-5 sm:py-10 md:px-7"
       role="log"
       aria-live="polite"
     >
-      <div className="max-w-[810px] mx-auto">
+      <div className="max-w-[810px] w-full mx-auto">
         {/* Virtualized portion */}
         <div style={{ height: totalHeight, position: 'relative' }}>
           <div style={{ transform: `translateY(${offsetTop}px)` }}>

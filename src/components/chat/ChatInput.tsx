@@ -636,9 +636,9 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
         onPaste={handlePaste}
         placeholder={placeholder}
         rows={1}
-        className="bg-transparent resize-none outline-none w-full px-5 pt-4 pb-1 placeholder:text-text-muted/80 chat-input-text text-text-primary leading-relaxed"
+        className="bg-transparent resize-none outline-none w-full px-4 pt-4 pb-1 placeholder:text-text-muted/80 chat-input-text text-text-primary leading-relaxed sm:px-5"
       />
-      <div className="h-12 px-3 pb-1 flex items-center justify-between">
+      <div className="h-12 px-2.5 pb-1 flex items-center justify-between sm:px-3">
         <div className="flex items-center gap-0.5">
           {/* Add attachment menu */}
           <div ref={attachMenuRef} className="relative">
@@ -659,7 +659,7 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
             {attachMenuOpen && (
               <div
                 role="menu"
-                className="absolute left-0 top-full z-40 mt-2 w-[318px] rounded-2xl border border-border-primary menu-surface p-2 animate-scale-in"
+                className="fixed left-3 right-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] z-40 mt-2 w-auto rounded-2xl border border-border-primary menu-surface p-2 animate-scale-in sm:absolute sm:left-0 sm:right-auto sm:top-full sm:bottom-auto sm:w-[318px]"
                 style={{ boxShadow: 'var(--shadow-lg)' }}
               >
                 <button

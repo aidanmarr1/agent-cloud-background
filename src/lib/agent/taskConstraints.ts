@@ -19,6 +19,8 @@ const NUMBER_WORDS: Record<string, number> = {
 
 const MARKDOWN_DELIVERABLE_PATTERN = /\b(?:\.md|markdown|md\s+file|markdown\s+file)\b/i
 const FILE_DELIVERABLE_PATTERN = /\b(?:create|write|save|return|deliver|make)\b.{0,80}\b(?:file|report|document)\b/i
+const INLINE_ANSWER_PATTERN = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|write\s+(?:it|this|the answer|the\s+(?:final\s+)?report|the summary|the findings?)\s+(?:directly\s+)?(?:in chat|here)|just\s+answer|inline)\b/i
+const REPORT_MARKDOWN_DEFAULT_PATTERN = /\b(?:research\s+(?:about|on|into|for|why|whether|all\s+about)|deep\s+research|report(?:\s+on|\s+about)?|research\s+report|findings?|write[-\s]?up|source[-\s]?backed\s+summary|cited\s+summary|compile\s+(?:the\s+)?(?:findings|research|report)|synthesi[sz]e\s+(?:the\s+)?(?:findings|research)|deliver\s+(?:the\s+)?(?:findings|report))\b/i
 const FIXED_SEARCH_COUNT_PATTERN = '(?:one|two|three|four|five|[1-5]|a|an|single)'
 const FIXED_SEARCH_DIRECTIVE_PATTERNS = [
   new RegExp(`\\b(?:please\\s*)?(?:do|run|make|perform|use|conduct|complete)?\\s*(?:only|exactly|just)?\\s*${FIXED_SEARCH_COUNT_PATTERN}\\s+(?:web\\s*)?search(?:es)?\\b`, 'gi'),
@@ -99,19 +101,36 @@ export function requestsMarkdownDeliverable(text: string | null | undefined): bo
     (/\bmarkdown\b/i.test(text) && FILE_DELIVERABLE_PATTERN.test(text))
 }
 
+export function explicitlyRequestsInlineAnswer(text: string | null | undefined): boolean {
+  return !!text && INLINE_ANSWER_PATTERN.test(text)
+}
+
+export function taskDefaultsToMarkdownDeliverable(text: string | null | undefined): boolean {
+  if (!text) return false
+  if (explicitlyRequestsInlineAnswer(text)) return false
+  const explicitArtifact = requestsMarkdownDeliverable(text) || FILE_DELIVERABLE_PATTERN.test(text)
+  if (
+    !explicitArtifact &&
+    /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast)\b/i.test(text)
+  ) {
+    return false
+  }
+  return explicitArtifact || REPORT_MARKDOWN_DEFAULT_PATTERN.test(text)
+}
+
 export function isSingleWebSearchMarkdownTask(messages: Array<{ role: string; content: string }>): boolean {
   const text = latestUserContent(messages)
-  return explicitWebSearchLimitFromText(text) === 1 && requestsMarkdownDeliverable(text)
+  return explicitWebSearchLimitFromText(text) === 1 && taskDefaultsToMarkdownDeliverable(text)
 }
 
 export function isFixedWebSearchAnswerTask(messages: Array<{ role: string; content: string }>): boolean {
   const text = latestUserContent(messages)
-  return explicitWebSearchLimitFromText(text) !== null && !requestsMarkdownDeliverable(text)
+  return explicitWebSearchLimitFromText(text) !== null && !taskDefaultsToMarkdownDeliverable(text)
 }
 
 export function isFixedWebSearchInlineAnswerState(state: Pick<AgentStateData, 'originalUserRequest'>): boolean {
   const text = state.originalUserRequest || ''
-  return explicitWebSearchLimitFromText(text) !== null && !requestsMarkdownDeliverable(text)
+  return explicitWebSearchLimitFromText(text) !== null && !taskDefaultsToMarkdownDeliverable(text)
 }
 
 export function hasSingleWebSearchLimit(state: Pick<

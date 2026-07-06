@@ -13,7 +13,13 @@ const apply = applyAll || applyAvailable
 const verifyValues = args.includes('--verify-values') || args.includes('--verify')
 const replaceDrift = args.includes('--replace-drift')
 const json = args.includes('--json')
-const vercelBin = process.env.VERCEL_CLI || 'vercel'
+const configuredVercelCli = process.env.VERCEL_CLI?.trim() || ''
+const localVercelBin = resolve(process.cwd(), 'node_modules/.bin/vercel')
+const vercelCommand = configuredVercelCli
+  ? { bin: configuredVercelCli, baseArgs: [], label: configuredVercelCli }
+  : existsSync(localVercelBin)
+    ? { bin: localVercelBin, baseArgs: [], label: localVercelBin }
+    : { bin: process.env.NPX_BIN?.trim() || 'npx', baseArgs: ['--yes', 'vercel'], label: 'npx --yes vercel' }
 
 const CLOUD_ENV = [
   { name: 'AUTH_SECRET', source: 'local', required: true },
@@ -22,9 +28,15 @@ const CLOUD_ENV = [
   { name: 'AGENT_TRUST_PROXY_HEADERS', value: 'true' },
   { name: 'TURSO_DATABASE_URL', source: 'local', required: true },
   { name: 'TURSO_AUTH_TOKEN', source: 'local', required: true },
+  { name: 'LLM_PROVIDER', value: 'openrouter' },
+  { name: 'DEEPSEEK_API_KEY', source: 'local', required: false },
+  { name: 'DEEPSEEK_MODEL', value: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash' },
+  { name: 'DEEPSEEK_REASONING_EFFORT', value: process.env.DEEPSEEK_REASONING_EFFORT || 'high' },
+  { name: 'DEEPSEEK_THINKING_ENABLED', value: process.env.DEEPSEEK_THINKING_ENABLED || 'true' },
   { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
-  { name: 'BRAVE_SEARCH_API_KEY', source: 'local', required: false },
-  { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'openai/gpt-5.4-mini' },
+  { name: 'SERPER_API_KEY', source: 'local', required: true },
+  { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
+  { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'google/gemini-3-flash-preview' },
   { name: 'OPENROUTER_REASONING_EFFORT', value: process.env.OPENROUTER_REASONING_EFFORT || 'minimal' },
   { name: 'OPENROUTER_REASONING_EXCLUDE', value: process.env.OPENROUTER_REASONING_EXCLUDE || 'true' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },
@@ -36,6 +48,7 @@ const CLOUD_ENV = [
   { name: 'AGENT_DEPLOYMENT_VERSION', source: 'local', required: false },
   { name: 'AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', value: process.env.AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION || 'false' },
   { name: 'AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', value: 'true' },
+  { name: 'AGENT_REQUIRE_HOSTED_TASK_WORKER', value: process.env.AGENT_REQUIRE_HOSTED_TASK_WORKER || 'false' },
   { name: 'AGENT_SANDBOX_PROVIDER', value: 'e2b' },
   { name: 'E2B_API_KEY', source: 'local', required: true, hint: 'Create an E2B runtime API key and set E2B_API_KEY locally before applying.' },
   { name: 'E2B_TEMPLATE_ID', value: 'agent-cloud-browser' },
@@ -47,7 +60,7 @@ const CLOUD_ENV = [
   { name: 'AGENT_E2B_BROWSER_PORT', value: '9222' },
   { name: 'AGENT_E2B_BROWSER_START_TIMEOUT_MS', value: '30000' },
   { name: 'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS', value: '30000' },
-  { name: 'AGENT_E2B_WARM_POOL_ENABLED', value: 'true' },
+  { name: 'AGENT_E2B_WARM_POOL_ENABLED', value: 'false' },
 ]
 
 loadLocalEnv()
@@ -108,7 +121,8 @@ function parseEnvFile(text) {
 
 function runVercel(commandArgs, input) {
   return new Promise((resolve, reject) => {
-    const child = spawn(vercelBin, commandArgs, {
+    const fullArgs = [...vercelCommand.baseArgs, ...commandArgs]
+    const child = spawn(vercelCommand.bin, fullArgs, {
       cwd: process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
       env: process.env,
@@ -120,7 +134,7 @@ function runVercel(commandArgs, input) {
     child.on('error', reject)
     child.on('exit', (code, signal) => {
       if (code === 0) resolve({ stdout, stderr })
-      else reject(new Error(`${vercelBin} ${commandArgs.join(' ')} failed with ${signal || `code ${code}`}\n${stderr || stdout}`))
+      else reject(new Error(`${vercelCommand.label} ${commandArgs.join(' ')} failed with ${signal || `code ${code}`}\n${stderr || stdout}`))
     })
     if (typeof input === 'string') child.stdin.end(input)
     else child.stdin.end()

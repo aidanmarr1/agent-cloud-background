@@ -70,6 +70,7 @@ export async function runSmoke() {
     const readRecovered = await readFileInSandbox(conversationId, 'draft.md')
     assert.match(String(readRecovered.content || ''), /first recovered section/)
 
+    const visibleStartsBeforeBadContinuation = emitter.events.filter(event => event.type === 'tool_start').length
     const recreate = await call(
       pipeline,
       state,
@@ -84,6 +85,72 @@ export async function runSmoke() {
     )
     assert.equal(recreate.isError, true)
     assert.match(String((recreate.result as any).error), /recovered partial write/)
+    assert.equal(
+      emitter.events.filter(event => event.type === 'tool_start').length,
+      visibleStartsBeforeBadContinuation,
+      'blocked same-path recreate must not emit a visible tool_start pill',
+    )
+
+    const recreateElsewhere = await call(
+      pipeline,
+      state,
+      'create-elsewhere',
+      'create_file',
+      JSON.stringify({
+        path: 'draft-copy.md',
+        content: '# Draft Copy\\\\nThis would dodge the partial recovery by starting a second deliverable path, so it must be blocked before it appears.',
+        action_label: 'Restart recovered draft elsewhere',
+        plan_step_index: 1,
+      }),
+    )
+    assert.equal(recreateElsewhere.isError, true)
+    assert.match(String((recreateElsewhere.result as any).error), /append_file call to "draft\.md"/)
+    assert.equal(
+      emitter.events.filter(event => event.type === 'tool_start').length,
+      visibleStartsBeforeBadContinuation,
+      'blocked different-path create must not emit a visible tool_start pill',
+    )
+
+    const appendElsewhere = await call(
+      pipeline,
+      state,
+      'append-elsewhere',
+      'append_file',
+      JSON.stringify({
+        path: 'other.md',
+        content: '\\\\nThis continuation targets the wrong file, so it should be blocked before any visible action starts.',
+        action_label: 'Append recovered draft elsewhere',
+        plan_step_index: 1,
+      }),
+    )
+    assert.equal(appendElsewhere.isError, true)
+    assert.match(String((appendElsewhere.result as any).error), /Do not append to "other\.md"/)
+    assert.equal(
+      emitter.events.filter(event => event.type === 'tool_start').length,
+      visibleStartsBeforeBadContinuation,
+      'blocked different-path append must not emit a visible tool_start pill',
+    )
+
+    const editPending = await call(
+      pipeline,
+      state,
+      'edit-pending',
+      'edit_file',
+      JSON.stringify({
+        path: 'draft.md',
+        old_string: 'first recovered section',
+        new_string: 'first recovered section edited too early',
+        action_label: 'Edit recovered draft too early',
+        plan_step_index: 1,
+      }),
+    )
+    assert.equal(editPending.isError, true)
+    assert.match(String((editPending.result as any).error), /Do not call edit_file yet/)
+    assert.equal(
+      emitter.events.filter(event => event.type === 'tool_start').length,
+      visibleStartsBeforeBadContinuation,
+      'blocked edit during partial recovery must not emit a visible tool_start pill',
+    )
 
     const append = await call(
       pipeline,

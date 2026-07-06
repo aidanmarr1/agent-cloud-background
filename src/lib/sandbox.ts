@@ -89,28 +89,39 @@ export function isCloudSandboxProviderEnabled(): boolean {
   return shouldUseE2BSandbox()
 }
 
-export async function getOrCreateSandboxDir(conversationId: string): Promise<string> {
+export async function getOrCreateLocalSandboxDir(conversationId: string): Promise<string> {
   const safeId = sanitizeConversationId(conversationId)
   const existing = sandboxDirs.get(safeId)
   if (existing) {
     existing.lastUsed = Date.now()
-    if (shouldUseE2BSandbox()) await getOrCreateE2BSandbox(safeId)
     return existing.path
   }
 
   const dir = getSandboxDirPath(safeId)
   await mkdir(dir, { recursive: true })
   sandboxDirs.set(safeId, { path: dir, lastUsed: Date.now() })
+  return dir
+}
+
+export async function resetLocalSandboxDir(conversationId: string): Promise<string> {
+  const safeId = sanitizeConversationId(conversationId)
+  const dir = getSandboxDirPath(safeId)
+  await rm(dir, { recursive: true, force: true })
+  await mkdir(dir, { recursive: true })
+  sandboxDirs.set(safeId, { path: dir, lastUsed: Date.now() })
+  return dir
+}
+
+export async function getOrCreateSandboxDir(conversationId: string): Promise<string> {
+  const safeId = sanitizeConversationId(conversationId)
+  const dir = await getOrCreateLocalSandboxDir(safeId)
   if (shouldUseE2BSandbox()) await getOrCreateE2BSandbox(safeId)
   return dir
 }
 
 export async function resetSandboxDir(conversationId: string): Promise<string> {
   const safeId = sanitizeConversationId(conversationId)
-  const dir = getSandboxDirPath(safeId)
-  await rm(dir, { recursive: true, force: true })
-  await mkdir(dir, { recursive: true })
-  sandboxDirs.set(safeId, { path: dir, lastUsed: Date.now() })
+  const dir = await resetLocalSandboxDir(safeId)
   if (shouldUseE2BSandbox()) await resetE2BSandbox(safeId)
   return dir
 }

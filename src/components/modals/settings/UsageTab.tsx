@@ -61,16 +61,9 @@ function formatDateTime(timestamp: number): string {
   })
 }
 
-function nextMonthlyDate(periodKey: string): string {
+function activityPeriodLabel(periodKey: string): string {
   const base = new Date(`${periodKey}-01T00:00:00.000Z`)
-  if (Number.isNaN(base.getTime())) return 'next month'
-  base.setUTCMonth(base.getUTCMonth() + 1)
-  return base.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-}
-
-function monthlyPeriodLabel(periodKey: string): string {
-  const base = new Date(`${periodKey}-01T00:00:00.000Z`)
-  if (Number.isNaN(base.getTime())) return 'This month'
+  if (Number.isNaN(base.getTime())) return 'Recent activity'
   return `Since ${base.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`
 }
 
@@ -87,8 +80,7 @@ export function UsageTab() {
   const ledger = useCreditStore((s) => s.ledger)
   const usageSummary = useCreditStore((s) => s.usageSummary)
   const activeSession = useCreditStore((s) => s.activeSession)
-  const lastMonthlyRefresh = useCreditStore((s) => s.lastMonthlyRefresh)
-  const monthlyAllowance = useCreditStore((s) => s.monthlyAllowance)
+  const lastCreditPeriod = useCreditStore((s) => s.lastMonthlyRefresh)
   const syncFromServer = useCreditStore((s) => s.syncFromServer)
   const conversations = useChatStore((s) => s.conversations)
 
@@ -104,11 +96,11 @@ export function UsageTab() {
     return titles
   }, [conversations])
 
-  const monthlyPeriodStart = new Date(`${lastMonthlyRefresh}-01T00:00:00.000Z`).getTime()
-  const monthlyLedger = Number.isNaN(monthlyPeriodStart)
+  const creditPeriodStart = new Date(`${lastCreditPeriod}-01T00:00:00.000Z`).getTime()
+  const periodLedger = Number.isNaN(creditPeriodStart)
     ? ledger
-    : ledger.filter((entry) => entry.timestamp >= monthlyPeriodStart)
-  const fallbackMonthlySpent = monthlyLedger.reduce((sum, entry) => (
+    : ledger.filter((entry) => entry.timestamp >= creditPeriodStart)
+  const fallbackRecentSpent = periodLedger.reduce((sum, entry) => (
     entry.amount > 0 ? sum + entry.amount : sum
   ), 0)
   const fallbackLifetimeSpent = ledger.reduce((sum, entry) => (
@@ -175,13 +167,9 @@ export function UsageTab() {
     return [...creditRows, ...spendRows].sort((a, b) => b.timestamp - a.timestamp)
   }, [ledger, taskRows, taskTitles])
 
-  const monthlySpent = usageSummary?.monthlySpent ?? fallbackMonthlySpent
+  const recentSpent = usageSummary?.monthlySpent ?? fallbackRecentSpent
   const lifetimeSpent = usageSummary?.lifetimeSpent ?? fallbackLifetimeSpent
   const totalCredits = getTotalCredits(balance)
-  const allowance = Math.max(0, finiteNumber(monthlyAllowance))
-  const monthlySpendProgress = allowance > 0
-    ? Math.max(0, Math.min(100, (monthlySpent / allowance) * 100))
-    : 0
   const taskCount = usageSummary?.taskCount ?? taskRows.length
 
   return (
@@ -192,25 +180,19 @@ export function UsageTab() {
           <div className="rounded-2xl border border-border-primary bg-bg-secondary p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-[12px] font-semibold text-text-tertiary">Your monthly spend</div>
+                <div className="text-[12px] font-semibold text-text-tertiary">Recent spend</div>
                 <div className="mt-3 flex items-baseline gap-2">
                   <span className="text-[34px] font-semibold leading-none tracking-[0] text-text-primary tabular-nums">
-                    {formatSpend(monthlySpent)}
+                    {formatSpend(recentSpent)}
                   </span>
                   <span className="text-[12px] font-medium text-text-tertiary">credits</span>
                 </div>
               </div>
               <Sparkles size={17} className="mt-0.5 text-text-secondary" strokeWidth={2.25} />
             </div>
-            <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-bg-primary">
-              <div
-                className="h-full rounded-full bg-accent-active"
-                style={{ width: `${monthlySpendProgress}%` }}
-              />
-            </div>
             <div className="mt-3 flex items-center justify-between gap-3 text-[11.5px] text-text-tertiary">
-              <span>{monthlyPeriodLabel(lastMonthlyRefresh)}</span>
-              <span>Renews {nextMonthlyDate(lastMonthlyRefresh)}</span>
+              <span>{activityPeriodLabel(lastCreditPeriod)}</span>
+              <span>Agent Credits</span>
             </div>
           </div>
 
@@ -235,7 +217,7 @@ export function UsageTab() {
                   <div className="mt-2 text-[24px] font-semibold leading-none tracking-[0] text-text-primary tabular-nums">
                     {formatCredits(totalCredits)}
                   </div>
-                  <div className="mt-1 text-[11.5px] text-text-tertiary">Current monthly balance</div>
+                  <div className="mt-1 text-[11.5px] text-text-tertiary">Current Agent Credits</div>
                 </div>
                 <Clock size={16} className="mt-0.5 text-text-secondary" strokeWidth={2.25} />
               </div>
@@ -259,7 +241,7 @@ export function UsageTab() {
                 {formatSpend(lifetimeSpent)}
               </div>
               <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-text-muted">
-                overall credits
+                total spent
               </div>
             </div>
           </div>

@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { shouldUseExternalTaskWorker } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
-import { getRecentTaskWorkerHeartbeats } from '@/lib/agent/taskWorkerHeartbeat'
+import { getRecentTaskWorkerHeartbeats, isLikelyLocalWorkerHostname, workerHeartbeatIsHosted } from '@/lib/agent/taskWorkerHeartbeat'
 import { getTursoClient, getTursoSetupStatus } from '@/lib/db/turso'
 
 export const runtime = 'nodejs'
@@ -54,6 +54,25 @@ function envBoolEnabled(name: string, fallback = true): boolean {
 }
 
 function isCloudCapableWorker(worker: {
+  hostname?: string | null
+  taskWorkerMode?: string | null
+  sandboxProvider?: string | null
+  deploymentVersion?: string | null
+  e2bApiKeyConfigured?: boolean
+  e2bBrowserRuntimeConfigured?: boolean
+}, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
+  const versionMatches = !requireDeploymentVersion ||
+    (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
+
+  return worker.taskWorkerMode === 'external' &&
+    worker.sandboxProvider === 'e2b' &&
+    worker.e2bApiKeyConfigured === true &&
+    worker.e2bBrowserRuntimeConfigured === true &&
+    workerHeartbeatIsHosted(worker) &&
+    versionMatches
+}
+
+function isE2BCapableWorker(worker: {
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
@@ -91,8 +110,10 @@ export async function GET(request: NextRequest) {
   checks.e2bPauseOnTaskEnd = env('AGENT_E2B_PAUSE_ON_TASK_END').toLowerCase() === 'true'
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', false)
+  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
   checks.workerDeploymentVersionRequired = requireDeploymentVersion
   checks.workerDeploymentVersionConfigured = Boolean(expectedDeploymentVersion)
+  checks.hostedWorkerRequired = requireHostedWorker
 
   if (!checks.externalWorkerMode) errors.push('AGENT_TASK_WORKER_MODE must be external.')
   if (!checks.persistentQueueConfigured) errors.push('Persistent Turso task queue is not configured.')
@@ -123,6 +144,7 @@ export async function GET(request: NextRequest) {
     currentRunId: string | null
     lastSeenAtMs: number
     completedTasks: number
+    hostname: string
     taskWorkerMode: string | null
     sandboxProvider: string | null
     deploymentVersion: string | null
@@ -139,6 +161,7 @@ export async function GET(request: NextRequest) {
         currentRunId: worker.currentRunId,
         lastSeenAtMs: worker.lastSeenAtMs,
         completedTasks: worker.completedTasks,
+        hostname: worker.hostname,
         taskWorkerMode: worker.taskWorkerMode,
         sandboxProvider: worker.sandboxProvider,
         deploymentVersion: worker.deploymentVersion,
@@ -153,13 +176,24 @@ export async function GET(request: NextRequest) {
 
   const cloudCapableWorkers = workers.filter((worker) =>
     isCloudCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
+  const e2bCapableWorkers = workers.filter((worker) =>
+    isE2BCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
+  const acceptedWorkers = requireHostedWorker ? cloudCapableWorkers : e2bCapableWorkers
+  const localOnlyWorkerHosts = e2bCapableWorkers
+    .filter((worker) => isLikelyLocalWorkerHostname(worker.hostname))
+    .map((worker) => worker.hostname)
   checks.liveWorkerHeartbeat = workers.length > 0
-  checks.liveCloudWorkerHeartbeat = cloudCapableWorkers.length > 0
+  checks.liveCloudWorkerHeartbeat = acceptedWorkers.length > 0
+  checks.liveHostedWorkerHeartbeat = cloudCapableWorkers.length > 0
   if (workers.length === 0) {
     errors.push(`No live worker heartbeat found for queue "${queueName}" in the last ${staleMs}ms.`)
-  } else if (requireDeploymentVersion && cloudCapableWorkers.length === 0) {
+  } else if (requireHostedWorker && e2bCapableWorkers.length > 0 && cloudCapableWorkers.length === 0) {
+    errors.push(`Only local worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Start a hosted background worker so tasks can continue when this Mac is offline.`)
+  } else if (!requireHostedWorker && e2bCapableWorkers.length > 0 && cloudCapableWorkers.length === 0) {
+    warnings.push(`Only local worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Tasks can run while this worker stays online, but they are not offline-safe.`)
+  } else if (requireDeploymentVersion && acceptedWorkers.length === 0) {
     errors.push(`No live E2B-capable worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}" for queue "${queueName}". Redeploy the worker with the same AGENT_DEPLOYMENT_VERSION as the web service.`)
-  } else if (cloudCapableWorkers.length === 0) {
+  } else if (acceptedWorkers.length === 0) {
     errors.push(`No E2B-capable live worker heartbeat found for queue "${queueName}". Redeploy the worker with AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND.`)
   }
 

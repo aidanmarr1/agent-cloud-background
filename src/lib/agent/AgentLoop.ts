@@ -6,11 +6,16 @@
  */
 
 import {
+  ASSISTANT_SUPPORTS_IMAGE_INPUT,
+  ASSISTANT_PROVIDER,
+  createCompletion,
   createStreamingCompletion,
+  type ChatCompletionResponse,
   type ChatCompletionTool,
   type ChatMessageParam,
   type StreamingChatCompletionChunk,
 } from '@/lib/llm'
+import { estimateUsageCost } from '@/lib/modelPricing'
 import { toolDefinitions } from '@/lib/tools'
 import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/lib/prompts'
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
@@ -22,11 +27,15 @@ import {
   AgentStateData,
   createInitialState,
   updatePhase,
+  advanceStep,
   trackFileCreate,
   logWork,
   recordWorkLedgerDeliverable,
   currentStepText,
   isResearchStepText,
+  markPhaseNarrationEmitted,
+  needsPhaseNarrationBeforeAdvance,
+  stepOpenedSourceDomains,
 } from './AgentState'
 import {
   MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES,
@@ -34,16 +43,17 @@ import {
   STREAM_REQUEST_TIMEOUT_MS, STREAM_RETRY_MAX_DELAY_MS,
   MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, URGENCY_FINAL_FRACTION,
   TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL_MS, TOOL_CACHE_MAX_SIZE_CHARS,
-  MIN_RESEARCH_CALLS_BY_COMPLEXITY, MIN_TOOL_CALLS_BY_COMPLEXITY,
+  MIN_TOOL_CALLS_BY_COMPLEXITY,
   AGENT_RUN_MAX_DURATION_MS, AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS, AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
+  NARRATION_THRESHOLD_DEFAULT,
 } from './config'
-import { StreamProcessor, type StreamResult, type ToolCallData } from './StreamProcessor'
+import { StreamProcessor, type StreamResult, type StreamUsage, type ToolCallData } from './StreamProcessor'
 import { ToolPipeline, type ToolExecutionResult } from './ToolPipeline'
 import { PolicyEngine } from './PolicyEngine'
 import { PlanManager, type RequiredPlanStep } from './PlanManager'
-import { isPromptInjection } from './guards'
-import { explicitWebSearchLimitFromText, isFixedWebSearchInlineAnswerState } from './taskConstraints'
+import { isPromptInjection, type TierTimeouts } from './guards'
+import { explicitWebSearchLimitFromText, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
 import { ContextManager } from './ContextManager'
@@ -73,7 +83,11 @@ import {
   researchActivityContext,
 } from './ResearchActivityLog'
 import { userErrorMessage } from '@/lib/errorMessages'
-import { humanTopicLabel } from './taskText'
+import { cleanTaskSubjectText, humanTopicLabel } from './taskText'
+import { researchDepthProfileForState } from './ResearchDepth'
+import { toolTypeRateLimitForState } from './ToolLimits'
+import { sanitizeNarrationText } from '@/lib/stream/cleaners'
+import { AGENT_IDENTITY_DISCLOSURE_RESPONSE, isAgentIdentityDisclosureQuestion, latestUserAskedAgentIdentityDisclosure } from '@/lib/agentIdentity'
 
 /**
  * Phase 12 Fix NNN: scan the user's most recent message for a URL or bare
@@ -141,7 +155,146 @@ function executedToolCallsForProviderHistory(
     }))
 }
 
+function assistantHistoryMessageForStreamResult(
+  result: StreamResult,
+  contentOverride?: string,
+): ChatMessageParam {
+  const content = contentOverride ?? result.assistantContent
+  const message: Record<string, unknown> = {
+    role: 'assistant',
+    content: content || null,
+  }
+  if (ASSISTANT_PROVIDER === 'deepseek' && result.reasoningContent) {
+    message.reasoning_content = result.reasoningContent
+  }
+  return message as ChatMessageParam
+}
+
+function completionResponseToStreamingIterable(
+  response: ChatCompletionResponse,
+): AsyncIterable<StreamingChatCompletionChunk> {
+  async function* chunks(): AsyncIterable<StreamingChatCompletionChunk> {
+    const choice = response.choices?.[0]
+    const message = choice?.message
+    const index = choice?.index ?? 0
+    const id = response.id
+
+    if (message?.reasoning_content) {
+      yield {
+        id,
+        choices: [{
+          index,
+          delta: { reasoning_content: message.reasoning_content },
+          finish_reason: null,
+        }],
+        usage: null,
+      }
+    }
+
+    if (message?.content) {
+      yield {
+        id,
+        choices: [{
+          index,
+          delta: { content: message.content },
+          finish_reason: null,
+        }],
+        usage: null,
+      }
+    }
+
+    const rawToolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : []
+    for (const [toolIndex, rawToolCall] of rawToolCalls.entries()) {
+      const tc = rawToolCall as {
+        id?: string
+        type?: string
+        function?: { name?: string; arguments?: string }
+      }
+      if (!tc.function?.name) continue
+      yield {
+        id,
+        choices: [{
+          index,
+          delta: {
+            tool_calls: [{
+              index: toolIndex,
+              id: tc.id || `completion_tool_${toolIndex}`,
+              type: 'function',
+              function: {
+                name: tc.function.name,
+                arguments: tc.function.arguments || '{}',
+              },
+            }],
+          },
+          finish_reason: null,
+        }],
+        usage: null,
+      }
+    }
+
+    yield {
+      id,
+      choices: [{
+        index,
+        delta: {},
+        finish_reason: choice?.finish_reason ?? 'stop',
+      }],
+      usage: response.usage ?? null,
+    }
+  }
+
+  return chunks()
+}
+
+function approximateStreamUsageForCompletedTurn(
+  model: string,
+  requestMessages: ChatMessageParam[],
+  result: StreamResult,
+): StreamUsage {
+  const promptChars = requestMessages.reduce((sum, message) => {
+    if (typeof message.content === 'string') return sum + message.content.length
+    if (Array.isArray(message.content)) {
+      return sum + message.content.reduce((inner, part) => inner + (part.text?.length || 0), 0)
+    }
+    return sum
+  }, 0)
+  const toolArgChars = [...result.toolCalls.values()].reduce((sum, toolCall) => {
+    return sum + toolCall.name.length + toolCall.arguments.length
+  }, 0)
+  const completionChars =
+    result.assistantContent.length +
+    result.reasoningContent.length +
+    toolArgChars
+  const promptTokens = Math.max(1, Math.ceil(promptChars / 4))
+  const completionTokens = Math.max(1, Math.ceil(completionChars / 4))
+  const totalTokens = promptTokens + completionTokens
+  const cost = estimateUsageCost({
+    model,
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+  }) ?? 0
+  return { promptTokens, completionTokens, totalTokens, cost }
+}
+
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
+const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000
+const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_400
+const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 250
+const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 220
+const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 140
+const FAST_SOURCE_ACTION_MAX_TOKENS = 320
+const FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS = 2_600
+const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
+
+function isAssistantRequestTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /Assistant request timed out after \d+ seconds/i.test(message) ||
+    /\b(?:timed out|timeout|ETIMEDOUT)\b/i.test(message)
+}
+
+function supportsProviderRequiredToolChoice(): boolean {
+  return true
+}
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
   return FINAL_DELIVERABLE_WRITE_TOOLS.has(result.tc.name) && !result.isError
@@ -320,6 +473,8 @@ function redactAgentServiceText(text: string): string {
   return text
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
     .replace(/\b(?:qwen|openai|anthropic|google|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
+    .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')
 }
 
@@ -344,6 +499,45 @@ function stepAdvanceStatusFor(state: AgentStateData, stepIdx: number): StepAdvan
   return finding?.startsWith('[INCOMPLETE]') || finding?.startsWith('[BLOCKED]') ? 'incomplete' : 'done'
 }
 
+function shouldPauseForPhaseEndNarrationBeforeAutoAdvance(
+  state: AgentStateData,
+  assistantContent = '',
+): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+
+  if (assistantContent.trim() && sanitizeNarrationText(assistantContent, {
+    requireSignal: false,
+    maxSentences: 2,
+    maxLength: 300,
+  })) {
+    markPhaseNarrationEmitted(state)
+    return false
+  }
+
+  return needsPhaseNarrationBeforeAdvance(state) || state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+}
+
+function pauseForPhaseEndNarrationBeforeAutoAdvance(
+  state: AgentStateData,
+  contextManager: ContextManager,
+  reason: string,
+  assistantContent = '',
+): boolean {
+  if (!shouldPauseForPhaseEndNarrationBeforeAutoAdvance(state, assistantContent)) return false
+  state.phaseEndNarrationPending = true
+  state.forceTextNextIteration = true
+  state.forcedNarrationRepairAttempts = 0
+  contextManager.push({
+    role: 'system',
+    content: [
+      `PHASE-END NARRATION REQUIRED before advancing: ${reason}.`,
+      'Every phase must show at least one real LLM-written progress paragraph, even if the phase used fewer than 3 tools.',
+      'Write one concise, result-first paragraph from completed work only, then put <next_step/> on its own final line. Do not call tools in this response.',
+    ].join(' '),
+  } as ChatMessageParam)
+  return true
+}
+
 function liveDirectiveContextMessage(directives: LiveDirective[]): string {
   const directiveList = directives
     .map((directive, index) => {
@@ -363,13 +557,14 @@ function liveDirectiveContextMessage(directives: LiveDirective[]): string {
 }
 
 function agentRunRemainingMs(state: AgentStateData): number {
-  return state.runStartedAtMs + AGENT_RUN_MAX_DURATION_MS - Date.now()
+  return state.runStartedAtMs + (state.runMaxDurationMs || AGENT_RUN_MAX_DURATION_MS) - Date.now()
 }
 
 function shouldStartDeadlineFinalization(state: AgentStateData): boolean {
   if (state.deadlineFinalizationStarted) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  return agentRunRemainingMs(state) <= AGENT_DEADLINE_FINALIZATION_BUFFER_MS
+  if (state.currentStepIdx < state.currentPlanItems.length - 1) return false
+  return agentRunRemainingMs(state) <= (state.deadlineFinalizationBufferMs || AGENT_DEADLINE_FINALIZATION_BUFFER_MS)
 }
 
 function deadlineFinalizationMessage(state: AgentStateData): ChatMessageParam {
@@ -382,6 +577,48 @@ function deadlineFinalizationMessage(state: AgentStateData): ChatMessageParam {
       'Use only the gathered work log, research activity, files, browser evidence, and current context to create the final user-facing result now.',
       'If a deliverable file is required and none is saved, make exactly one create_file call for the initial final output; use append_file only for essential continuation chunks.',
       'If the answer can be delivered inline, write the concise final answer now. Mention evidence gaps plainly instead of trying to fill them.',
+    ].join(' '),
+  } as ChatMessageParam
+}
+
+function iterationBudgetFinalizationReserve(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): number {
+  const savedArtifactRequired = taskNeedsSavedFinalArtifact(state, messages)
+  const deliverableBudget = state.deliverableStepBudget || 0
+  const artifactReserve = savedArtifactRequired
+    ? Math.max(18, Math.min(34, deliverableBudget + 6))
+    : Math.max(10, Math.min(18, Math.ceil(deliverableBudget * 0.7) || 10))
+  const remainingPlanSteps = state.currentPlanItems
+    ? Math.max(0, state.currentPlanItems.length - state.currentStepIdx - 1)
+    : 0
+  return artifactReserve + Math.min(8, remainingPlanSteps * 2)
+}
+
+function shouldStartIterationBudgetFinalization(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  void state
+  void messages
+  // Do not jump from an unfinished research phase straight to the final
+  // deliverable. That made reports look complete while intermediate plan steps
+  // were skipped. Per-step policies can still advance a worked phase, and the
+  // true runtime-deadline finalizer only runs once the agent is already on the
+  // final step.
+  return false
+}
+
+function iterationBudgetFinalizationMessage(state: AgentStateData, overrunStep: string): ChatMessageParam {
+  return {
+    role: 'system',
+    content: [
+      'ITERATION BUDGET FINALIZATION: stop source gathering and produce the final user-facing result now.',
+      `The task spent too long on "${overrunStep}", so use the gathered evidence and clearly mention any important gaps inside the output.`,
+      'Do not call web_search, read_document, browser tools, image_search, or optional verification.',
+      'If a file/report is required, make exactly one create_file call for the final output under deliverables/; continue with append_file only if the write is clipped.',
+      'If the answer belongs in chat, write the answer directly now.',
     ].join(' '),
   } as ChatMessageParam
 }
@@ -400,6 +637,7 @@ export interface AgentLoopOptions {
       content?: string
       contentEncoding?: 'text' | 'data-url'
       url?: string
+      sandboxPath?: string
       persisted?: boolean
       preview?: string
     }>
@@ -412,6 +650,15 @@ export interface AgentLoopOptions {
   creditRunId?: string
   userId?: string
   skipStartupAcknowledgement?: boolean
+  startupReadyPromise?: Promise<unknown>
+  startupPlan?: {
+    items: string[]
+    scopes?: Array<string | null>
+  }
+  runMaxDurationMs?: number
+  deadlineFinalizationBufferMs?: number
+  deadlineModelTurnTimeoutMs?: number
+  deadlineHardStopBufferMs?: number
   diagnostics?: (event: { type: string; data: Record<string, unknown> }) => void
 }
 
@@ -420,6 +667,8 @@ export interface AgentLoopOptions {
 type Phase = 'PLANNING' | 'STREAMING' | 'EXECUTING_TOOLS' | 'EVALUATING' | 'COMPLETE' | 'ERROR'
 
 const AUTOSAVE_DRAFT_MIN_CHARS = 1200
+const FINAL_AUTOSAVE_DRAFT_MIN_CHARS = 600
+const TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS = 3_500
 const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 const MAX_PLANNING_SKILL_CHARS = 18_000
 const MAX_PLANNING_ATTACHMENT_CHARS = 12_000
@@ -469,7 +718,31 @@ const BROWSER_STEP_START_RUNTIME_TOOLS = new Set([
 
 const RESEARCH_FILE_WRITE_RUNTIME_TOOLS = new Set(['create_file', 'edit_file', 'append_file'])
 const RESEARCH_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search'])
+const RESEARCH_COLD_BROWSER_RUNTIME_TOOLS = new Set(['browser_navigate', 'browse_page', 'browser_get_content'])
 const FIXED_WEB_SEARCH_RUNTIME_TOOLS = new Set(['web_search'])
+const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
+  'web_search',
+  'read_document',
+  'http_request',
+  'image_search',
+  'browser_get_content',
+  'browser_navigate',
+])
+const COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS = new Set([
+  'web_search',
+  'read_document',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+  'browser_scroll',
+])
+const COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS = new Set([
+  'web_search',
+  'read_document',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+])
 const BUILD_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
 const FINAL_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
 const BROWSER_ADVANCED_POINTER_TOOLS = new Set(['browser_click_and_hold', 'browser_drag', 'browser_hover'])
@@ -489,13 +762,20 @@ function slugifyDraftName(input: string): string {
   return slug || 'draft'
 }
 
-function shouldAutosaveTextOnlyDraft(state: AgentStateData, content: string): boolean {
+function shouldAutosaveTextOnlyDraft(
+  state: AgentStateData,
+  content: string,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
   const text = cleanDraftContent(content)
-  if (text.length < AUTOSAVE_DRAFT_MIN_CHARS) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
 
   const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
-  if (isLastStep) return true
+  if (isLastStep) {
+    return text.length >= FINAL_AUTOSAVE_DRAFT_MIN_CHARS && taskNeedsSavedFinalArtifact(state, messages)
+  }
+
+  if (text.length < AUTOSAVE_DRAFT_MIN_CHARS) return false
 
   return state.currentPhase === 'build' ||
     state.taskStrategy === 'build' ||
@@ -515,8 +795,19 @@ function autosaveDraftPath(state: AgentStateData): string {
 function shouldKeepAssistantInjection(content: string): boolean {
   const text = content.trim()
   if (!text) return false
+  if (looksLikeFutureOnlyAssistantInjection(text)) return false
   if (text.length >= 240) return true
   return /```|^#{1,6}\s|^\s*[-*]\s+\S/m.test(text)
+}
+
+function looksLikeFutureOnlyAssistantInjection(content: string): boolean {
+  const text = content.trim().toLowerCase()
+  if (!text) return false
+  const futureAction =
+    /\b(?:i(?:'|’)?ll|i will|let me|now i(?:'|’)?ll|i(?:'|’)?m going to|i am going to|next,?\s+i(?:'|’)?ll|next,?\s+i will)\b.{0,180}\b(?:build|create|write|research|implement|fix|add|start|run|check|verify|open|browse|search|continue|make|get|fetch|load|read|visit|pivot)\b/i.test(text)
+  const concreteOutput =
+    /```|^#{1,6}\s|^\s*[-*]\s+\S|\b(?:answer|verdict|summary|finding|conclusion|recommendation):/mi.test(content)
+  return futureAction && !concreteOutput
 }
 
 function containsFalseCapabilityRefusal(content: string): boolean {
@@ -571,6 +862,74 @@ function taskWantsPdfArtifact(
   return /\b(?:pdf|export)\b/i.test(`${currentToolIntentText(state)} ${userText}`)
 }
 
+function explicitSavedFinalArtifactRequested(text: string): boolean {
+  const cleaned = text
+    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
+    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
+  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
+  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
+    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
+    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
+    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned) ||
+    taskDefaultsToMarkdownDeliverable(text)
+  return positiveArtifactRequest && !declinesSavedArtifact
+}
+
+function originalRequestPrefersInlineBrief(text: string): boolean {
+  if (!text) return false
+  if (explicitSavedFinalArtifactRequested(text)) return false
+  return /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast)\b/i.test(text)
+}
+
+function taskNeedsSavedFinalArtifact(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const userText = messages
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .join(' ')
+  if (originalRequestPrefersInlineBrief(userText)) return false
+  const taskText = `${currentToolIntentText(state)} ${userText}`
+  return state.buildTask ||
+    state.taskStrategy === 'build' ||
+    state.taskStrategy === 'code' ||
+    state.taskStrategy === 'creative' ||
+    explicitSavedFinalArtifactRequested(taskText)
+}
+
+function isBriefInlineDirectAnswerTask(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const userText = messages
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .join(' ')
+  const taskText = `${currentToolIntentText(state)} ${userText}`.toLowerCase()
+  if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|serious analysis|strategic|technical|comparative)\b/.test(taskText)) {
+    return false
+  }
+  const brief = /\b(?:brief|briefly|quick|quickly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/.test(taskText)
+  const inline = /\b(?:no file|no document|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/.test(taskText)
+  return (brief || inline) && !taskNeedsSavedFinalArtifact(state, messages)
+}
+
+function shouldAutoAdvanceBriefInlineResearchAfterTools(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+  results: ToolExecutionResult[],
+): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
+  if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return false
+  if (!isBriefInlineDirectAnswerTask(state, messages)) return false
+  if (!results.some(result => !result.isError)) return false
+  const openedOrExtractedSource = state.stepVisitedUrls.size > 0 || stepOpenedSourceDomains(state).size > 0
+  const usefulDiscovery = state.stepSearchQueries.size > 0 || state.stepSourceDomainCounts.size > 0
+  return openedOrExtractedSource ||
+    (state.stepResearchCallCount >= 2 && usefulDiscovery)
+}
+
 function isLeanFinalSynthesisStep(state: AgentStateData): boolean {
   return !!state.currentPlanItems &&
     state.currentPlanItems.length > 0 &&
@@ -578,6 +937,286 @@ function isLeanFinalSynthesisStep(state: AgentStateData): boolean {
     state.currentPhase === 'deliver' &&
     (state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.taskStrategy === 'general') &&
     !state.buildTask
+}
+
+function finalInlineAnswerTurn(state: AgentStateData, messages: Array<{ role: string; content: string }>): boolean {
+  return isLeanFinalSynthesisStep(state) && !taskNeedsSavedFinalArtifact(state, messages)
+}
+
+function shouldCompleteFinalInlineAnswerTurn(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+  content: string,
+): boolean {
+  if (!finalInlineAnswerTurn(state, messages)) return false
+  const text = content.trim()
+  if (text.length < 80) return false
+  const startsLikeStatus =
+    /^(?:i(?:'|’)?ll|i will|i am going to|we(?:'|’)?ll|let me|next,?\s+i|now,?\s+i)\b/i.test(text) ||
+    /\blet me\b/i.test(text.slice(0, 240)) ||
+    /\b(?:i|we)\s+(?:found|checked|searched|gathered|looked|reviewed)\b.{0,180}\b(?:but|so|next|instead)\b/i.test(text.slice(0, 260)) ||
+    /\b(?:will|going to)\s+(?:research|gather|compare|summari[sz]e|investigate|check|look up|write|produce)\b/i.test(text.slice(0, 220))
+  if (startsLikeStatus && text.length < 240) return false
+  return /[.!?)]\s*$/.test(text) || text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS
+}
+
+function finalSavedDeliverableTurn(state: AgentStateData, messages: Array<{ role: string; content: string }>): boolean {
+  return isLeanFinalSynthesisStep(state) && taskNeedsSavedFinalArtifact(state, messages)
+}
+
+function shouldUseTextSavedFinalDeliverable(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  return ASSISTANT_PROVIDER === 'openrouter' &&
+    finalSavedDeliverableTurn(state, messages) &&
+    !state.partialFileWriteRecoveryPending &&
+    !hasSavedFinalDeliverableCandidate(state)
+}
+
+function hasSavedFinalDeliverableCandidate(state: AgentStateData): boolean {
+  return state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable')
+}
+
+function latestSavedFinalDeliverablePath(state: AgentStateData): string | null {
+  return state.workLedger.deliverableCandidates
+    .filter(item => item.purpose === 'deliverable' && item.path)
+    .slice(-1)[0]?.path || null
+}
+
+function savedFinalDeliverableMinimumChars(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): number {
+  const taskText = `${state.originalUserRequest || ''} ${currentToolIntentText(state)} ${messages.map(m => m.content).join(' ')}`.toLowerCase()
+  const originalRequest = state.originalUserRequest || ''
+  const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(originalRequest)
+  const requestedSavedReport = taskDefaultsToMarkdownDeliverable(originalRequest)
+  if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|long report|serious analysis|technical)\b/.test(taskText)) {
+    return 4_800
+  }
+  if (requestLooksBrief) {
+    return requestedSavedReport ? 2_200 : 1_400
+  }
+  return 2_600
+}
+
+function shouldContinueSavedFinalDeliverableChunk(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+  path: string,
+  content: string,
+): boolean {
+  if (!finalSavedDeliverableTurn(state, messages)) return false
+  if (!path || !path.toLowerCase().endsWith('.md')) return false
+  if (state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS) return false
+  return content.trim().length < savedFinalDeliverableMinimumChars(state, messages)
+}
+
+function finalSavedDeliverableToolCallInstruction(
+  state: AgentStateData,
+  reason: string,
+): string {
+  const pending = state.partialFileWriteRecoveryPending
+  const existingPath = latestSavedFinalDeliverablePath(state)
+  const target = pending
+    ? `Use append_file to continue "${pending.path}".`
+    : existingPath
+      ? `Use append_file or edit_file against "${existingPath}".`
+      : 'Use create_file for the final saved output under deliverables/ unless the user named a different path.'
+  const chunkGuidance = !pending && !existingPath
+    ? 'For the first create_file call, save a fast opening chunk only: title, short intro, and the first useful section. Do not try to finish the whole deliverable in this first call.'
+    : 'Append the next useful chunk only. Do not repeat existing content.'
+
+  return [
+    reason,
+    target,
+    chunkGuidance,
+    'Make exactly one native file tool call now with strict JSON object arguments.',
+    'Put action_label, plan_step_index, and path before content so the file action starts immediately.',
+    'Do not write visible prose, a status update, a plan, a source count, or a permission question.',
+    'The worker will keep the same final phase active until the saved output is complete.',
+  ].join(' ')
+}
+
+function finalInlineAnswerPrompt(state: AgentStateData): string {
+  const request = state.originalUserRequest?.trim()
+  const step = state.currentPlanItems?.[state.currentStepIdx] || 'the final answer'
+  const retry = state.consecutiveNoToolCalls > 0 || state.timeoutNudgeCount > 0
+    ? 'A previous final-turn response was too slow or did not answer directly enough. Begin the answer immediately in the first sentence.'
+    : 'This response must be the answer itself.'
+  return [
+    'FINAL INLINE ANSWER NOW: The user expects the final response in chat, not a saved file.',
+    retry,
+    request ? `User request: ${request}.` : '',
+    `Current final task: ${step}.`,
+    'Start with the answer content: a clear heading or the first factual sentence. Do not spend a separate hidden planning pass before writing.',
+    'Do not write a status update, plan, tool label, action label, or permission question.',
+    'Use the gathered evidence; if evidence is thin, answer with a brief caveat rather than searching, planning, or narrating.',
+    'If the user explicitly asked for an inline report/no-file answer, write the actual report with concrete substance and stop.',
+  ].filter(Boolean).join(' ')
+}
+
+function finalSavedDeliverablePrompt(state: AgentStateData): string {
+  const request = state.originalUserRequest?.trim()
+  const step = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable'
+  const pendingPartial = state.partialFileWriteRecoveryPending
+  if (pendingPartial) {
+    return [
+      `PARTIAL FILE CONTINUATION NOW: make exactly one native append_file call to "${pendingPartial.path}" immediately.`,
+      request ? `User request: ${request}.` : '',
+      `Current final task: ${step}.`,
+      `The existing file already contains ${pendingPartial.lines} lines / ${pendingPartial.chars} characters from a recovered clipped write.`,
+      'Do not call create_file, edit_file, read_file, list_files, export_pdf, or any research/browser tool.',
+      'Do not write visible prose, a status update, a plan, a source summary, or a permission question.',
+      'Append only the next missing section or chunk. Do not repeat already-written content, and do not emit <next_step/> until after a successful append clears this partial-file state.',
+      'Use the full output budget for the append_file content so long reports and code files continue instead of restarting.',
+    ].filter(Boolean).join(' ')
+  }
+  return [
+    'FINAL SAVED DELIVERABLE NOW: make exactly one native file tool call immediately.',
+    request ? `User request: ${request}.` : '',
+    `Current final task: ${step}.`,
+    'Do not write a status update, plan, source summary, or permission question.',
+    'Use create_file for the first saved output; use append_file only after a file exists; use edit_file only for a targeted fix.',
+    'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
+    'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
+    'For the first create_file call, write only a fast opening chunk: title, short intro, and first useful section. The worker will continue with append_file chunks until the saved output is complete.',
+  ].filter(Boolean).join(' ')
+}
+
+function finalSavedDeliverableTextPrompt(state: AgentStateData): string {
+  const request = state.originalUserRequest?.trim()
+  const step = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable'
+  return [
+    'FINAL SAVED DELIVERABLE TEXT NOW: write the actual final Markdown content directly.',
+    request ? `User request: ${request}.` : '',
+    `Current final task: ${step}.`,
+    'Start with a clear Markdown title and the useful content itself.',
+    'Do not write a status update, source count, plan, permission question, tool label, action label, or note about attaching/saving a file.',
+    'The app will save this exact Markdown content as the deliverable after you finish writing it.',
+    'Use the gathered evidence and be concise, but include enough substance for the task.',
+  ].filter(Boolean).join(' ')
+}
+
+function finalInlineAnswerTaskText(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): string {
+  const userText = messages
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .join(' ')
+  return `${state.originalUserRequest || ''} ${currentToolIntentText(state)} ${currentStepText(state)} ${userText}`.toLowerCase()
+}
+
+function finalInlineAnswerMaxTokens(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): number {
+  const taskText = finalInlineAnswerTaskText(state, messages)
+  const wantsReportDepth = /\b(?:report|memo|briefing|essay|article|write[-\s]?up|deep|detailed|comprehensive|analysis|evaluate|compare|assessment)\b/i.test(taskText)
+  if (wantsReportDepth) return FINAL_INLINE_REPORT_MAX_TOKENS
+  return FINAL_INLINE_ANSWER_MAX_TOKENS
+}
+
+function isFastActionToolTurn(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (state.forceTextNextIteration || state.exactExtractionGuardPending) return false
+  if (state.deadlineFinalizationStarted) return false
+  if (finalInlineAnswerTurn(state, messages) || finalSavedDeliverableTurn(state, messages)) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.currentPhase === 'deliver') return false
+
+  return state.taskStrategy === 'browse' ||
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    state.taskStrategy === 'build' ||
+    state.taskStrategy === 'code' ||
+    state.currentPhase === 'research' ||
+    state.currentPhase === 'build' ||
+    state.consecutiveNoToolCalls > 0 ||
+    state.browserNoToolRecoveryAttempts > 0 ||
+    state.researchNoToolRecoveryAttempts > 0
+}
+
+function isFastSourceActionToolTurn(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (!isFastActionToolTurn(state, messages)) return false
+  return state.taskStrategy === 'browse' ||
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    state.currentPhase === 'research'
+}
+
+function shouldUseNaturalCadenceNarration(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (state.forceTextNextIteration || state.exactExtractionGuardPending) return false
+  if (state.deadlineFinalizationStarted) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.visibleToolActionsSinceLastNarration < NARRATION_THRESHOLD_DEFAULT) return false
+  if (state.partialFileWriteRecoveryPending) return false
+  if (finalInlineAnswerTurn(state, messages) || finalSavedDeliverableTurn(state, messages)) return false
+  return true
+}
+
+function tierTimeoutsForIteration(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+  compactNarration = false,
+): TierTimeouts {
+  if (compactNarration || state.forceTextNextIteration) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FORCED_NARRATION_ITERATION_TIMEOUT_MS),
+      inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FORCED_NARRATION_INACTIVITY_TIMEOUT_MS),
+      contentOnlyTimeoutMs: FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS,
+      contentOnlyMinChars: 80,
+    }
+  }
+  if (shouldUseTextSavedFinalDeliverable(state, messages)) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: FINAL_SAVED_DELIVERABLE_TEXT_ITERATION_TIMEOUT_MS,
+      inactivityTimeoutMs: FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS,
+      contentOnlyTimeoutMs: FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS,
+      contentOnlyMinChars: FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS,
+    }
+  }
+  if (finalSavedDeliverableTurn(state, messages)) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS),
+      inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS),
+      contentOnlyTimeoutMs: FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS,
+      contentOnlyMinChars: FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS,
+    }
+  }
+  if (isFastActionToolTurn(state, messages)) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FAST_ACTION_ITERATION_TIMEOUT_MS),
+      inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FAST_ACTION_INACTIVITY_TIMEOUT_MS),
+      contentOnlyTimeoutMs: state.tierTimeouts.contentOnlyTimeoutMs === null
+        ? null
+        : Math.min(state.tierTimeouts.contentOnlyTimeoutMs, FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS),
+      contentOnlyMinChars: Math.min(state.tierTimeouts.contentOnlyMinChars, FAST_ACTION_CONTENT_ONLY_MIN_CHARS),
+    }
+  }
+  if (!finalInlineAnswerTurn(state, messages)) return state.tierTimeouts
+  return {
+    ...state.tierTimeouts,
+    iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS),
+    inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS),
+    contentOnlyTimeoutMs: FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS,
+    contentOnlyMinChars: FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS,
+  }
 }
 
 function isNonFinalBrowserStep(state: AgentStateData): boolean {
@@ -603,6 +1242,29 @@ function filterToolDefinitions(
     const name = tool.function?.name || ''
     return allowed.has(name)
   })
+}
+
+function toolStepRateLimitReached(state: AgentStateData, toolName: string): boolean {
+  const limit = toolTypeRateLimitForState(state, toolName)
+  if (limit === undefined) return false
+  return (state.stepToolTypeCounts.get(toolName) || 0) >= limit
+}
+
+function pruneExhaustedStepToolsForCurrentTurn(
+  state: AgentStateData,
+  tools: ToolDefinitionLike[],
+): { tools: ToolDefinitionLike[]; exhausted: string[] } {
+  const exhausted = new Set<string>()
+  const filtered = tools.filter(tool => {
+    const name = tool.function?.name || ''
+    if (!name || !toolStepRateLimitReached(state, name)) return true
+    exhausted.add(name)
+    return false
+  })
+  return {
+    tools: filtered,
+    exhausted: [...exhausted],
+  }
 }
 
 function compactToolDefinitionsForModel(tools: ToolDefinitionLike[]): ToolDefinitionLike[] {
@@ -650,6 +1312,124 @@ function researchStepAllowsSupportFileTools(state: AgentStateData): boolean {
 function researchStepAllowsImageSearch(state: AgentStateData): boolean {
   if (state.currentPhase !== 'research') return true
   return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|return|download|real one|use real|logo|logos|icon|icons|illustration|illustrations)\b/i.test(currentToolIntentText(state))
+}
+
+function shouldPreferExtractionBeforeColdBrowser(state: AgentStateData): boolean {
+  if (state.taskStrategy === 'browse') return false
+  if (state.currentPhase === 'build' || state.currentPhase === 'deliver') return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.userProvidedUrl) return false
+  if (state.stepResearchCallCount > 0 || state.stepVisitedUrls.size > 0) return false
+
+  return /\b(?:research|source|sources|cite|citation|pricing|price|latest|current|recent|fact|facts|verify|check|find|fetch|gather|read|extract|report|analysis|compare)\b/i.test(currentToolIntentText(state))
+}
+
+function shouldUseCompactResearchRecoveryTools(state: AgentStateData): boolean {
+  if (!shouldUseCompactResearchTurn(state)) return false
+  if (!compactResearchNeedsToolAction(state)) return false
+  return state.consecutiveNoToolCalls > 0 ||
+    (state.stepToolCallCount > 0 && state.stepResearchCallCount === 0)
+}
+
+function compactResearchRecoveryToolsForState(
+  state: AgentStateData,
+  tools: ToolDefinitionLike[],
+): ToolDefinitionLike[] {
+  const allowed = new Set(COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS)
+  if (!researchStepAllowsImageSearch(state)) allowed.delete('image_search')
+  if (!hasRenderedBrowserContext(state)) allowed.delete('browser_get_content')
+  const needsOpenedSourceRoute = compactResearchNeedsOpenedSource(state) ||
+    state.suppressedResearchToolName === 'read_document'
+  if (!state.userProvidedUrl && state.stepResearchCallCount > 0 && !needsOpenedSourceRoute) {
+    allowed.delete('browser_navigate')
+  }
+  const narrowed = filterToolDefinitions(tools, allowed)
+  return narrowed.length > 0 ? narrowed : tools
+}
+
+function compactResearchOpenedSourceToolsForState(
+  state: AgentStateData,
+  tools: ToolDefinitionLike[],
+): ToolDefinitionLike[] {
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const candidateDomains = state.stepSourceDomainCounts.size
+  const needsAlternateSourceRoute =
+    state.suppressedResearchToolName === 'read_document' ||
+    state.stepLoopDetections > 0 ||
+    state.consecutiveNoToolCalls > 0 ||
+    (state.stepResearchCallCount >= 2 && openedDomains < Math.min(2, Math.max(1, candidateDomains)))
+
+  const allowed = needsAlternateSourceRoute
+    ? new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
+    : new Set(['read_document'])
+  if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
+  if (!hasRenderedBrowserContext(state)) {
+    allowed.delete('browser_get_content')
+    allowed.delete('browser_find_text')
+    allowed.delete('browser_scroll')
+  }
+  const narrowed = filterToolDefinitions(tools, allowed)
+  return narrowed.length > 0 ? narrowed : tools
+}
+
+function compactResearchSourceRecoveryToolsForState(
+  state: AgentStateData,
+  currentTools: ToolDefinitionLike[],
+  sourcePool: ToolDefinitionLike[],
+): ToolDefinitionLike[] {
+  const hasPrimarySourceRoute = currentTools.some(tool =>
+    COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS.has(tool.function?.name || ''),
+  )
+  if (hasPrimarySourceRoute) return currentTools
+
+  const allowed = new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
+  if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
+  if (!hasRenderedBrowserContext(state)) {
+    allowed.delete('browser_get_content')
+    allowed.delete('browser_find_text')
+    allowed.delete('browser_scroll')
+  }
+  const recovered = filterToolDefinitions(sourcePool, allowed)
+  const recoveredHasPrimarySourceRoute = recovered.some(tool =>
+    COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS.has(tool.function?.name || ''),
+  )
+  return recoveredHasPrimarySourceRoute ? recovered : currentTools
+}
+
+function loopRecoveryToolForState(
+  state: AgentStateData,
+  tools: ToolDefinitionLike[],
+): ToolDefinitionLike[] {
+  const suppressed = state.suppressedResearchToolName
+  if (!suppressed) return tools
+
+  if (suppressed === 'web_search' && state.stepLoopDetections >= 1) {
+    const names = hasRenderedBrowserContext(state)
+      ? ['read_document', 'browser_navigate', 'browser_get_content', 'browser_find_text']
+      : ['read_document', 'browser_navigate']
+    const narrowed = tools.filter(tool => names.includes(tool.function?.name || ''))
+    if (narrowed.length > 0) return narrowed
+  }
+
+  if (state.stepLoopDetections < 2) return tools
+
+  const preferred = suppressed === 'read_document'
+    ? ['browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search']
+    : ['read_document', 'web_search', 'browser_get_content', 'browser_navigate', 'browser_find_text']
+
+  const narrowed = tools.filter(tool => {
+    const name = tool.function?.name || ''
+    if (name === suppressed) return false
+    if ((name === 'browser_get_content' || name === 'browser_find_text') && !hasRenderedBrowserContext(state)) return false
+    return preferred.includes(name)
+  })
+  if (narrowed.length > 0) return narrowed
+  return tools.length > 1 ? tools.slice(0, 1) : tools
+}
+
+function hasRenderedBrowserContext(state: AgentStateData): boolean {
+  const signature = state.lastBrowserStateHash
+  return !!signature && signature !== '||0'
 }
 
 function currentToolIntentText(state: AgentStateData): string {
@@ -742,32 +1522,43 @@ function pruneToolsForCurrentStep(state: AgentStateData, tools: ToolDefinitionLi
       return !BROWSER_ADVANCED_POINTER_TOOLS.has(name) && (name !== 'read_document' || browserStepAllowsDocumentTool(state))
     })
   }
+  let stepTools = tools
+  if (shouldPreferExtractionBeforeColdBrowser(state)) {
+    const narrowed = stepTools.filter(tool => !RESEARCH_COLD_BROWSER_RUNTIME_TOOLS.has(tool.function?.name || ''))
+    if (narrowed.length > 0) stepTools = narrowed
+  }
   if (state.currentPhase === 'research') {
     if (explicitWebSearchLimitFromText(state.originalUserRequest || '') !== null) {
-      return filterToolDefinitions(tools, FIXED_WEB_SEARCH_RUNTIME_TOOLS)
+      return filterToolDefinitions(stepTools, FIXED_WEB_SEARCH_RUNTIME_TOOLS)
     }
     const allowSupportFiles = researchStepAllowsSupportFileTools(state)
     const allowImageSearch = researchStepAllowsImageSearch(state)
-    return tools.filter(tool => {
+    const allowColdBrowserOpen =
+      !!state.userProvidedUrl ||
+      state.stepResearchCallCount > 0 ||
+      state.stepVisitedUrls.size > 0 ||
+      state.suppressedResearchToolName === 'read_document'
+    return stepTools.filter(tool => {
       const name = tool.function?.name || ''
       if (!allowSupportFiles && RESEARCH_FILE_WRITE_RUNTIME_TOOLS.has(name)) return false
       if (!allowImageSearch && RESEARCH_OPTIONAL_RUNTIME_TOOLS.has(name)) return false
+      if (!allowColdBrowserOpen && RESEARCH_COLD_BROWSER_RUNTIME_TOOLS.has(name)) return false
       return true
     })
   }
   if (state.currentPhase === 'build') {
-    return tools.filter(tool => {
+    return stepTools.filter(tool => {
       const name = tool.function?.name || ''
       return !BUILD_OPTIONAL_RUNTIME_TOOLS.has(name) || buildStepAllowsOptionalTool(state, name)
     })
   }
   if (state.currentPhase === 'deliver') {
-    return tools.filter(tool => {
+    return stepTools.filter(tool => {
       const name = tool.function?.name || ''
       return !FINAL_OPTIONAL_RUNTIME_TOOLS.has(name) || finalStepAllowsOptionalTool(state, name)
     })
   }
-  return tools
+  return stepTools
 }
 
 function selectedSkillAttachments(messages: AgentLoopOptions['messages']): Array<{ name: string; content: string }> {
@@ -809,9 +1600,10 @@ function uploadedAttachmentNames(messages: AgentLoopOptions['messages']): string
 
 function describeAttachmentForContext(attachment: AgentAttachment): string {
   const size = attachment.size > 0 ? `, ${Math.round(attachment.size / 1024)} KB` : ''
+  const sandboxPath = attachment.sandboxPath ? `, sandbox path: ${attachment.sandboxPath}` : ''
   if (attachment.type.startsWith('image/')) return `Image: ${attachment.name} (${attachment.type}${size})`
   if (attachment.type === SKILL_ATTACHMENT_TYPE) return `Selected skill file: ${attachment.name}${size ? ` (${Math.round(attachment.size / 1024)} KB)` : ''}`
-  return `Attached file: ${attachment.name} (${attachment.type || 'unknown type'}${size})`
+  return `Attached file: ${attachment.name} (${attachment.type || 'unknown type'}${size}${sandboxPath})`
 }
 
 function attachmentSummaryForContext(message: AgentLoopOptions['messages'][number], includeSkills = false): string {
@@ -833,7 +1625,7 @@ function attachmentContextForPlanning(message: AgentLoopOptions['messages'][numb
   const sections = [
     'UPLOADED ATTACHMENT HANDLING:',
     'These files came from the user upload UI, not the public web. If the user asks about them, plan from the uploaded attachment context first.',
-    'Do not plan web_search for an uploaded filename/title. Do not plan read_file/open-local-path steps for uploaded attachments; read_file is only for files created in the task workspace.',
+    'Do not plan web_search for an uploaded filename/title. If a sandbox path is listed, inspect that exact uploaded sandbox file with document or terminal tools when file contents are needed.',
     'Use web/browsing only if the user explicitly asks for outside/current information beyond the attachment.',
   ]
 
@@ -846,13 +1638,22 @@ function attachmentContextForPlanning(message: AgentLoopOptions['messages'][numb
         : content
       sections.push(`--- Uploaded attachment text: ${attachment.name} ---\n${excerpt}\n--- End uploaded attachment text: ${attachment.name} ---`)
     } else if (attachment.type.startsWith('image/')) {
-      sections.push([
-        `Image attachment ${attachment.name} is already available as high-detail visual input at runtime.`,
-        'For image questions, inspect the uploaded image directly from the visual input.',
-        'Do not create browser/open/current-view/extract-text/read_file/web_search steps for the uploaded image filename.',
-      ].join(' '))
+      sections.push(ASSISTANT_SUPPORTS_IMAGE_INPUT
+        ? [
+            `Image attachment ${attachment.name} is already available as high-detail visual input at runtime.`,
+            'For image questions, inspect the uploaded image directly from the visual input.',
+            'Do not create browser/open/current-view/extract-text/read_file/web_search steps for the uploaded image filename.',
+          ].join(' ')
+        : [
+            `Image attachment ${attachment.name} was uploaded, but the active model route does not accept direct image input.`,
+            'Use any extracted text or metadata already present.',
+            'If the user needs visual interpretation of the image itself, explain that direct image inspection is not available on this route.',
+            'Do not web_search the uploaded image filename unless the user explicitly asks for outside/current information.',
+          ].join(' '))
     } else {
-      sections.push(`No extracted text is currently loaded for ${attachment.name}. If runtime still lacks content, report that this uploaded file could not be read instead of searching the web for the filename.`)
+      sections.push(attachment.sandboxPath
+        ? `No extracted text is currently loaded for ${attachment.name}. A sandbox copy is listed at ${attachment.sandboxPath}; use that path with document or terminal tools if the file contents are required.`
+        : `No extracted text is currently loaded for ${attachment.name}. If runtime still lacks content, report that this uploaded file could not be read instead of searching the web for the filename.`)
     }
   }
 
@@ -908,18 +1709,26 @@ function requiredAttachmentPlanSteps(messages: AgentLoopOptions['messages']): Re
   const names = uploadedAttachmentNames(messages)
   const readableName = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2} more` : '')
   const firstReadable = readableUploadedAttachments(messages)[0]
-  const hasVisualImages = visualImageUploadedAttachments(messages).length > 0
+  const hasVisualImages = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
+  const hasTextOnlyImages = !ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
+  const hasSandboxUploads = attachments.some(attachment => !!attachment.sandboxPath)
   const contentPreview = firstReadable?.content
     ? firstReadable.content.slice(0, MAX_PRELOADED_ATTACHMENT_PANEL_CHARS)
     : hasVisualImages
       ? 'Uploaded image visual content is available as high-detail model input. No browser opening, current-view extraction, or filename search is required.'
+      : hasTextOnlyImages
+        ? 'Uploaded image metadata was loaded, but this model route cannot inspect the image pixels directly.'
       : 'Uploaded attachment metadata was loaded, but no extracted text was available in context.'
   const titlePrefix = hasVisualImages
     ? `Visually inspect uploaded image${names.length === 1 ? '' : 's'}`
     : `Read uploaded attachment${names.length === 1 ? '' : 's'}`
   const scope = hasVisualImages
     ? 'Runtime preflight only: uploaded image bytes are already loaded as high-detail visual input in the model context. Inspect the attached image directly from that visual input. Do not plan browser/open/current-view/extract-text/read_file/web_search steps for the image filename. Use web/browsing only if the user explicitly asks for outside/current information beyond the image.'
-    : 'Runtime preflight only: uploaded attachment content is loaded from the message/server and must be used as the source context. Do not web_search uploaded filenames. Do not use read_file for uploaded attachment names.'
+    : hasTextOnlyImages
+      ? 'Runtime preflight only: uploaded image metadata is loaded, but the active model route cannot inspect image pixels directly. Use extracted text/metadata if present; otherwise report that direct image inspection is unavailable on this route. Do not web_search uploaded filenames unless the user explicitly asks for outside/current information.'
+    : hasSandboxUploads
+      ? 'Runtime preflight only: uploaded attachment metadata is loaded and sandbox copies are available at the listed paths. Use extracted message text if present; otherwise inspect the listed sandbox path with document or terminal tools. Do not web_search uploaded filenames.'
+      : 'Runtime preflight only: uploaded attachment content is loaded from the message/server and must be used as the source context. Do not web_search uploaded filenames. Do not use read_file for uploaded attachment names.'
 
   return [{
     title: `${titlePrefix}: ${readableName || 'provided file'}`,
@@ -959,6 +1768,7 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
       return { role: m.role, content: m.content }
     }
 
+    const hasUploadedAttachments = m.attachments.some(a => a.type !== SKILL_ATTACHMENT_TYPE)
     const imageAttachments = m.attachments.filter(a => a.type.startsWith('image/') && a.content)
     const textAttachments = m.attachments.filter(a =>
       !a.type.startsWith('image/') &&
@@ -967,6 +1777,9 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
     )
 
     let textContent = m.content
+    if (hasUploadedAttachments) {
+      textContent += `\n\n${attachmentSummaryForContext(m, false)}`
+    }
     let remainingAttachmentChars = MAX_CONTEXT_ATTACHMENT_CHARS
     for (const att of textAttachments) {
       if (!att.content) continue
@@ -991,8 +1804,8 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
       textContent += `\n\n--- ${label}: ${att.name} ---${instruction}\n${truncated}\n--- End of ${att.name} ---`
     }
 
-    if (imageAttachments.length > 0) {
-      textContent += `\n\n${attachmentSummaryForContext(m, false)}\nUse the attached image content below as visual input; do not claim the image was unavailable.`
+    if (imageAttachments.length > 0 && ASSISTANT_SUPPORTS_IMAGE_INPUT) {
+      textContent += '\n\nUse the attached image content below as visual input; do not claim the image was unavailable.'
       const parts: Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }> = [
         { type: 'text', text: textContent },
       ]
@@ -1003,6 +1816,27 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
         })
       }
       return { role: m.role, content: parts }
+    }
+
+    if (imageAttachments.length > 0) {
+      textContent += '\n\nUploaded image bytes are stored with the conversation, but the active DeepSeek API route does not accept direct image input. Use any extracted text or metadata already loaded; if the user asks for visual interpretation of the image itself, state that direct image inspection is unavailable on this route.'
+    }
+
+    const metadataOnlyAttachments = m.attachments.filter(a =>
+      a.type !== SKILL_ATTACHMENT_TYPE &&
+      !a.type.startsWith('image/') &&
+      !isReadableAttachmentContent(a)
+    )
+    if (metadataOnlyAttachments.length > 0) {
+      const hasSandboxCopies = metadataOnlyAttachments.some(att => !!att.sandboxPath)
+      textContent += [
+        '',
+        'Uploaded attachment metadata is present, but no extracted text was loaded for the following file(s):',
+        ...metadataOnlyAttachments.map(att => `- ${describeAttachmentForContext(att)}`),
+        hasSandboxCopies
+          ? 'Do not say no file was attached. Use the listed sandbox path with document or terminal tools when the user asks for the file contents.'
+          : 'Do not say no file was attached. Identify the file from this metadata and state that its contents could not be read from the provided upload context unless another tool supplies the contents.',
+      ].join('\n')
     }
 
     return { role: m.role, content: textContent }
@@ -1087,44 +1921,89 @@ async function getNextWebsiteCompletionBlocker(
 }
 
 function maxTokensForIteration(state: AgentStateData): number {
-  if (state.forceTextNextIteration) return 96
-  if (state.deadlineFinalizationStarted) return 4096
+  const maxNormalOutputTokens = 8192
+  const maxBuildOutputTokens = 24_576
+  const maxDeliverableOutputTokens = 24_576
+  if (state.deadlineFinalizationStarted) return maxDeliverableOutputTokens
   if (state.currentPhase === 'deliver') {
-    if (state.taskStrategy === 'creative') return 10_240
-    if (state.taskStrategy === 'build' || state.taskStrategy === 'code') return 6144
-    if (state.taskStrategy === 'research' || state.taskStrategy === 'analysis') {
-      return state.taskComplexity >= 3 ? 6144 : 4096
-    }
-    return 4096
+    return maxDeliverableOutputTokens
   }
-  if (state.taskStrategy === 'browse') return 1280
-  if (state.currentPhase === 'build') return state.taskStrategy === 'creative' ? 8192 : 3072
+  if (state.taskStrategy === 'browse') return 4096
+  if (state.currentPhase === 'build') return maxBuildOutputTokens
   if (state.taskStrategy === 'research' || state.taskStrategy === 'analysis') {
-    return state.taskComplexity >= 3 ? 2048 : state.taskComplexity >= 2 ? 1792 : 1024
+    return maxNormalOutputTokens
   }
-  return state.taskComplexity >= 2 ? 1536 : 768
+  return maxNormalOutputTokens
 }
 
 function shouldForceAgenticToolCall(state: AgentStateData, hasActivePlanStep: boolean): boolean {
   if (!hasActivePlanStep || state.currentPhase === 'deliver') return false
   if (state.taskStrategy === 'browse') return true
 
+  const stepLooksActionable = isResearchStepText(currentStepText(state))
   const agenticStep =
     state.taskStrategy === 'research' ||
     state.taskStrategy === 'analysis' ||
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'code' ||
     state.currentPhase === 'research' ||
-    state.currentPhase === 'build'
+    state.currentPhase === 'build' ||
+    stepLooksActionable
   if (!agenticStep) return false
 
   const complexity = state.taskComplexity as 1 | 2 | 3
   const requiredCalls = state.currentPhase === 'research' || state.taskStrategy === 'research' || state.taskStrategy === 'analysis'
-    ? (MIN_RESEARCH_CALLS_BY_COMPLEXITY[complexity] ?? MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 2)
+    ? researchDepthProfileForState(state).requiredCalls
     : (MIN_TOOL_CALLS_BY_COMPLEXITY[complexity] ?? 2)
   const earlyToolFloor = Math.min(requiredCalls, state.taskComplexity >= 3 ? 2 : 1)
 
   return state.stepToolCallCount < earlyToolFloor
+}
+
+const STARTUP_READY_REQUIRED_TOOLS = new Set([
+  'create_file',
+  'edit_file',
+  'append_file',
+  'export_pdf',
+  'read_file',
+  'list_files',
+  'delete_file',
+  'execute_command',
+  'run_code',
+])
+
+function parsedToolCallArgs(toolCall: ToolCallData): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(toolCall.arguments || '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function sourceLooksLocal(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  const text = value.trim()
+  if (!text) return false
+  if (/^(?:https?:|data:|blob:|mailto:|tel:)/i.test(text)) return false
+  return true
+}
+
+function toolCallNeedsStartupReady(toolCall: ToolCallData): boolean {
+  if (STARTUP_READY_REQUIRED_TOOLS.has(toolCall.name)) return true
+  if (toolCall.name === 'read_document') {
+    return sourceLooksLocal(parsedToolCallArgs(toolCall).source)
+  }
+  if (toolCall.name === 'http_request') {
+    return sourceLooksLocal(parsedToolCallArgs(toolCall).url)
+  }
+  return false
+}
+
+function toolCallsNeedStartupReady(toolCalls: Map<number, ToolCallData>): boolean {
+  return [...toolCalls.values()].some(toolCallNeedsStartupReady)
 }
 
 function messageText(content: ChatMessageParam['content']): string {
@@ -1171,7 +2050,9 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
   return [
     {
       role: 'system',
-      content: 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 15-20 words preferred, hard cap 34 words / 240 characters. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump.',
+      content: state.phaseEndNarrationPending
+        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 15-20 words preferred, hard cap 34 words / 240 characters before the marker. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
+        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 15-20 words preferred, hard cap 34 words / 240 characters. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
     },
     {
       role: 'user',
@@ -1180,7 +2061,331 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
   ]
 }
 
-function toolJsonRecoveryMessage(state: AgentStateData): string {
+function compactResearchTurnMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
+  const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Continue the research task.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'current research step'
+  const currentScope = state.currentPlanScopes?.[state.currentStepIdx]
+  const memoryText = state.workingMemory?.render({ stepIdx: state.currentStepIdx, maxFacts: 10, maxChars: 1000 }) || ''
+  const recentSources = state.researchActivity.entries
+    .filter(entry => entry.success && (entry.domain || entry.query || entry.url || entry.titles?.length))
+    .slice(-5)
+    .map(entry => {
+      const target = entry.domain || entry.url || entry.query || entry.tool
+      const titles = entry.titles?.slice(0, 2).join('; ')
+      return titles ? `${entry.kind}: ${target} - ${titles}` : `${entry.kind}: ${target}`
+    })
+  const recentActions = state.workLog
+    .slice(-5)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const findings = [...state.stepFindings.entries()]
+    .sort(([a], [b]) => a - b)
+    .slice(-4)
+    .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+
+  const context = [
+    `User request: ${request}`,
+    `Active phase: ${state.currentStepIdx + 1}/${state.currentPlanItems?.length || 1} - ${currentStep}`,
+    currentScope ? `Phase scope: ${currentScope}` : '',
+    memoryText,
+    recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
+    recentActions.length ? `Recent completed work:\n- ${recentActions.join('\n- ')}` : '',
+    findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n')
+
+  return [
+    {
+      role: 'system',
+      content: 'COMPACT RESEARCH TURN. Continue from the compact task state below; do not ask to see the full transcript and do not repeat completed source actions. Tool caps are ceilings, never targets: do not chase available search/extraction budget once the phase has a credible evidence packet. Use targeted web_search for the next missing evidence gap, then read_document on the strongest candidate URL. If strong candidate URLs are already available, read the best one instead of searching again. If the phase has enough evidence, write one concise result-first progress paragraph and emit <next_step/>. Use browser navigation only when rendered state, interaction, screenshots, or page scripts are necessary.',
+    },
+    {
+      role: 'user',
+      content: context,
+    },
+  ]
+}
+
+function shouldUseCompactResearchTurn(state: AgentStateData): boolean {
+  if (state.forceTextNextIteration || state.exactExtractionGuardPending) return false
+  if (state.deadlineFinalizationStarted) return false
+  if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.currentStepIdx === state.currentPlanItems.length - 1 && state.currentPhase === 'deliver') return false
+  return true
+}
+
+function compactResearchNeedsToolAction(state: AgentStateData): boolean {
+  return !compactResearchEvidenceComplete(state)
+}
+
+function compactResearchBreadthSaturated(state: AgentStateData, depth: ReturnType<typeof researchDepthProfileForState>): boolean {
+  if (depth.label === 'single-source' || depth.label === 'light') return false
+  const openedPages = state.stepVisitedUrls.size
+  const distinctDomains = stepOpenedSourceDomains(state).size
+  const uniqueSearches = state.stepSearchQueries.size
+  const usefulCalls = Math.max(
+    depth.label === 'wide' ? 9 : depth.label === 'deep' ? 7 : 4,
+    Math.ceil(depth.requiredCalls * 0.75),
+  )
+  const usefulOpenedPages = Math.min(
+    depth.requiredSourceBreadth,
+    Math.max(3, Math.ceil(depth.requiredSourceBreadth * 0.7)),
+  )
+  return state.stepResearchCallCount >= usefulCalls &&
+    uniqueSearches >= Math.min(usefulCalls, depth.label === 'wide' ? 7 : 5) &&
+    openedPages >= usefulOpenedPages &&
+    distinctDomains >= depth.requiredSourceBreadth
+}
+
+function compactResearchNeedsOpenedSource(state: AgentStateData): boolean {
+  const depth = researchDepthProfileForState(state)
+  if (depth.label === 'single-source' || depth.label === 'light') return false
+  if (compactResearchEvidenceComplete(state)) return false
+  const openedPages = state.stepVisitedUrls.size
+  const candidateDomains = state.stepSourceDomainCounts.size
+  const evidenceDomains = Math.max(stepOpenedSourceDomains(state).size, candidateDomains)
+  const uniqueSearches = state.stepSearchQueries.size
+  const usefulCalls = Math.max(
+    depth.label === 'wide' ? 9 : depth.label === 'deep' ? 7 : 4,
+    Math.ceil(depth.requiredCalls * 0.75),
+  )
+  const usefulOpenedPages = Math.min(
+    depth.requiredSourceBreadth,
+    Math.max(3, Math.ceil(depth.requiredSourceBreadth * 0.7)),
+  )
+  return state.stepResearchCallCount >= 1 &&
+    uniqueSearches >= 1 &&
+    evidenceDomains >= 1 &&
+    openedPages < usefulOpenedPages
+}
+
+function compactResearchStalledSearchPacketComplete(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthProfileForState>,
+): boolean {
+  if (state.consecutiveNoToolCalls < 3) return false
+
+  const calls = state.stepResearchCallCount
+  const uniqueSearches = state.stepSearchQueries.size
+  const candidateDomains = state.stepSourceDomainCounts.size
+  if (calls <= 0 || uniqueSearches <= 0 || candidateDomains <= 0) return false
+
+  if (depth.label === 'single-source' || depth.label === 'light') {
+    return calls >= Math.min(2, depth.requiredCalls) &&
+      candidateDomains >= 1
+  }
+
+  const usefulCalls = Math.max(3, Math.ceil(depth.requiredCalls * 0.45))
+  const usefulSearches = Math.max(2, Math.ceil(depth.requiredCalls * 0.3))
+  const usefulCandidateDomains = Math.min(
+    depth.requiredSourceBreadth,
+    Math.max(2, Math.ceil(depth.requiredSourceBreadth * 0.4)),
+  )
+
+  return calls >= usefulCalls &&
+    uniqueSearches >= Math.min(usefulSearches, calls) &&
+    candidateDomains >= usefulCandidateDomains
+}
+
+function compactResearchEvidenceComplete(state: AgentStateData): boolean {
+  const depth = researchDepthProfileForState(state)
+  const requiredResearchCalls = depth.requiredCalls
+  const requiredSourceBreadth = depth.requiredSourceBreadth
+  const openedPages = state.stepVisitedUrls.size
+  const distinctDomains = stepOpenedSourceDomains(state).size
+  const requiredOpenedPages = Math.min(requiredSourceBreadth, Math.max(1, Math.ceil(requiredResearchCalls / 3)))
+  const hasDirectEvidence = openedPages > 0 && distinctDomains > 0
+  const candidateDomains = state.stepSourceDomainCounts.size
+  const originalRequest = state.originalUserRequest || ''
+  const explicitlyHighEvidenceRequest =
+    /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|report|\.md|markdown|cited|citations?|sources?|source[-\s]?backed|evidence[-\s]?backed|compare|versus|vs\.?|analysis|dossier|briefing)\b/i.test(originalRequest) ||
+    SUBSTANTIVE_RESEARCH_RE.test(originalRequest)
+  const reportResearchNeedsSources =
+    taskDefaultsToMarkdownDeliverable(originalRequest) &&
+    explicitlyHighEvidenceRequest
+
+  if (hasDirectEvidence && compactResearchBreadthSaturated(state, depth)) return true
+  if (!reportResearchNeedsSources && !explicitlyHighEvidenceRequest && compactResearchStalledSearchPacketComplete(state, depth)) return true
+  if (hasDirectEvidence && state.stepFailureCount >= 2 && !explicitlyHighEvidenceRequest) {
+    return state.stepResearchCallCount >= Math.max(2, Math.ceil(requiredResearchCalls * 0.35)) &&
+      (candidateDomains >= 2 || distinctDomains >= 1)
+  }
+  if (hasDirectEvidence && depth.label === 'standard' && !explicitlyHighEvidenceRequest) {
+    const usefulCalls = Math.max(4, Math.ceil(requiredResearchCalls * 0.6))
+    return state.stepResearchCallCount >= usefulCalls &&
+      openedPages >= Math.min(2, requiredOpenedPages) &&
+      distinctDomains >= Math.min(2, requiredSourceBreadth)
+  }
+  if (hasDirectEvidence && depth.label === 'light') {
+    return state.stepResearchCallCount >= Math.min(3, requiredResearchCalls) &&
+      distinctDomains >= 1
+  }
+  return state.stepResearchCallCount >= requiredResearchCalls &&
+    hasDirectEvidence &&
+    openedPages >= requiredOpenedPages &&
+    distinctDomains >= requiredSourceBreadth
+}
+
+function compactFinalInlineAnswerMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
+  const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Answer the user directly in chat.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final answer'
+  const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
+  const findings = [...state.stepFindings.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+    .slice(-6)
+  const recentActions = state.workLog
+    .slice(-8)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const recentSources = state.researchActivity.entries
+    .filter(entry => entry.success && (entry.domain || entry.query || entry.url || entry.titles?.length))
+    .slice(-8)
+    .map(entry => {
+      const target = entry.domain || entry.url || entry.query || entry.tool
+      const titles = entry.titles?.slice(0, 2).join('; ')
+      return titles ? `${entry.kind}: ${target} - ${titles}` : `${entry.kind}: ${target}`
+    })
+  const context = [
+    `User request: ${request}`,
+    `Final task: ${currentStep}`,
+    memoryText,
+    findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
+    recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
+    recentActions.length ? `Recent completed work:\n- ${recentActions.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n')
+
+  return [
+    {
+      role: 'system',
+      content: 'FINAL INLINE ANSWER ONLY. Write the final answer directly in chat now. Do not call tools, do not write a status update, do not explain what you will do, do not mention plan steps/action labels/files, and do not ask permission to continue. Start with the answer content itself. Use the supplied context as evidence; if context is thin, answer with a concise caveat instead of stalling.',
+    },
+    {
+      role: 'user',
+      content: context,
+    },
+  ]
+}
+
+function compactFinalDeliverableMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
+  const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Create the requested deliverable.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final deliverable'
+  const pendingPartial = state.partialFileWriteRecoveryPending
+  const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
+  const findings = [...state.stepFindings.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+    .slice(-6)
+  const recentActions = state.workLog
+    .slice(-8)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const recentSources = state.researchActivity.entries
+    .filter(entry => entry.success && (entry.domain || entry.query || entry.url || entry.titles?.length))
+    .slice(-8)
+    .map(entry => {
+      const target = entry.domain || entry.url || entry.query || entry.tool
+      const titles = entry.titles?.slice(0, 2).join('; ')
+      return titles ? `${entry.kind}: ${target} - ${titles}` : `${entry.kind}: ${target}`
+    })
+  const context = [
+    `User request: ${request}`,
+    `Final task: ${currentStep}`,
+    pendingPartial ? `Partial saved file: ${pendingPartial.path} (${pendingPartial.lines} lines, ${pendingPartial.chars} chars).` : '',
+    memoryText,
+    findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
+    recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
+    recentActions.length ? `Recent completed work:\n- ${recentActions.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n')
+
+  return [
+    {
+      role: 'system',
+      content: pendingPartial
+        ? [
+            'PARTIAL FILE CONTINUATION TOOL CALL ONLY.',
+            `Make exactly one native append_file call to "${pendingPartial.path}" now; do not write visible prose before it.`,
+            'Do not call create_file, edit_file, read_file, list_files, export_pdf, research tools, or browser tools.',
+            'Append the next missing section/chunk only. Do not repeat already-written content.',
+            'Do not emit <next_step/> until after a successful append clears the partial-file state.',
+            'Use the full available output budget for this append so clipped long reports and code continue cleanly.',
+          ].join(' ')
+        : [
+            'FINAL SAVED DELIVERABLE TOOL CALL ONLY.',
+            'Make exactly one native create_file or append_file call now; do not write visible prose before it.',
+            'For the first saved output, use create_file with action_label, plan_step_index, and path before content.',
+            'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
+            state.stepToolCallCount > 0 && !hasSavedFinalDeliverableCandidate(state)
+              ? 'A previous final-write turn did not save a deliverable; make a shorter complete create_file call now instead of continuing to reason.'
+              : '',
+            'Write the complete deliverable when it fits. If the provider clips the write, continue the same file with append_file on the next turn.',
+          ].filter(Boolean).join(' '),
+    },
+    {
+      role: 'user',
+      content: context,
+    },
+  ]
+}
+
+function compactFinalTextDeliverableMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
+  const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Create the requested deliverable.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final deliverable'
+  const memoryText = state.workingMemory?.render({ maxFacts: 14, maxChars: 2200 }) || ''
+  const findings = [...state.stepFindings.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+    .slice(-8)
+  const recentActions = state.workLog
+    .slice(-10)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const recentSources = state.researchActivity.entries
+    .filter(entry => entry.success && (entry.domain || entry.query || entry.url || entry.titles?.length))
+    .slice(-10)
+    .map(entry => {
+      const target = entry.domain || entry.url || entry.query || entry.tool
+      const titles = entry.titles?.slice(0, 2).join('; ')
+      return titles ? `${entry.kind}: ${target} - ${titles}` : `${entry.kind}: ${target}`
+    })
+  const context = [
+    `User request: ${request}`,
+    `Final task: ${currentStep}`,
+    memoryText,
+    findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
+    recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
+    recentActions.length ? `Recent completed work:\n- ${recentActions.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n')
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'FINAL SAVED DELIVERABLE TEXT ONLY.',
+        'Write the actual Markdown deliverable directly now.',
+        'Start with the title and content; do not write status, plan, action labels, source counts, or attachment/save narration.',
+        'The app will save this exact text into the requested Markdown file after your response.',
+        'Use the supplied evidence. If evidence is limited, include a short caveat inside the deliverable instead of searching again.',
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: context,
+    },
+  ]
+}
+
+function toolJsonRecoveryMessage(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): string {
+  if (finalSavedDeliverableTurn(state, messages)) {
+    return finalSavedDeliverableToolCallInstruction(
+      state,
+      'FINAL SAVED DELIVERABLE TOOL FORMAT REPAIR: the previous file action was rejected before streaming.',
+    )
+  }
+
   if (state.taskStrategy === 'browse') {
     return [
       'TOOL FORMAT RECOVERY: The previous assistant response was rejected before streaming because the browser tool call format or forced tool-call mode was not accepted.',
@@ -1201,7 +2406,17 @@ function toolJsonRecoveryMessage(state: AgentStateData): string {
   ].filter(Boolean).join(' ')
 }
 
-function providerToolModeRecoveryMessage(state: AgentStateData): string {
+function providerToolModeRecoveryMessage(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): string {
+  if (finalSavedDeliverableTurn(state, messages)) {
+    return finalSavedDeliverableToolCallInstruction(
+      state,
+      'FINAL SAVED DELIVERABLE TOOL MODE REPAIR: continue with a voluntary native file tool call.',
+    )
+  }
+
   const step = state.currentPlanItems?.[state.currentStepIdx] || 'the current task phase'
   const preferredTool = state.taskStrategy === 'browse'
     ? 'a browser tool such as browser_screenshot, browser_get_content, browser_click_at, browser_type, browser_scroll, or browser_find_text'
@@ -1218,66 +2433,136 @@ function providerToolModeRecoveryMessage(state: AgentStateData): string {
   ].join(' ')
 }
 
-const STARTUP_SEARCH_SKIP_PATTERN = /\b(?:do\s+not|don't|dont|without|no)\s+(?:use\s+)?(?:web\s+)?(?:search|browse|browsing|internet|web)\b/i
-
-function cleanStartupSearchText(value: string, fallback: string): string {
-  const cleaned = value
-    .replace(/\s+/g, ' ')
-    .replace(/^\s*(?:please\s+)?(?:can\s+you\s+)?(?:research|look\s+up|find|search|investigate|check|tell\s+me)\s+(?:all\s+)?(?:about\s+)?/i, '')
-    .trim()
-  return (cleaned || fallback || 'the topic').slice(0, 180)
+function compactResearchToolRequiredMessage(state: AgentStateData, reason: string): string {
+  const step = state.currentPlanItems?.[state.currentStepIdx] || 'the current research step'
+  const evidenceNeed = compactResearchEvidenceComplete(state)
+    ? 'The evidence floor is already satisfied; emit <next_step/> only if this phase is complete.'
+    : 'The evidence floor is not satisfied yet.'
+  const recoveryToolNote = shouldUseCompactResearchRecoveryTools(state)
+    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or read_document when candidate URLs already exist. Do not ask for another broad planning turn.'
+    : 'Choose the most useful source/search/browser/document action for this specific step; use strict JSON object arguments.'
+  return [
+    'RESEARCH TOOL REQUIRED:',
+    `Continue "${step}" with exactly one appropriate evidence tool call now.`,
+    `Reason: ${reason}.`,
+    evidenceNeed,
+    recoveryToolNote,
+    'Do not write a prose-only update, do not answer from memory, and do not advance until this phase has enough evidence.',
+  ].join(' ')
 }
 
-function expandStartupSearchQuery(query: string): string {
-  const normalized = query.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
-  if (normalized === 'ai') return 'artificial intelligence AI overview current developments credible sources'
-  if (normalized === 'ml') return 'machine learning overview current developments credible sources'
-  const words = normalized.split(/\s+/).filter(Boolean)
-  if (words.length === 1 && normalized.length <= 4) return `${query} overview credible sources`
-  return query
+function compactToolFailureDiagnostics(results: ToolExecutionResult[]): Array<{
+  tool: string
+  error: string
+  durationMs?: number
+}> {
+  return results
+    .filter(result => result.isError)
+    .slice(-4)
+    .map(result => {
+      const value = result.result && typeof result.result === 'object'
+        ? (result.result as { error?: unknown }).error
+        : undefined
+      const error = typeof value === 'string'
+        ? value.replace(/\s+/g, ' ').slice(0, 220)
+        : 'unknown tool error'
+      return {
+        tool: result.tc.name,
+        error,
+        durationMs: result.durationMs,
+      }
+    })
 }
 
-function startupSearchQuery(state: AgentStateData): string {
-  const request = state.originalUserRequest || ''
-  const step = currentStepText(state)
-  return expandStartupSearchQuery(cleanStartupSearchText(request || step, step || request))
+function isDisplayContractRepairResult(result: ToolExecutionResult): boolean {
+  const value = result.result && typeof result.result === 'object'
+    ? (result.result as { error?: unknown }).error
+    : undefined
+  return typeof value === 'string' &&
+    /display contract repair needed before executing this action/i.test(value)
 }
 
-function startupSearchDisplayTopic(state: AgentStateData): string {
-  const request = state.originalUserRequest || ''
-  const step = currentStepText(state)
-  return humanTopicLabel(cleanStartupSearchText(request || step, step || request), 'the topic', 48)
+function displayContractRepairInstruction(state: AgentStateData, results: ToolExecutionResult[]): string {
+  const latest = [...results].reverse().find(isDisplayContractRepairResult) || results[results.length - 1]
+  const step = state.currentPlanItems?.[state.currentStepIdx] || 'the active step'
+  let safeArgs: Record<string, unknown> = {}
+  try {
+    const parsed = JSON.parse(latest.tc.arguments) as Record<string, unknown>
+    const keepKeys = ['query', 'url', 'source', 'path', 'output_path', 'source_path', 'directory', 'text', 'index', 'selector', 'method']
+    safeArgs = Object.fromEntries(
+      keepKeys
+        .filter(key => parsed[key] !== undefined)
+        .map(key => [key, parsed[key]]),
+    )
+  } catch {
+    safeArgs = {}
+  }
+  const argHint = Object.keys(safeArgs).length > 0
+    ? `Keep these non-display arguments unchanged: ${JSON.stringify(safeArgs).slice(0, 900)}.`
+    : 'Keep the same non-display arguments from the rejected tool call.'
+
+  return [
+    'ACTION LABEL REPAIR:',
+    `Retry the same ${latest.tc.name} action now for "${step}".`,
+    argHint,
+    `Set plan_step_index to ${state.currentStepIdx + 1}.`,
+    'Replace only action_label with a fresh model-authored purpose label, 2-12 words, starts with a capital letter, does not end with a period, no first person, no tool names, no raw URL/path, and no past-tense summary.',
+    'Make the native tool call now with no prose.',
+  ].join(' ')
 }
 
-function startupSearchActionLabel(topicLabel: string): string {
-  const topic = topicLabel
-    .replace(/[^\w\s.-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 48)
-  return `Search ${topic || 'topic'} source evidence`
-}
-
-function shouldRunStartupResearchSearch(state: AgentStateData): boolean {
-  if (state.iterations > 0 || state.stepToolCallCount > 0 || state.currentStepIdx !== 0) return false
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.buildTask || state.searchDisabled || state.userProvidedUrl) return false
-  if (state.uploadedAttachmentContextAvailable || state.uploadedAttachmentContentAvailable) return false
-  if (STARTUP_SEARCH_SKIP_PATTERN.test(state.originalUserRequest || '')) return false
-
-  const stepText = currentStepText(state)
-  return state.taskStrategy === 'research' ||
-    state.taskStrategy === 'analysis' ||
-    isResearchStepText(stepText)
-}
+const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 2_800
+const FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS = 5_000
+const FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS = 650
+const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
+const FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS = 420
+const FINAL_INLINE_ANSWER_MAX_TOKENS = 1_200
+const FINAL_INLINE_REPORT_MAX_TOKENS = 3_000
+const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 3_600
+const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 5_200
+const FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS = 8_500
+const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 5_000
+const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 650
+const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 650
+const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 220
+const FINAL_SAVED_DELIVERABLE_TEXT_REQUEST_TIMEOUT_MS = 6_500
+const FINAL_SAVED_DELIVERABLE_TEXT_ITERATION_TIMEOUT_MS = 24_000
+const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 6_000
+const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
+const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
+const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 360
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 900
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 1_400
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 1_800
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 220
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 180
+const FORCED_NARRATION_MAX_TOKENS = 48
+const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
 export class AgentLoop {
   private emitter: AgentEventEmitter
   private options: AgentLoopOptions
+  private lastCreditRunwayCheckAt = Date.now()
 
   constructor(emitter: AgentEventEmitter, options: AgentLoopOptions) {
     this.emitter = emitter
     this.options = options
+  }
+
+  private emitAgentIdentityDisclosureAnswer(): void {
+    if (this.emitter.isClosed) return
+    this.emitter.textDelta(AGENT_IDENTITY_DISCLOSURE_RESPONSE)
+    this.emitter.done()
+    this.emitter.close()
+  }
+
+  private async assertServerCreditRunwayCached(): Promise<void> {
+    if (!this.options.userId) return
+    const now = Date.now()
+    if (now - this.lastCreditRunwayCheckAt < CREDIT_PREFLIGHT_CACHE_MS) return
+    await assertServerCreditsAvailable(this.options.userId)
+    this.lastCreditRunwayCheckAt = now
   }
 
   private async recoverTextOnlyDraft(
@@ -1287,9 +2572,10 @@ export class AgentLoop {
     planManager: PlanManager,
     workingMemory: WorkingMemory,
     goalTracker: GoalTracker,
+    outputVerifier: OutputVerifier,
   ): Promise<Phase | null> {
     const { conversationId } = this.options
-    if (!conversationId || !shouldAutosaveTextOnlyDraft(state, assistantContent)) return null
+    if (!conversationId || !shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
 
     const content = cleanDraftContent(assistantContent)
     const path = autosaveDraftPath(state)
@@ -1300,10 +2586,52 @@ export class AgentLoop {
       ? content.slice(0, 5000) + '\n\n...[autosaved draft continues in the saved file]'
       : content
     this.emitter.toolStart(id, 'create_file', { path, content: previewContent })
-    const result = await createFileInSandbox(conversationId, path, content)
-    this.emitter.toolResult(id, 'create_file', result as never)
+    if (isLastStep) {
+      this.emitter.artifactCreated({
+        id: `artifact_${id}`,
+        fileName: path.split('/').pop() || path,
+        filePath: path,
+        content: content.length > 20_000
+          ? content.slice(0, 20_000) + '\n\n---\n*Content truncated for preview. Open the file for the full saved draft.*'
+          : content,
+        type: 'document',
+        deliverable: true,
+        createdAt: Date.now(),
+      })
+    }
 
-    if (result.size === undefined) {
+    const savePromise = createFileInSandbox(conversationId, path, content)
+    const result = await Promise.race([
+      savePromise,
+      this.wait(TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS).then(() => null),
+    ])
+
+    if (!result) {
+      this.emitter.toolResult(id, 'create_file', {
+        action: 'created',
+        path,
+        content: previewContent,
+        size: content.length,
+      } as never)
+      void savePromise
+        .then(saveResult => {
+          console.log('[AgentDiagnostics] Text-only draft save completed after visible artifact', {
+            path,
+            size: saveResult.size,
+            hasError: saveResult.size === undefined,
+          })
+        })
+        .catch(err => {
+          console.warn('[AgentDiagnostics] Text-only draft save finished after completion with error', {
+            path,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+    } else {
+      this.emitter.toolResult(id, 'create_file', result as never)
+    }
+
+    if (result && result.size === undefined) {
       contextManager.push({
         role: 'system',
         content: `The draft text was not saved because create_file failed for ${path}. Retry with a shorter create_file call or a safer path.`,
@@ -1323,23 +2651,73 @@ export class AgentLoop {
     } as ChatMessageParam)
 
     if (isLastStep && state.currentPlanItems) {
+      if (
+        shouldContinueSavedFinalDeliverableChunk(
+          state,
+          this.options.messages,
+          path,
+          content,
+        )
+      ) {
+        const lines = content.split(/\r?\n/).filter(Boolean).length
+        state.deliverableRevisionCount++
+        state.partialFileWriteRecoveryPending = {
+          path,
+          toolName: 'append_file',
+          chars: content.length,
+          lines,
+        }
+        state.partialFileWriteRecoveryNudged = false
+        state.deliverableVerificationDone = false
+        contextManager.push({
+          role: 'system',
+          content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${path}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next useful section. Do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
+        } as ChatMessageParam)
+        return 'STREAMING'
+      }
+
+      const originalRequest = this.options.messages[this.options.messages.length - 1]?.content || state.originalUserRequest || ''
+      const verification = outputVerifier.verify(
+        content,
+        path,
+        originalRequest,
+        state.taskStrategy,
+        workingMemory,
+        state.taskComplexity,
+      )
+      if (!verification.passed && state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
+        state.deliverableRevisionCount++
+        state.pendingDeliverableRevision = {
+          path,
+          failures: verification.failures,
+          suggestions: verification.suggestions,
+          createdAt: Date.now(),
+        }
+        state.deliverableVerificationDone = false
+        contextManager.push({
+          role: 'system',
+          content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+        } as ChatMessageParam)
+        return 'STREAMING'
+      }
+
+      if (!verification.passed) {
+        state.pendingDeliverableRevision = {
+          path,
+          failures: verification.failures,
+          suggestions: verification.suggestions,
+          createdAt: Date.now(),
+        }
+        state.deliverableVerificationDone = false
+        return 'COMPLETE'
+      }
+
       const stepIdxBefore = state.currentStepIdx
       state.deliverableVerificationDone = true
       state.currentStepIdx = state.currentPlanItems.length
       for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
         this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
       }
-      this.emitter.artifactCreated({
-        id: `artifact_${id}`,
-        fileName: path.split('/').pop() || path,
-        filePath: path,
-        content: content.length > 20_000
-          ? content.slice(0, 20_000) + '\n\n---\n*Content truncated for preview. Open the file for the full saved draft.*'
-          : content,
-        type: 'document',
-        deliverable: true,
-        createdAt: Date.now(),
-      })
       return 'COMPLETE'
     }
 
@@ -1357,94 +2735,15 @@ export class AgentLoop {
     return 'STREAMING'
   }
 
-  private async runStartupResearchSearch(
-    state: AgentStateData,
-    toolPipeline: ToolPipeline,
-    contextManager: ContextManager,
-    toolRegistry: ToolRegistry,
-    goalTracker: GoalTracker,
-  ): Promise<ToolExecutionResult[]> {
-    if (!shouldRunStartupResearchSearch(state)) return []
-
-    const query = startupSearchQuery(state)
-    const displayTopic = startupSearchDisplayTopic(state)
-    const toolCall: ToolCallData = {
-      id: `startup_web_search_${Date.now().toString(36)}`,
-      name: 'web_search',
-      arguments: JSON.stringify({
-        query,
-        action_label: startupSearchActionLabel(displayTopic),
-        plan_step_index: state.currentStepIdx + 1,
-      }),
-    }
-    const toolCalls = new Map<number, ToolCallData>([[0, toolCall]])
-
-    console.log('[AgentDiagnostics] Running startup research search', {
-      step: state.currentStepIdx,
-      query,
-    })
-    const results = await toolPipeline.executeAll(toolCalls, state, '')
-    const executedToolCalls = executedToolCallsForProviderHistory(toolCalls, results)
-    if (executedToolCalls.length > 0) {
-      contextManager.push({
-        role: 'assistant',
-        content: null,
-        tool_calls: executedToolCalls.map(tc => ({
-          id: tc.id,
-          type: 'function' as const,
-          function: { name: tc.name, arguments: tc.arguments },
-        })),
-      } as unknown as ChatMessageParam)
-    }
-
-    for (const msg of toolPipeline.buildToolResultMessages(results, state)) {
-      contextManager.push(msg as unknown as ChatMessageParam, 4)
-    }
-
-    for (const result of results) {
-      toolRegistry.recordCall(result.tc.name)
-      if (goalTracker.isInitialized()) {
-        goalTracker.recordToolContribution(result.tc.name, result, state.currentStepIdx, state.workingMemory)
-      }
-    }
-
-    const resultCount = Array.isArray(results[0]?.result) ? results[0].result.length : 0
-    contextManager.push({
-      role: 'system',
-      content: `STARTUP SEARCH COMPLETE: A real web_search already ran for "${query}" before the first model turn and returned ${resultCount} result${resultCount === 1 ? '' : 's'}. Do not repeat this exact query. Continue from these results; read_document or otherwise extract the strongest relevant source next. Use browser_navigate only if the source needs rendered page state, screenshots, interaction, or scripts. Use a narrower follow-up search only if the current results are insufficient.`,
-    } as ChatMessageParam, 3)
-
-    return results
-  }
-
   private maybeStartDeadlineFinalization(
     state: AgentStateData,
     contextManager: ContextManager,
-    planManager: PlanManager,
-    goalTracker: GoalTracker,
   ): boolean {
     if (!shouldStartDeadlineFinalization(state)) return false
 
     state.deadlineFinalizationStarted = true
     state.forceTextNextIteration = false
     state.forcedNarrationRepairAttempts = 0
-
-    let lastStepMessage: { role: string; content: string } | null = null
-    if (state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length - 1) {
-      while (state.currentStepIdx < state.currentPlanItems.length - 1) {
-        const stepIdxBefore = state.currentStepIdx
-        lastStepMessage = planManager.handleStepAdvance(state)
-        this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepIdxBefore))
-      }
-      if (goalTracker.isInitialized()) {
-        goalTracker.advanceToStep(state.currentStepIdx)
-      }
-      contextManager.compactForStepTransition(state)
-    }
-
-    if (lastStepMessage) {
-      contextManager.push(lastStepMessage as ChatMessageParam)
-    }
     contextManager.push(deadlineFinalizationMessage(state))
     console.log('[AgentDiagnostics] Runtime deadline finalization started', {
       iteration: state.iterations,
@@ -1456,12 +2755,56 @@ export class AgentLoop {
     return true
   }
 
+  private maybeStartIterationBudgetFinalization(
+    state: AgentStateData,
+    contextManager: ContextManager,
+    goalTracker: GoalTracker,
+  ): boolean {
+    if (!shouldStartIterationBudgetFinalization(state, this.options.messages)) return false
+    if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
+
+    const stepIdxBefore = state.currentStepIdx
+    const finalStepIdx = state.currentPlanItems.length - 1
+    const overrunStep = state.currentPlanItems[stepIdxBefore] || 'the current phase'
+    while (state.currentStepIdx < finalStepIdx) {
+      const currentStep = state.currentPlanItems[state.currentStepIdx] || 'phase'
+      const finding = state.currentStepIdx === stepIdxBefore
+        ? `Reserved final output budget after working on ${currentStep}`
+        : `Folded ${currentStep} into the final output from available evidence`
+      advanceStep(state, finding)
+    }
+
+    state.deadlineFinalizationStarted = true
+    state.forceTextNextIteration = false
+    state.phaseEndNarrationPending = false
+    state.forcedNarrationRepairAttempts = 0
+    state.consecutiveNoToolCalls = 0
+    contextManager.push(iterationBudgetFinalizationMessage(state, overrunStep))
+    if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+    for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
+      this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+    }
+    console.log('[AgentDiagnostics] Iteration budget finalization started', {
+      iteration: state.iterations,
+      limit: state.dynamicIterationLimit,
+      fromStep: stepIdxBefore,
+      finalStep: state.currentStepIdx,
+      totalSteps: state.currentPlanItems.length,
+    })
+    return true
+  }
+
   async run(): Promise<void> {
     const { messages, model, conversationId, customInstructions, signal } = this.options
 
     // ── Security: Prompt Injection Check ───────────────────────────────
 
     const latestUserMessage = [...messages].reverse().find(m => m.role === 'user')
+    if (latestUserAskedAgentIdentityDisclosure(messages)) {
+      this.emitAgentIdentityDisclosureAnswer()
+      return
+    }
+
     const injectionDetected = latestUserMessage ? isPromptInjection(latestUserMessage.content || '') : false
     if (injectionDetected) {
       this.emitter.textDelta("I can't reveal or override internal instructions. Send the task normally and I'll work on it.")
@@ -1484,6 +2827,10 @@ export class AgentLoop {
 
     const isBuild = strategy.type === 'build' || strategy.type === 'code'
     const state = createInitialState(isBuild, timeouts)
+    state.runMaxDurationMs = this.options.runMaxDurationMs ?? AGENT_RUN_MAX_DURATION_MS
+    state.deadlineFinalizationBufferMs = this.options.deadlineFinalizationBufferMs ?? AGENT_DEADLINE_FINALIZATION_BUFFER_MS
+    state.deadlineModelTurnTimeoutMs = this.options.deadlineModelTurnTimeoutMs ?? AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS
+    state.deadlineHardStopBufferMs = this.options.deadlineHardStopBufferMs ?? AGENT_DEADLINE_HARD_STOP_BUFFER_MS
     state.taskComplexity = complexity
     state.taskStrategy = strategy.type
     state.strategyConfig = strategy
@@ -1491,14 +2838,17 @@ export class AgentLoop {
     state.originalUserRequest = effectiveTaskRequest(messages) || null
     state.uploadedAttachmentNames = uploadedAttachmentNames(scopedMessages)
     state.uploadedAttachmentContextAvailable = state.uploadedAttachmentNames.length > 0
-    state.uploadedImageAttachmentAvailable = visualImageUploadedAttachments(scopedMessages).length > 0
+    state.uploadedImageAttachmentAvailable = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(scopedMessages).length > 0
     state.uploadedAttachmentContentAvailable = readableUploadedAttachments(scopedMessages).length > 0 ||
       state.uploadedImageAttachmentAvailable
     // Detect a URL/domain in the scoped task request so web_search attempts can
     // be silently rerouted to direct navigation before another paid model turn.
     state.userProvidedUrl = extractUserProvidedUrl(scopedMessages)
     if (state.userProvidedUrl) log.info(`User provided URL detected: ${state.userProvidedUrl}`)
-    if (this.options.userId && conversationId) {
+    const shouldHydrateResearchActivity = !!this.options.userId &&
+      !!conversationId &&
+      this.options.startFreshSandbox !== true
+    if (shouldHydrateResearchActivity && this.options.userId && conversationId) {
       try {
         const entries = await loadResearchActivityEntries(this.options.userId, conversationId)
         hydrateResearchActivityIndex(state.researchActivity, entries)
@@ -1595,17 +2945,19 @@ export class AgentLoop {
       )
       if (recorded?.created) this.emitter.creditEvent(recorded.entry)
     }
-    const assertPlannerCreditRunway = async () => {
-      if (this.options.userId) await assertServerCreditsAvailable(this.options.userId)
-    }
+    const assertPlannerCreditRunway = async () => this.assertServerCreditRunwayCached()
     const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, customInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
 
     planManager.setStateRef(state)
-    planManager.startPlanCall()
+    const startupPlanUsed = this.options.startupPlan?.items?.length
+      ? planManager.usePrecomputedPlan(state, this.options.startupPlan)
+      : false
+    if (!startupPlanUsed) planManager.startPlanCall()
 
     // ── Mutable iteration state ───────────────────────────────────────
 
     let lastStreamResult: StreamResult | null = null
+    let lastStreamWasCompactNarration = false
     let lastToolResults: ToolExecutionResult[] = []
     let cumulativeInputTokens = 0
     let cumulativeOutputTokens = 0
@@ -1615,18 +2967,23 @@ export class AgentLoop {
     // ── Main Loop ─────────────────────────────────────────────────────
 
     let phase = 'PLANNING' as Phase
+    let startupReadyAwaited = false
 
     try {
       while (true) {
         if (phase === 'ERROR') break
         while (phase !== 'COMPLETE' && phase !== 'ERROR') {
           if (signal?.aborted) { phase = 'ERROR'; break }
-          if (agentRunRemainingMs(state) <= AGENT_DEADLINE_HARD_STOP_BUFFER_MS) {
+          if (agentRunRemainingMs(state) <= (state.deadlineHardStopBufferMs || AGENT_DEADLINE_HARD_STOP_BUFFER_MS)) {
             terminalReason = state.deadlineFinalizationStarted
               ? 'runtime_deadline_finalized'
               : 'runtime_deadline'
             phase = 'COMPLETE'
             break
+          }
+          if (this.maybeStartIterationBudgetFinalization(state, contextManager, goalTracker)) {
+            phase = 'STREAMING'
+            continue
           }
           if (state.iterations >= state.dynamicIterationLimit) {
             log.info(`Iteration cap reached: ${state.iterations}/${state.dynamicIterationLimit}`)
@@ -1662,15 +3019,6 @@ export class AgentLoop {
               goalTracker.initializeFromPlan(state.currentPlanItems)
             }
 
-            lastToolResults = await this.runStartupResearchSearch(
-              state,
-              toolPipeline,
-              contextManager,
-              toolRegistry,
-              goalTracker,
-            )
-            if (signal?.aborted) { phase = 'ERROR'; break }
-
             phase = 'STREAMING'
             break
           }
@@ -1689,11 +3037,13 @@ export class AgentLoop {
               state.iterationDelayMs = Math.max(MIN_ITERATION_DELAY_MS, state.iterationDelayMs - 500)
             }
 
-            if (this.injectLiveDirectives(contextManager)) {
+            const streamingDirectiveStatus = this.injectLiveDirectives(contextManager)
+            if (streamingDirectiveStatus === 'identity') return
+            if (streamingDirectiveStatus) {
               log.info('Injected live user directive before model turn')
             }
 
-            this.maybeStartDeadlineFinalization(state, contextManager, planManager, goalTracker)
+            this.maybeStartDeadlineFinalization(state, contextManager)
 
             // Context trimming
             contextManager.compactForModelCall(state)
@@ -1709,15 +3059,19 @@ export class AgentLoop {
                 state.pendingToolJsonRecovery = false
                 state.lastModelErrorForUser = null
                 state.consecutiveNullStreams = 0
-                state.forceTextNextIteration = state.taskStrategy !== 'browse'
+                const recoveringFinalSavedDeliverable = finalSavedDeliverableTurn(state, this.options.messages)
+                state.forceTextNextIteration = !recoveringFinalSavedDeliverable && state.taskStrategy !== 'browse'
                 contextManager.push({
                   role: 'system',
-                  content: toolJsonRecoveryMessage(state),
+                  content: toolJsonRecoveryMessage(state, this.options.messages),
                 } as ChatMessageParam)
                 state.lastIterationEnd = Date.now()
                 break // stay in STREAMING after an internal recovery nudge
               }
 
+              const wasForcedNarrationRecovery = state.forceTextNextIteration
+              const wasCompactCadenceNarration = !wasForcedNarrationRecovery &&
+                shouldUseNaturalCadenceNarration(state, this.options.messages)
               state.consecutiveNullStreams = (state.consecutiveNullStreams || 0) + 1
               console.error('[AgentDiagnostics] Stream unavailable after model call', {
                 attempt: state.consecutiveNullStreams,
@@ -1729,28 +3083,137 @@ export class AgentLoop {
                 signalAborted: !!signal?.aborted,
                 pendingToolJsonRecovery: !!state.pendingToolJsonRecovery,
                 hasLastModelError: !!state.lastModelErrorForUser,
+                forcedNarrationRecovery: wasForcedNarrationRecovery,
+                compactCadenceNarration: wasCompactCadenceNarration,
               })
-              log.info(`Agent returned no stream (attempt ${state.consecutiveNullStreams}/3)`)
+              log.info(`Agent returned no stream (attempt ${state.consecutiveNullStreams}/1)`)
               if (state.lastModelErrorForUser) {
                 this.emitter.error(state.lastModelErrorForUser)
                 phase = 'ERROR'
                 break
               }
-              if (state.consecutiveNullStreams >= 3) {
-                this.emitter.error('Agent lost connection while starting the next action. Please try again.')
-                phase = 'ERROR'
+              if (wasForcedNarrationRecovery || wasCompactCadenceNarration) {
+                if (state.phaseEndNarrationPending) {
+                  markPhaseNarrationEmitted(state)
+                  state.phaseEndNarrationPending = false
+                }
+                state.forceTextNextIteration = false
+                state.forcedNarrationRepairAttempts = 0
+                state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
+                state.consecutiveNullStreams = 0
+                contextManager.push({
+                  role: 'system',
+                  content: 'The progress narration window timed out before streaming. Continue the active phase with one concrete action now; the narration window should open again after the next visible action.',
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                console.log('[AgentDiagnostics] Released narration timeout back to active work', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  visibleToolActionsSinceLastNarration: state.visibleToolActionsSinceLastNarration,
+                  phaseEndNarrationPending: state.phaseEndNarrationPending,
+                })
+                phase = 'STREAMING'
                 break
               }
-              console.log('[Agent] Retrying after empty stream')
-              await this.wait(state.iterationDelayMs)
-              state.lastIterationEnd = Date.now()
-              break // stay in STREAMING
+              if (
+                shouldUseCompactResearchTurn(state) &&
+                state.currentPlanItems &&
+                state.currentStepIdx < state.currentPlanItems.length - 1
+              ) {
+                if (compactResearchEvidenceComplete(state)) {
+                  const stepBeforeAdvance = state.currentStepIdx
+                  const advanceMsg = planManager.handleStepAdvance(state)
+                  if (state.currentStepIdx > stepBeforeAdvance) {
+                    contextManager.compactForStepTransition(state)
+                  }
+                  if (advanceMsg) {
+                    contextManager.push(advanceMsg as ChatMessageParam)
+                  }
+                  if (goalTracker.isInitialized()) {
+                    goalTracker.advanceToStep(state.currentStepIdx)
+                  }
+                  for (let i = stepBeforeAdvance; i < state.currentStepIdx; i++) {
+                    this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                  }
+                  state.forceTextNextIteration = false
+                  state.consecutiveNullStreams = 0
+                  state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                  state.lastIterationEnd = Date.now()
+                  console.log('[AgentDiagnostics] Model-start timeout advanced compact research phase from gathered evidence', {
+                    step: state.currentStepIdx,
+                    totalSteps: state.currentPlanItems.length,
+                    researchCalls: state.stepResearchCallCount,
+                    sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                  })
+                  phase = 'STREAMING'
+                  break
+                }
+
+                if (state.consecutiveNullStreams >= 2) {
+                  state.consecutiveNullStreams = 0
+                  state.consecutiveNoToolCalls = Math.max(state.consecutiveNoToolCalls, 1)
+                }
+                contextManager.push({
+                  role: 'system',
+                  content: compactResearchToolRequiredMessage(state, 'the previous model turn timed out before starting a tool action'),
+                } as ChatMessageParam)
+                state.forceTextNextIteration = false
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                state.lastIterationEnd = Date.now()
+                console.log('[AgentDiagnostics] Model-start timeout reissued model-selected research tool requirement', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems.length,
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                })
+                phase = 'STREAMING'
+                break
+              }
+              if (finalSavedDeliverableTurn(state, this.options.messages)) {
+                state.forceTextNextIteration = false
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                contextManager.push({
+                  role: 'system',
+                  content: finalSavedDeliverableToolCallInstruction(
+                    state,
+                    'FINAL SAVED DELIVERABLE START CHECK: the previous model call did not start streaming quickly enough.',
+                  ),
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                console.log('[AgentDiagnostics] Reissued final saved deliverable file-tool instruction after model-start timeout', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  hasFinalDeliverable: hasSavedFinalDeliverableCandidate(state),
+                })
+                phase = 'STREAMING'
+                break
+              }
+              if (!wasForcedNarrationRecovery && state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
+                state.forceTextNextIteration = true
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                contextManager.push({
+                  role: 'system',
+                  content: 'MODEL START RECOVERY: The previous full model turn timed out before streaming. Do not retry the same heavy context. Use the compact forced-narration path next so the UI gets a concrete progress update quickly, then continue from the active phase.',
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                console.log('[Agent] Switching to compact progress recovery after empty stream')
+                break
+              }
+              this.emitter.error('Agent could not start the next action quickly enough. Please retry the task.')
+              phase = 'ERROR'
+              break
             }
             state.consecutiveNullStreams = 0
 
             // Process stream
+            let processedCompactNarrationTurn = false
             try {
-              streamProcessor.setTierTimeouts(state.tierTimeouts)
+              lastStreamWasCompactNarration = false
+              processedCompactNarrationTurn =
+                (state.forceTextNextIteration && !state.exactExtractionGuardPending) ||
+                (!state.forceTextNextIteration && shouldUseNaturalCadenceNarration(state, this.options.messages))
+              lastStreamWasCompactNarration = processedCompactNarrationTurn
+              streamProcessor.setTierTimeouts(tierTimeoutsForIteration(state, this.options.messages, processedCompactNarrationTurn))
               lastStreamResult = await streamProcessor.processStream(
                 response,
                 state,
@@ -1767,14 +3230,23 @@ export class AgentLoop {
               break
             }
 
-            // Log costs
+            // Log costs. Provider usage metadata can arrive late or be unavailable
+            // for some routed generations, so estimate instead of interrupting work.
+            const u = lastStreamResult.usage ?? approximateStreamUsageForCompletedTurn(
+              model,
+              contextManager.getMessages(),
+              lastStreamResult,
+            )
             if (!lastStreamResult.usage) {
-              this.emitter.error('The assistant could not complete the request. Please try again.')
-              phase = 'ERROR'
-              break
+              console.warn('[AgentDiagnostics] Missing model usage metadata; continuing with estimated usage', {
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                promptTokens: u.promptTokens,
+                completionTokens: u.completionTokens,
+                cost: u.cost,
+              })
             }
-
-            const u = lastStreamResult.usage
             cumulativeInputTokens += u.promptTokens
             cumulativeOutputTokens += u.completionTokens
             cumulativeCost += u.cost
@@ -1792,12 +3264,120 @@ export class AgentLoop {
 
             updatePhase(state)
 
+            if (
+              processedCompactNarrationTurn &&
+              !state.phaseEndNarrationPending &&
+              lastStreamResult.toolCalls.size === 0 &&
+              lastStreamResult.assistantContent.trim()
+            ) {
+              markPhaseNarrationEmitted(state)
+              state.forceTextNextIteration = false
+              state.forcedNarrationRepairAttempts = 0
+              state.visibleToolActionsSinceLastNarration = 0
+              state.consecutiveNoToolCalls = 0
+            }
+
+            if (
+              lastStreamResult.toolCalls.size === 0 &&
+              shouldCompleteFinalInlineAnswerTurn(state, this.options.messages, lastStreamResult.assistantContent)
+            ) {
+              const stepBeforeComplete = state.currentStepIdx
+              contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              if (state.currentPlanItems) {
+                state.currentStepIdx = state.currentPlanItems.length
+              }
+              state.forceTextNextIteration = false
+              state.phaseEndNarrationPending = false
+              state.lastIterationEnd = Date.now()
+              terminalReason = 'final_inline_answer_complete'
+              for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+              }
+              console.log('[AgentDiagnostics] Final inline answer accepted without another policy retry', {
+                iteration: state.iterations,
+                chars: lastStreamResult.assistantContent.trim().length,
+                step: stepBeforeComplete,
+                totalSteps: state.currentPlanItems?.length || 0,
+              })
+              phase = 'COMPLETE'
+              break
+            }
+
             // Check plan on early iterations
             if (state.iterations <= 2) {
               await planManager.awaitPlan(state)
               const planInjection = planManager.getStepInjection(state, state.dynamicIterationLimit)
               if (planInjection) {
                 contextManager.push(planInjection as ChatMessageParam)
+              }
+            }
+
+            if (
+              !lastStreamWasCompactNarration &&
+              lastStreamResult.toolCalls.size === 0 &&
+              shouldUseCompactResearchTurn(state) &&
+              state.currentPlanItems &&
+              state.currentStepIdx < state.currentPlanItems.length - 1
+            ) {
+              if (compactResearchEvidenceComplete(state)) {
+                const stepBeforeAdvance = state.currentStepIdx
+                if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                  contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                }
+                const advanceMsg = planManager.handleStepAdvance(state)
+                if (state.currentStepIdx > stepBeforeAdvance) {
+                  contextManager.compactForStepTransition(state)
+                }
+                if (advanceMsg) {
+                  contextManager.push(advanceMsg as ChatMessageParam)
+                }
+                if (goalTracker.isInitialized()) {
+                  goalTracker.advanceToStep(state.currentStepIdx)
+                }
+                for (let i = stepBeforeAdvance; i < state.currentStepIdx; i++) {
+                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                }
+                console.log('[AgentDiagnostics] Compact research evidence complete; advanced immediately after text-only turn', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems.length,
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+
+              if (compactResearchNeedsToolAction(state)) {
+                if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                  contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                }
+                state.consecutiveNoToolCalls += 1
+                state.forceTextNextIteration = false
+                if (state.consecutiveNoToolCalls >= 2) {
+                  state.suppressedResearchToolName = null
+                  state.stepLoopDetections = 0
+                  state.recentToolCalls = []
+                }
+                contextManager.push({
+                  role: 'system',
+                  content: compactResearchToolRequiredMessage(
+                    state,
+                    state.consecutiveNoToolCalls >= 2
+                      ? 'the compact research turn repeated without a tool call, so reopened source tools and cleared the loop state'
+                      : 'the previous research response did not include the required evidence tool call',
+                  ),
+                } as ChatMessageParam)
+                console.log('[AgentDiagnostics] Compact research no-tool response reissued model-selected tool requirement', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems.length,
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                  reopenedTools: state.consecutiveNoToolCalls >= 2,
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
               }
             }
 
@@ -1811,11 +3391,35 @@ export class AgentLoop {
 
             const stepIdxBeforeExec = state.currentStepIdx
 
-            if (this.injectLiveDirectives(contextManager)) {
+            const preToolDirectiveStatus = this.injectLiveDirectives(contextManager)
+            if (preToolDirectiveStatus === 'identity') return
+            if (preToolDirectiveStatus) {
               log.info('Live user directive superseded pending tool calls')
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
               break
+            }
+
+            if (!startupReadyAwaited && this.options.startupReadyPromise && toolCallsNeedStartupReady(lastStreamResult.toolCalls)) {
+              startupReadyAwaited = true
+              const waitStartedAt = Date.now()
+              try {
+                await this.options.startupReadyPromise
+                console.log('[AgentDiagnostics] Tool startup prerequisites ready', {
+                  elapsedMs: Date.now() - waitStartedAt,
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                })
+              } catch (error) {
+                console.error('[AgentDiagnostics] Tool startup prerequisites failed', {
+                  elapsedMs: Date.now() - waitStartedAt,
+                  error: error instanceof Error ? error.message : String(error),
+                })
+                this.emitter.error(userErrorMessage(error, 'Task setup failed before tools could run. Please try again.'))
+                phase = 'ERROR'
+                break
+              }
+              if (signal?.aborted) { phase = 'ERROR'; break }
             }
 
             // Execute tools
@@ -1826,6 +3430,56 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
+
+            if (lastToolResults.length > 0 && lastToolResults.every(isDisplayContractRepairResult)) {
+              if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              }
+              state.consecutiveNoToolCalls = 0
+              state.forceTextNextIteration = false
+              state.recentToolCalls = []
+              state.recentToolSequence = []
+              contextManager.push({
+                role: 'system',
+                content: displayContractRepairInstruction(state, lastToolResults),
+              } as ChatMessageParam)
+              console.log('[AgentDiagnostics] Reissued model-selected tool after display contract repair', {
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems?.length || 0,
+                attempts: state.displayContractRepairAttempts,
+                tool: lastToolResults[0]?.tc.name,
+              })
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
+
+            if (
+              (lastToolResults.length === 0 || state.stepResearchCallCount === 0) &&
+              shouldUseCompactResearchTurn(state) &&
+              state.currentPlanItems &&
+              state.currentStepIdx < state.currentPlanItems.length - 1 &&
+              compactResearchNeedsToolAction(state)
+            ) {
+              if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              }
+              state.consecutiveNoToolCalls += 1
+              contextManager.push({
+                role: 'system',
+                content: compactResearchToolRequiredMessage(state, 'the previous tool turn did not produce usable research evidence'),
+              } as ChatMessageParam)
+              console.log('[AgentDiagnostics] Empty compact research tool turn reissued model-selected tool requirement', {
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems.length,
+                researchCalls: state.stepResearchCallCount,
+                sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                toolErrors: compactToolFailureDiagnostics(lastToolResults),
+              })
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
 
             // OpenAI-compatible APIs require tool result messages to appear
             // immediately after the assistant message that declared tool_calls.
@@ -1844,12 +3498,12 @@ export class AgentLoop {
                   function: { name: tc.name, arguments: tc.arguments },
                 })),
               }
+              if (ASSISTANT_PROVIDER === 'deepseek' && lastStreamResult.reasoningContent) {
+                assistantMsg.reasoning_content = lastStreamResult.reasoningContent
+              }
               contextManager.push(assistantMsg as unknown as ChatMessageParam)
             } else if (lastStreamResult.assistantContent) {
-              contextManager.push({
-                role: 'assistant',
-                content: lastStreamResult.assistantContent,
-              } as ChatMessageParam)
+              contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
             }
 
             const toolMessages = toolPipeline.buildToolResultMessages(lastToolResults, state)
@@ -1873,7 +3527,9 @@ export class AgentLoop {
               toolRegistry.recordCall(result.tc.name)
             }
 
-            if (this.injectLiveDirectives(contextManager)) {
+            const postToolDirectiveStatus = this.injectLiveDirectives(contextManager)
+            if (postToolDirectiveStatus === 'identity') return
+            if (postToolDirectiveStatus) {
               log.info('Injected live user directive after tool results')
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -1936,7 +3592,13 @@ export class AgentLoop {
               const deliverableResult = lastToolResults.find(isSuccessfulFinalDeliverableWrite)
               const recoveredPartialWrite = !!(deliverableResult?.result as { partialWriteIncomplete?: boolean } | undefined)?.partialWriteIncomplete
               if (deliverableResult && recoveredPartialWrite) {
-                log.info('Recovered partial deliverable write on last step — continuing for append/edit completion')
+                const pending = state.partialFileWriteRecoveryPending
+                const path = pending?.path || toolResultPath(deliverableResult) || 'the saved deliverable'
+                log.info('Recovered partial deliverable write on last step — requiring append continuation')
+                contextManager.push({
+                  role: 'system',
+                  content: `PARTIAL DELIVERABLE SAVED: ${path} already exists. Do not call create_file for it again. Next response must be exactly one append_file call to the same path with the next complete missing section, using the full available output budget. Do not emit <next_step/> or any visible prose until a successful append_file call clears this partial-file state.`,
+                } as ChatMessageParam)
                 phase = 'EVALUATING'
                 break
               }
@@ -1951,6 +3613,32 @@ export class AgentLoop {
                       recordWorkLedgerDeliverable(state, { path: verifiedContent.path, purpose: 'deliverable' })
                     }
                     const originalRequest = messages[messages.length - 1]?.content || ''
+                    if (
+                      shouldContinueSavedFinalDeliverableChunk(
+                        state,
+                        this.options.messages,
+                        verifiedContent.path || args.path || toolResultPath(deliverableResult) || '',
+                        verifiedContent.content || args.content || '',
+                      )
+                    ) {
+                      const continuationPath = verifiedContent.path || args.path || toolResultPath(deliverableResult) || ''
+                      const continuationContent = verifiedContent.content || args.content || ''
+                      const continuationLines = continuationContent.split(/\r?\n/).filter(Boolean).length
+                      state.deliverableRevisionCount++
+                      state.partialFileWriteRecoveryPending = {
+                        path: continuationPath,
+                        toolName: 'append_file',
+                        chars: continuationContent.length,
+                        lines: continuationLines,
+                      }
+                      state.partialFileWriteRecoveryNudged = false
+                      contextManager.push({
+                        role: 'system',
+                        content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${continuationPath}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next useful section. Do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
+                      } as ChatMessageParam)
+                      phase = 'EVALUATING'
+                      break
+                    }
                     if (shouldDefaultFrontendToNextTsx(originalRequest)) {
                       const websiteProblems = await getNextWebsiteCompletionProblems(conversationId, state.createdFiles)
                       if (websiteProblems.missingFiles.length > 0) {
@@ -2025,6 +3713,19 @@ export class AgentLoop {
                       break
                     }
 
+                    if (!verification.passed) {
+                      state.pendingDeliverableRevision = {
+                        path: verifiedContent.path || args.path || toolResultPath(deliverableResult) || 'the existing deliverable',
+                        failures: verification.failures,
+                        suggestions: verification.suggestions,
+                        createdAt: Date.now(),
+                      }
+                      state.deliverableVerificationDone = false
+                      terminalReason = 'deliverable_verification_failed'
+                      phase = 'COMPLETE'
+                      break
+                    }
+
                     if (
                       args.path &&
                       isWebsiteEntryPath(args.path) &&
@@ -2053,7 +3754,12 @@ export class AgentLoop {
                       phase = 'EVALUATING'
                       break
                     }
-                  } catch { /* parse error — skip verification */ }
+                  } catch {
+                    state.deliverableVerificationDone = false
+                    terminalReason = 'deliverable_verification_failed'
+                    phase = 'COMPLETE'
+                    break
+                  }
                 } else {
                   const originalRequest = messages[messages.length - 1]?.content || ''
                   const wantsPdf = /\bpdf\b/i.test(originalRequest)
@@ -2114,6 +3820,15 @@ export class AgentLoop {
               }
             }
             if (state.currentPlanItems && nonNoteFileCreated) {
+              if (pauseForPhaseEndNarrationBeforeAutoAdvance(
+                state,
+                contextManager,
+                'The non-note file creation phase',
+                lastStreamResult.assistantContent,
+              )) {
+                phase = 'STREAMING'
+                break
+              }
               log.info(`Non-note file created on step ${state.currentStepIdx} — forcing step advance`)
               const stepBeforeAdvance = state.currentStepIdx
               const advanceMsg = planManager.handleStepAdvance(state)
@@ -2131,6 +3846,15 @@ export class AgentLoop {
               const goalCheck = goalTracker.checkGoalCompletion(state.currentStepIdx, state)
               if (goalCheck.allMet) {
                 state.goalsMet = true
+                if (pauseForPhaseEndNarrationBeforeAutoAdvance(
+                  state,
+                  contextManager,
+                  'The goal-complete phase',
+                  lastStreamResult.assistantContent,
+                )) {
+                  phase = 'STREAMING'
+                  break
+                }
                 log.info(`Goals met for step ${state.currentStepIdx} — advancing`)
                 const stepBeforeAdvance = state.currentStepIdx
                 const advanceMsg = planManager.handleStepAdvance(state)
@@ -2162,6 +3886,31 @@ export class AgentLoop {
               contextManager.push(debugInjection as ChatMessageParam)
             }
 
+            if (
+              state.currentStepIdx === stepIdxBeforeExec &&
+              shouldAutoAdvanceBriefInlineResearchAfterTools(state, this.options.messages, lastToolResults)
+            ) {
+              if (pauseForPhaseEndNarrationBeforeAutoAdvance(
+                state,
+                contextManager,
+                'The quick research phase',
+                lastStreamResult.assistantContent,
+              )) {
+                phase = 'STREAMING'
+                break
+              }
+              log.info(`Brief inline research evidence gathered on step ${state.currentStepIdx} — advancing to answer`)
+              const stepBeforeAdvance = state.currentStepIdx
+              const advanceMsg = planManager.handleStepAdvance(state)
+              if (state.currentStepIdx > stepBeforeAdvance) {
+                contextManager.compactForStepTransition(state)
+              }
+              if (advanceMsg) {
+                contextManager.push(advanceMsg as ChatMessageParam)
+              }
+              if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+            }
+
             // Emit SSE step_advance events for any step advancement that happened
             for (let i = stepIdxBeforeExec; i < state.currentStepIdx; i++) {
               this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
@@ -2183,6 +3932,7 @@ export class AgentLoop {
                 planManager,
                 workingMemory,
                 goalTracker,
+                outputVerifier,
               )
               if (recoveredPhase) {
                 phase = recoveredPhase
@@ -2256,6 +4006,75 @@ export class AgentLoop {
               break
             }
 
+            if (
+              !lastStreamWasCompactNarration &&
+              lastStreamResult.toolCalls.size === 0 &&
+              shouldUseCompactResearchTurn(state) &&
+              state.currentPlanItems &&
+              state.currentStepIdx < state.currentPlanItems.length - 1
+            ) {
+              if (compactResearchEvidenceComplete(state)) {
+                const stepBeforeAdvance = state.currentStepIdx
+                if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                  contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                }
+                const advanceMsg = planManager.handleStepAdvance(state)
+                if (state.currentStepIdx > stepBeforeAdvance) {
+                  contextManager.compactForStepTransition(state)
+                }
+                if (advanceMsg) {
+                  contextManager.push(advanceMsg as ChatMessageParam)
+                }
+                if (goalTracker.isInitialized()) {
+                  goalTracker.advanceToStep(state.currentStepIdx)
+                }
+                for (let i = stepBeforeAdvance; i < state.currentStepIdx; i++) {
+                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                }
+                console.log('[AgentDiagnostics] Compact research evidence complete; advanced after text-only turn', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems.length,
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+
+              if (compactResearchNeedsToolAction(state)) {
+                if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
+                  contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                }
+                state.consecutiveNoToolCalls += 1
+                state.forceTextNextIteration = false
+                if (state.consecutiveNoToolCalls >= 2) {
+                  state.suppressedResearchToolName = null
+                  state.stepLoopDetections = 0
+                  state.recentToolCalls = []
+                }
+                contextManager.push({
+                  role: 'system',
+                  content: compactResearchToolRequiredMessage(
+                    state,
+                    state.consecutiveNoToolCalls >= 2
+                      ? 'the compact research turn repeated without a tool call, so reopened source tools and cleared the loop state'
+                      : 'the current research phase still needs model-selected evidence before it can advance',
+                  ),
+                } as ChatMessageParam)
+                console.log('[AgentDiagnostics] Compact research text loop reissued model-selected tool requirement', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems.length,
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                  reopenedTools: state.consecutiveNoToolCalls >= 2,
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+            }
+
             const stepIdxBeforeEval = state.currentStepIdx
 
             const actions = policyEngine.evaluate(
@@ -2287,7 +4106,13 @@ export class AgentLoop {
                 if (action.message.role === 'system') {
                   systemInjections.push(action.message.content as string)
                 } else if (shouldKeepAssistantInjection(action.message.content as string)) {
-                  contextManager.push(action.message as ChatMessageParam)
+                  const actionContent = String(action.message.content || '')
+                  const isCurrentAssistantReplay =
+                    action.message.role === 'assistant' &&
+                    actionContent === lastStreamResult.assistantContent
+                  contextManager.push(isCurrentAssistantReplay
+                    ? assistantHistoryMessageForStreamResult(lastStreamResult, actionContent)
+                    : action.message as ChatMessageParam)
                 } else {
                   console.log('[Context] Dropped short assistant no-tool injection from model context')
                 }
@@ -2436,18 +4261,23 @@ export class AgentLoop {
     })
   }
 
-  private injectLiveDirectives(contextManager: ContextManager): boolean {
+  private injectLiveDirectives(contextManager: ContextManager): false | 'injected' | 'identity' {
     const { conversationId, userId } = this.options
     if (!conversationId) return false
 
     const directives = drainLiveDirectives(conversationId, userId)
     if (directives.length === 0) return false
 
+    if (directives.some(directive => isAgentIdentityDisclosureQuestion(directive.content))) {
+      this.emitAgentIdentityDisclosureAnswer()
+      return 'identity'
+    }
+
     contextManager.push({
       role: 'user',
       content: liveDirectiveContextMessage(directives),
     } as ChatMessageParam, 10)
-    return true
+    return 'injected'
   }
 
   /**
@@ -2469,10 +4299,43 @@ export class AgentLoop {
     strategy: TaskStrategyConfig,
     toolRegistry: ToolRegistry,
   ): Promise<AsyncIterable<StreamingChatCompletionChunk> | null> {
-    let requestMessages = allMessages
-    if (state.strategyConfig && state.strategyConfig.type !== strategy.type) {
+    const useCompactForcedNarration = state.forceTextNextIteration && !state.exactExtractionGuardPending
+    const useCompactCadenceNarration = !useCompactForcedNarration &&
+      shouldUseNaturalCadenceNarration(state, this.options.messages)
+    const useCompactNarration = useCompactForcedNarration || useCompactCadenceNarration
+    const useCompactFinalInlineAnswer = finalInlineAnswerTurn(state, this.options.messages) &&
+      !useCompactNarration &&
+      !state.exactExtractionGuardPending
+    const useTextFinalDeliverable = shouldUseTextSavedFinalDeliverable(state, this.options.messages) &&
+      !useCompactNarration &&
+      !state.exactExtractionGuardPending
+    const useCompactFinalDeliverable = finalSavedDeliverableTurn(state, this.options.messages) &&
+      !useTextFinalDeliverable &&
+      !useCompactNarration &&
+      !state.exactExtractionGuardPending
+    const useCompactResearchTurn = !useCompactNarration &&
+      !useCompactFinalInlineAnswer &&
+      !useTextFinalDeliverable &&
+      !useCompactFinalDeliverable &&
+      shouldUseCompactResearchTurn(state)
+    const compactResearchPhaseCanAdvance = useCompactResearchTurn &&
+      !!state.currentPlanItems &&
+      state.currentStepIdx < state.currentPlanItems.length - 1 &&
+      compactResearchEvidenceComplete(state)
+    let requestMessages = useCompactNarration
+      ? compactForcedNarrationMessages(state, allMessages)
+      : useCompactFinalInlineAnswer
+        ? compactFinalInlineAnswerMessages(state, allMessages)
+        : useTextFinalDeliverable
+          ? compactFinalTextDeliverableMessages(state, allMessages)
+        : useCompactFinalDeliverable
+          ? compactFinalDeliverableMessages(state, allMessages)
+          : useCompactResearchTurn
+            ? compactResearchTurnMessages(state, allMessages)
+            : allMessages
+    if (!useCompactNarration && state.strategyConfig && state.strategyConfig.type !== strategy.type) {
       requestMessages = [
-        ...allMessages,
+        ...requestMessages,
         {
           role: 'system',
           content: `RUNTIME STRATEGY OVERRIDE: use "${state.strategyConfig.type}" behavior for this task now. Follow the current plan/step guidance over the initial classifier hint.`,
@@ -2480,6 +4343,10 @@ export class AgentLoop {
       ]
     }
     const hasActivePlanStep = !!state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length
+    const partialFileContinuationNeedsTool = hasActivePlanStep &&
+      !!state.partialFileWriteRecoveryPending &&
+      !state.forceTextNextIteration &&
+      !state.exactExtractionGuardPending
     if (state.exactExtractionGuardPending && state.exactExtractionGuardPrompt) {
       requestMessages = [
         ...requestMessages,
@@ -2488,27 +4355,36 @@ export class AgentLoop {
           content: state.exactExtractionGuardPrompt,
         } as ChatMessageParam,
       ]
-    } else if (hasActivePlanStep && !state.forceTextNextIteration && state.visibleToolActionsSinceLastNarration >= 4) {
+    } else if (partialFileContinuationNeedsTool && state.partialFileWriteRecoveryPending) {
+      const pending = state.partialFileWriteRecoveryPending
       requestMessages = [
         ...requestMessages,
         {
           role: 'system',
-          content: 'NARRATION REQUIRED NOW: Start this response with one concise Manus-style progress paragraph from completed work, then optionally make exactly one concrete tool call in the same response. This applies in every phase and task type: research, browser, build, code, file, creative, analysis, and delivery. Do not skip the paragraph just because another useful tool call is available; a tool-only response at this point is a cadence miss unless no concrete completed work exists. If this phase is complete, write the paragraph and emit <next_step/> with no tool call; phase-end narration is valid even when no further action remains in the phase. Keep the cadence soft by continuing useful work after the paragraph when needed. Never ask permission to continue or write opt-in handoffs such as "If you want, I can continue"; continue autonomously until complete or concretely blocked. Use 1-2 sentences, never fewer than 15 words, usually 15-20 words, hard cap <=34 words and <=240 characters. Be result-first and concrete; vary the opening verb and sentence shape from recent progress notes. No lists, source dumps, internal step numbers, or command fragments.',
-        } as ChatMessageParam,
-      ]
-    } else if (hasActivePlanStep && !state.forceTextNextIteration && state.visibleToolActionsSinceLastNarration >= 3) {
-      requestMessages = [
-        ...requestMessages,
-        {
-          role: 'system',
-          content: 'NARRATION CADENCE STATE: 3 visible action pills have completed since the last progress paragraph. The narration window is open across every phase and task type. Start this response with one concise, concrete progress paragraph before any tool call, then optionally make exactly one concrete visible tool call in the same response. Do not skip the paragraph just because another useful tool call is available. If this phase is complete, write the paragraph and emit <next_step/> with no tool call instead of waiting for another action. Do not ask permission to continue, do not offer to continue later, and do not wait for a separate repair turn. Vary the opening verb and sentence shape from recent progress notes.',
+          content: [
+            'PARTIAL FILE CONTINUATION REQUIRED NOW.',
+            `The only valid next action is one native append_file call to "${pending.path}".`,
+            `That file already has ${pending.lines} lines / ${pending.chars} characters from a recovered clipped write.`,
+            'Do not call create_file, edit_file, read_file, list_files, export_pdf, browser tools, research tools, or emit <next_step/>.',
+            'Append only the next missing section or chunk, without repeating earlier content.',
+          ].join(' '),
         } as ChatMessageParam,
       ]
     }
     if (state.forceTextNextIteration) {
-      requestMessages = compactForcedNarrationMessages(state, allMessages)
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: [
+            'NARRATION DUE: write exactly one concise, concrete progress paragraph from completed work.',
+            'This is a narration-only repair turn: do not call tools, do not ask permission to continue, and do not stop with future intent.',
+            'After this paragraph is accepted, the following turn can continue the active phase or final answer.',
+          ].join(' '),
+        } as ChatMessageParam,
+      ]
     }
-    const researchLogContext = shouldInjectResearchActivityContext(state)
+    const researchLogContext = !useCompactNarration && shouldInjectResearchActivityContext(state)
       ? researchActivityContext(state.researchActivity, state.currentStepIdx)
       : null
     if (researchLogContext) {
@@ -2520,6 +4396,26 @@ export class AgentLoop {
         } as ChatMessageParam,
       ]
     }
+    if (useCompactResearchTurn && compactResearchNeedsOpenedSource(state)) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: state.suppressedResearchToolName === 'read_document'
+            ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: targeted web_search for a new authoritative URL, browser_navigate to that URL, or browser_get_content from a different already-open useful page. Do not retry the same extracted URL.'
+            : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again. Open or extract one of the strongest URLs already surfaced in the research activity context using read_document, browser_navigate, or browser_get_content if a useful page is already open. After this opened/read source, synthesize or advance instead of doing more query variants.',
+        } as ChatMessageParam,
+      ]
+    }
+    if (compactResearchPhaseCanAdvance) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase.',
+        } as ChatMessageParam,
+      ]
+    }
     if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
       requestMessages = [
         ...requestMessages,
@@ -2528,10 +4424,38 @@ export class AgentLoop {
           content: 'FIXED-SEARCH INLINE ANSWER: The user requested a limited web search followed by an inline chat answer, not a saved file. Use only the completed search evidence and answer directly in the requested length. Do not create, mention, attach, or claim any file, report, artifact, or deliverable.',
         } as ChatMessageParam,
       ]
+    } else if (finalInlineAnswerTurn(state, this.options.messages)) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: finalInlineAnswerPrompt(state),
+        } as ChatMessageParam,
+      ]
+    } else if (shouldUseTextSavedFinalDeliverable(state, this.options.messages)) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: finalSavedDeliverableTextPrompt(state),
+        } as ChatMessageParam,
+      ]
+    } else if (finalSavedDeliverableTurn(state, this.options.messages)) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: finalSavedDeliverablePrompt(state),
+        } as ChatMessageParam,
+      ]
     }
     let relaxRequiredToolChoice = false
     let lastShouldRequireToolCall = false
     for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
+      let finalSavedCompactCompletionParams: Parameters<typeof createCompletion>[0] | null = null
+      let fastActionCompactCompletionParams: Parameters<typeof createCompletion>[0] | null = null
+      let finalSavedStreamTimeoutMs: number | null = null
+      let fastActionStreamTimeoutMs: number | null = null
       try {
         const budgetFraction = state.dynamicIterationLimit
           ? state.iterations / state.dynamicIterationLimit
@@ -2539,42 +4463,56 @@ export class AgentLoop {
 
         let activeTools: ToolDefinitionLike[]
         const isPostCompletion = state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length
-        if (isPostCompletion || state.forceTextNextIteration) {
+        if (isPostCompletion) {
           activeTools = []
         } else if (state.exactExtractionGuardPending) {
           activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
             .filter(t => EXACT_EXTRACTION_TOOLS.has(t.function?.name || ''))
+        } else if (useCompactNarration) {
+          activeTools = []
+        } else if (useTextFinalDeliverable) {
+          activeTools = []
+        } else if (compactResearchPhaseCanAdvance) {
+          activeTools = []
         } else if (state.deadlineFinalizationStarted) {
-          const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
-          const deadlineFinalTools = new Set([
-            'create_file',
-            'append_file',
-            'edit_file',
-            'read_file',
-            'list_files',
-            ...(finalWantsPdf ? ['export_pdf'] : []),
-          ])
-          activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
-            .filter(t => deadlineFinalTools.has(t.function?.name || ''))
+          if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) {
+            activeTools = []
+          } else {
+            const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
+            const deadlineFinalTools = new Set([
+              'create_file',
+              'append_file',
+              'edit_file',
+              'read_file',
+              'list_files',
+              ...(finalWantsPdf ? ['export_pdf'] : []),
+            ])
+            activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
+              .filter(t => deadlineFinalTools.has(t.function?.name || ''))
+          }
         } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
           activeTools = []
         } else if (isLeanFinalSynthesisStep(state)) {
-          const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
-          const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
-          const allowedFinalTools = new Set([
-            'create_file',
-            'edit_file',
-            'append_file',
-            'read_file',
-            'list_files',
-            ...(finalWantsPdf ? ['export_pdf'] : []),
-            ...(finalWantsImage ? ['image_search'] : []),
-          ])
-          activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
-            .filter(t => {
-              const name = t.function?.name || ''
-              return allowedFinalTools.has(name)
-            })
+          if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) {
+            activeTools = []
+          } else {
+            const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
+            const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
+            const allowedFinalTools = new Set([
+              'create_file',
+              'edit_file',
+              'append_file',
+              'read_file',
+              'list_files',
+              ...(finalWantsPdf ? ['export_pdf'] : []),
+              ...(finalWantsImage ? ['image_search'] : []),
+            ])
+            activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
+              .filter(t => {
+                const name = t.function?.name || ''
+                return allowedFinalTools.has(name)
+              })
+          }
         } else if (budgetFraction >= URGENCY_FINAL_FRACTION) {
           const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
           const allActiveTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
@@ -2606,22 +4544,163 @@ export class AgentLoop {
         } else {
           activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
         }
-        activeTools = pruneToolsForCurrentStep(state, activeTools)
+        const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction(state)
+        const compactResearchToolState = compactResearchNeedsTool && state.currentPhase !== 'research'
+          ? ({ ...state, currentPhase: 'research' as const })
+          : state
+        if (compactResearchToolState !== state) {
+          activeTools = toolRegistry.getActiveDefinitions(compactResearchToolState) as ToolDefinitionLike[]
+        }
+        if (compactResearchNeedsTool) {
+          const sourceRecoveryPool = toolRegistry.getActiveDefinitions(compactResearchToolState) as ToolDefinitionLike[]
+          const restoredTools = compactResearchSourceRecoveryToolsForState(
+            state,
+            activeTools,
+            sourceRecoveryPool,
+          )
+          if (restoredTools !== activeTools) {
+            console.log('[AgentDiagnostics] Restored compact research source tools', {
+              step: state.currentStepIdx,
+              totalSteps: state.currentPlanItems?.length || 0,
+              beforeTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+              afterTools: restoredTools.map(tool => tool.function?.name).filter(Boolean),
+            })
+            activeTools = restoredTools
+          }
+        }
+        activeTools = pruneToolsForCurrentStep(compactResearchToolState, activeTools)
+        if (compactResearchNeedsTool && compactResearchNeedsOpenedSource(state)) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = compactResearchOpenedSourceToolsForState(state, activeTools)
+          console.log('[AgentDiagnostics] Narrowed compact research to opened-source tools', {
+            step: state.currentStepIdx,
+            totalSteps: state.currentPlanItems?.length || 0,
+            stepResearchCallCount: state.stepResearchCallCount,
+            stepSearchQueries: state.stepSearchQueries.size,
+            stepVisitedUrls: state.stepVisitedUrls.size,
+            stepSourceDomains: stepOpenedSourceDomains(state).size,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
+        if (compactResearchNeedsTool && shouldUseCompactResearchRecoveryTools(state)) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = compactResearchRecoveryToolsForState(state, activeTools)
+          console.log('[AgentDiagnostics] Narrowed compact research recovery tools', {
+            step: state.currentStepIdx,
+            totalSteps: state.currentPlanItems?.length || 0,
+            consecutiveNoToolCalls: state.consecutiveNoToolCalls,
+            stepToolCallCount: state.stepToolCallCount,
+            stepResearchCallCount: state.stepResearchCallCount,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
+        if (
+          compactResearchNeedsTool &&
+          state.suppressedResearchToolName &&
+          !compactResearchEvidenceComplete(state)
+        ) {
+          const suppressed = state.suppressedResearchToolName
+          const filtered = activeTools.filter(tool => tool.function?.name !== suppressed)
+          if (filtered.length > 0) {
+            const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+            activeTools = loopRecoveryToolForState(state, filtered)
+            console.log('[AgentDiagnostics] Suppressed looped research tool for recovery', {
+              step: state.currentStepIdx,
+              totalSteps: state.currentPlanItems?.length || 0,
+              suppressed,
+              loopDetections: state.stepLoopDetections,
+              beforeTools,
+              afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+            })
+          }
+        }
+        if (partialFileContinuationNeedsTool) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = activeTools.filter(tool => tool.function?.name === 'append_file')
+          console.log('[AgentDiagnostics] Narrowed tools for partial file continuation', {
+            step: state.currentStepIdx,
+            partialPath: state.partialFileWriteRecoveryPending?.path || '',
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
+        const exhaustedStepToolPrune = pruneExhaustedStepToolsForCurrentTurn(state, activeTools)
+        if (exhaustedStepToolPrune.exhausted.length > 0) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = exhaustedStepToolPrune.tools
+          console.log('[AgentDiagnostics] Pruned exhausted step tools before model call', {
+            step: state.currentStepIdx,
+            totalSteps: state.currentPlanItems?.length || 0,
+            exhausted: exhaustedStepToolPrune.exhausted,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: `STEP TOOL LIMIT REACHED: ${exhaustedStepToolPrune.exhausted.join(', ')} is unavailable for the rest of this phase because its per-phase limit is exhausted. Do not request that tool. Use one of the remaining tools, or if the phase has enough evidence, write a concise progress paragraph and emit <next_step/>.`,
+            } as ChatMessageParam,
+          ]
+        }
         const agenticStepNeedsTool = shouldForceAgenticToolCall(state, hasActivePlanStep)
+        const finalSavedDeliverableNeedsTool = useCompactFinalDeliverable &&
+          (
+            partialFileContinuationNeedsTool ||
+            !hasSavedFinalDeliverableCandidate(state)
+          )
+        if (
+          finalSavedDeliverableNeedsTool &&
+          !partialFileContinuationNeedsTool &&
+          !hasSavedFinalDeliverableCandidate(state)
+        ) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = activeTools.filter(tool => tool.function?.name === 'create_file')
+          console.log('[AgentDiagnostics] Narrowed tools for initial final saved deliverable', {
+            step: state.currentStepIdx,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
+        const narrationWindowOpen =
+          hasActivePlanStep &&
+          !state.forceTextNextIteration &&
+          !state.exactExtractionGuardPending &&
+          state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
+          !finalSavedDeliverableNeedsTool &&
+          !partialFileContinuationNeedsTool
         const shouldRequireToolCall =
           activeTools.length > 0 &&
           !isPostCompletion &&
           !state.forceTextNextIteration &&
-          state.currentPhase !== 'deliver' &&
           (
-            agenticStepNeedsTool ||
-            state.exactExtractionGuardPending ||
-            state.taskStrategy === 'browse' ||
-            state.consecutiveNoToolCalls > 0 ||
-            state.browserNoToolRecoveryAttempts > 0
+            partialFileContinuationNeedsTool ||
+            finalSavedDeliverableNeedsTool ||
+            (
+              state.currentPhase !== 'deliver' &&
+              (
+                agenticStepNeedsTool ||
+                compactResearchNeedsTool ||
+                state.exactExtractionGuardPending ||
+                state.taskStrategy === 'browse' ||
+                state.consecutiveNoToolCalls > 0 ||
+                state.browserNoToolRecoveryAttempts > 0
+              )
+            )
           )
-        lastShouldRequireToolCall = shouldRequireToolCall
-        const useRequiredToolCall = shouldRequireToolCall && !relaxRequiredToolChoice
+        const requiredToolIntent = shouldRequireToolCall && !narrationWindowOpen
+        const fastActionTurn = activeTools.length > 0 &&
+          !isPostCompletion &&
+          isFastActionToolTurn(state, this.options.messages) &&
+          (requiredToolIntent || compactResearchNeedsTool || agenticStepNeedsTool || narrationWindowOpen)
+        const fastSourceActionTurn = fastActionTurn &&
+          isFastSourceActionToolTurn(state, this.options.messages)
+        const useRequiredToolCall = requiredToolIntent &&
+          !relaxRequiredToolChoice &&
+          supportsProviderRequiredToolChoice()
+        lastShouldRequireToolCall = useRequiredToolCall
 
         const approxChars = requestMessages.reduce((sum, m) => {
           if (typeof m.content === 'string') return sum + m.content.length
@@ -2631,15 +4710,103 @@ export class AgentLoop {
         console.log(`[Agent] iter=${state.iterations} msgs=${requestMessages.length} ~${Math.round(approxChars / 4)}tok tools=${activeTools.length} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0}`)
 
         const modelTools = compactToolDefinitionsForModel(activeTools)
-        const requestTimeoutMs = state.deadlineFinalizationStarted
-          ? Math.max(
-              10_000,
-              Math.min(
-                AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS,
-                agentRunRemainingMs(state) - AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
-              ),
-            )
+        const isFinalInlineAnswerTurn = finalInlineAnswerTurn(state, this.options.messages)
+        const isFinalSavedDeliverableTurn = finalSavedDeliverableTurn(state, this.options.messages)
+        const isInitialFinalSavedDeliverableTurn = isFinalSavedDeliverableTurn &&
+          !state.partialFileWriteRecoveryPending &&
+          !hasSavedFinalDeliverableCandidate(state)
+        const maxTokens = useCompactNarration
+          ? Math.min(maxTokensForIteration(state), FORCED_NARRATION_MAX_TOKENS)
+          : isFinalInlineAnswerTurn
+          ? Math.min(maxTokensForIteration(state), finalInlineAnswerMaxTokens(state, this.options.messages))
+          : useTextFinalDeliverable
+          ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS)
+          : isInitialFinalSavedDeliverableTurn
+          ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS)
+          : isFinalSavedDeliverableTurn
+          ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_MAX_TOKENS)
+          : fastSourceActionTurn
+          ? Math.min(maxTokensForIteration(state), FAST_SOURCE_ACTION_MAX_TOKENS)
+          : maxTokensForIteration(state)
+        const requestTemperature = useCompactNarration
+          ? 0.25
+          : isFinalInlineAnswerTurn
+            ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
+            : isFinalSavedDeliverableTurn
+              ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
+            : state.strategyConfig?.temperature ?? strategy.temperature
+        const requestReasoning = useCompactNarration
+          ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+          : isFinalInlineAnswerTurn
+            ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+            : isFinalSavedDeliverableTurn
+              ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+              : fastActionTurn
+                ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+            : {}
+        const requestTimeoutMs = useCompactNarration
+            ? FORCED_NARRATION_REQUEST_TIMEOUT_MS
+          : isFinalInlineAnswerTurn
+            ? FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS
+          : useTextFinalDeliverable
+            ? FINAL_SAVED_DELIVERABLE_TEXT_REQUEST_TIMEOUT_MS
+          : isInitialFinalSavedDeliverableTurn
+            ? FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS
+          : isFinalSavedDeliverableTurn
+            ? FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS
+          : state.deadlineFinalizationStarted
+            ? Math.max(
+                10_000,
+                Math.min(
+                  state.deadlineModelTurnTimeoutMs || AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+                  agentRunRemainingMs(state) - (state.deadlineHardStopBufferMs || AGENT_DEADLINE_HARD_STOP_BUFFER_MS),
+                ),
+              )
+          : fastActionTurn
+            ? FAST_ACTION_REQUEST_TIMEOUT_MS
           : STREAM_REQUEST_TIMEOUT_MS
+        if (isFinalSavedDeliverableTurn) {
+          finalSavedStreamTimeoutMs = requestTimeoutMs
+          finalSavedCompactCompletionParams = {
+            model,
+            messages: requestMessages,
+            ...(modelTools.length > 0
+              ? { tools: modelTools as unknown as ChatCompletionTool[] }
+              : {}),
+            ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
+            temperature: requestTemperature,
+            parallel_tool_calls: false,
+            max_tokens: maxTokens,
+            ...requestReasoning,
+            includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
+            usage: { include: true },
+            requestTimeoutMs: FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS,
+            retryMaxAttempts: 0,
+            retryBaseDelayMs: STREAM_RETRY_BASE_MS,
+            retryMaxDelayMs: STREAM_RETRY_MAX_DELAY_MS,
+            abortSignal: this.options.signal,
+          }
+        }
+        if (fastActionTurn && modelTools.length > 0 && !isFinalSavedDeliverableTurn && !useCompactNarration) {
+          fastActionStreamTimeoutMs = requestTimeoutMs
+          fastActionCompactCompletionParams = {
+            model,
+            messages: requestMessages,
+            tools: modelTools as unknown as ChatCompletionTool[],
+            ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
+            temperature: requestTemperature,
+            parallel_tool_calls: false,
+            max_tokens: maxTokens,
+            ...requestReasoning,
+            includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
+            usage: { include: true },
+            requestTimeoutMs: FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS,
+            retryMaxAttempts: 0,
+            retryBaseDelayMs: STREAM_RETRY_BASE_MS,
+            retryMaxDelayMs: STREAM_RETRY_MAX_DELAY_MS,
+            abortSignal: this.options.signal,
+          }
+        }
         console.error('[AgentDiagnostics] Opening streaming model call', {
           iteration: state.iterations,
           phase: state.currentPhase,
@@ -2649,13 +4816,19 @@ export class AgentLoop {
           activeTools: activeTools.length,
           modelTools: modelTools.length,
           requireToolCall: useRequiredToolCall,
+          requiredToolIntent,
+          providerRequiredToolChoice: supportsProviderRequiredToolChoice(),
+          fastActionTurn,
+          fastSourceActionTurn,
           forceTextNextIteration: !!state.forceTextNextIteration,
+          compactCadenceNarration: !!useCompactCadenceNarration,
           approxTokens: Math.round(approxChars / 4),
+          maxTokens,
+          finalInlineAnswer: isFinalInlineAnswerTurn,
+          finalSavedDeliverable: isFinalSavedDeliverableTurn,
           requestTimeoutMs,
         })
-        if (this.options.userId) {
-          await assertServerCreditsAvailable(this.options.userId)
-        }
+        await this.assertServerCreditRunwayCached()
         const response = await createStreamingCompletion({
           model,
           messages: requestMessages,
@@ -2663,12 +4836,10 @@ export class AgentLoop {
             ? { tools: modelTools as unknown as ChatCompletionTool[] }
             : {}),
           ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
-          temperature: state.strategyConfig?.temperature ?? strategy.temperature,
+          temperature: requestTemperature,
           parallel_tool_calls: false,
-          max_tokens: maxTokensForIteration(state),
-          ...(state.forceTextNextIteration
-            ? { reasoning: { effort: 'minimal', exclude: true }, temperature: 0.25 }
-            : {}),
+          max_tokens: maxTokens,
+          ...requestReasoning,
           includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
           stream_options: { include_usage: true },
           requestTimeoutMs,
@@ -2679,7 +4850,7 @@ export class AgentLoop {
         })
 
         if (attempt > 0) {
-          state.iterationDelayMs = Math.min(3000, state.iterationDelayMs + 1000)
+          state.iterationDelayMs = Math.min(1200, state.iterationDelayMs + 500)
         }
 
         state.lastModelErrorForUser = null
@@ -2687,6 +4858,75 @@ export class AgentLoop {
       } catch (streamErr) {
         const status = (streamErr as { status?: number })?.status
         const errorText = `${(streamErr as { body?: string })?.body || ''}\n${streamErr instanceof Error ? streamErr.message : String(streamErr)}`
+        if (isAssistantRequestTimeout(streamErr)) {
+          if (finalSavedCompactCompletionParams) {
+            try {
+              console.warn('[AgentDiagnostics] Final saved deliverable stream start timed out; using compact final-write completion', {
+                attempt: attempt + 1,
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                timeoutMs: finalSavedStreamTimeoutMs,
+              })
+              const completion = await createCompletion(finalSavedCompactCompletionParams)
+              return completionResponseToStreamingIterable(completion)
+            } catch (completionErr) {
+              console.warn('[AgentDiagnostics] Compact final-write completion also failed to start', {
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                error: sanitizeAgentServiceError(completionErr),
+              })
+            }
+          }
+          if (fastActionCompactCompletionParams) {
+            try {
+              console.warn('[AgentDiagnostics] Fast action stream start timed out; using compact action completion', {
+                attempt: attempt + 1,
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                timeoutMs: fastActionStreamTimeoutMs,
+              })
+              const completion = await createCompletion(fastActionCompactCompletionParams)
+              return completionResponseToStreamingIterable(completion)
+            } catch (completionErr) {
+              console.warn('[AgentDiagnostics] Compact action completion also failed to start', {
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                error: sanitizeAgentServiceError(completionErr),
+              })
+            }
+          }
+          this.options.diagnostics?.({
+            type: 'stream_error',
+            data: {
+              category: 'model_start_timeout',
+              attempt: attempt + 1,
+              maxAttempts: STREAM_MAX_RETRIES + 1,
+              iteration: state.iterations,
+              phase: state.currentPhase,
+              step: state.currentStepIdx,
+              requiredToolMode: lastShouldRequireToolCall,
+              status,
+              error: sanitizeAgentServiceError(streamErr),
+            },
+          })
+          console.warn('[AgentDiagnostics] Streaming model did not start before the bounded action timeout', {
+            attempt: attempt + 1,
+            maxAttempts: STREAM_MAX_RETRIES + 1,
+            iteration: state.iterations,
+            phase: state.currentPhase,
+            step: state.currentStepIdx,
+            requiredToolMode: lastShouldRequireToolCall,
+            status,
+            error: sanitizeAgentServiceError(streamErr),
+          })
+          state.lastModelErrorForUser = null
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+          return null
+        }
         const invalidToolArguments = status === 400 &&
           /\bfunction\.arguments\b[\s\S]*\bJSON format\b|invalid_parameter_error|invalid_parameter/i.test(errorText)
         if (invalidToolArguments) {
@@ -2721,7 +4961,7 @@ export class AgentLoop {
                 content: 'PROVIDER RECOVERY: The previous model attempt was rejected before streaming because a function/tool call used invalid JSON for function.arguments. Your next response must make exactly one native tool call with arguments as a strict JSON object. Use double quotes around every key and string value, no markdown, no comments, no trailing commas, no bare strings, and no prose outside the tool call. Example arguments: {"query":"specific search phrase"} or {"url":"https://example.com"}. If the current page is blocked by CAPTCHA, Cloudflare, access denial, or human verification, do not interact with it and do not retry the same URL; choose a different source route.',
               } as ChatMessageParam,
             ]
-            state.iterationDelayMs = Math.min(4000, state.iterationDelayMs + 1000)
+            state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
             continue
           }
           state.lastModelErrorForUser = null
@@ -2765,10 +5005,10 @@ export class AgentLoop {
               ...requestMessages,
               {
                 role: 'system',
-                content: providerToolModeRecoveryMessage(state),
+                content: providerToolModeRecoveryMessage(state, this.options.messages),
               } as ChatMessageParam,
             ]
-            state.iterationDelayMs = Math.min(4000, state.iterationDelayMs + 1000)
+            state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
             continue
           }
           state.lastModelErrorForUser = null
@@ -2882,7 +5122,7 @@ export class AgentLoop {
             error: sanitizeAgentServiceError(streamErr),
           },
         })
-        state.iterationDelayMs = Math.min(4000, state.iterationDelayMs + 1500)
+        state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
         return null
       }
     }
@@ -2910,6 +5150,63 @@ export class AgentLoop {
 
     // Nudgeable timeout
     if (isNudgeableTimeout(error)) {
+      if (finalInlineAnswerTurn(state, this.options.messages)) {
+        const partialContent = error.partialContent || ''
+        if (partialContent.trim().length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS) {
+          contextManager.push({ role: 'assistant', content: partialContent } as ChatMessageParam)
+          if (state.currentPlanItems) {
+            state.currentStepIdx = state.currentPlanItems.length
+          }
+          state.forceTextNextIteration = false
+          state.phaseEndNarrationPending = false
+          state.lastIterationEnd = Date.now()
+          return 'COMPLETE'
+        }
+
+        if (state.timeoutNudgeCount < 1) {
+          state.timeoutNudgeCount++
+          contextManager.push({
+            role: 'system',
+            content: 'FINAL ANSWER TIME CHECK: stop hidden reasoning and write the answer now from gathered evidence only. No tools, no planning, no status update, no extra source gathering. Keep it concise and finish in this response.',
+          } as ChatMessageParam)
+          state.lastIterationEnd = Date.now()
+          return 'STREAMING'
+        }
+
+        this.emitter.error('The final answer took too long to respond. Please try again.')
+        return 'ERROR'
+      }
+
+      if (finalSavedDeliverableTurn(state, this.options.messages)) {
+        if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
+          state.timeoutNudgeCount++
+          state.forceTextNextIteration = false
+          contextManager.push({
+            role: 'system',
+            content: finalSavedDeliverableToolCallInstruction(
+              state,
+              'FINAL SAVED DELIVERABLE TIME CHECK: the final output turn stalled before saving the deliverable.',
+            ),
+          } as ChatMessageParam)
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+          state.lastIterationEnd = Date.now()
+          return 'STREAMING'
+        }
+
+        state.timeoutNudgeCount = 0
+        state.forceTextNextIteration = false
+        contextManager.push({
+          role: 'system',
+          content: finalSavedDeliverableToolCallInstruction(
+            state,
+            'FINAL SAVED DELIVERABLE IMMEDIATE WRITE: the previous saved-output turn was too slow.',
+          ),
+        } as ChatMessageParam)
+        state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+        state.lastIterationEnd = Date.now()
+        return 'STREAMING'
+      }
+
       if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
         state.timeoutNudgeCount++
 
@@ -2937,7 +5234,7 @@ export class AgentLoop {
     if (state.iterations < state.dynamicIterationLimit) {
       console.error('[Agent] Stream interrupted, retrying iteration...')
       state.lastIterationEnd = Date.now()
-      state.iterationDelayMs = Math.min(4000, state.iterationDelayMs + 1000)
+      state.iterationDelayMs = Math.min(1500, state.iterationDelayMs + 500)
       return 'STREAMING'
     }
     this.emitter.error('The task stopped before it finished. Please try again.')

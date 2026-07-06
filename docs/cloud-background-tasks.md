@@ -58,7 +58,14 @@ Set these values on both the web process and the worker process:
 ```bash
 TURSO_DATABASE_URL=...
 TURSO_AUTH_TOKEN=...
+LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=google/gemini-3.1-flash-lite
+OPENROUTER_REASONING_EFFORT=minimal
+OPENROUTER_REASONING_EXCLUDE=true
+DEEPSEEK_API_KEY=...
+DEEPSEEK_MODEL=deepseek-v4-flash
+DEEPSEEK_REASONING_EFFORT=high
 AUTH_SECRET=...
 AGENT_INTERNAL_HEALTH_SECRET=...
 AGENT_TASK_WORKER_MODE=external
@@ -67,11 +74,12 @@ AGENT_TASK_WORKER_HEARTBEAT_MS=15000
 AGENT_TASK_WORKER_STALE_MS=60000
 AGENT_TASK_WORKER_MAX_ATTEMPTS=3
 AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true
+AGENT_REQUIRE_HOSTED_TASK_WORKER=true
 AGENT_DEPLOYMENT_VERSION=
 AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=false
 ```
 
-`AGENT_TASK_QUEUE_NAME` must match between the web process and its worker process. Use different values for production, staging, and local workers when they share the same Turso database, so a local or preview worker cannot claim production jobs, satisfy the production worker heartbeat guard, or collide with production active-task leases.
+`AGENT_TASK_QUEUE_NAME` must match between the web process and its worker process. Use different values for production, staging, and local workers when they share the same Turso database, so a local or preview worker cannot claim production jobs, satisfy the production worker heartbeat guard, or collide with production active-task leases. Keep `AGENT_REQUIRE_HOSTED_TASK_WORKER=true` on deployed web hosts so a local laptop worker can never satisfy production readiness.
 
 If you want the web service to reject stale workers from an older deployment, set the same `AGENT_DEPLOYMENT_VERSION` on the web and worker services, then set `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true` on the web service. Use a release id, git SHA, or deployment label that you update when both services are redeployed. With that flag enabled, `/api/chat`, `cloud:worker-ready`, and `cloud:worker-smoke` accept only workers heartbeating the matching version.
 
@@ -79,12 +87,12 @@ Optional worker tuning:
 
 ```bash
 AGENT_TASK_WORKER_ID=production-worker-1
-AGENT_TASK_WORKER_POLL_MS=250
+AGENT_TASK_WORKER_POLL_MS=100
 ```
 
 If you set `AGENT_TASK_WORKER_ID` manually, keep it unique per queue. Leaving it blank is fine; the worker generates a unique ID at startup.
 
-Use the default `AGENT_E2B_WARM_POOL_ENABLED=true` on cloud workers when you want Manus-style startup latency: the worker prewarms one E2B sandbox and Chromium browser before advertising readiness, then adopts that ready sandbox for the next task before emitting the first acknowledgement.
+Keep `AGENT_E2B_WARM_POOL_ENABLED=false` by default so E2B runtime starts only when a task can be billed. If you explicitly turn warm pooling on for lower startup latency, the next task that adopts the warm sandbox is charged from the sandbox's original start time.
 
 `AGENT_TASK_WORKER_MAX_ATTEMPTS` caps repeated claims for a task whose worker keeps dying before completion. The default is `3`. When the next claim would exceed the cap, the job is marked terminal with a replayable error event and the user's active-task lease is released, preventing an infinite crash/retry loop and unbounded cloud spend.
 
@@ -226,7 +234,7 @@ RENDER_REPO_URL=https://github.com/your-org/your-repo \
 npm run cloud:render-worker-env -- --apply --create-if-missing --trigger-deploy
 ```
 
-This creates a Render `background_worker` named `agent-worker` on the Starter plan in Oregon, with build command `npm ci && npm run build`, start command `npm run worker:cloud`, Node runtime, one instance, and a 300 second shutdown delay. You can override those defaults with `--plan`, `--region`, `--branch`, `--root-dir`, `--build-command`, and `--start-command`. Because this creates billable infrastructure, dry runs never create the worker; `--apply --create-if-missing` is required.
+This creates a Render `background_worker` named `agent-worker` on the Starter plan in Singapore, with build command `npm ci && npm run build`, start command `npm run worker:cloud`, Node runtime, one instance, and a 300 second shutdown delay. You can override those defaults with `--plan`, `--region`, `--branch`, `--root-dir`, `--build-command`, and `--start-command`. Because this creates billable infrastructure, dry runs never create the worker; `--apply --create-if-missing` is required.
 
 If you enable stale-worker rejection with `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true`, put the same `AGENT_DEPLOYMENT_VERSION` value into the worker checklist before deploying the worker.
 
@@ -367,7 +375,7 @@ The worker heartbeat includes its own runtime capabilities. Readiness requires a
 
 `cloud:worker-smoke` calls the signed `/api/internal/background-worker-smoke` endpoint. The endpoint enqueues a safe diagnostic job in Turso, verifies the server can rediscover that active run by task ID before any viewer stream state is required, opens an event stream until the worker claims it, intentionally disconnects that first viewer stream, reconnects with `afterSeq`, and waits for the same worker job to finish. A passing response proves the deployed web process, Turso queue, active-run rediscovery, live worker, persisted SSE replay, and disconnect-safe worker execution are connected. Successful smoke jobs delete their diagnostic job/event rows before returning; failed probes try to cancel and clean up before reporting the failure.
 
-At runtime, the web process also checks this heartbeat before accepting an external-worker task. With `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true`, a task request returns `503 BACKGROUND_WORKER_UNAVAILABLE` instead of silently queueing work when no worker is alive. Set it to `false` only if your platform has a separate queue-triggered worker startup mechanism.
+At runtime, the web process also checks this heartbeat before accepting an external-worker task. With `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true`, a task request returns `503 BACKGROUND_WORKER_UNAVAILABLE` instead of silently queueing work when no worker is alive. With `AGENT_REQUIRE_HOSTED_TASK_WORKER=true`, deployed web hosts reject local-only worker heartbeats instead of starting tasks that will fail when your laptop disconnects. Set these to `false` only if your platform has a separate queue-triggered worker startup mechanism.
 
 For a local production-shaped run:
 
@@ -383,7 +391,7 @@ Pricing changes, so verify these before adding a payment method. As of 2026-06-0
 
 - Web and worker hosting: about $14/month on [Render](https://render.com/pricing) if you run one Starter web service and one Starter background worker. Render lists Starter compute at $7/month each. If 512 MB is too tight, two Standard services are about $50/month.
 - Turso: likely $0 at low volume. [Turso's free tier](https://turso.tech/pricing) lists 5 GB storage, 500M monthly row reads, and 10M monthly row writes. Paid plans currently start at the Developer tier.
-- OpenRouter: depends on model usage. The default `.env.example` model, [`google/gemini-2.5-flash-lite`](https://openrouter.ai/google/gemini-2.5-flash-lite/), is listed at $0.10 per 1M input tokens and $0.40 per 1M output tokens.
+- OpenRouter/Gemini 3.1 Flash Lite: depends on model usage. The default `.env.example` model, `google/gemini-3.1-flash-lite`, is listed at $0.25 per 1M input tokens, $0.025 per 1M cache-read input tokens, and $1.50 per 1M output tokens.
 - E2B: $0 base on Hobby, with a one-time $100 usage credit for new users. Pro is $150/month plus usage. E2B bills per second while a sandbox is running, and its current docs direct you to the usage calculator for exact CPU/RAM/runtime estimates.
 
 Illustrative E2B budgeting examples at roughly $0.12 per sandbox running hour:

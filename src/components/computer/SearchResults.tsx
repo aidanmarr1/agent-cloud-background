@@ -57,19 +57,10 @@ function SearchContextHeader({ title, count, streaming }: { title?: string; coun
 export function SearchResults({ results, streaming, title }: SearchResultsProps) {
   const items = Array.isArray(results) ? results : []
 
-  // Handle visible search provider errors. Internal recovery skips are removed
-  // by the stream dispatcher; this guard keeps stale persisted data quiet.
+  // Search execution issues are handled by the agent loop. Keep provider
+  // hiccups out of the Computer panel so the workspace does not look broken.
   if (!Array.isArray(results) && results && typeof results === 'object' && 'error' in results) {
-    const rawError = String((results as { error: string }).error || '')
-    if (/^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(rawError)) return null
-
-    return (
-      <div className="flex items-center justify-center h-full py-16 px-6">
-        <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
-          Search was unavailable. The agent will keep working another way.
-        </p>
-      </div>
-    )
+    return null
   }
 
   if (items.length === 0 && streaming) {

@@ -1,4 +1,45 @@
 const JSON_CHANNEL_MARKER_PATTERN = /\|\s*!\s*\(?\s*json\s*>\s*json\s*\)?|\(?\s*json\s*>\s*json\s*\)?/gi
+const DSML_MARKER = String.raw`(?:\uFF5C|[|])\s*(?:\uFF5C|[|])\s*DSML\s*(?:\uFF5C|[|])\s*(?:\uFF5C|[|])`
+const DSML_TOOL_CALL_OPEN_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*tool_calls\b[^>]*>`, 'i')
+const DSML_TOOL_CALL_CLOSE_RE = new RegExp(String.raw`<\/\s*${DSML_MARKER}\s*tool_calls\s*>`, 'i')
+const DSML_TOOL_CALL_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*tool_calls\b[^>]*>[\s\S]*?<\/\s*${DSML_MARKER}\s*tool_calls\s*>`, 'gi')
+const DSML_INVOKE_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*invoke\b[^>]*>[\s\S]*?<\/\s*${DSML_MARKER}\s*invoke\s*>`, 'gi')
+const DSML_PARAMETER_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*parameter\b[^>]*>[\s\S]*?<\/\s*${DSML_MARKER}\s*parameter\s*>`, 'gi')
+const DSML_TAG_RE = new RegExp(String.raw`<\/?\s*${DSML_MARKER}\s*(?:tool_calls|invoke|parameter)\b[^>]*>`, 'gi')
+const INTERNAL_POLICY_LINE_RE = /^\s*(?:[*_`#>\-\s]*)?(?:INTERNAL_RECOVERY|FINAL_STEP_REDIRECT|BROWSER_ACTION_PREFLIGHT_BLOCKED|BLOCKED|FINAL ANSWER REQUIRED|FINAL SYNTHESIS TOOL REQUIRED|PHASE-END NARRATION REQUIRED|NARRATION REQUIRED BEFORE NEXT ACTION|NARRATION REQUIRED NOW|NARRATION CADENCE STATE|NARRATION DUE|PLAN PROGRESS|FINAL PHASE SWITCH|PHASE SWITCH|TOOL CALL CONTRACT|TOOL HEALTH|FINDINGS|FOCUS|AVOID|MODE|Plan step index|Action label|Your plan for this step|Deliverable step)\b[^\n\r]*$/gim
+const INTERNAL_STEP_LINE_RE = /^\s*(?:[*_`#>\-\s]*)?(?:Step\s+\d+\s*\/\s*\d+:\s*["“][^"”]+["”]|\[DONE\]\s*\d+\.|→\s*\[NOW\]\s*\d+\.|\[\s*\]\s*\d+\.)[^\n]*$/gim
+const FUTURE_ACTION_SENTENCE_RE = /(?:^|(?<=[.!?]\s))\s*(?:let me)\b[^.!?\n]*(?:[.!?]|$)/gi
+
+export function stripTextModeToolCallBlocks(
+  text: string,
+  insideBlock = false,
+): { text: string; insideBlock: boolean } {
+  let output = ''
+  let cursor = 0
+  let inside = insideBlock
+
+  while (cursor < text.length) {
+    if (inside) {
+      const closeMatch = DSML_TOOL_CALL_CLOSE_RE.exec(text.slice(cursor))
+      if (!closeMatch) return { text: output, insideBlock: true }
+      cursor += (closeMatch.index || 0) + closeMatch[0].length
+      inside = false
+      continue
+    }
+
+    const openMatch = DSML_TOOL_CALL_OPEN_RE.exec(text.slice(cursor))
+    if (!openMatch) {
+      output += text.slice(cursor)
+      break
+    }
+
+    output += text.slice(cursor, cursor + (openMatch.index || 0))
+    cursor += (openMatch.index || 0) + openMatch[0].length
+    inside = true
+  }
+
+  return { text: output, insideBlock: inside }
+}
 
 function containsDisplayToolArgKeys(text: string): boolean {
   return /\\?"action_label\\?"\s*:/.test(text) && /\\?"plan_step_index\\?"\s*:/.test(text)
@@ -82,7 +123,11 @@ function stripDisplayToolArgJsonLeaks(text: string): string {
 }
 
 export function stripRawToolCallMarkup(text: string): string {
-  return stripDisplayToolArgJsonLeaks(text)
+  return stripDisplayToolArgJsonLeaks(stripTextModeToolCallBlocks(text).text)
+    .replace(DSML_TOOL_CALL_BLOCK_RE, ' ')
+    .replace(DSML_INVOKE_BLOCK_RE, ' ')
+    .replace(DSML_PARAMETER_BLOCK_RE, ' ')
+    .replace(DSML_TAG_RE, ' ')
     .replace(/<\s*tool[_\s-]*calls?\b[^>]*>[\s\S]*?<\/\s*tool[_\s-]*calls?\s*>/gi, ' ')
     .replace(/&lt;\s*tool[_\s-]*calls?\b[^&]*&gt;[\s\S]*?&lt;\/\s*tool[_\s-]*calls?\s*&gt;/gi, ' ')
     .replace(/<\s*function\s*=\s*["']?[\w.-]+["']?\s*>[\s\S]*?<\/\s*function\s*>/gi, ' ')
@@ -95,9 +140,17 @@ export function stripRawToolCallMarkup(text: string): string {
     .replace(/&lt;\/\s*function\s*&gt;/gi, ' ')
 }
 
+export function stripInternalPolicyScaffolding(text: string): string {
+  return text
+    .replace(INTERNAL_POLICY_LINE_RE, '')
+    .replace(INTERNAL_STEP_LINE_RE, '')
+    .replace(FUTURE_ACTION_SENTENCE_RE, '')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
 /** Light cleanup for streaming chunks -- preserves whitespace so words don't merge */
 export function cleanThinkingTags(text: string): string {
-  return stripRawToolCallMarkup(text)
+  return stripInternalPolicyScaffolding(stripRawToolCallMarkup(text))
     .replace(/<think>[\s\S]*?<\/think>/g, '')
     .replace(/<\s*\|?\s*(?:begin|end)[_\s]*of[_\s]*thinking\s*\|?\s*>/gi, '')
     .replace(/\b(?:end_of_thinking|begin_of_thinking|end_thinking|begin_thinking)\b/gi, '')
@@ -119,7 +172,7 @@ export function cleanThinkingTags(text: string): string {
  * like "the research so far has established..." is preserved per user request.
  */
 export function stripPolicyScaffolding(text: string): string {
-  return text
+  return stripInternalPolicyScaffolding(text)
     .replace(/^\s*(?:\d+\.\s*)?(?:\*\*)?(?:GOAL|DONE|BLOCKER|NEXT)(?:\*\*)?\s*:.*$/gim, '')
     .replace(/\n{3,}/g, '\n\n')
 }
@@ -151,20 +204,52 @@ export function cleanThinkingTokens(text: string): string {
   ).trim()
 }
 
-const PLANNER_VERB_PATTERN = '(?:Navigate(?:\\s+to)?|Go\\s+to|Open|Opening|Browse|Visit|Search(?:ing)?(?:\\s+for)?|Research(?!\\s+(?:shows?|indicates?|confirms?|found|suggests?|reports?|demonstrates?|states?))|Examine|Investigate|Analyze|Compare|Synthesize|Summarize|Compile|Write|Draft|Produce|Deliver|Create|Prepare|Gather|Verify|Check|Fix)'
+function normalizeMarkdownDisplaySegment(segment: string): string {
+  return segment
+    .replace(/\r\n/g, '\n')
+    .replace(/([^\n#])([ \t]*)(#{1,6})(?=\s*(?:\d+[.)]?|[A-Z][A-Za-z0-9]))/g, (match, before: string, _space: string, hashes: string, offset: number, full: string) => {
+      const previousToken = full.slice(Math.max(0, offset - 80), offset + 1)
+      if (/https?:\/\/\S*$/i.test(previousToken)) return match
+      return `${before}\n\n${hashes}`
+    })
+    .replace(/(^|\n)(#{1,6})(?=(?:\d|[A-Z]))/g, '$1$2 ')
+    .replace(/\b(in|on|by|for|from|to|since|until)(20\d{2})\b/gi, '$1 $2')
+    .replace(/\b([A-Za-z][A-Za-z]{2,})(\d{1,4})(?=\b|[a-z])/g, (match, word: string, value: string) => {
+      if (/^(?:web|mp|sha|md|iso)$/i.test(word)) return match
+      return `${word} ${value}`
+    })
+    .replace(/\b(\d{1,4})([A-Z][a-z]{2,})\b/g, '$1 $2')
+    .replace(/\b(\d{1,4})([a-z][a-z]{2,})\b/g, '$1 $2')
+    .replace(/\n{3,}/g, '\n\n')
+}
+
+export function normalizeMarkdownForDisplay(text: string): string {
+  if (!text) return ''
+  return text
+    .split(/(```[\s\S]*?```)/g)
+    .map((part, index) => index % 2 === 1 ? part : normalizeMarkdownDisplaySegment(part))
+    .join('')
+    .trim()
+}
+
+const PLANNER_VERB_PATTERN = '(?:Navigate(?:\\s+to)?|Go\\s+to|Open|Opening|Browse|Visit|Search(?:ing)?(?:\\s+for)?|Research(?!\\s+(?:shows?|indicates?|confirms?|found|suggests?|reports?|demonstrates?|states?))|Review|Examine|Investigate|Analyze|Compare|Synthesize|Summarize|Compile|Write|Draft|Produce|Deliver|Create|Prepare|Gather|Verify|Check|Fix)'
 const TOOL_ACTION_START_PATTERN = new RegExp(`^(?:i(?:['’]ll| will| am going to)\\s+)?${PLANNER_VERB_PATTERN}\\b|^(?:click|type|select|scroll|inspect|read|list|edit|append|build|run|execute|use)\\b`, 'i')
-const TOOL_ACTION_SPLIT_PATTERN = new RegExp(`(?=\\b(?:${PLANNER_VERB_PATTERN}|Click|Type|Select|Scroll|Inspect|Read|List|Edit|Append|Build|Run|Execute|Use)\\b)`, 'gi')
+const TOOL_ACTION_SPLIT_PATTERN = new RegExp(`(?=\\b(?:${PLANNER_VERB_PATTERN}|Click|Type|Select|Scroll|Inspect|Read|List|Edit|Append|Build|Run|Execute|Use)\\b)`, 'g')
 const ENUMERATED_PLAN_ITEM_PATTERN = new RegExp(`(?:^|\\s)\\d+[.)]\\s+${PLANNER_VERB_PATTERN}\\b`, 'gi')
-const FINDING_SIGNAL_PATTERN = /\b(?:found|discovered|identified|learned|reviewed|examined|analyzed|analysis|research shows?|research indicates?|shows?|showed|confirms?|confirmed|verified|retrieved|gathered|created|built|generated|designed|saved|completed|selected|entered|progressed|synthesized|successfully|states?|stated|says?|said|reports?|reported|defines?|defined|explains?|explained|indicates?|indicated|suggests?|suggested|demonstrates?|demonstrated|according to|evidence|source|page explains|result indicates)\b/i
+const FINDING_SIGNAL_PATTERN = /\b(?:found|discovered|identified|learned|reviewed|examined|analyzed|analysis|research shows?|research indicates?|shows?|showed|confirms?|confirmed|verified|retrieved|gathered|collected|scanned|checked|compared|mapped|traced|pulled together|created|built|generated|designed|saved|completed|selected|entered|progressed|synthesized|successfully|states?|stated|says?|said|reports?|reported|defines?|defined|explains?|explained|indicates?|indicated|suggests?|suggested|demonstrates?|demonstrated|according to|evidence|source|page explains|result indicates)\b/i
 const BLOCKER_SIGNAL_PATTERN = /\b(?:blocked|paywall|captcha|access denied|unavailable|failed|could not|not found|no visible matches|requires login|requires sign-in|rate limit|403|404|500)\b/i
 const MALFORMED_NARRATION_PATTERNS = [
   /\b(?:the\s+The|a\s+A|an\s+An)\b/,
   /\b[a-z]{3,}\s+(?:The|This|These|That)\s+[a-z]/,
-  /^the analysis of\b/i,
+  /[a-z][.!?](?:The|This|These|That|I|We|You|He|She|It|They|[A-Z][a-z]{2,})\b/,
+  /^since\s+the\s+last\s+(?:llm\s+)?(?:narration|progress\s+(?:paragraph|update)|update)\b/i,
   /^i have (?:initiated|started|begun|performed|conducted|analyzed|analysed)\b/i,
+  /^(?:i(?:'|’)?ve\s+)?(?:completed|ran|performed|conducted|made|finished)\s+(?:\d+\s+)?(?:targeted\s+|focused\s+|fresh\s+|additional\s+)?(?:web\s+)?(?:searches|queries|tool calls|source actions|research actions|document reads|page reads|extractions)\b/i,
+  /\b(?:phase moved on|remaining plan budget|plan budget|preserve(?:d|s|ing)?\s+(?:the\s+)?(?:remaining\s+)?budget)\b/i,
   /^i (?:have|now have|had)\s+(?:sufficient|enough)\s+(?:evidence|information|context|research)\s+(?:for|on)\s+(?:step|phase|task)\s*\d*\.?$/i,
   /\b(?:step|phase)\s+\d+\b/i,
-  /^gather\b.{0,160}\b(?:evidence|information|research|sources?|context)\b/i,
+  /^gather\b.{0,180}\b(?:evidence|information|research|sources?|context|details?|page|pages?|source|sources?|content|more)\b/i,
+  /^synthesi[sz]ed\s+key\b/i,
   /\bto\s+i\s+(?:have\s+)?(?:found|identified|confirmed|learned|gathered|examined|reviewed|analyzed|analysed)\b/i,
   /^(?:review|read|open|navigate|search|click|scroll)\b.{0,160}\bi (?:have\s+)?(?:found|identified|confirmed|learned|gathered|examined)\b/i,
 ]
@@ -199,9 +284,11 @@ const DEFAULT_NARRATION_MAX_LENGTH = 360
 const COMPLETE_SENTENCE_PATTERN = /[.!?][)"'\]]*$/
 const DANGLING_NARRATION_END_PATTERN = /\b(?:and|or|but|with|without|to|for|of|in|on|at|by|from|as|than|that|which|while|because|including|such as|rather than|instead of|its|their|the|a|an)$/i
 const NON_FINAL_NARRATION_TRAIL_PATTERN = /[:;,]\s*$/
-const IMPERATIVE_NARRATION_START_PATTERN = /^(?:confirm|move|proceed|continue|advance|select|choose|enter|fill|submit|go|open|navigate|search|read|scroll|click|type)\b/i
+const IMPERATIVE_NARRATION_START_PATTERN = /^(?:confirm|move|proceed|continue|advance|select|choose|enter|fill|submit|go|open|navigate|search|read|review|scroll|click|type)\b/i
 const OPERATIONAL_NARRATION_PATTERNS = [
   /^(?:now\s+)?(?:let me|i(?:['’]ll| will| am going to| need to| should| can| have to))\s+(?:now\s+)?(?:read|scroll|search|open|navigate|click|continue|try|extract|gather|build|create|write|edit|append|verify|check|fix|look|review|inspect|visit|use)\b/i,
+  /^now\s+(?:read|review|search|open|navigate|click|continue|try|extract|gather|verify|check|look|inspect|visit|use)\b/i,
+  /^(?:review|read|check)\s+what\s+(?:we(?:'|’)?ve|we have|i(?:'|’)?ve|i have)\s+(?:gathered|found|collected|reviewed|learned|confirmed)\b/i,
   /^the (?:page|article|content|page content|result|results?) (?:loaded|opened|is truncated|was truncated|looks truncated|has loaded)\b/i,
   /^the browser (?:got\s+)?redirected\b/i,
   /^i have (?:searched|looked up|found some relevant information)\b/i,
@@ -211,6 +298,7 @@ const OPERATIONAL_NARRATION_PATTERNS = [
   PERMISSION_TO_CONTINUE_PATTERN,
   /^i(?:['’]ll| will) (?:continue|move on|proceed|switch|try|use)\b/i,
   /^i(?:['’]ll| will| am going to) .*\bnow\b.*\b(?:files?|website|app|page|code|deliverable)\b/i,
+  /^(?:let me|i(?:['’]ll| will| am going to| need to| should| can| have to))\s+(?:get|fetch|load)\b/i,
 ]
 const INTERNAL_GUARD_PATTERNS = [
   /\bFINAL_STEP_REDIRECT:[^.?!]*(?:[.?!]|$)/gi,
@@ -274,11 +362,12 @@ function isOperationalNarration(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
   if (isUiMechanicNarration(trimmed)) return true
+  if (OPERATIONAL_NARRATION_PATTERNS.some(pattern => pattern.test(trimmed))) return true
   if (FINDING_SIGNAL_PATTERN.test(trimmed)) return false
   if (BLOCKER_SIGNAL_PATTERN.test(trimmed) && !/\b(?:let me|i(?:'ll| will| need to| should| can)|continue|navigate|open|scroll|search|click|read|try)\b/i.test(trimmed)) {
     return false
   }
-  return OPERATIONAL_NARRATION_PATTERNS.some(pattern => pattern.test(trimmed))
+  return false
 }
 
 function isImperativeNarration(text: string): boolean {
@@ -357,7 +446,7 @@ function stripEnumeratedPlanItems(text: string): string {
  */
 export function stripToolActionNarration(text: string): string {
   const normalized = INTERNAL_GUARD_PATTERNS
-    .reduce((current, pattern) => current.replace(pattern, ' '), stripEnumeratedPlanItems(stripRawToolCallMarkup(text)))
+    .reduce((current, pattern) => current.replace(pattern, ' '), stripInternalPolicyScaffolding(stripEnumeratedPlanItems(stripRawToolCallMarkup(text))))
     .replace(/\s+/g, ' ')
     .trim()
   if (!normalized) return ''
@@ -422,8 +511,41 @@ function stripMarkdownArtifacts(text: string): string {
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
 }
 
+function repairMissingSentenceBoundarySpaces(text: string): string {
+  return text
+    .replace(/([A-Za-z0-9][.!?])(?=(?:The|This|These|That|I|We|You|He|She|It|They|[A-Z][a-z]{2,})\b)/g, '$1 ')
+    .replace(/([.!?])\s+(?=[,;:])/g, '$1')
+    .replace(/\b([a-z][a-z]{3,})\s+(I\s+now\s+have)\b/g, '$1, and $2')
+    .replace(/,\s+and I now have a solid evidence base\b/gi, ', building a solid evidence base')
+}
+
+function repairMissingNarrationNumberSpaces(text: string): string {
+  return text
+    .replace(/\b(in|on|by|for|from|to|since|until)(20\d{2})\b/gi, '$1 $2')
+    .replace(/\b([A-Za-z][A-Za-z]{2,})(\d{1,4})(?=\b|[a-z])/g, (match, word: string, value: string) => {
+      if (/^(?:web|mp)$/i.test(word)) return match
+      return `${word} ${value}`
+    })
+    .replace(/\b(\d{1,4})([a-z][a-z]{2,})\b/g, '$1 $2')
+}
+
+function repairRestartedNarrationOpening(text: string): string {
+  return text
+    .replace(/^i(?:'|’)?ve\s+gathered\s+initial\s+i\s+have\s+/i, "I've found ")
+    .replace(/^i\s+have\s+gathered\s+initial\s+i\s+have\s+/i, "I've found ")
+    .replace(/^i(?:'|’)?ve\s+gathered\s+(?:initial|early|some)\s+(?=i\s+(?:found|identified|confirmed|learned|reviewed|examined|gathered)\b)/i, '')
+    .replace(/^i\s+have\s+gathered\s+(?:initial|early|some)\s+(?=i\s+(?:found|identified|confirmed|learned|reviewed|examined|gathered)\b)/i, '')
+}
+
+function repairCadenceMetaOpening(text: string): string {
+  return text
+    .replace(/^since\s+the\s+last\s+(?:llm\s+)?(?:narration|progress\s+(?:paragraph|update)|update),?\s*/i, '')
+    .replace(/^i(?:'|’)?ve\s+completed\b/i, 'Completed')
+    .replace(/^i\s+completed\b/i, 'Completed')
+}
+
 export function stripNarrationArtifacts(text: string): string {
-  return stripMarkdownArtifacts(stripHtmlArtifacts(stripToolActionNarration(cleanThinkingTokens(text))))
+  return repairCadenceMetaOpening(repairRestartedNarrationOpening(repairMissingSentenceBoundarySpaces(repairMissingNarrationNumberSpaces(stripMarkdownArtifacts(stripHtmlArtifacts(stripToolActionNarration(cleanThinkingTokens(text))))))))
     .replace(/\bSources?:\s*[^.?!]*(?:[.?!]|$)/gi, ' ')
     .replace(/\b(?:Page text|Target selector|Target path|Nearby text):\s*[^.?!]*(?:[.?!]|$)/gi, ' ')
     .replace(/\s+/g, ' ')
@@ -465,11 +587,25 @@ export function sanitizeNarrationText(
   const maxLength = options.maxLength ?? DEFAULT_NARRATION_MAX_LENGTH
   const requireSignal = options.requireSignal ?? false
   const rawCleaned = stripMarkdownArtifacts(stripHtmlArtifacts(cleanThinkingTokens(text)))
+    .replace(/([A-Za-z0-9][.!?])(?=(?:The|This|These|That|I|We|You|He|She|It|They|[A-Z][a-z]{2,})\b)/g, '$1 ')
+    .replace(/\b(in|on|by|for|from|to|since|until)(20\d{2})\b/gi, '$1 $2')
+    .replace(/\b([A-Za-z][A-Za-z]{2,})(\d{1,4})(?=\b|[a-z])/g, (match, word: string, value: string) => {
+      if (/^(?:web|mp)$/i.test(word)) return match
+      return `${word} ${value}`
+    })
+    .replace(/\b(\d{1,4})([a-z][a-z]{2,})\b/g, '$1 $2')
+    .replace(/\b(the|a|an)\s+\1\b/gi, '$1')
+    .replace(/^i(?:'|’)?ve\s+gathered\s+initial\s+i\s+have\s+/i, "I've found ")
+    .replace(/^i\s+have\s+gathered\s+initial\s+i\s+have\s+/i, "I've found ")
+    .replace(/^since\s+the\s+last\s+(?:llm\s+)?(?:narration|progress\s+(?:paragraph|update)|update),?\s*/i, '')
+    .replace(/^i(?:'|’)?ve\s+completed\b/i, 'Completed')
+    .replace(/^i\s+completed\b/i, 'Completed')
     .replace(/\s+/g, ' ')
     .trim()
   if (isPlanLeakNarration(rawCleaned) || isPhaseLeakNarration(rawCleaned)) return null
 
   const cleaned = stripNarrationArtifacts(text)
+    .replace(/\b(the|a|an)\s+\1\b/gi, '$1')
     .replace(/\n{2,}/g, ' ')
     .replace(/\n/g, ' ')
     .trim()

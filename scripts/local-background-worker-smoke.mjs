@@ -45,7 +45,7 @@ function createChildEnv(extra = {}) {
     AGENT_TASK_WORKER_MODE: 'external',
     AGENT_TASK_QUEUE_NAME: queueName,
     AGENT_TASK_WORKER_ID: `local-smoke-worker-${queueName}`,
-    AGENT_TASK_WORKER_POLL_MS: '250',
+    AGENT_TASK_WORKER_POLL_MS: '100',
     AGENT_TASK_WORKER_HEARTBEAT_MS: '500',
     AGENT_TASK_WORKER_STALE_MS: '5000',
     AGENT_REQUIRE_TASK_WORKER_HEARTBEAT: 'true',

@@ -1,24 +1,39 @@
 import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
-import { getOrCreateSandboxDir, pauseSandboxIfIdle, resetSandboxDir } from '@/lib/sandbox'
-import { ensureE2BRemoteBrowser, shouldUseE2BSandbox } from '@/lib/e2bSandbox'
+import { getOrCreateLocalSandboxDir, pauseSandboxIfIdle, resetLocalSandboxDir } from '@/lib/sandbox'
+import {
+  ensureE2BRemoteBrowser,
+  getE2BSandboxBillingStartedAtMs,
+  resetE2BSandbox,
+  shouldUseE2BSandbox,
+} from '@/lib/e2bSandbox'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
+import {
+  materializeMessageAttachmentsToSandbox,
+  withMessageAttachmentSandboxPaths,
+} from '@/lib/attachments'
 import { isContextualTaskUpdate } from '@/lib/conversationContext'
 import { clearLiveDirectives } from '@/lib/liveDirectives'
 import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
 import {
   assertServerCreditsAvailable,
   chargeServerActiveTime,
+  chargeServerE2BRuntime,
   chargeServerTaskStart,
   chargeServerTokenUsage,
   isOutOfCreditsError,
   type ServerCreditRecord,
 } from '@/lib/serverCredits'
 import { ACTIVE_CREDITS_PER_MINUTE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
-import { refreshActiveTaskLease, releaseActiveTaskLease } from '@/lib/activeTasks'
 import { userErrorMessage } from '@/lib/errorMessages'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
-import { sandboxReadyAcknowledgementForTask } from './taskText'
+import {
+  AGENT_WORKER_RUN_MAX_DURATION_MS,
+  AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS,
+  AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+  AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS,
+} from '@/lib/agent/config'
+import { waitForTaskJobStartupPlan } from '@/lib/agent/taskJobs'
 
 const DIRECT_CHAT_SYSTEM_PROMPT = `You are Agent, a helpful assistant. Answer the user's request directly and concisely.
 Do not browse, search, use tools, or create a multi-step plan in this path.
@@ -30,7 +45,6 @@ const DIRECT_CHAT_MAX_CONTEXT_CHARS = 10_000
 const DIRECT_CHAT_MAX_TOKENS = 1536
 const DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768
 const DIRECT_CHAT_MAX_CONTINUATIONS = 2
-const ACTIVE_TASK_LEASE_REFRESH_MS = 10_000
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
 
@@ -42,6 +56,10 @@ export interface ChatTaskPayload {
   startFreshSandbox?: boolean
   startIsolatedTaskSandbox: boolean
   directChat: boolean
+  skipStartupAcknowledgement?: boolean
+  startupPlan?: AgentLoopOptions['startupPlan']
+  startupPlanExpected?: boolean
+  startupPlanDeadlineMs?: number
 }
 
 export interface BackgroundProbeTaskPayload {
@@ -122,6 +140,51 @@ function publicErrorMessage(error: unknown): string {
   return message
 }
 
+function pauseCloudSandboxAfterTask(
+  conversationId: string,
+  remoteSandboxReadyPromise: Promise<void> | null,
+  billing?: {
+    userId: string
+    creditRunId: string
+    startedAtMs: number
+    emitCreditRecord: (recorded: ServerCreditRecord | null | undefined) => void
+  },
+): void {
+  const pause = async () => {
+    if (billing) {
+      try {
+        const billingStartedAtMs = getE2BSandboxBillingStartedAtMs(conversationId) ?? billing.startedAtMs
+        billing.emitCreditRecord(await chargeServerE2BRuntime(
+          billing.userId,
+          conversationId,
+          billing.creditRunId,
+          billingStartedAtMs,
+        ))
+      } catch (error) {
+        if (isOutOfCreditsError(error)) billing.emitCreditRecord(error.record)
+        console.error('[AgentDiagnostics] E2B runtime credit charge failed', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    await pauseSandboxIfIdle(conversationId).catch((error) => {
+      console.error('[AgentDiagnostics] Cloud sandbox pause failed', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
+
+  if (remoteSandboxReadyPromise) {
+    void remoteSandboxReadyPromise.then(pause, () => undefined)
+    return
+  }
+
+  void pause()
+}
+
 function normalizeProviderUsage(usage: {
   prompt_tokens?: number
   completion_tokens?: number
@@ -176,10 +239,6 @@ function isLikelyIncompleteDirectAnswer(content: string): boolean {
 function directChatNeedsTemporalContext(messages: Array<{ role: string; content: string }>): boolean {
   const lastUser = [...messages].reverse().find(message => message.role === 'user')
   return !!lastUser?.content && DIRECT_CHAT_TEMPORAL_PATTERN.test(lastUser.content)
-}
-
-function sandboxReadyAcknowledgement(messages: AgentLoopOptions['messages']): string {
-  return sandboxReadyAcknowledgementForTask(messages)
 }
 
 function appendContinuation(base: string, continuation: string): string {
@@ -291,18 +350,26 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     startFreshSandbox,
     startIsolatedTaskSandbox,
     directChat,
+    skipStartupAcknowledgement,
+    startupPlan,
+    startupPlanExpected,
+    startupPlanDeadlineMs,
     userId,
     creditRunId,
   } = input
 
   let activeCreditTimer: ReturnType<typeof setInterval> | null = null
-  let activeTaskLeaseTimer: ReturnType<typeof setInterval> | null = null
   let activeCreditTick = 0
   let activeCreditInFlight = false
   let lastActiveCreditAt = Date.now()
   let jobAborted = signal.aborted
   let meteredTaskStarted = false
-  let startupAcknowledgementSent = false
+  let restorePersistedFiles = false
+  let remoteSandboxReadyPromise: Promise<void> | null = null
+  let remoteSandboxStartedAtMs: number | null = null
+  let taskStartCreditPromise: Promise<void> | null = null
+  let startupReadyPromise: Promise<unknown> | null = null
+  let agentMessages = messages
 
   const isJobAbort = () => jobAborted || signal.aborted
 
@@ -346,52 +413,116 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
   signal.addEventListener('abort', onAbort)
 
   try {
-    activeTaskLeaseTimer = setInterval(() => {
-      void refreshActiveTaskLease(userId, creditRunId).catch((error) => {
-        console.error('[AgentDiagnostics] Active task lease refresh failed', {
-          conversationId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      })
-    }, ACTIVE_TASK_LEASE_REFRESH_MS)
-
     if (conversationId) {
+      const startupTasks: Array<Promise<unknown>> = []
       if (startIsolatedTaskSandbox) {
+        const staleResearchCutoff = Date.now()
         clearLiveDirectives(conversationId)
-        await clearResearchActivityForTask(userId, conversationId)
-        await resetSandboxDir(conversationId)
-      } else {
-        await getOrCreateSandboxDir(conversationId)
-        const restored = await restoreTaskFilesToActiveSandbox({ userId, conversationId }).catch((error) => {
-          console.warn('[AgentDiagnostics] Persisted task file restore failed', {
+        void clearResearchActivityForTask(userId, conversationId, staleResearchCutoff).catch((error) => {
+          console.warn('[AgentDiagnostics] Fresh task research activity cleanup failed', {
             conversationId,
             error: error instanceof Error ? error.message : String(error),
           })
-          return null
         })
-        if (restored?.total) {
-          console.log('[AgentDiagnostics] Restored persisted task files to sandbox', {
-            conversationId,
-            restored: restored.restored,
-            failed: restored.failed,
-            total: restored.total,
-          })
-        }
+        startupTasks.push(resetLocalSandboxDir(conversationId))
+      } else {
+        startupTasks.push(getOrCreateLocalSandboxDir(conversationId))
+        restorePersistedFiles = true
       }
-      if (!directChat && shouldUseE2BSandbox()) {
-        await ensureE2BRemoteBrowser(conversationId)
-      }
-      emitCreditRecord(await chargeServerTaskStart(userId, conversationId, creditRunId))
       meteredTaskStarted = true
-      if (!directChat && !emitter.isClosed) {
-        emitter.textDelta(`${sandboxReadyAcknowledgement(messages)}\n\n`)
-        startupAcknowledgementSent = true
+      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
+        .then((record) => {
+          emitCreditRecord(record)
+        })
+        .catch((error) => {
+          console.error('[AgentDiagnostics] Task-start credit charge failed', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          emitOutOfCreditsStop(error)
+        })
+      startupReadyPromise = (async () => {
+        await Promise.all(startupTasks)
+        if (restorePersistedFiles) {
+          const restored = await restoreTaskFilesToActiveSandbox({ userId, conversationId }).catch((error) => {
+            console.warn('[AgentDiagnostics] Persisted task file restore failed', {
+              conversationId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return null
+          })
+          if (restored?.total) {
+            console.log('[AgentDiagnostics] Restored persisted task files to sandbox', {
+              conversationId,
+              restored: restored.restored,
+              failed: restored.failed,
+              total: restored.total,
+            })
+          }
+        }
+      })().catch((error) => {
+        console.error('[AgentDiagnostics] Background task startup preparation failed', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        throw error
+      })
+      void startupReadyPromise.catch(() => undefined)
+      if (!directChat && shouldUseE2BSandbox()) {
+        remoteSandboxStartedAtMs = Date.now()
+        remoteSandboxReadyPromise = (async () => {
+          if (startIsolatedTaskSandbox) {
+            await resetE2BSandbox(conversationId)
+          }
+          await ensureE2BRemoteBrowser(conversationId)
+        })()
+        void remoteSandboxReadyPromise.catch((error) => {
+          console.error('[AgentDiagnostics] Background E2B sandbox preparation failed', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        })
       }
       if (ACTIVE_CREDITS_PER_MINUTE > 0) {
         activeCreditTimer = setInterval(() => {
           void chargeActiveCredit()
         }, 5000)
       }
+
+      if (!directChat) {
+        agentMessages = withMessageAttachmentSandboxPaths(agentMessages)
+        const hasSandboxAttachments = agentMessages.some(message =>
+          message.attachments?.some(attachment =>
+            attachment.type !== 'application/x-agent-skill' &&
+            typeof attachment.sandboxPath === 'string' &&
+            attachment.sandboxPath.trim().length > 0
+          )
+        )
+
+        if (hasSandboxAttachments) {
+          const previousStartupReadyPromise = startupReadyPromise
+          startupReadyPromise = (async () => {
+            await previousStartupReadyPromise
+            if (remoteSandboxReadyPromise) await remoteSandboxReadyPromise
+            await materializeMessageAttachmentsToSandbox(agentMessages, userId, conversationId)
+          })().catch((error) => {
+            console.error('[AgentDiagnostics] Uploaded attachment sandbox materialization failed', {
+              conversationId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            throw error
+          })
+          void startupReadyPromise.catch(() => undefined)
+        }
+      }
+    }
+
+    let resolvedStartupPlan = startupPlan
+    if (!directChat && !resolvedStartupPlan?.items?.length && startupPlanExpected && creditRunId) {
+      resolvedStartupPlan = await waitForTaskJobStartupPlan(creditRunId, {
+        deadlineMs: startupPlanDeadlineMs,
+        signal,
+      })
     }
 
     if (directChat) {
@@ -399,13 +530,13 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     } else {
       console.log('[AgentDiagnostics] Starting agent loop', {
         conversationId,
-        messageCount: messages.length,
+        messageCount: agentMessages.length,
         startFreshSandbox,
         jobAborted: signal.aborted,
       })
       const { AgentLoop } = await import('@/lib/agent/AgentLoop')
       const loop = new AgentLoop(emitter, {
-        messages,
+        messages: agentMessages,
         model,
         conversationId,
         customInstructions,
@@ -413,7 +544,13 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         signal,
         creditRunId,
         userId,
-        skipStartupAcknowledgement: startupAcknowledgementSent,
+        skipStartupAcknowledgement: skipStartupAcknowledgement === true,
+        startupReadyPromise: startupReadyPromise ?? undefined,
+        startupPlan: resolvedStartupPlan,
+        runMaxDurationMs: AGENT_WORKER_RUN_MAX_DURATION_MS,
+        deadlineFinalizationBufferMs: AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS,
+        deadlineModelTurnTimeoutMs: AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+        deadlineHardStopBufferMs: AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS,
       })
       await loop.run()
       console.log('[AgentDiagnostics] Agent loop returned', {
@@ -449,26 +586,18 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       clearInterval(activeCreditTimer)
       activeCreditTimer = null
     }
-    if (activeTaskLeaseTimer) {
-      clearInterval(activeTaskLeaseTimer)
-      activeTaskLeaseTimer = null
-    }
-    await releaseActiveTaskLease(userId, creditRunId).catch((error) => {
-      console.error('[AgentDiagnostics] Active task lease release failed', {
-        conversationId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    })
     if (!isJobAbort() && ACTIVE_CREDITS_PER_MINUTE > 0 && meteredTaskStarted) {
       await chargeActiveCredit()
     }
+    await taskStartCreditPromise?.catch(() => undefined)
     if (conversationId) {
-      await pauseSandboxIfIdle(conversationId).catch((error) => {
-        console.error('[AgentDiagnostics] Cloud sandbox pause failed', {
-          conversationId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      })
+      pauseCloudSandboxAfterTask(
+        conversationId,
+        remoteSandboxReadyPromise,
+        remoteSandboxStartedAtMs === null
+          ? undefined
+          : { userId, creditRunId, startedAtMs: remoteSandboxStartedAtMs, emitCreditRecord },
+      )
     }
     signal.removeEventListener('abort', onAbort)
     console.log('[AgentDiagnostics] Background chat task closed', {

@@ -39,7 +39,7 @@ export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps)
 
   return (
     <div className="flex-shrink-0">
-      <div className="max-w-[820px] mx-auto px-4">
+      <div className="max-w-[820px] mx-auto px-3 sm:px-4">
         <div
           className={`border rounded-2xl overflow-hidden mb-3 bg-bg-card transition-colors duration-300 ${justCompleted ? 'border-border-primary' : 'border-border-primary'}`}
           style={{ boxShadow: 'var(--shadow-sm)' }}
@@ -54,7 +54,7 @@ export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps)
 
           {/* Expanded step list */}
           {expanded && total > 1 && (
-            <div className="px-5 pt-5 pb-3 animate-fade-in">
+            <div className="px-3.5 pt-4 pb-3 animate-fade-in sm:px-5 sm:pt-5">
               <div className="flex items-center justify-between mb-4">
                 <span className="text-[14.5px] font-semibold text-text-primary [font-family:var(--font-display)] tracking-[0]">Task progress</span>
                 <span className="text-[11.5px] text-text-muted tabular-nums font-semibold bg-bg-secondary border border-border-primary rounded-md px-1.5 py-0.5">{doneCount} / {total}</span>
@@ -126,7 +126,7 @@ export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps)
           {!expanded && (
             <button
               onClick={() => total > 1 && setExpanded(true)}
-              className={`w-full flex items-center gap-3 px-5 py-3.5 transition-all duration-150 ${total > 1 ? 'hover:bg-bg-secondary cursor-pointer' : 'cursor-default'}`}
+              className={`w-full flex items-center gap-2.5 px-3.5 py-3 transition-all duration-150 sm:gap-3 sm:px-5 sm:py-3.5 ${total > 1 ? 'hover:bg-bg-secondary cursor-pointer' : 'cursor-default'}`}
               aria-expanded={false}
               aria-label={`Task progress: ${doneCount} of ${total} steps complete`}
             >
@@ -174,7 +174,7 @@ export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps)
           {expanded && total > 1 && (
             <button
               onClick={() => setExpanded(false)}
-              className="w-full flex items-center justify-center gap-1.5 px-5 py-2.5 hover:bg-bg-secondary transition-all duration-150 cursor-pointer border-t border-border-primary"
+              className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2.5 hover:bg-bg-secondary transition-all duration-150 cursor-pointer border-t border-border-primary sm:px-5"
               aria-expanded={true}
               aria-label="Collapse task progress"
             >

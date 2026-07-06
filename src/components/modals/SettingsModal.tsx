@@ -23,7 +23,7 @@ const navGroups = [
     items: [
       { id: 'account', label: 'Account & Data', description: 'Profile, password, and task history', icon: ShieldCheck, keywords: 'account profile photo password reset security clear delete tasks history' },
       { id: 'general', label: 'General', description: 'Task behavior and defaults', icon: SlidersHorizontal, keywords: 'language sound enter notifications behavior interface' },
-      { id: 'usage', label: 'Usage', description: 'Spend and task credit history', icon: BarChart3, keywords: 'credits usage balance cost task history billing monthly spend account' },
+      { id: 'usage', label: 'Usage', description: 'Spend and task credit history', icon: BarChart3, keywords: 'agent credits usage balance cost task history billing spend account' },
       { id: 'appearance', label: 'Appearance', description: 'Theme and display', icon: Palette, keywords: 'theme dark light system motion transparency display' },
       { id: 'shortcuts', label: 'Shortcuts', description: 'Keyboard commands', icon: Keyboard, keywords: 'keyboard hotkeys command palette enter' },
     ],

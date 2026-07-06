@@ -11,7 +11,6 @@ import { parseSSEStream } from './SSEParser'
 import { EventDispatcher } from './eventDispatcher'
 import { useCreditStore } from '@/store/credits'
 import { OUT_OF_CREDITS_CODE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
-import { ACTIVE_TASK_CONFLICT_CODE } from '@/lib/activeTaskConstants'
 import { isContextualTaskUpdateText } from '@/lib/conversationContext'
 import { bindAttachmentsToTask } from '@/lib/attachmentUpload'
 import { clampTaskInput, taskInputLimitMessage } from '@/lib/inputLimits'
@@ -20,7 +19,7 @@ import { userErrorMessage } from '@/lib/errorMessages'
 export interface UseAgentStreamReturn {
   sendMessage: (content: string, isAutoSendOrAttachments?: boolean | FileAttachment[]) => Promise<void>
   handleStop: () => void
-  resumeActiveTask: () => Promise<boolean>
+  resumeActiveTask: (options?: { includeTerminalReplay?: boolean }) => Promise<boolean>
   streamError: string | null
   clearError: () => void
 }
@@ -42,13 +41,6 @@ interface ActiveTaskResponse {
   runId?: unknown
   conversationId?: unknown
   startedAt?: unknown
-}
-
-class ActiveTaskConflictError extends Error {
-  constructor() {
-    super(ACTIVE_TASK_CONFLICT_CODE)
-    this.name = 'ActiveTaskConflictError'
-  }
 }
 
 function readActiveRunMap(): Record<string, ActiveRunRecord> {
@@ -104,9 +96,13 @@ function clearStoredActiveRun(conversationId: string, runId?: string): void {
   writeActiveRunMap(records)
 }
 
-async function fetchServerActiveRun(conversationId: string): Promise<ActiveRunRecord | null> {
+async function fetchServerActiveRun(
+  conversationId: string,
+  options: { includeTerminalReplay?: boolean } = {},
+): Promise<ActiveRunRecord | null> {
   try {
     const query = new URLSearchParams({ conversationId })
+    if (options.includeTerminalReplay) query.set('includeTerminalReplay', '1')
     const response = await fetch(`/api/chat/active?${query.toString()}`)
     if (!response.ok) return null
     const data = await response.json().catch(() => null) as ActiveTaskResponse | null
@@ -185,6 +181,287 @@ function markActiveAssistantInterrupted(conversationId: string, label: string): 
 
 export function hasActiveAgentStream(conversationId: string): boolean {
   return activeControllers.has(conversationId)
+}
+
+function createStoreDispatcher(conversationId: string, setStreamError: (message: string | null) => void): EventDispatcher {
+  const chat = useChatStore.getState()
+  const ui = useUIStore.getState()
+  return new EventDispatcher(conversationId, {
+    appendToLastMessage: chat.appendToLastMessage,
+    appendReasoning: chat.appendReasoning,
+    setSteps: chat.setSteps,
+    setTaskGroups: chat.setTaskGroups,
+    updateTaskGroupStatus: chat.updateTaskGroupStatus,
+    addSubtaskToGroup: chat.addSubtaskToGroup,
+    updateSubtaskInGroup: chat.updateSubtaskInGroup,
+    addGroupNarration: chat.addGroupNarration,
+    setLastMessageContent: chat.setLastMessageContent,
+    setFollowUps: chat.setFollowUps,
+    addArtifact: chat.addArtifact,
+    addComputerPanelItem: chat.addComputerPanelItem,
+    upsertComputerPanelItem: chat.upsertComputerPanelItem,
+    removeComputerPanelItem: chat.removeComputerPanelItem,
+    setComputerPanelOpen: ui.setComputerPanelOpen,
+    addToast: ui.addToast,
+  }, setStreamError)
+}
+
+async function generateTitleForConversation(conversationId: string): Promise<void> {
+  const conv = useChatStore.getState().conversations.find(c => c.id === conversationId)
+  if (!conv) return
+  const userMsg = conv.messages.find(m => m.role === 'user')
+  if (!userMsg) return
+  const assistantMsg = conv.messages.find(m => m.role === 'assistant')
+
+  try {
+    const res = await fetch('/api/title', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        conversationId,
+        messages: [
+          { role: 'user', content: userMsg.content },
+          ...(assistantMsg?.content ? [{ role: 'assistant', content: assistantMsg.content }] : []),
+        ],
+      }),
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.title && data.title !== 'New task') {
+      useChatStore.getState().updateTitle(conversationId, data.title)
+    }
+  } catch {
+    // Title generation is non-critical.
+  }
+}
+
+async function consumeTaskResponseForConversation(input: {
+  conversationId: string
+  response: Response
+  controller: AbortController
+  dispatcher: EventDispatcher
+  runId?: string
+  assistantMessageId?: string
+  isFirstResponse?: boolean
+  allowTerminalReplay?: boolean
+  setStreamError: (message: string | null) => void
+}): Promise<void> {
+  const { conversationId, setStreamError } = input
+  const addToast = useUIStore.getState().addToast
+  let response = input.response
+  let runId = input.runId || response.headers.get('x-agent-run-id') || undefined
+  let allowTerminalReplay = input.allowTerminalReplay !== false
+  if (runId) {
+    saveStoredActiveRun(conversationId, {
+      runId,
+      assistantMessageId: input.assistantMessageId,
+    })
+  }
+
+  let dispatchErrors = 0
+  let highestDispatchedSeq = 0
+
+  while (true) {
+    const headerRunId = response.headers.get('x-agent-run-id') || undefined
+    if (!runId && headerRunId) runId = headerRunId
+    if (runId) {
+      saveStoredActiveRun(conversationId, {
+        runId,
+        assistantMessageId: input.assistantMessageId,
+      })
+    }
+
+    const reader = response.body?.getReader()
+    if (!reader) throw new Error('The task could not start. Please try again.')
+
+    for await (const event of parseSSEStream(reader)) {
+      if (!runId && typeof event.runId === 'string') {
+        runId = event.runId
+      }
+      const seq = Number(event.seq)
+      if (runId && Number.isFinite(seq) && seq > 0) {
+        if (seq <= highestDispatchedSeq) continue
+        highestDispatchedSeq = seq
+        saveStoredActiveRun(conversationId, {
+          runId,
+          lastSeq: seq,
+          assistantMessageId: input.assistantMessageId,
+        })
+      }
+      try {
+        input.dispatcher.dispatch(event)
+        dispatchErrors = 0
+      } catch (dispatchErr) {
+        dispatchErrors++
+        console.error('[useAgentStream] dispatch error:', event.type, dispatchErr)
+        if (dispatchErrors === 5) {
+          console.error('[useAgentStream] Repeated dispatch errors; keeping stream alive so the backend task can finish')
+          addToast('Some live updates were missed, but the task is still running.', 'error')
+        }
+      }
+      if (input.dispatcher.hasTerminalEvent()) break
+    }
+
+    if (input.dispatcher.hasTerminalEvent()) break
+
+    const activeRun = runId ? getStoredActiveRun(conversationId) : null
+    if (
+      allowTerminalReplay &&
+      activeRun &&
+      activeRun.runId === runId &&
+      input.controller.signal.reason !== 'user-stop'
+    ) {
+      allowTerminalReplay = false
+      const query = new URLSearchParams({
+        conversationId,
+        runId: activeRun.runId,
+        after: String(Math.max(highestDispatchedSeq, activeRun.lastSeq || 0)),
+      })
+      const replayResponse = await fetch(`/api/chat?${query.toString()}`, {
+        method: 'GET',
+        signal: input.controller.signal,
+      })
+      if (replayResponse.ok) {
+        response = replayResponse
+        continue
+      }
+    }
+    break
+  }
+
+  if (!input.dispatcher.hasTerminalEvent()) {
+    const activeRun = runId ? getStoredActiveRun(conversationId) : null
+    if (activeRun?.runId === runId && input.controller.signal.reason !== 'user-stop') {
+      setStreamError('Disconnected from the running task. Reopen this task to reconnect.')
+      return
+    }
+    const msg = 'The task stopped before it finished. Please try again.'
+    input.dispatcher.finalizeOnAbort('error', msg)
+    setStreamError(msg)
+    addToast(msg, 'error')
+    return
+  }
+
+  if (runId) {
+    clearStoredActiveRun(conversationId, runId)
+  }
+
+  const latest = useChatStore.getState().conversations
+    .find(c => c.id === conversationId)
+    ?.messages
+    .slice()
+    .reverse()
+    .find(m => m.role === 'assistant')
+  const hasVisibleResponse = !!(
+    latest?.content?.trim() ||
+    latest?.taskGroups?.length ||
+    latest?.steps?.length ||
+    latest?.computerPanelData?.length ||
+    latest?.artifacts?.length
+  )
+  if (!hasVisibleResponse) {
+    const msg = input.dispatcher.getTerminalStatus() === 'error'
+      ? userErrorMessage(input.dispatcher.getTerminalErrorMessage(), 'The task stopped before it finished. Please try again.')
+      : 'The task stopped before it finished. Please try again.'
+    input.dispatcher.finalizeOnAbort('error', msg)
+    useChatStore.getState().setLastMessageContent(conversationId, msg)
+    setStreamError(msg)
+    addToast(msg, 'error')
+  } else if (input.isFirstResponse) {
+    void generateTitleForConversation(conversationId)
+  }
+}
+
+export async function startInitialAgentTask(conversationId: string): Promise<void> {
+  const conversation = useChatStore.getState().conversations.find(c => c.id === conversationId)
+  if (!conversation || activeControllers.has(conversationId) || getStoredActiveRun(conversationId)) return
+
+  const assistantMsg = {
+    id: uuidv4(),
+    role: 'assistant' as const,
+    content: '',
+    timestamp: Date.now(),
+    steps: [] as TaskStep[],
+    artifacts: [],
+    computerPanelData: [] as ComputerPanelItem[],
+  }
+  useChatStore.getState().addMessage(conversationId, assistantMsg)
+
+  const allMessages = conversation.messages.map(m => ({
+    role: m.role,
+    content: m.role === 'user' ? clampTaskInput(m.content) : m.content,
+    ...(m.attachments && m.attachments.length > 0 ? { attachments: m.attachments } : {}),
+  }))
+  const globalInstructions = useSettingsStore.getState().globalInstructions || ''
+  const conversationInstructions = conversation.customInstructions || ''
+  const customInstructions = [globalInstructions, conversationInstructions].filter(Boolean).join('\n\n') || undefined
+  const latestUserContent = clampTaskInput([...conversation.messages].reverse().find(m => m.role === 'user')?.content || '')
+  const startFreshSandbox = !isContextualTaskUpdateText(latestUserContent)
+  const currentModel = useSettingsStore.getState().model
+  const controller = new AbortController()
+  const dispatcher = createStoreDispatcher(conversationId, (message) => {
+    if (message) useUIStore.getState().addToast(message, 'error')
+  })
+
+  useUIStore.getState().resetComputerPanelAutoOpenSuppression()
+  useUIStore.getState().setStreaming(true)
+  useUIStore.getState().setStreamingStatus('startup')
+  useCreditStore.getState().startTask(conversationId, {
+    chargeStart: false,
+    accountingMode: 'server',
+  })
+  activeControllers.set(conversationId, controller)
+
+  const startupTimer = window.setTimeout(() => {
+    if (activeControllers.get(conversationId) === controller && useUIStore.getState().streamingStatus === 'startup') {
+      useUIStore.getState().setStreamingStatus('thinking')
+    }
+  }, 1500)
+
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: allMessages, model: currentModel, conversationId, customInstructions, startFreshSandbox }),
+      signal: controller.signal,
+    })
+    if (!response.ok) {
+      const errorBody = await response.json().catch(() => null) as { error?: unknown; code?: unknown } | null
+      if (response.status === 402 || errorBody?.code === OUT_OF_CREDITS_CODE) {
+        await useCreditStore.getState().syncFromServer({ force: true })
+        throw new Error(userErrorMessage(errorBody?.error ?? errorBody, OUT_OF_CREDITS_MESSAGE))
+      }
+      throw new Error(userErrorMessage(errorBody?.error ?? errorBody, 'The task could not start. Please try again.'))
+    }
+    const responseRunId = response.headers.get('x-agent-run-id') || undefined
+    await consumeTaskResponseForConversation({
+      conversationId,
+      response,
+      controller,
+      dispatcher,
+      runId: responseRunId,
+      assistantMessageId: assistantMsg.id,
+      isFirstResponse: true,
+      setStreamError: (message) => {
+        if (message) useUIStore.getState().addToast(message, 'error')
+      },
+    })
+  } catch (error) {
+    if (activeControllers.get(conversationId) !== controller) return
+    if ((error as Error).name !== 'AbortError') {
+      const msg = userErrorMessage(error, 'The task could not finish. Please try again.')
+      dispatcher.finalizeOnAbort('error', msg)
+      useUIStore.getState().addToast(msg, 'error')
+    }
+  } finally {
+    window.clearTimeout(startupTimer)
+    if (activeControllers.get(conversationId) === controller) {
+      useCreditStore.getState().finishTask(conversationId, dispatcher.getTerminalStatus() ?? 'stopped')
+      useUIStore.getState().setStreaming(false)
+      activeControllers.delete(conversationId)
+      if (dispatcher.hasTerminalEvent()) activeRunIds.delete(conversationId)
+    }
+  }
 }
 
 export function useAgentStream(conversationId: string): UseAgentStreamReturn {
@@ -294,9 +571,11 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
     runId?: string
     assistantMessageId?: string
     isFirstResponse?: boolean
+    allowTerminalReplay?: boolean
   }) => {
-    const headerRunId = input.response.headers.get('x-agent-run-id') || undefined
-    let runId = input.runId || headerRunId
+    let response = input.response
+    let runId = input.runId || response.headers.get('x-agent-run-id') || undefined
+    let allowTerminalReplay = input.allowTerminalReplay !== false
     if (runId) {
       saveStoredActiveRun(conversationId, {
         runId,
@@ -304,36 +583,75 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
       })
     }
 
-    const reader = input.response.body?.getReader()
-    if (!reader) throw new Error('The task could not start. Please try again.')
-
     let dispatchErrors = 0
     let highestDispatchedSeq = 0
-    for await (const event of parseSSEStream(reader)) {
-      if (!runId && typeof event.runId === 'string') {
-        runId = event.runId
-      }
-      const seq = Number(event.seq)
-      if (runId && Number.isFinite(seq) && seq > 0) {
-        if (seq <= highestDispatchedSeq) continue
-        highestDispatchedSeq = seq
+
+    while (true) {
+      const headerRunId = response.headers.get('x-agent-run-id') || undefined
+      if (!runId && headerRunId) runId = headerRunId
+      if (runId) {
         saveStoredActiveRun(conversationId, {
           runId,
-          lastSeq: seq,
           assistantMessageId: input.assistantMessageId,
         })
       }
-      try {
-        input.dispatcher.dispatch(event)
-        dispatchErrors = 0
-      } catch (dispatchErr) {
-        dispatchErrors++
-        console.error('[useAgentStream] dispatch error:', event.type, dispatchErr)
-        if (dispatchErrors === 5) {
-          console.error('[useAgentStream] Repeated dispatch errors; keeping stream alive so the backend task can finish')
-          addToast('Some live updates were missed, but the task is still running.', 'error')
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('The task could not start. Please try again.')
+
+      for await (const event of parseSSEStream(reader)) {
+        if (!runId && typeof event.runId === 'string') {
+          runId = event.runId
+        }
+        const seq = Number(event.seq)
+        if (runId && Number.isFinite(seq) && seq > 0) {
+          if (seq <= highestDispatchedSeq) continue
+          highestDispatchedSeq = seq
+          saveStoredActiveRun(conversationId, {
+            runId,
+            lastSeq: seq,
+            assistantMessageId: input.assistantMessageId,
+          })
+        }
+        try {
+          input.dispatcher.dispatch(event)
+          dispatchErrors = 0
+        } catch (dispatchErr) {
+          dispatchErrors++
+          console.error('[useAgentStream] dispatch error:', event.type, dispatchErr)
+          if (dispatchErrors === 5) {
+            console.error('[useAgentStream] Repeated dispatch errors; keeping stream alive so the backend task can finish')
+            addToast('Some live updates were missed, but the task is still running.', 'error')
+          }
+        }
+        if (input.dispatcher.hasTerminalEvent()) break
+      }
+
+      if (input.dispatcher.hasTerminalEvent()) break
+
+      const activeRun = runId ? getStoredActiveRun(conversationId) : null
+      if (
+        allowTerminalReplay &&
+        activeRun &&
+        activeRun.runId === runId &&
+        input.controller.signal.reason !== 'user-stop'
+      ) {
+        allowTerminalReplay = false
+        const query = new URLSearchParams({
+          conversationId,
+          runId: activeRun.runId,
+          after: String(Math.max(highestDispatchedSeq, activeRun.lastSeq || 0)),
+        })
+        const replayResponse = await fetch(`/api/chat?${query.toString()}`, {
+          method: 'GET',
+          signal: input.controller.signal,
+        })
+        if (replayResponse.ok) {
+          response = replayResponse
+          continue
         }
       }
+      break
     }
 
     if (!input.dispatcher.hasTerminalEvent()) {
@@ -393,8 +711,22 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
       }
 
       setStreamError(null)
-      const existingController = activeControllers.get(conversationId) ?? abortRef.current
-      const storedActiveRun = getStoredActiveRun(conversationId)
+      let existingController = activeControllers.get(conversationId) ?? abortRef.current
+      let storedActiveRun = getStoredActiveRun(conversationId)
+      if (existingController?.signal.aborted) {
+        activeControllers.delete(conversationId)
+        if (abortRef.current === existingController) abortRef.current = null
+        existingController = null
+      }
+      if (!existingController && storedActiveRun && !isAutoSend) {
+        const serverActiveRun = await fetchServerActiveRun(conversationId)
+        if (serverActiveRun?.runId) {
+          storedActiveRun = serverActiveRun
+        } else {
+          clearStoredActiveRun(conversationId, storedActiveRun.runId)
+          storedActiveRun = null
+        }
+      }
       if (existingController && isAutoSend) {
         // Auto-send can be re-fired by remounts, route refreshes, or React dev
         // strict effects. It must not abort the task it originally started.
@@ -572,28 +904,6 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
             await useCreditStore.getState().syncFromServer({ force: true })
             throw new Error(userErrorMessage(errorBody?.error ?? errorBody, OUT_OF_CREDITS_MESSAGE))
           }
-          if (response.status === 409 || errorBody?.code === ACTIVE_TASK_CONFLICT_CODE) {
-            useUIStore.getState().showActiveTaskConflict({
-              message: userErrorMessage(errorBody?.error, 'A task is already running. Finish or stop it before starting another.'),
-              activeConversationId: typeof errorBody?.activeConversationId === 'string' ? errorBody.activeConversationId : undefined,
-            })
-            const pendingIds = new Set([
-              assistantMsg.id,
-              !isAutoSend ? userMsg?.id : undefined,
-            ].filter((id): id is string => typeof id === 'string'))
-            useChatStore.setState((state) => ({
-              conversations: state.conversations.map((item) => (
-                item.id === conversationId
-                  ? {
-                      ...item,
-                      messages: item.messages.filter((message) => !pendingIds.has(message.id)),
-                      updatedAt: Date.now(),
-                    }
-                  : item
-              )),
-            }))
-            throw new ActiveTaskConflictError()
-          }
           throw new Error(userErrorMessage(errorBody?.error ?? errorBody, 'The task could not start. Please try again.'))
         }
         const responseRunId = response.headers.get('x-agent-run-id') || undefined
@@ -610,9 +920,7 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
         // active — bail out so we don't append to the new message or wipe
         // its streaming state.
         if (activeControllers.get(conversationId) !== controller) return
-        if (error instanceof ActiveTaskConflictError) {
-          setStreamError(null)
-        } else if ((error as Error).name === 'AbortError') {
+        if ((error as Error).name === 'AbortError') {
           if (controller.signal.reason === 'user-stop') {
             dispatcher.finalizeOnAbort('stopped', 'Task stopped.')
             appendToLastMessage(conversationId, '\n\n*Task stopped.*')
@@ -643,8 +951,8 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
     ]
   )
 
-  const resumeActiveTask = useCallback(async (): Promise<boolean> => {
-    const record = getStoredActiveRun(conversationId) || await fetchServerActiveRun(conversationId)
+  const resumeActiveTask = useCallback(async (options: { includeTerminalReplay?: boolean } = {}): Promise<boolean> => {
+    const record = getStoredActiveRun(conversationId) || await fetchServerActiveRun(conversationId, options)
     if (!record?.runId) return false
     if (activeControllers.has(conversationId)) return true
 

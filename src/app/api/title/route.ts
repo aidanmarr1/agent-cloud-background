@@ -11,7 +11,6 @@ import {
   isOutOfCreditsError,
 } from '@/lib/serverCredits'
 import { OUT_OF_CREDITS_CODE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
-import { assertInviteAccessApproved } from '@/lib/inviteAccess'
 
 const TITLE_BODY_LIMIT_BYTES = 512 * 1024
 
@@ -70,9 +69,6 @@ export async function POST(request: Request) {
     if (!userId) {
       return Response.json({ error: 'Authentication required' }, { status: 401 })
     }
-    const inviteAccessError = await assertInviteAccessApproved(userId)
-    if (inviteAccessError) return inviteAccessError
-
     const access = await assertTaskAccess(request, conversationId, { userId })
     if (!access.ok) return access.response
 
