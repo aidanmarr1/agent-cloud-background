@@ -314,10 +314,6 @@ async function responseToStreamError(response: Response, fallback: string): Prom
   return error
 }
 
-async function taskWorkerUnavailableStreamError(response: Response): Promise<Error> {
-  return responseToStreamError(response, 'Background task worker is unavailable.')
-}
-
 async function taskAccessStreamError(response: Response): Promise<Error> {
   return responseToStreamError(response, 'Task access denied.')
 }
@@ -1291,19 +1287,26 @@ export async function POST(request: Request) {
       seq: index + 1,
       runId: creditRunId,
     } as SSEEvent))
-    taskStartPromise = Promise.all([
-      accessPromise,
-      workerAvailabilityPromise,
-    ]).then(async ([accessResult, unavailableWorker]) => {
+    void workerAvailabilityPromise.then((unavailableWorker) => {
+      if (!unavailableWorker) return
+      console.warn('[AgentDiagnostics] Background worker readiness check reported unavailable after stream open', {
+        conversationId,
+        runId: creditRunId,
+        elapsedMs: Date.now() - postStartedAt,
+      })
+    }).catch((error) => {
+      console.warn('[AgentDiagnostics] Background worker readiness check failed after stream open', {
+        conversationId,
+        runId: creditRunId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+
+    taskStartPromise = accessPromise.then(async (accessResult) => {
       if (accessResult && !accessResult.ok) {
         routeStartupAcknowledgementAbort.abort()
         routeStartupPlanAbort.abort()
         throw await taskAccessStreamError(accessResult.response)
-      }
-      if (unavailableWorker) {
-        routeStartupAcknowledgementAbort.abort()
-        routeStartupPlanAbort.abort()
-        throw await taskWorkerUnavailableStreamError(unavailableWorker)
       }
       return enqueueTaskJob({
         runId: creditRunId,

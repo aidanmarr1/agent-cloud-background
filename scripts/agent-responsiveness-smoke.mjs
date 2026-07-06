@@ -13,6 +13,7 @@ const [
   llm,
   useAgentStream,
   search,
+  chatRoute,
 ] = await Promise.all([
   readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
@@ -22,6 +23,7 @@ const [
   readFile(join(root, 'src/lib/llm.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
   readFile(join(root, 'src/lib/search.ts'), 'utf8'),
+  readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
 ])
 
 assert.match(config, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 1_500/, 'agent inactivity timeout must recover quickly from invisible provider stalls')
@@ -69,6 +71,8 @@ assert.match(llm, /const delayMs = Math\.min\(rawDelay,\s*maxDelayMs\) \+ jitter
 assert.match(useAgentStream, /if \(existingController && isAutoSend\) \{[\s\S]*?return[\s\S]*?\}/, 'duplicate auto-send must not abort an already-running task stream')
 assert.doesNotMatch(useAgentStream, /Too many dispatch errors, aborting stream|controller\.abort\(\)[\s\S]*?Stream dispatcher failed repeatedly/, 'client-side stream dispatch errors must not abort the backend task')
 assert.match(useAgentStream, /Repeated dispatch errors; keeping stream alive so the backend task can finish/, 'dispatch failures should be visible but non-fatal')
+assert.doesNotMatch(chatRoute, /Promise\.all\(\[\s*accessPromise,\s*workerAvailabilityPromise\s*\]\)/, 'external-worker chat route must not hold durable job enqueue behind worker readiness checks')
+assert.match(chatRoute, /taskStartPromise = accessPromise\.then[\s\S]*enqueueTaskJob/, 'external-worker chat route must enqueue as soon as access passes so workers can claim immediately')
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')
 assert.match(search, /\$\{SERPER_BASE_URL\}\/\$\{path\}/, 'web search must call the configured Serper endpoint')
