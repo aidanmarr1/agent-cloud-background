@@ -2193,6 +2193,19 @@ function compactResearchStalledSearchPacketComplete(
     candidateDomains >= usefulCandidateDomains
 }
 
+function compactResearchSourceOpeningExhausted(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthProfileForState>,
+): boolean {
+  if (state.stepVisitedUrls.size > 0 || stepOpenedSourceDomains(state).size > 0) return false
+  if (state.stepSearchQueries.size === 0 || state.stepSourceDomainCounts.size === 0) return false
+  if (state.stepResearchCallCount === 0) return false
+
+  const repeatedSourceLoops = state.stepLoopDetections >= 4
+  const repeatedToolAttempts = state.stepToolCallCount >= Math.max(8, Math.min(14, depth.requiredCalls))
+  return repeatedSourceLoops && repeatedToolAttempts
+}
+
 function compactResearchEvidenceComplete(state: AgentStateData): boolean {
   const depth = researchDepthProfileForState(state)
   const requiredResearchCalls = depth.requiredCalls
@@ -2211,6 +2224,7 @@ function compactResearchEvidenceComplete(state: AgentStateData): boolean {
     explicitlyHighEvidenceRequest
 
   if (hasDirectEvidence && compactResearchBreadthSaturated(state, depth)) return true
+  if (compactResearchSourceOpeningExhausted(state, depth)) return true
   if (!reportResearchNeedsSources && !explicitlyHighEvidenceRequest && compactResearchStalledSearchPacketComplete(state, depth)) return true
   if (hasDirectEvidence && state.stepFailureCount >= 2 && !explicitlyHighEvidenceRequest) {
     return state.stepResearchCallCount >= Math.max(2, Math.ceil(requiredResearchCalls * 0.35)) &&
@@ -4420,11 +4434,17 @@ export class AgentLoop {
       ]
     }
     if (compactResearchPhaseCanAdvance) {
+      const sourceOpeningExhausted = compactResearchSourceOpeningExhausted(
+        state,
+        researchDepthProfileForState(state),
+      )
       requestMessages = [
         ...requestMessages,
         {
           role: 'system',
-          content: 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase.',
+          content: sourceOpeningExhausted
+            ? 'SOURCE OPENING EXHAUSTED: repeated attempts to open or extract the surfaced source URLs looped without usable page evidence. Stop rotating source tools for this phase. Write one concise progress paragraph using the available search-result packet, explicitly note that source opening failed for this phase, then emit <next_step/>. Do not call more tools for this phase.'
+            : 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase.',
         } as ChatMessageParam,
       ]
     }
