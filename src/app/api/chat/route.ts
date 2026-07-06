@@ -15,7 +15,6 @@ import { auth } from '@/auth'
 import { hydrateMessageAttachmentsForUser } from '@/lib/attachments'
 import { clearLiveDirectives } from '@/lib/liveDirectives'
 import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
-import { bareResearchOverviewTopic, isBareResearchOverviewRequest } from '@/lib/agent/taskConstraints'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
 import {
   assertServerCreditsAvailable,
@@ -605,16 +604,6 @@ async function createRouteStartupPlan(input: {
 }): Promise<{ items: string[] } | null> {
   const request = latestUserRequestText(input.messages)
   if (!request) return null
-
-  if (isBareResearchOverviewRequest(request)) {
-    const topic = bareResearchOverviewTopic(request) || 'the topic'
-    return {
-      items: [
-        `Research ${topic} basics`,
-        `Summarize ${topic} clearly`,
-      ],
-    }
-  }
 
   try {
     const res = await createCompletion({

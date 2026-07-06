@@ -43,7 +43,7 @@ interface WorkingMemoryLike {
 }
 import type { Logger } from './Logger'
 import { ErrorRecoveryEngine, type ToolFailure } from './recovery/ErrorRecoveryEngine'
-import { currentStepWebSearchLimit, hasSingleWebSearchLimit, isBareResearchOverviewRequest, requestsMarkdownDeliverable, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { currentStepWebSearchLimit, hasSingleWebSearchLimit, requestsMarkdownDeliverable, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import {
   browserActionPreflight,
   browserNavigate,
@@ -1216,182 +1216,6 @@ function researchActivityResultDetails(result: unknown): {
     titles: rows.map(item => item.title).filter((title): title is string => typeof title === 'string' && !!title.trim()).slice(0, 8),
     sourceUrls: rows.map(item => item.url).filter((url): url is string => typeof url === 'string' && !!url.trim()).slice(0, 12),
   }
-}
-
-interface SearchResultAutoOpenCandidate {
-  url: string
-  title?: string
-  snippet?: string
-  domain: string
-  rank: number
-}
-
-const AUTO_OPEN_DISCOURAGED_SOURCE_DOMAINS = new Set([
-  'youtube.com',
-  'youtu.be',
-  'facebook.com',
-  'instagram.com',
-  'tiktok.com',
-  'x.com',
-  'twitter.com',
-  'linkedin.com',
-  'pinterest.com',
-  'google.com',
-  'bing.com',
-])
-
-const AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS = [
-  'nih.gov',
-  'ncbi.nlm.nih.gov',
-  'cdc.gov',
-  'who.int',
-  'mayoclinic.org',
-  'healthline.com',
-  'webmd.com',
-  'medicalnewstoday.com',
-  'verywellhealth.com',
-  'health.harvard.edu',
-  'britannica.com',
-  'stanford.edu',
-  'mit.edu',
-  'ibm.com',
-  'microsoft.com',
-  'google.com',
-  'openai.com',
-] as const
-
-function autoOpenTrustedDomainScore(domain: string): number {
-  return AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS.some(hint => domain === hint || domain.endsWith(`.${hint}`))
-    ? 18
-    : 0
-}
-
-function autoOpenDiscouragedDomainScore(domain: string): number {
-  if (AUTO_OPEN_DISCOURAGED_SOURCE_DOMAINS.has(domain)) return -30
-  if (/\.(?:shop|store)$/i.test(domain)) return -22
-  if (/\b(?:deal|coupon|promo|affiliate|shop|store|casino|bet|loan|credit)\b/i.test(domain)) return -18
-  return 0
-}
-
-function explicitQuickInlineScope(state: AgentStateData): boolean {
-  const request = state.originalUserRequest || ''
-  if (!/\b(?:very quickly|real quick|asap|super quick|quickly|quick|briefly|brief|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/i.test(request)) {
-    return false
-  }
-  if (taskDefaultsToMarkdownDeliverable(request)) return false
-  return !/\b(?:current|latest|today|this\s+(?:week|month|year)|202[0-9]|report|memo|briefing|deep|detailed|comprehensive|thorough|analysis|compare|versus|vs\.?|landscape|overview|state|applications?|sources?|citations?|evidence|source[-\s]?backed)\b/i.test(request)
-}
-
-function searchResultAutoOpenAllowed(state: AgentStateData): boolean {
-  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return false
-  if (explicitQuickInlineScope(state)) return false
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.currentStepIdx === state.currentPlanItems.length - 1) return false
-
-  const researchLike =
-    state.currentPhase === 'research' ||
-    state.taskStrategy === 'research' ||
-    state.taskStrategy === 'analysis' ||
-    currentStepLooksLikeLiveResearch(state)
-  if (!researchLike) return false
-
-  const stepText = `${currentStepText(state)} ${state.currentPlanScopes?.[state.currentStepIdx] || ''}`.trim()
-  if (stepIsSynthesisOnly(state) && !isResearchStepText(stepText)) return false
-  return true
-}
-
-function sourceUrlAlreadyAttemptedInStep(state: AgentStateData, rawUrl: string): boolean {
-  const parsed = parsedHttpUrl(rawUrl)
-  if (!parsed) return true
-  const normalized = normalizeUrl(parsed.toString())
-
-  for (const visited of state.stepVisitedUrls) {
-    if (normalizeUrl(visited) === normalized) return true
-  }
-
-  for (const failure of state.workLedger.failedRoutes) {
-    if (failure.stepIdx !== state.currentStepIdx) continue
-    const targetUrl = parsedHttpUrl(failure.target)
-    if (!targetUrl) continue
-    if (normalizeUrl(targetUrl.toString()) === normalized) return true
-  }
-
-  return false
-}
-
-function sourceDomainFailedInCurrentStep(state: AgentStateData, domain: string): boolean {
-  for (const failure of state.workLedger.failedRoutes) {
-    if (failure.stepIdx !== state.currentStepIdx) continue
-    const targetUrl = parsedHttpUrl(failure.target)
-    if (!targetUrl) continue
-    if (targetUrl.hostname.toLowerCase().replace(/^www\./, '') === domain) return true
-  }
-  return false
-}
-
-function sourceDomainOpenedInCurrentStep(state: AgentStateData, domain: string): boolean {
-  return (stepOpenedSourceDomains(state).get(domain) || 0) > 0
-}
-
-function searchResultAutoOpenCandidates(result: unknown): SearchResultAutoOpenCandidate[] {
-  if (!Array.isArray(result)) return []
-  const seen = new Set<string>()
-  const candidates: SearchResultAutoOpenCandidate[] = []
-
-  result.forEach((item, index) => {
-    if (!item || typeof item !== 'object') return
-    const row = item as { title?: unknown; url?: unknown; snippet?: unknown }
-    const parsed = parsedHttpUrl(row.url)
-    if (!parsed) return
-    const url = normalizeUrl(parsed.toString())
-    if (seen.has(url)) return
-    seen.add(url)
-    const domain = parsed.hostname.toLowerCase().replace(/^www\./, '')
-    candidates.push({
-      url,
-      domain,
-      rank: index,
-      title: typeof row.title === 'string' ? row.title : undefined,
-      snippet: typeof row.snippet === 'string' ? row.snippet : undefined,
-    })
-  })
-
-  return candidates
-}
-
-function scoreAutoOpenCandidate(candidate: SearchResultAutoOpenCandidate, state: AgentStateData): number {
-  let score = 100 - candidate.rank
-  if (sourceDomainOpenedInCurrentStep(state, candidate.domain)) score -= 45
-  if (sourceDomainFailedInCurrentStep(state, candidate.domain)) score -= 80
-  score += autoOpenTrustedDomainScore(candidate.domain)
-  score += autoOpenDiscouragedDomainScore(candidate.domain)
-  if (/\.(?:pdf|docx?|pptx?)(?:$|\?)/i.test(candidate.url)) score += 5
-  if (/\.(?:gov|edu)$/i.test(candidate.domain)) score += 10
-  if (candidate.domain.endsWith('.org')) score += 4
-
-  const stepText = `${currentStepText(state)} ${state.currentPlanScopes?.[state.currentStepIdx] || ''}`.toLowerCase()
-  const candidateText = `${candidate.title || ''} ${candidate.snippet || ''} ${candidate.url}`.toLowerCase()
-  for (const token of stepText.split(/[^a-z0-9]+/).filter(token => token.length >= 5).slice(0, 16)) {
-    if (candidateText.includes(token)) score += 2
-  }
-
-  return score
-}
-
-function chooseSearchResultToAutoOpen(result: unknown, state: AgentStateData): SearchResultAutoOpenCandidate | null {
-  const candidates = searchResultAutoOpenCandidates(result)
-    .filter(candidate => !sourceUrlAlreadyAttemptedInStep(state, candidate.url))
-    .sort((a, b) => scoreAutoOpenCandidate(b, state) - scoreAutoOpenCandidate(a, state))
-  return candidates[0] || null
-}
-
-function bareResearchRenderedBrowserBlockReason(toolName: string, state: AgentStateData): string | null {
-  if (!isBareResearchOverviewRequest(state.originalUserRequest)) return null
-  if (state.userProvidedUrl) return null
-  if (toolName !== 'browser_navigate' && toolName !== 'browse_page') return null
-  if (!currentStepLooksLikeLiveResearch(state)) return null
-
-  return 'INTERNAL_RECOVERY: This is a compact research overview. Do not open a rendered browser page for normal source reading. Use web_search and read_document/http extraction for another source, or emit <next_step/>/answer if the compact evidence floor is met.'
 }
 
 function browserObservationDetail(result: BrowserActionResult): string {
@@ -3374,9 +3198,6 @@ export class ToolPipeline {
       if (result === null) continue  // skipped (pre-validation blocked)
       results.push(result)
 
-      const chainedSourceRead = await this.maybeAutoOpenSearchResult(result, state, assistantContent)
-      if (chainedSourceRead) results.push(chainedSourceRead)
-
       // Check for termination signal — stop executing further tools if file creation is looping
       if (result.isError) {
         const errorMsg = (result.result as { error?: string })?.error
@@ -3390,32 +3211,6 @@ export class ToolPipeline {
     }
 
     return results
-  }
-
-  private async maybeAutoOpenSearchResult(
-    searchResult: ToolExecutionResult,
-    state: AgentStateData,
-    assistantContent: string,
-  ): Promise<ToolExecutionResult | null> {
-    if (searchResult.tc.name !== 'web_search' || searchResult.isError) return null
-    if (!searchResultAutoOpenAllowed(state)) return null
-
-    const candidate = chooseSearchResultToAutoOpen(searchResult.result, state)
-    if (!candidate) return null
-
-    const args = {
-      source: candidate.url,
-      action_label: 'Source evidence details',
-      plan_step_index: state.currentStepIdx + 1,
-    }
-    const toolCall: ToolCallData = {
-      id: `${searchResult.tc.id}_auto_read`,
-      name: 'read_document',
-      arguments: JSON.stringify(args),
-    }
-
-    this.logger?.info(`Auto-opening search result without an extra model turn: ${candidate.url}`)
-    return this.executeSingle(toolCall, state, assistantContent)
   }
 
   /**
@@ -3744,21 +3539,6 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
-    }
-
-    const bareResearchRenderedBrowserBlock = bareResearchRenderedBrowserBlockReason(tc.name, state)
-    if (bareResearchRenderedBrowserBlock) {
-      const errorResult = { error: bareResearchRenderedBrowserBlock }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: bareResearchRenderedBrowserBlock,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.stepFailureCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }

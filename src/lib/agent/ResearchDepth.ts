@@ -1,5 +1,5 @@
 import { currentStepText, type AgentStateData } from './AgentState'
-import { isBareResearchOverviewRequest, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import {
   MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY,
   MIN_RESEARCH_CALLS_BY_COMPLEXITY,
@@ -113,10 +113,6 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
 
   if (isExactSingleSourceLookupText(text)) {
     return { requiredCalls: 1, requiredSourceBreadth: 1, label: 'single-source' }
-  }
-
-  if (isBareResearchOverviewRequest(originalRequest)) {
-    return { requiredCalls: 3, requiredSourceBreadth: 2, label: 'light' }
   }
 
   const quick = QUICK_RE.test(originalRequest) &&

@@ -52,7 +52,7 @@ import { ToolPipeline, type ToolExecutionResult } from './ToolPipeline'
 import { PolicyEngine } from './PolicyEngine'
 import { PlanManager, type RequiredPlanStep } from './PlanManager'
 import { isPromptInjection, type TierTimeouts } from './guards'
-import { explicitWebSearchLimitFromText, isBareResearchOverviewRequest, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { explicitWebSearchLimitFromText, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
 import { ContextManager } from './ContextManager'
@@ -123,20 +123,6 @@ function extractUserProvidedUrl(messages: Array<{ role: string; content: string 
   const bareDomain = content.match(/(?<!@)\b(?:localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?)(?:\/[^\s<>()\]]*)?/i)
   if (bareDomain) return normalizeUserProvidedUrl(bareDomain[0])
   return null
-}
-
-function customInstructionsForTask(customInstructions: string | undefined, latestRequest: string | null): string | undefined {
-  const trimmed = customInstructions?.trim()
-  if (!trimmed) return undefined
-  if (!isBareResearchOverviewRequest(latestRequest)) return trimmed
-
-  return `${trimmed}
-
-Fast-lane override for this latest request:
-- The latest user request is a lightweight "research about X" overview, not a deep report.
-- Ignore saved instructions that would expand this task into rigorous/deep research, unusually high source counts, or a long-form/deep report scope.
-- Keep the product default: research findings are saved as a concise Markdown deliverable unless the latest user explicitly asks for inline/no-file output.
-- Use fast source extraction, avoid rendered browser navigation for normal article pages, then answer concisely once the compact evidence floor is met.`
 }
 
 function toolArgumentsForProviderHistory(argumentsText: string): string {
@@ -214,12 +200,12 @@ function approximateStreamUsageForCompletedTurn(
 }
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
-const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000
-const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_800
-const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 600
-const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 600
-const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 160
-const FAST_SOURCE_ACTION_MAX_TOKENS = 320
+const FAST_ACTION_REQUEST_TIMEOUT_MS = 1_500
+const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_000
+const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 450
+const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
+const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
+const FAST_SOURCE_ACTION_MAX_TOKENS = 260
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -2505,10 +2491,10 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_800
-const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
-const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 1_500
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 450
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 450
 const FORCED_NARRATION_MAX_TOKENS = 48
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
@@ -2814,7 +2800,7 @@ export class AgentLoop {
     state.strategyConfig = strategy
     state.dynamicIterationLimit = iterationLimit
     state.originalUserRequest = effectiveTaskRequest(messages) || null
-    const effectiveCustomInstructions = customInstructionsForTask(customInstructions, state.originalUserRequest)
+    const effectiveCustomInstructions = customInstructions?.trim() || undefined
     state.uploadedAttachmentNames = uploadedAttachmentNames(scopedMessages)
     state.uploadedAttachmentContextAvailable = state.uploadedAttachmentNames.length > 0
     state.uploadedImageAttachmentAvailable = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(scopedMessages).length > 0
@@ -2869,13 +2855,6 @@ export class AgentLoop {
         content: `INTERRUPTION UPDATE: The latest user message is a correction to the previous task, not a standalone question. Continue the prior task using the current browser/session state and apply this correction as a hard constraint. Do not answer from memory or refuse because an earlier assistant message was interrupted.`,
       } as ChatMessageParam, 9)
     }
-    if (isBareResearchOverviewRequest(state.originalUserRequest)) {
-      contextManager.push({
-        role: 'system',
-        content: 'FAST-LANE RESEARCH OVERRIDE: The latest request is a compact overview, not a deep report. Saved instructions asking for unusually deep research do not apply to this task, but the product default still saves research findings as concise Markdown unless the user explicitly asks for inline/no-file output. Prefer web_search plus read_document/http extraction; do not open rendered browser pages unless the user provided a URL or the page is genuinely interactive. Once compact multi-source evidence is gathered, advance or write the Markdown deliverable instead of waiting through recovery turns.',
-      } as ChatMessageParam, 9)
-    }
-
     const toolRegistry = new ToolRegistry()
     toolRegistry.registerFromDefinitions(toolDefinitions as unknown[])
 
@@ -4683,6 +4662,15 @@ export class AgentLoop {
           isFastActionToolTurn(state, this.options.messages)
         const fastSourceActionTurn = fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
+        if (fastActionTurn && !useCompactNarration) {
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
+            } as ChatMessageParam,
+          ]
+        }
         const useRequiredToolCall = requiredToolIntent &&
           !relaxRequiredToolChoice &&
           supportsProviderRequiredToolChoice()
