@@ -215,7 +215,12 @@ function isAssistantRequestTimeout(error: unknown): boolean {
 }
 
 function supportsProviderRequiredToolChoice(): boolean {
-  return true
+  // OpenRouter model routes vary a lot in how they handle provider-forced
+  // tool_choice. Gemini Flash Lite currently times out repeatedly on required
+  // tool starts, which looks like a frozen "thinking" state to the user. Keep
+  // the model-selected tool intent in the prompt, but do not send the provider
+  // forcing flag through OpenRouter.
+  return ASSISTANT_PROVIDER !== 'openrouter'
 }
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
@@ -3267,8 +3272,10 @@ export class AgentLoop {
               break
             }
 
-            // Check plan on early iterations
-            if (state.iterations <= 2) {
+            // Check plan on early text-only iterations. If the model already
+            // selected a tool, run it immediately instead of holding the hot
+            // path open while a background planner finishes.
+            if (state.iterations <= 2 && lastStreamResult.toolCalls.size === 0) {
               await planManager.awaitPlan(state)
               const planInjection = planManager.getStepInjection(state, state.dynamicIterationLimit)
               if (planInjection) {
