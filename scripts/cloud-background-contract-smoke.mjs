@@ -214,6 +214,7 @@ assert.match(taskWorker, /E2B_API_KEY is missing/, 'worker process must fail bef
 assert.match(taskWorker, /e2bApiKeyConfigured:\s*Boolean\(env\('E2B_API_KEY'\)\)/, 'worker heartbeat must report whether E2B credentials are configured on the worker host')
 assert.match(taskWorker, /e2bBrowserRuntimeConfigured:\s*Boolean\(env\('E2B_TEMPLATE_ID'\) \|\| env\('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND'\)\)/, 'worker heartbeat must report whether E2B browser runtime is configured on the worker host')
 assert.match(taskWorker, /deploymentVersion:\s*env\('AGENT_DEPLOYMENT_VERSION'\) \|\| null/, 'worker heartbeat must report the deployment version when configured')
+assert.match(taskWorker, /console\.log\('\[TaskWorker\] Started'[\s\S]*void ensureAgentRuntimePreloaded\(\)\.catch/, 'worker must preload the agent runtime on startup before the first claimed task')
 assert.match(taskWorker, /setInterval\(\(\) => \{[\s\S]*sendHeartbeat\(currentRunId \? 'running' : 'idle'\)/, 'worker must keep heartbeating while idle or running')
 assert.match(taskWorker, /currentRunId = claim\.runId/, 'worker heartbeat must expose the current task run id')
 assert.match(taskWorker, /markTaskWorkerStopped\(workerId\)/, 'worker must mark itself stopped on shutdown')

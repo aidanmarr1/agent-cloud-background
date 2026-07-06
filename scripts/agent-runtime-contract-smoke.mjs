@@ -865,6 +865,7 @@ async function assertSourceContracts() {
   assert.match(taskJobs, /snapshot\.conversationId !== input\.conversationId/, 'persisted task event replay must reject run ids from a different conversation')
   assert.match(useAgentStream, /let highestDispatchedSeq = 0[\s\S]*if \(seq <= highestDispatchedSeq\) continue[\s\S]*highestDispatchedSeq = seq/, 'client stream consumer must ignore duplicate persisted seq events before dispatch')
   assert.match(taskWorker, /DEFAULT_WORKER_POLL_MS = 100/, 'cloud worker must poll the queue quickly enough for sub-second claim latency')
+  assert.match(taskWorker, /console\.log\('\[TaskWorker\] Started'[\s\S]*void ensureAgentRuntimePreloaded\(\)\.catch/, 'worker must preload the agent runtime at startup instead of making the first task pay import latency')
   assert.match(taskWorker, /envBoolDefault\('AGENT_E2B_WARM_POOL_ENABLED', false\)/, 'worker must not prewarm unowned E2B runtime unless explicitly enabled')
   assert.match(taskWorker, /prewarmE2BSandbox\('worker-startup'\)/, 'worker must still support explicit prewarmed E2B sandbox startup')
   assert.match(e2bSandbox, /warmSandboxPromise/, 'E2B runtime must track an in-process warm sandbox promise')

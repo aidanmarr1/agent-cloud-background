@@ -210,6 +210,7 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   await sendHeartbeat('starting')
 
   console.log('[TaskWorker] Started', { workerId, queueName, pollMs, heartbeatMs, once: options.once === true })
+  void ensureAgentRuntimePreloaded().catch(() => undefined)
 
   const warmPoolEnabled = e2bWarmPoolEnabled()
   const startupWarmupPromise = warmPoolEnabled
