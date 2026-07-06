@@ -21,6 +21,8 @@ const MARKDOWN_DELIVERABLE_PATTERN = /\b(?:\.md|markdown|md\s+file|markdown\s+fi
 const FILE_DELIVERABLE_PATTERN = /\b(?:create|write|save|return|deliver|make)\b.{0,80}\b(?:file|report|document)\b/i
 const INLINE_ANSWER_PATTERN = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|write\s+(?:it|this|the answer|the\s+(?:final\s+)?report|the summary|the findings?)\s+(?:directly\s+)?(?:in chat|here)|just\s+answer|inline)\b/i
 const REPORT_MARKDOWN_DEFAULT_PATTERN = /\b(?:research\s+(?:about|on|into|for|why|whether|all\s+about)|deep\s+research|report(?:\s+on|\s+about)?|research\s+report|findings?|write[-\s]?up|source[-\s]?backed\s+summary|cited\s+summary|compile\s+(?:the\s+)?(?:findings|research|report)|synthesi[sz]e\s+(?:the\s+)?(?:findings|research)|deliver\s+(?:the\s+)?(?:findings|report))\b/i
+const BARE_RESEARCH_OVERVIEW_PATTERN = /^\s*(?:please\s+)?(?:research|look\s+up|search(?:\s+for)?|find\s+out\s+about|learn\s+about)\s+(?:about|on|into|for)?\s+(.{2,120}?)\s*[.!?]*\s*$/i
+const SUBSTANTIVE_RESEARCH_SCOPE_PATTERN = /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|all\s+about|everything\s+about|current|latest|recent|today|this\s+(?:week|month|year)|202[4-9]|news|report|memo|briefing|analysis|markdown|\.md|file|document|sources?|citations?|cited|references?|evidence|verified|verify|compare|versus|vs\.?|landscape|ecosystem|applications?|use\s+cases?|trends?|history|timeline|ethical|societal|future|risks?|opportunities?|market|pricing|funding|reviews?)\b/i
 const FIXED_SEARCH_COUNT_PATTERN = '(?:one|two|three|four|five|[1-5]|a|an|single)'
 const FIXED_SEARCH_DIRECTIVE_PATTERNS = [
   new RegExp(`\\b(?:please\\s*)?(?:do|run|make|perform|use|conduct|complete)?\\s*(?:only|exactly|just)?\\s*${FIXED_SEARCH_COUNT_PATTERN}\\s+(?:web\\s*)?search(?:es)?\\b`, 'gi'),
@@ -105,9 +107,29 @@ export function explicitlyRequestsInlineAnswer(text: string | null | undefined):
   return !!text && INLINE_ANSWER_PATTERN.test(text)
 }
 
+export function bareResearchOverviewTopic(text: string | null | undefined): string | null {
+  if (!text) return null
+  const match = text.trim().match(BARE_RESEARCH_OVERVIEW_PATTERN)
+  if (!match?.[1]) return null
+  return match[1]
+    .replace(/\b(?:quickly|quick|briefly|brief|short|concise|simple)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^[,.;:!?-]+|[,.;:!?-]+$/g, '')
+    .trim() || null
+}
+
+export function isBareResearchOverviewRequest(text: string | null | undefined): boolean {
+  const topic = bareResearchOverviewTopic(text)
+  if (!topic || !text) return false
+  if (explicitWebSearchLimitFromText(text) !== null) return false
+  if (requestsMarkdownDeliverable(text) || FILE_DELIVERABLE_PATTERN.test(text)) return false
+  return !SUBSTANTIVE_RESEARCH_SCOPE_PATTERN.test(text)
+}
+
 export function taskDefaultsToMarkdownDeliverable(text: string | null | undefined): boolean {
   if (!text) return false
   if (explicitlyRequestsInlineAnswer(text)) return false
+  if (isBareResearchOverviewRequest(text)) return false
   const explicitArtifact = requestsMarkdownDeliverable(text) || FILE_DELIVERABLE_PATTERN.test(text)
   if (
     !explicitArtifact &&

@@ -679,6 +679,7 @@ async function assertSourceContracts() {
   assert.match(chatRoute, /Continue exactly from the next word/, 'direct chat must request a continuation instead of showing cut-off text')
   assert.match(chatRoute, /chargeServerTokenUsage\(userId,\s*conversationId,\s*creditRunId,\s*creditUsage,\s*`direct:\$\{attempt \+ 1\}`\)/, 'direct chat continuation calls must be charged with distinct server ledger ids')
   assert.match(chatRoute, /DIRECT_CHAT_MAX_TOKENS = 1536/, 'direct chat should keep concise answers on a smaller completion cap')
+  assert.match(chatRoute, /isBareResearchOverviewRequest\(request\)[\s\S]*`Research \$\{topic\} basics`[\s\S]*`Summarize \$\{topic\} clearly`/, 'route startup plans must keep bare research prompts to a compact overview plan')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
   assert.match(chatRoute, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
   assert.match(chatRoute, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
@@ -1464,8 +1465,10 @@ import {
   researchDepthProfileForState,
 } from ${JSON.stringify(join(root, 'src/lib/agent/ResearchDepth.ts'))}
 import {
+  bareResearchOverviewTopic,
   explicitWebSearchLimitFromText,
   fixedWebSearchTopicFromMessages,
+  isBareResearchOverviewRequest,
   isSingleWebSearchMarkdownTask,
   taskDefaultsToMarkdownDeliverable,
 } from ${JSON.stringify(join(root, 'src/lib/agent/taskConstraints.ts'))}
@@ -1787,7 +1790,10 @@ export async function runLedgerSmoke() {
   assert.equal(stripToolActionNarration(leakedInternalRecovery).trim(), '')
   assert.equal(stripSpecialTokens(leakedInternalRecovery).trim(), '')
   assert.equal(stripThinkingTags(leakedInternalRecovery).trim(), '')
-  assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17'), true)
+  assert.equal(isBareResearchOverviewRequest('Research about AI'), true)
+  assert.equal(bareResearchOverviewTopic('Research about AI'), 'AI')
+  assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17'), false)
+  assert.equal(taskDefaultsToMarkdownDeliverable('Research report about iPhone 17'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('actually make a report in .md file'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17 but answer here, no file'), false)
 
@@ -1802,8 +1808,18 @@ export async function runLedgerSmoke() {
     depthState.currentStepIdx = 0
     return depthState
   }
+  const bareResearchDepth = researchDepthProfileForState(makeDepthState(
+    'Research about AI',
+    2,
+    ['Research AI basics', 'Summarize AI clearly'],
+    ['Gather a compact source-backed overview', ''],
+  ))
+  assert.equal(bareResearchDepth.label, 'light', 'bare research prompts must stay lightweight: ' + JSON.stringify(bareResearchDepth))
+  assert.equal(bareResearchDepth.requiredCalls, 3, 'bare research prompts should not inherit report-level source quotas: ' + JSON.stringify(bareResearchDepth))
+  assert.equal(bareResearchDepth.requiredSourceBreadth, 2, 'bare research prompts should only need compact source breadth: ' + JSON.stringify(bareResearchDepth))
+
   const normalResearchDepth = researchDepthProfileForState(makeDepthState(
-    'Research about iPhone 17',
+    'Research report about iPhone 17',
     2,
     ['Gather current iPhone evidence', 'Analyze importance and implications', 'Write the report'],
     ['Release details, specs, pricing, market impact, and caveats', 'Technology, ecosystem, sales, and cultural significance', ''],
