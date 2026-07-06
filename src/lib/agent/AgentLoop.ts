@@ -52,7 +52,7 @@ import { ToolPipeline, type ToolExecutionResult } from './ToolPipeline'
 import { PolicyEngine } from './PolicyEngine'
 import { PlanManager, type RequiredPlanStep } from './PlanManager'
 import { isPromptInjection, type TierTimeouts } from './guards'
-import { explicitWebSearchLimitFromText, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { explicitWebSearchLimitFromText, isBareResearchOverviewRequest, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
 import { ContextManager } from './ContextManager'
@@ -123,6 +123,20 @@ function extractUserProvidedUrl(messages: Array<{ role: string; content: string 
   const bareDomain = content.match(/(?<!@)\b(?:localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?)(?:\/[^\s<>()\]]*)?/i)
   if (bareDomain) return normalizeUserProvidedUrl(bareDomain[0])
   return null
+}
+
+function customInstructionsForTask(customInstructions: string | undefined, latestRequest: string | null): string | undefined {
+  const trimmed = customInstructions?.trim()
+  if (!trimmed) return undefined
+  if (!isBareResearchOverviewRequest(latestRequest)) return trimmed
+
+  return `${trimmed}
+
+Fast-lane override for this latest request:
+- The latest user request is a lightweight "research about X" overview, not a deep report.
+- Ignore saved instructions that would expand this task into rigorous/deep research, unusually high source counts, or a default Markdown/report file.
+- Do not create a report file unless the latest user explicitly asks for one.
+- Use fast source extraction, avoid rendered browser navigation for normal article pages, then answer concisely once the compact evidence floor is met.`
 }
 
 function toolArgumentsForProviderHistory(argumentsText: string): string {
@@ -2786,6 +2800,7 @@ export class AgentLoop {
     state.strategyConfig = strategy
     state.dynamicIterationLimit = iterationLimit
     state.originalUserRequest = effectiveTaskRequest(messages) || null
+    const effectiveCustomInstructions = customInstructionsForTask(customInstructions, state.originalUserRequest)
     state.uploadedAttachmentNames = uploadedAttachmentNames(scopedMessages)
     state.uploadedAttachmentContextAvailable = state.uploadedAttachmentNames.length > 0
     state.uploadedImageAttachmentAvailable = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(scopedMessages).length > 0
@@ -2823,7 +2838,7 @@ export class AgentLoop {
       stepGuidance: strategy.stepGuidance,
       temperature: strategy.temperature,
     }
-    const systemPrompt = { role: 'system', content: getSystemPrompt(customInstructions, strategyHints) } as ChatMessageParam
+    const systemPrompt = { role: 'system', content: getSystemPrompt(effectiveCustomInstructions, strategyHints) } as ChatMessageParam
     contextManager.initialize(
       systemPrompt,
       processedMessages as ChatMessageParam[]
@@ -2838,6 +2853,12 @@ export class AgentLoop {
       contextManager.push({
         role: 'system',
         content: `INTERRUPTION UPDATE: The latest user message is a correction to the previous task, not a standalone question. Continue the prior task using the current browser/session state and apply this correction as a hard constraint. Do not answer from memory or refuse because an earlier assistant message was interrupted.`,
+      } as ChatMessageParam, 9)
+    }
+    if (isBareResearchOverviewRequest(state.originalUserRequest)) {
+      contextManager.push({
+        role: 'system',
+        content: 'FAST-LANE RESEARCH OVERRIDE: The latest request is a compact overview. Saved instructions asking for unusually deep research or report files do not apply to this task. Prefer web_search plus read_document/http extraction; do not open rendered browser pages unless the user provided a URL or the page is genuinely interactive. Once compact evidence is gathered, advance or answer instead of waiting through recovery turns.',
       } as ChatMessageParam, 9)
     }
 
@@ -2896,7 +2917,7 @@ export class AgentLoop {
       if (recorded?.created) this.emitter.creditEvent(recorded.entry)
     }
     const assertPlannerCreditRunway = async () => this.assertServerCreditRunwayCached()
-    const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, customInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
+    const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, effectiveCustomInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
 
     planManager.setStateRef(state)
     const startupPlanUsed = this.options.startupPlan?.items?.length

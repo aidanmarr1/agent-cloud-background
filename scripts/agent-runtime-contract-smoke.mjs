@@ -291,7 +291,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /lastCreditRunwayCheckAt = Date\.now\(\)/, 'newly accepted tasks should treat the route-level credit check as fresh for startup control calls')
   assert.match(agentLoop, /assertServerCreditRunwayCached/, 'agent loop must use cached credit runway checks before model calls')
   assert.match(agentLoop, /const assertPlannerCreditRunway = async \(\) => this\.assertServerCreditRunwayCached\(\)/, 'planner control calls must share the cached credit runway instead of rechecking credits before acknowledgement')
-  assert.match(agentLoop, /new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*customInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire custom instructions, credit usage, credit preflight, and startup acknowledgement control into PlanManager')
+  assert.match(agentLoop, /new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*effectiveCustomInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire effective custom instructions, credit usage, credit preflight, and startup acknowledgement control into PlanManager')
   assert.match(agentLoop, /shouldHydrateResearchActivity[\s\S]*this\.options\.startFreshSandbox !== true[\s\S]*loadResearchActivityEntries/, 'fresh tasks must not block startup acknowledgement on an already-cleared research activity read')
   assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*void clearResearchActivityForTask\(userId,\s*conversationId,\s*staleResearchCutoff\)[\s\S]*resetLocalSandboxDir[\s\S]*taskStartCreditPromise = chargeServerTaskStart[\s\S]*await Promise\.all\(startupTasks\)/, 'background task startup must keep sandbox reset parallel and move stale research cleanup plus task-start billing off the acknowledgement critical path')
   assert.doesNotMatch(chatTaskRunner, /startupTasks\.push\(\s*chargeServerTaskStart/, 'task-start credit charging must not block first acknowledgement startup')
@@ -372,6 +372,7 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /AGENT_DEADLINE_HARD_STOP_BUFFER_MS\s*=\s*18_000/, 'agent runtime must keep a hard stop buffer before route termination')
   assert.match(agentConfig, /AGENT_WORKER_RUN_MAX_DURATION_MS\s*=\s*900_000/, 'background workers must have a longer quality window than serverless routes')
   assert.match(agentConfig, /AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS\s*=\s*120_000/, 'background workers must not enter deadline synthesis after only a short research window')
+  assert.match(agentConfig, /AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS\s*=\s*12_000/, 'background workers must fail forward quickly instead of waiting near 30 seconds on stalled model turns')
   assert.match(chatTaskRunner, /runMaxDurationMs:\s*AGENT_WORKER_RUN_MAX_DURATION_MS/, 'background workers must pass their longer runtime window into AgentLoop')
   assert.match(chatTaskRunner, /deadlineFinalizationBufferMs:\s*AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS/, 'background workers must pass their deadline buffer into AgentLoop')
   assert.match(agentState, /runStartedAtMs/, 'agent state must track wall-clock start time for long task deadline handling')
@@ -680,6 +681,8 @@ async function assertSourceContracts() {
   assert.match(chatRoute, /chargeServerTokenUsage\(userId,\s*conversationId,\s*creditRunId,\s*creditUsage,\s*`direct:\$\{attempt \+ 1\}`\)/, 'direct chat continuation calls must be charged with distinct server ledger ids')
   assert.match(chatRoute, /DIRECT_CHAT_MAX_TOKENS = 1536/, 'direct chat should keep concise answers on a smaller completion cap')
   assert.match(chatRoute, /isBareResearchOverviewRequest\(request\)[\s\S]*`Research \$\{topic\} basics`[\s\S]*`Summarize \$\{topic\} clearly`/, 'route startup plans must keep bare research prompts to a compact overview plan')
+  assert.match(agentLoop, /customInstructionsForTask[\s\S]*Fast-lane override for this latest request[\s\S]*Ignore saved instructions that would expand this task into rigorous\/deep research/, 'bare overview prompts must override saved deep-report custom instructions')
+  assert.match(agentLoop, /FAST-LANE RESEARCH OVERRIDE[\s\S]*Saved instructions asking for unusually deep research or report files do not apply/, 'bare overview runtime must inject a high-priority fast-lane instruction')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
   assert.match(chatRoute, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
   assert.match(chatRoute, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
@@ -1003,6 +1006,8 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /const chainedSourceRead = await this\.maybeAutoOpenSearchResult\(result,\s*state,\s*assistantContent\)/, 'search-result auto-open must run in the same tool execution cycle')
   assert.match(toolPipeline, /chooseSearchResultToAutoOpen[\s\S]*name:\s*'read_document'/, 'search-result auto-open must choose a real unused result URL and read it as source evidence')
   assert.match(toolPipeline, /explicitQuickInlineScope/, 'explicitly quick inline prompts must stay lightweight instead of auto-opening extra sources')
+  assert.match(toolPipeline, /bareResearchRenderedBrowserBlockReason/, 'bare research overview prompts must block slow rendered-browser detours')
+  assert.match(toolPipeline, /AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS/, 'auto-open source selection must prefer credible domains before weak commercial pages')
   assert.doesNotMatch(toolPipeline, /BLOCKED: the user's request contains an explicit URL\/domain/, 'explicit URL search guard must not expose raw BLOCKED text')
   assert.match(toolPipeline, /function isBrowseFailureResult/, 'browse failure tracking must count failures without poisoning whole domains')
   assert.match(toolPipeline, /chrome-error:/, 'browser chrome-error pages must count as failed browser evidence, not successful research')
@@ -1815,8 +1820,8 @@ export async function runLedgerSmoke() {
     ['Gather a compact source-backed overview', ''],
   ))
   assert.equal(bareResearchDepth.label, 'light', 'bare research prompts must stay lightweight: ' + JSON.stringify(bareResearchDepth))
-  assert.equal(bareResearchDepth.requiredCalls, 3, 'bare research prompts should not inherit report-level source quotas: ' + JSON.stringify(bareResearchDepth))
-  assert.equal(bareResearchDepth.requiredSourceBreadth, 2, 'bare research prompts should only need compact source breadth: ' + JSON.stringify(bareResearchDepth))
+  assert.equal(bareResearchDepth.requiredCalls, 2, 'bare research prompts should not inherit report-level source quotas: ' + JSON.stringify(bareResearchDepth))
+  assert.equal(bareResearchDepth.requiredSourceBreadth, 1, 'bare research prompts should only need compact source breadth: ' + JSON.stringify(bareResearchDepth))
 
   const normalResearchDepth = researchDepthProfileForState(makeDepthState(
     'Research report about iPhone 17',

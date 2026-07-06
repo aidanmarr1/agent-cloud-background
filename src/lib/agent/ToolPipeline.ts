@@ -43,7 +43,7 @@ interface WorkingMemoryLike {
 }
 import type { Logger } from './Logger'
 import { ErrorRecoveryEngine, type ToolFailure } from './recovery/ErrorRecoveryEngine'
-import { currentStepWebSearchLimit, hasSingleWebSearchLimit, requestsMarkdownDeliverable, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { currentStepWebSearchLimit, hasSingleWebSearchLimit, isBareResearchOverviewRequest, requestsMarkdownDeliverable, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import {
   browserActionPreflight,
   browserNavigate,
@@ -1240,6 +1240,39 @@ const AUTO_OPEN_DISCOURAGED_SOURCE_DOMAINS = new Set([
   'bing.com',
 ])
 
+const AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS = [
+  'nih.gov',
+  'ncbi.nlm.nih.gov',
+  'cdc.gov',
+  'who.int',
+  'mayoclinic.org',
+  'healthline.com',
+  'webmd.com',
+  'medicalnewstoday.com',
+  'verywellhealth.com',
+  'health.harvard.edu',
+  'britannica.com',
+  'stanford.edu',
+  'mit.edu',
+  'ibm.com',
+  'microsoft.com',
+  'google.com',
+  'openai.com',
+] as const
+
+function autoOpenTrustedDomainScore(domain: string): number {
+  return AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS.some(hint => domain === hint || domain.endsWith(`.${hint}`))
+    ? 18
+    : 0
+}
+
+function autoOpenDiscouragedDomainScore(domain: string): number {
+  if (AUTO_OPEN_DISCOURAGED_SOURCE_DOMAINS.has(domain)) return -30
+  if (/\.(?:shop|store)$/i.test(domain)) return -22
+  if (/\b(?:deal|coupon|promo|affiliate|shop|store|casino|bet|loan|credit)\b/i.test(domain)) return -18
+  return 0
+}
+
 function explicitQuickInlineScope(state: AgentStateData): boolean {
   const request = state.originalUserRequest || ''
   if (!/\b(?:very quickly|real quick|asap|super quick|quickly|quick|briefly|brief|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/i.test(request)) {
@@ -1330,7 +1363,8 @@ function scoreAutoOpenCandidate(candidate: SearchResultAutoOpenCandidate, state:
   let score = 100 - candidate.rank
   if (sourceDomainOpenedInCurrentStep(state, candidate.domain)) score -= 45
   if (sourceDomainFailedInCurrentStep(state, candidate.domain)) score -= 80
-  if (AUTO_OPEN_DISCOURAGED_SOURCE_DOMAINS.has(candidate.domain)) score -= 30
+  score += autoOpenTrustedDomainScore(candidate.domain)
+  score += autoOpenDiscouragedDomainScore(candidate.domain)
   if (/\.(?:pdf|docx?|pptx?)(?:$|\?)/i.test(candidate.url)) score += 5
   if (/\.(?:gov|edu)$/i.test(candidate.domain)) score += 10
   if (candidate.domain.endsWith('.org')) score += 4
@@ -1349,6 +1383,15 @@ function chooseSearchResultToAutoOpen(result: unknown, state: AgentStateData): S
     .filter(candidate => !sourceUrlAlreadyAttemptedInStep(state, candidate.url))
     .sort((a, b) => scoreAutoOpenCandidate(b, state) - scoreAutoOpenCandidate(a, state))
   return candidates[0] || null
+}
+
+function bareResearchRenderedBrowserBlockReason(toolName: string, state: AgentStateData): string | null {
+  if (!isBareResearchOverviewRequest(state.originalUserRequest)) return null
+  if (state.userProvidedUrl) return null
+  if (toolName !== 'browser_navigate' && toolName !== 'browse_page') return null
+  if (!currentStepLooksLikeLiveResearch(state)) return null
+
+  return 'INTERNAL_RECOVERY: This is a compact research overview. Do not open a rendered browser page for normal source reading. Use web_search and read_document/http extraction for another source, or emit <next_step/>/answer if the compact evidence floor is met.'
 }
 
 function browserObservationDetail(result: BrowserActionResult): string {
@@ -3701,6 +3744,21 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
+    const bareResearchRenderedBrowserBlock = bareResearchRenderedBrowserBlockReason(tc.name, state)
+    if (bareResearchRenderedBrowserBlock) {
+      const errorResult = { error: bareResearchRenderedBrowserBlock }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: bareResearchRenderedBrowserBlock,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.stepFailureCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
