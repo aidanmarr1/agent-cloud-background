@@ -1,5 +1,5 @@
 export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.1-flash-lite'
 
 export const DEEPSEEK_MODEL_PRICING = {
   model: DEFAULT_DEEPSEEK_MODEL,
@@ -17,13 +17,13 @@ export const DEEPSEEK_MODEL_PRICING = {
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 1.50,
-  cacheHitInputUsdPer1M: 0.15,
-  outputUsdPer1M: 9.00,
-  internalReasoningUsdPer1M: 9.00,
+  inputUsdPer1M: 0.25,
+  cacheHitInputUsdPer1M: 0.025,
+  outputUsdPer1M: 1.50,
+  internalReasoningUsdPer1M: 1.50,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 1.50,
-  longContextOutputUsdPer1M: 9.00,
+  longContextInputUsdPer1M: 0.25,
+  longContextOutputUsdPer1M: 1.50,
   contextTokens: 1_048_576,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
