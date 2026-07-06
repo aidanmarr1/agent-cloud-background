@@ -33,7 +33,7 @@ import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
 import { attachTaskJobStartupPlan, cancelTaskJob, createTaskJobEventStream, enqueueTaskJob, shouldUseExternalTaskWorker, startTaskJob } from '@/lib/agent/taskJobs'
 import { getRecentTaskWorkerHeartbeats, workerHeartbeatIsHosted, type TaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
-import { runChatTaskJob as runSharedChatTaskJob, type ChatTaskPayload } from '@/lib/agent/chatTaskRunner'
+import { runChatTaskJob as runSharedChatTaskJob, type ChatTaskPayload, type TaskJobPayload } from '@/lib/agent/chatTaskRunner'
 import type { SSEEvent } from '@/types'
 
 export const runtime = 'nodejs'
@@ -1304,12 +1304,31 @@ export async function POST(request: Request) {
       })
     })
 
-    taskStartPromise = enqueueTaskJob({
-      runId: creditRunId,
-      userId,
-      conversationId,
-      payload: taskPayload,
-      initialEvents,
+    const workerStartupPlanPromise = directChat
+      ? Promise.resolve(null)
+      : Promise.race([
+        routeStartupPlanPromise,
+        new Promise<null>((resolve) => {
+          setTimeout(() => resolve(null), ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS)
+        }),
+      ])
+
+    taskStartPromise = workerStartupPlanPromise.then((startupPlan) => {
+      if (taskAccessDenied) throw new Error('Task access denied.')
+      const queuedPayload: TaskJobPayload = startupPlan?.items?.length
+        ? {
+          ...taskPayload,
+          startupPlan,
+          startupPlanExpected: false,
+        }
+        : taskPayload
+      return enqueueTaskJob({
+        runId: creditRunId,
+        userId,
+        conversationId,
+        payload: queuedPayload,
+        initialEvents,
+      })
     }).then((result) => {
       if (taskAccessDenied) throw new Error('Task access denied.')
       persistConversationAfterResponse({
