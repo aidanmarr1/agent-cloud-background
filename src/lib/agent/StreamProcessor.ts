@@ -308,6 +308,32 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>): boolean {
   if (!strictActionLabelFromArgs(args)) return false
 
+  if (toolName === 'web_search' || toolName === 'image_search') {
+    return typeof args.query === 'string' && args.query.length > 0
+  }
+
+  if (toolName === 'read_document') {
+    return (typeof args.source === 'string' && args.source.length > 0) ||
+      (typeof args.url === 'string' && args.url.length > 0)
+  }
+
+  if (toolName === 'browser_navigate' || toolName === 'browse_page' || toolName === 'youtube_transcript') {
+    return typeof args.url === 'string' && args.url.length > 0
+  }
+
+  if (toolName === 'http_request') {
+    return typeof args.url === 'string' && args.url.length > 0
+  }
+
+  if (toolName === 'browser_find_text') {
+    return (typeof args.text === 'string' && args.text.length > 0) ||
+      (typeof args.query === 'string' && args.query.length > 0)
+  }
+
+  if (toolName === 'browser_get_content' || toolName === 'browser_screenshot') {
+    return true
+  }
+
   if (toolName === 'create_file' || toolName === 'append_file') {
     return typeof args.path === 'string' && args.path.length > 0
   }

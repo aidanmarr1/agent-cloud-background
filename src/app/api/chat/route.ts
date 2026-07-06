@@ -54,6 +54,7 @@ const DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768
 const DIRECT_CHAT_MAX_CONTINUATIONS = 2
 const DEFAULT_TASK_WORKER_STALE_MS = 60_000
 const TASK_WORKER_READY_CACHE_MS = 10_000
+const ROUTE_STARTUP_ACK_PREFACE_WAIT_MS = 2_200
 const ROUTE_STARTUP_ACK_MAX_TOKENS = 96
 const ROUTE_STARTUP_ACK_TIMEOUT_MS = 2_000
 const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -296,6 +297,23 @@ async function taskWorkerUnavailableResponse(): Promise<Response | null> {
   return Response.json(body, { status: 503 })
 }
 
+async function taskWorkerUnavailableStreamError(response: Response): Promise<Error> {
+  let body: { error?: unknown; code?: unknown } | null = null
+  try {
+    body = await response.clone().json() as { error?: unknown; code?: unknown }
+  } catch {
+    body = null
+  }
+  const message = typeof body?.error === 'string' && body.error.trim()
+    ? body.error.trim()
+    : response.statusText || 'Background task worker is unavailable.'
+  const error = new Error(message)
+  if (typeof body?.code === 'string' && body.code.trim()) {
+    ;(error as Error & { code?: string }).code = body.code.trim()
+  }
+  return error
+}
+
 function hasUnhydratedAttachments(messages: AgentLoopOptions['messages']): boolean {
   return messages.some((message) => (
     Array.isArray(message.attachments) &&
@@ -372,14 +390,28 @@ function createPrefacedTaskJobEventStream(input: {
           }
         }
 
-        if (input.deferredPrefaceEvents?.length) {
-          const pending = input.deferredPrefaceEvents.map((promise, index) => ({
+        const deferredPrefaceEvents = input.deferredPrefaceEvents ?? []
+        const ackPrefaceSettled = { promise: Promise.resolve() }
+        let resolveAckPreface: (() => void) | null = null
+        const settleAckPreface = () => {
+          resolveAckPreface?.()
+          resolveAckPreface = null
+        }
+        let ackPrefaceExpired = false
+        if (deferredPrefaceEvents.length) {
+          ackPrefaceSettled.promise = new Promise<void>((resolve) => {
+            resolveAckPreface = resolve
+          })
+        }
+        const deferredPrefacePump = deferredPrefaceEvents.length ? (async () => {
+          const pending = deferredPrefaceEvents.map((promise, index) => ({
             index,
             promise: promise.catch(() => [] as SSEEvent[]),
           }))
           const buffered = new Map<number, SSEEvent[]>()
           const emitted = new Set<number>()
           const deadline = Date.now() + ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS
+          let acknowledgementSettled = false
 
           const emitEvents = (events: SSEEvent[]) => {
             for (const event of events) {
@@ -402,22 +434,25 @@ function createPrefacedTaskJobEventStream(input: {
                 setTimeout(() => resolve({ type: 'timeout' }), remaining)
               }),
             ])
-            if (raced.type === 'timeout') break
+            if (raced.type === 'timeout') {
+              settleAckPreface()
+              break
+            }
 
             const pendingIndex = pending.findIndex((entry) => entry.index === raced.index)
             if (pendingIndex >= 0) pending.splice(pendingIndex, 1)
             if (raced.index === 0) {
               emitted.add(0)
-              emitEvents(raced.events)
+              acknowledgementSettled = true
+              if (!ackPrefaceExpired) emitEvents(raced.events)
+              settleAckPreface()
               const planEvents = buffered.get(1)
               if (planEvents) {
                 emitted.add(1)
                 buffered.delete(1)
                 emitEvents(planEvents)
-              } else {
-                break
               }
-            } else if (!emitted.has(0) && input.deferredPrefaceEvents.length > 1) {
+            } else if (!acknowledgementSettled && deferredPrefaceEvents.length > 1) {
               buffered.set(raced.index, raced.events)
             } else {
               emitted.add(raced.index)
@@ -425,12 +460,24 @@ function createPrefacedTaskJobEventStream(input: {
             }
           }
 
-          if (!emitted.has(0)) {
+          if (!acknowledgementSettled) {
+            settleAckPreface()
             const bufferedPlan = buffered.get(1)
             if (bufferedPlan) emitEvents(bufferedPlan)
           }
-        }
+        })().catch(() => undefined).finally(() => {
+          settleAckPreface()
+        }) : Promise.resolve()
+        void deferredPrefacePump
 
+        await Promise.race([
+          ackPrefaceSettled.promise,
+          new Promise(resolve => setTimeout(() => {
+            ackPrefaceExpired = true
+            settleAckPreface()
+            resolve(null)
+          }, ROUTE_STARTUP_ACK_PREFACE_WAIT_MS)),
+        ])
         await input.taskStartPromise
         if (closed) return
 
@@ -1129,18 +1176,19 @@ export async function POST(request: Request) {
   const accessPromise = conversationId
     ? timedRoutePromise('taskAccessReadyMs', assertTaskAccess(request, conversationId, { allowCreate: true, userId }))
     : Promise.resolve(null)
+  const useExternalWorker = shouldUseExternalTaskWorker()
   const workerAvailabilityPromise = timedRoutePromise('workerReadyMs', taskWorkerUnavailableResponse())
   const routeStartupAcknowledgementAbort = new AbortController()
   const routeStartupPlanAbort = new AbortController()
   request.signal.addEventListener('abort', () => routeStartupAcknowledgementAbort.abort(), { once: true })
   request.signal.addEventListener('abort', () => routeStartupPlanAbort.abort(), { once: true })
-  const routeStartupAcknowledgementPromise = !directChat && shouldUseExternalTaskWorker()
+  const routeStartupAcknowledgementPromise = !directChat && useExternalWorker
     ? timedRoutePromise('routeAckReadyMs', createRouteStartupAcknowledgement({
         messages: rawMessages,
         signal: routeStartupAcknowledgementAbort.signal,
       }))
     : Promise.resolve(null)
-  const routeStartupPlanPromise = !directChat && shouldUseExternalTaskWorker()
+  const routeStartupPlanPromise = !directChat && useExternalWorker
     ? timedRoutePromise('routePlanReadyMs', createRouteStartupPlan({
         messages: rawMessages,
         signal: routeStartupPlanAbort.signal,
@@ -1149,14 +1197,12 @@ export async function POST(request: Request) {
 
   let messages: AgentLoopOptions['messages']
   let access: Awaited<ReturnType<typeof assertTaskAccess>> | null
-  let unavailableWorker: Response | null
 
   try {
-    ;[, messages, access, unavailableWorker] = await Promise.all([
+    ;[, messages, access] = await Promise.all([
       creditsPromise,
       messagesPromise,
       accessPromise,
-      workerAvailabilityPromise,
     ])
   } catch (error) {
     if (isOutOfCreditsError(error)) {
@@ -1177,17 +1223,20 @@ export async function POST(request: Request) {
     return access.response
   }
 
-  if (unavailableWorker) {
-    routeStartupAcknowledgementAbort.abort()
-    routeStartupPlanAbort.abort()
-    const headers = new Headers(unavailableWorker.headers)
-    headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
-    headers.set('X-Agent-Route-Timings', routeTimingsHeaderValue(routeTimings))
-    return new Response(unavailableWorker.body, {
-      status: unavailableWorker.status,
-      statusText: unavailableWorker.statusText,
-      headers,
-    })
+  if (!useExternalWorker) {
+    const unavailableWorker = await workerAvailabilityPromise
+    if (unavailableWorker) {
+      routeStartupAcknowledgementAbort.abort()
+      routeStartupPlanAbort.abort()
+      const headers = new Headers(unavailableWorker.headers)
+      headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
+      headers.set('X-Agent-Route-Timings', routeTimingsHeaderValue(routeTimings))
+      return new Response(unavailableWorker.body, {
+        status: unavailableWorker.status,
+        statusText: unavailableWorker.statusText,
+        headers,
+      })
+    }
   }
 
   const taskPayload: ChatTaskPayload = {
@@ -1197,12 +1246,12 @@ export async function POST(request: Request) {
     startFreshSandbox,
     startIsolatedTaskSandbox,
     directChat,
-    skipStartupAcknowledgement: shouldUseExternalTaskWorker(),
-    startupPlanExpected: !directChat && shouldUseExternalTaskWorker(),
+    skipStartupAcknowledgement: useExternalWorker,
+    startupPlanExpected: !directChat && useExternalWorker,
     startupPlanDeadlineMs: Date.now() + ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS,
   }
 
-  if (shouldUseExternalTaskWorker()) {
+  if (useExternalWorker) {
     const initialEvents: SSEEvent[] = [{ type: 'heartbeat', timestamp: postStartedAt }]
     let taskStartPromise: Promise<unknown> = Promise.resolve()
     const deferredPrefaceEvents = [
@@ -1226,12 +1275,19 @@ export async function POST(request: Request) {
       seq: index + 1,
       runId: creditRunId,
     } as SSEEvent))
-    taskStartPromise = enqueueTaskJob({
-      runId: creditRunId,
-      userId,
-      conversationId,
-      payload: taskPayload,
-      initialEvents,
+    taskStartPromise = workerAvailabilityPromise.then(async (unavailableWorker) => {
+      if (unavailableWorker) {
+        routeStartupAcknowledgementAbort.abort()
+        routeStartupPlanAbort.abort()
+        throw await taskWorkerUnavailableStreamError(unavailableWorker)
+      }
+      return enqueueTaskJob({
+        runId: creditRunId,
+        userId,
+        conversationId,
+        payload: taskPayload,
+        initialEvents,
+      })
     }).then((result) => {
       persistConversationAfterResponse({
         userId,

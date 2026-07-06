@@ -101,8 +101,8 @@ const [
 ])
 
 assert.match(chatRoute, /getRecentTaskWorkerHeartbeats/, 'chat route must query task worker heartbeat before accepting external-worker tasks')
-assert.match(chatRoute, /BACKGROUND_WORKER_QUEUE_NOT_CONFIGURED/, 'chat route must fail fast when external mode lacks persistent queue config')
-assert.match(chatRoute, /BACKGROUND_WORKER_UNAVAILABLE/, 'chat route must fail fast when no worker heartbeat is recent')
+assert.match(chatRoute, /BACKGROUND_WORKER_QUEUE_NOT_CONFIGURED/, 'chat route must fail visibly when external mode lacks persistent queue config')
+assert.match(chatRoute, /BACKGROUND_WORKER_UNAVAILABLE/, 'chat route must fail visibly when no worker heartbeat is recent')
 assert.match(chatRoute, /AGENT_REQUIRE_TASK_WORKER_HEARTBEAT/, 'worker heartbeat requirement must be runtime-configurable')
 assert.match(chatRoute, /AGENT_TASK_WORKER_STALE_MS/, 'worker heartbeat stale window must be runtime-configurable')
 assert.match(chatRoute, /workerMatchesConfiguredRuntime/, 'chat route must reject workers that do not match the configured runtime')
@@ -185,10 +185,12 @@ assert.match(taskFiles, /writeSandboxFileBytes/, 'sandbox restore must write dur
 
 const guardCallIndex = chatRoute.indexOf('const workerAvailabilityPromise = timedRoutePromise')
 const leaseIndex = chatRoute.indexOf('const creditRunId = randomUUID()')
-const enqueueIndex = chatRoute.indexOf('const taskStartPromise = enqueueTaskJob({')
+const streamErrorIndex = chatRoute.indexOf('throw await taskWorkerUnavailableStreamError(unavailableWorker)')
+const enqueueIndex = chatRoute.indexOf('return enqueueTaskJob({')
 assert.ok(guardCallIndex > 0, 'chat route must call the worker availability guard')
 assert.ok(guardCallIndex > leaseIndex, 'worker guard must start immediately after run setup')
-assert.ok(enqueueIndex > guardCallIndex, 'worker guard must run before enqueueing a background task')
+assert.ok(streamErrorIndex > guardCallIndex, 'worker guard failures must surface before enqueueing a background task')
+assert.ok(enqueueIndex > streamErrorIndex, 'background task enqueue must stay behind the worker availability guard')
 
 assert.match(taskWorkerHeartbeat, /create table if not exists agent_task_workers/, 'worker heartbeats must be durable in Turso')
 assert.match(taskWorkerHeartbeat, /last_seen_at_ms integer not null/, 'worker heartbeat rows must store a last-seen timestamp')

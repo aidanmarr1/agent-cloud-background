@@ -9,6 +9,7 @@ const [
   agentLoop,
   policyEngine,
   toolPipeline,
+  streamProcessor,
   llm,
   useAgentStream,
   search,
@@ -17,6 +18,7 @@ const [
   readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/PolicyEngine.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
+  readFile(join(root, 'src/lib/agent/StreamProcessor.ts'), 'utf8'),
   readFile(join(root, 'src/lib/llm.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
   readFile(join(root, 'src/lib/search.ts'), 'utf8'),
@@ -41,12 +43,15 @@ assert.match(toolPipeline, /function documentTimeoutRecoveryResult[\s\S]*INTERNA
 assert.match(toolPipeline, /function searchExecutionRecoveryResult[\s\S]*INTERNAL_RECOVERY:[\s\S]*search provider call failed or timed out/, 'search provider failures must become internal recovery results instead of visible search-unavailable panels')
 
 assert.match(agentLoop, /requestTimeoutMs,/, 'agent loop must pass the computed streaming request timeout into the LLM client')
-assert.match(agentLoop, /const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000/, 'fast action turns should give the provider enough first-token room to avoid retry loops')
-assert.match(agentLoop, /const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 600/, 'fast action turns should recover quickly from invisible provider stalls')
+assert.match(agentLoop, /const FAST_ACTION_REQUEST_TIMEOUT_MS = 1_500/, 'fast action turns must stay inside the 1-2 second first-token window')
+assert.match(agentLoop, /const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 450/, 'fast action turns should recover quickly from invisible provider stalls')
 assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'final saved writes must not wait on a second non-stream fallback request')
-assert.match(agentLoop, /const FAST_SOURCE_ACTION_MAX_TOKENS = 320/, 'source/action selection turns must keep a small output budget')
+assert.match(agentLoop, /const FAST_SOURCE_ACTION_MAX_TOKENS = 260/, 'source/action selection turns must keep a small output budget')
 assert.match(agentLoop, /workingMemory\?\.render\(\{ stepIdx: state\.currentStepIdx, maxFacts: 10, maxChars: 1000 \}\)/, 'compact research turns must keep memory payload lean')
 assert.match(agentLoop, /researchActivity\.entries[\s\S]*?\.slice\(-5\)/, 'compact research turns must not replay too many recent source records')
+assert.match(streamProcessor, /toolName === 'web_search' \|\| toolName === 'image_search'[\s\S]*typeof args\.query === 'string'/, 'search action pills must show from safe provisional tool-call args instead of waiting for the whole tool stream')
+assert.match(streamProcessor, /toolName === 'read_document'[\s\S]*typeof args\.source === 'string'[\s\S]*typeof args\.url === 'string'/, 'read_document action pills must show from safe provisional source args')
+assert.match(streamProcessor, /toolName === 'browser_navigate' \|\| toolName === 'browse_page'[\s\S]*typeof args\.url === 'string'/, 'browser navigation action pills must show from safe provisional URL args')
 assert.match(agentLoop, /state\.deadlineFinalizationStarted[\s\S]*?agentRunRemainingMs\(state\) - \(state\.deadlineHardStopBufferMs \|\| AGENT_DEADLINE_HARD_STOP_BUFFER_MS\)/, 'deadline finalization must shorten model request timeout to fit remaining platform time')
 assert.match(agentLoop, /retryMaxAttempts:\s*STREAM_MAX_RETRIES/, 'agent loop must pass bounded retry count into the LLM client')
 assert.match(agentLoop, /retryMaxDelayMs:\s*STREAM_RETRY_MAX_DELAY_MS/, 'agent loop must pass retry delay cap into the LLM client')
