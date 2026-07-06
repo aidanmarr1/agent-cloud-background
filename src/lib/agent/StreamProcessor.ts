@@ -472,7 +472,14 @@ export class StreamProcessor {
               void iterator.return().catch(() => {})
             }
           } catch { /* stream may already be closed */ }
-          throw new Error(`Assistant stream timed out (${timeoutReason || 'inactivity'})`)
+          const elapsed = Date.now() - iterationStartTime
+          if (timeoutReason === 'iteration') {
+            throw new IterationTimeoutError(elapsed)
+          }
+          if (timeoutReason === 'content_only') {
+            throw new ContentOnlyTimeoutError(elapsed, assistantContent.length, assistantContent || '')
+          }
+          throw new InactivityTimeoutError(elapsed, assistantContent || '')
         }
       }
     }
