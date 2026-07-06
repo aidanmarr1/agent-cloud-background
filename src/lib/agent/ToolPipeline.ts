@@ -3225,6 +3225,15 @@ export class ToolPipeline {
     this.throwIfAborted()
 
     const startTime = Date.now()
+    const closeVisibleProvisionalStart = (result: Record<string, unknown>, toolName = tc.name): void => {
+      if (!state.visibleNarrationToolStartIds.has(tc.id)) return
+      this.emitter.toolResult(tc.id, toolName, result as never)
+      state.visibleNarrationToolStartIds.delete(tc.id)
+    }
+    const preflightResult = (result: Record<string, unknown>, isError = true): ToolExecutionResult => {
+      closeVisibleProvisionalStart(result)
+      return { tc, result, isError, durationMs: Date.now() - startTime }
+    }
 
     // Parse arguments
     let args: Record<string, unknown>
@@ -3247,7 +3256,7 @@ export class ToolPipeline {
             })
             trackToolCall(state, tc.name, JSON.stringify(recoveredArgs))
             state.stepToolCallCount++
-            return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+            return preflightResult(errorResult)
           }
 
           const recoveredLines = lineCount(partial.content)
@@ -3370,7 +3379,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const actionLabelReason = actionLabelBlockReason(args, state)
@@ -3390,7 +3399,7 @@ export class ToolPipeline {
         target: toolTargetFromArgs(args),
         error: actionLabelReason,
       })
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
     const modelActionLabel = strictActionLabelFromArgs(args)
     if (modelActionLabel) {
@@ -3409,7 +3418,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const phaseSemanticReason = phaseSemanticBlockReason(tc.name, args, state)
@@ -3422,7 +3431,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const researchFileDetourReason = researchFileDetourBlockReason(tc.name, args, state)
@@ -3436,7 +3445,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const uploadedAttachmentReason = uploadedAttachmentToolBlockReason(tc.name, args, state)
@@ -3449,7 +3458,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     if (tc.name === 'browser_resize') {
@@ -3463,7 +3472,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     // The final step is for writing/saving the deliverable. Do not let the model
@@ -3479,7 +3488,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const synthesisPhaseResearchReason = synthesisPhaseResearchBlockReason(tc.name, state)
@@ -3493,7 +3502,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     if (
@@ -3510,7 +3519,7 @@ export class ToolPipeline {
         error: errorResult.error,
       })
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const singleSearchLimitReason = singleWebSearchLimitBlockReason(tc.name, state)
@@ -3526,7 +3535,7 @@ export class ToolPipeline {
       state.lastLoopSignal = tc.name === 'web_search'
         ? { type: 'search_duplicate', tool: 'web_search' }
         : { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const researchSourceBalanceReason = researchSourceBalanceBlockReason(tc.name, state)
@@ -3540,7 +3549,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
@@ -3557,11 +3566,37 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
+
+    const activityKind = researchActivityKindForTool(tc.name)
+    const activityQuery = researchQueryFromToolArgs(tc.name, args)
+    const activityUrl = researchUrlFromToolCall(tc.name, args)
+    const activityRepeatReason = activityKind
+      ? deliberateRepeatReason({
+          objectiveText: researchObjectiveText(state, args),
+          actionText: typeof args.action_label === 'string' ? args.action_label : undefined,
+          domain: researchDomainFromUrl(activityUrl),
+          url: activityUrl,
+        })
+      : null
 
     const duplicateSourceOpenReason = duplicateSourceOpenBlockReason(tc.name, args, state)
     if (duplicateSourceOpenReason) {
+      if (this.cache) {
+        const cached = this.cache.get(tc.name, args)
+        if (cached !== undefined && !isToolExecutionErrorResult(tc.name, cached)) {
+          this.logger?.info(`Returning cached source result for duplicate ${tc.name}`)
+          closeVisibleProvisionalStart(cached as Record<string, unknown>)
+          const cachedIsError = await this.recordCachedToolProgress(tc, args, cached, state, {
+            kind: activityKind,
+            query: activityQuery,
+            url: activityUrl,
+            repeatReason: activityRepeatReason,
+          })
+          return { tc, result: cached, isError: cachedIsError, cached: true, durationMs: Date.now() - startTime }
+        }
+      }
       const errorResult = { error: duplicateSourceOpenReason }
       recordWorkLedgerFailure(state, {
         tool: tc.name,
@@ -3572,7 +3607,7 @@ export class ToolPipeline {
       state.stepToolCallCount++
       state.stepFailureCount++
       state.lastLoopSignal = { type: 'near_dup_search', tool: tc.name }
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     const fileWritePreflightReason = fileWritePreflightBlockReason(tc.name, args, state)
@@ -3585,7 +3620,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
-      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+      return preflightResult(errorResult)
     }
 
     // If the user supplied an explicit URL/domain, silently reroute search
@@ -3604,15 +3639,21 @@ export class ToolPipeline {
         })
         trackToolCall(state, tc.name, JSON.stringify(args))
         state.stepToolCallCount++
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return preflightResult(errorResult)
       }
       const reroutedArgs = {
         url: directNavigationTarget.toString(),
         action_label: modelActionLabel,
         plan_step_index: state.currentStepIdx + 1,
       }
+      const provisionalSearchWasVisible = state.visibleNarrationToolStartIds.has(tc.id)
+      if (provisionalSearchWasVisible) {
+        closeVisibleProvisionalStart({
+          error: 'INTERNAL_RECOVERY: provisional search display was closed because this action is being rerouted to a direct navigation.',
+        })
+      }
       const reroutedToolCall: ToolCallData = {
-        id: tc.id,
+        id: provisionalSearchWasVisible ? `${tc.id}:direct_navigation` : tc.id,
         name: 'browser_navigate',
         arguments: JSON.stringify(reroutedArgs),
       }
@@ -3640,7 +3681,7 @@ export class ToolPipeline {
         trackToolCall(state, tc.name, JSON.stringify(args))
         state.stepToolCallCount++
         state.lastLoopSignal = { type: 'search_duplicate', tool: 'web_search' }
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return preflightResult(errorResult)
       }
     }
 
@@ -3730,18 +3771,6 @@ export class ToolPipeline {
         : { type: 'near_dup_search', tool: tc.name }
       return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
     }
-
-    const activityKind = researchActivityKindForTool(tc.name)
-    const activityQuery = researchQueryFromToolArgs(tc.name, args)
-    const activityUrl = researchUrlFromToolCall(tc.name, args)
-    const activityRepeatReason = activityKind
-      ? deliberateRepeatReason({
-          objectiveText: researchObjectiveText(state, args),
-          actionText: typeof args.action_label === 'string' ? args.action_label : undefined,
-          domain: researchDomainFromUrl(activityUrl),
-          url: activityUrl,
-        })
-      : null
 
     // Prefer cached duplicates, but do not hard-block search repeats. Hard
     // duplicate guards were causing paid recovery loops that cost more than an
