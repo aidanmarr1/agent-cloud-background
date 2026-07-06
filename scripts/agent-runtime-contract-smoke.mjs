@@ -1007,13 +1007,15 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /deliverableReserve[\s\S]*MIN_DELIVERABLE_BUDGET \+ 8/, 'global budget protection must reserve usable final-synthesis runway')
   assert.match(agentLoop, /FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000/, 'between-tool action turns must stay quick without self-cancelling before the provider can start')
   assert.match(agentLoop, /function isFastActionToolTurn/, 'agent loop must classify fast between-tool action turns centrally')
+  assert.match(agentLoop, /const fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast minimal-thinking lane by default')
   assert.match(agentLoop, /fastSourceActionTurn[\s\S]*FAST_SOURCE_ACTION_MAX_TOKENS/, 'source-action turns must use a compact max-token budget instead of a full synthesis budget')
   assert.match(agentLoop, /fastActionTurn[\s\S]*reasoning:\s*\{\s*effort: 'minimal' as const,\s*exclude: true\s*\}/, 'between-tool action turns must suppress expensive hidden reasoning where the provider supports it')
   assert.doesNotMatch(agentLoop, /FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS|Fast action stream start timed out; using compact action completion/, 'between-tool timeouts must not wait again on a second non-streaming fast-action call')
   assert.match(agentLoop, /function shouldStartIterationBudgetFinalization[\s\S]*remainingIterations <= iterationBudgetFinalizationTriggerTurns/, 'iteration budget pressure must force finalization instead of ending with an unfinished plan')
   assert.match(agentLoop, /state\.dynamicIterationLimit = Math\.min\([\s\S]*MAX_ITERATIONS[\s\S]*state\.iterations \+ finalizationTurns/, 'iteration budget finalization must reserve enough turns to save or emit the final output')
-  assert.match(agentLoop, /function compactResearchSourceOpeningExhausted[\s\S]*state\.stepLoopDetections >= 4[\s\S]*state\.stepToolCallCount >= Math\.max/, 'source-opening loops must break out after repeated failed extraction/navigation attempts')
-  assert.match(agentLoop, /SOURCE OPENING EXHAUSTED:[\s\S]*emit <next_step\/>/, 'exhausted source-opening recovery must advance with an explicit evidence-gap note instead of rotating tools forever')
+  assert.match(agentLoop, /function compactResearchSourceOpeningExhausted[\s\S]*state\.stepLoopDetections >= 4[\s\S]*state\.stepToolCallCount >= Math\.max/, 'source-opening loops must be detected after repeated failed extraction/navigation attempts')
+  assert.doesNotMatch(agentLoop, /compactResearchSourceOpeningExhausted\(state,\s*depth\)[\s\S]{0,120}return true/, 'source-opening exhaustion alone must not mark compact research evidence complete')
+  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*do not emit <next_step\/>[\s\S]*different source action now/, 'exhausted source-opening recovery must try a different concrete source route instead of advancing with failure narration')
   assert.match(agentLoop, /FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000/, 'progress narration must start inside the fast 1-2 second window')
   assert.match(agentLoop, /FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650/, 'progress narration must recover quickly from short provider stalls')
   assert.match(streamProcessor, /throw new InactivityTimeoutError\(elapsed,\s*assistantContent \|\| ''\)/, 'stream polling inactivity must remain nudgeable instead of becoming a fatal generic error')
@@ -1086,8 +1088,9 @@ async function assertSourceContracts() {
   assert.doesNotMatch(activityDescriber, /Search for information on/, 'search pills must not use the old repeated generic wording')
   assert.doesNotMatch(toolPipeline, /Gather evidence on/, 'repaired search pills must not use the old repeated generic wording')
   assert.match(streamProcessor, /addDisplayContractArgs\(args,\s*parsed,\s*rawArgs\)/, 'stream parser must extract action labels before a tool call finishes streaming')
-  assert.match(streamProcessor, /toolName === 'create_file' \|\| toolName === 'append_file'[\s\S]*?typeof args\.path === 'string'/, 'file writes must be eligible for provisional action starts once label and path exist')
-  assert.match(streamProcessor, /toolName === 'edit_file'[\s\S]*?typeof args\.path === 'string'/, 'file edits must be eligible for provisional action starts once label and path exist')
+  assert.match(streamProcessor, /toolName === 'create_file' \|\| toolName === 'append_file'[\s\S]*?typeof args\.path === 'string'/, 'file writes must be eligible for provisional action starts once path exists')
+  assert.match(streamProcessor, /toolName === 'edit_file'[\s\S]*?typeof args\.path === 'string'/, 'file edits must be eligible for provisional action starts once path exists')
+  assert.match(streamProcessor, /function addProvisionalFileActionLabel[\s\S]*fileActionLabelFallback[\s\S]*args\.action_label/, 'file tools must show an early visible pill when path streams before action_label')
   assert.match(streamProcessor, /addStringMetrics\(args,\s*rawArgs,\s*'new_string'\)/, 'edit_file replacement text must expose live size metrics while streaming')
   assert.match(streamProcessor, /delete stableArgs\.new_stringCharCount[\s\S]*delete stableArgs\.new_stringLineCount/, 'edit_file metric changes must not recreate the live action pill while replacement text streams')
   assert.match(streamProcessor, /hasDisplayLabel[\s\S]*?path && hasDisplayLabel/, 'live file previews must still require a strict model-authored action label')
@@ -1348,7 +1351,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /finalSavedDeliverableNeedsTool[\s\S]*partialFileContinuationNeedsTool[\s\S]*!hasSavedFinalDeliverableCandidate\(state\)[\s\S]*requiredToolIntent/, 'saved final deliverables and partial continuation actions must keep a file-tool intent until a final file exists')
   assert.doesNotMatch(agentLoop, /finalSavedDeliverableNeedsTool[\s\S]{0,240}state\.stepToolCallCount === 0[\s\S]{0,240}!hasSavedFinalDeliverableCandidate\(state\)/, 'saved final deliverable retries must not stop forcing the file tool after the first failed attempt')
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 2_200/, 'saved final deliverables must have a bounded startup window that still tolerates provider variance')
-  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 9_000/, 'saved final deliverables must have enough stream runway to finish a real file chunk')
+  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 3_200/, 'saved final deliverables must fail forward quickly when no file-tool arguments start streaming')
   assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'saved final deliverables must not spend an extra non-stream fallback wait before the next native tool attempt')
   assert.match(streamProcessor, /FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 14_000[\s\S]*isStreamingToolArgs[\s\S]*effectiveIterationMs[\s\S]*FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS/, 'file tool arguments must get a protected post-start window so reports do not break mid-write')
   assert.match(agentLoop, /End cleanly at a sentence or section boundary/, 'saved report chunks must be instructed to stop at clean section boundaries')
@@ -1377,7 +1380,7 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /Never insert it between completed/, 'client must attach late narration recovery at the current frontier instead of inserting it between completed tools')
   assert.match(eventDispatcher, /discardNarrationBuffer/, 'client must drop early narration buffers instead of carrying them into later tool gaps')
   assert.match(streamProcessor, /recordVisibleToolStartForNarration/, 'provisional visible tool starts must count toward backend narration cadence')
-  assert.match(streamProcessor, /strictActionLabelFromArgs\(args\)/, 'provisional visible tool starts must use the strict model-authored action label contract')
+  assert.match(streamProcessor, /strictActionLabelFromArgs\(args\)/, 'provisional visible tool starts must use a strict action label once available')
   assert.match(streamProcessor, /splitCleanVisibleAssistantText/, 'streamed user-visible text must be scrubbed before text_delta emission')
   assert.match(streamProcessor, /DISPLAY_FUTURE_ACTION_SENTENCE_RE/, 'streamed user-visible text must strip Let-me future action narration')
   assert.match(streamProcessor, /visibleTextBuffer/, 'streamed user-visible text must buffer partial future-action sentences across chunks')
@@ -2416,6 +2419,39 @@ export async function runLedgerSmoke() {
   assert.ok(
     shallowCurrentAiActions.some((action) => action.message?.content?.includes('Research still needs')),
     'shallow current-state AI phase must request more opened/read source work',
+  )
+
+  const failedSourceAdvanceState = createInitialState(false, timeouts)
+  failedSourceAdvanceState.taskStrategy = 'research'
+  failedSourceAdvanceState.currentPhase = 'research'
+  failedSourceAdvanceState.currentPlanItems = [
+    'Detail temperament and social behavior',
+    'Outline diet and daily care requirements',
+    'Write final concise guide',
+  ]
+  failedSourceAdvanceState.currentStepIdx = 0
+  failedSourceAdvanceState.taskComplexity = 2
+  failedSourceAdvanceState.originalUserRequest = 'Write a concise guide on Pacific parrotlets covering physical traits, temperament, and essential care needs.'
+  failedSourceAdvanceState.stepToolCallCount = 2
+  failedSourceAdvanceState.stepResearchCallCount = 2
+  failedSourceAdvanceState.stepSearchQueries.add('Pacific Parrotlet temperament and social behavior')
+  failedSourceAdvanceState.stepSourceDomainCounts.set('thesprucepets.com', 1)
+  failedSourceAdvanceState.stepSourceDomainCounts.set('lafeber.com', 1)
+  failedSourceAdvanceState.stepFailureCount = 1
+  const failedSourceAdvanceActions = policy.evaluate(
+    failedSourceAdvanceState,
+    new Map(),
+    'During the research phase focusing on temperament and social behavior of the Pacific Parrotlet, attempts to open and extract detailed text from primary source URLs failed to return usable page content.' +
+      String.fromCharCode(10) +
+      '<next_step/>',
+    true,
+    60,
+  )
+  assert.equal(failedSourceAdvanceState.currentStepIdx, 0, 'failed source-opening narration must not advance a shallow research phase')
+  assert.ok(!failedSourceAdvanceActions.some((action) => action.type === 'step_advance'), 'failed source-opening phase must keep trying sources')
+  assert.ok(
+    failedSourceAdvanceActions.some((action) => action.message?.content?.includes('Research still needs')),
+    'failed source-opening phase must ask for another concrete source action',
   )
 
   const incompleteDepthState = createInitialState(false, timeouts)

@@ -141,6 +141,26 @@ function addStringMetrics(target: Record<string, unknown>, rawArgs: string, key:
   target[`${key}LineCount`] = value.split('\n').length
 }
 
+function fileActionLabelFallback(toolName: string, path: string): string {
+  const fileName = path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'file'
+  const compactName = fileName.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const subject = compactName.split(' ').slice(0, 5).join(' ') || 'file'
+  const verb = toolName === 'append_file'
+    ? 'Continue'
+    : toolName === 'edit_file'
+      ? 'Edit'
+      : 'Write'
+  return formatVisibleActionLabel(`${verb} ${subject}`)
+}
+
+function addProvisionalFileActionLabel(args: Record<string, unknown>, toolName: string): void {
+  if (strictActionLabelFromArgs(args)) return
+  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return
+  const path = typeof args.path === 'string' ? args.path : ''
+  if (!path) return
+  args.action_label = fileActionLabelFallback(toolName, path)
+}
+
 function addDisplayContractArgs(args: Record<string, unknown>, parsed: Record<string, unknown> | null, rawArgs: string): void {
   const actionLabel = parsed ? parsed.action_label : extractStringArg(rawArgs, 'action_label')
   if (typeof actionLabel === 'string' && actionLabel) args.action_label = formatVisibleActionLabel(actionLabel)
@@ -198,6 +218,7 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       } else if (toolName === 'edit_file') {
         addStringMetrics(args, rawArgs, 'new_string')
       }
+      addProvisionalFileActionLabel(args, toolName)
       break
     case 'list_files':
       addString('directory')

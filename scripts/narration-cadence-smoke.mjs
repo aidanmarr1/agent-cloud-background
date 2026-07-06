@@ -81,7 +81,7 @@ async function assertSourceContracts() {
   assert.match(config, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(config, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
   assert.match(streamProcessor, /recordVisibleToolStartForNarration/, 'provisional file/code tool starts must count toward the same visible narration cadence as executed tools')
-  assert.match(streamProcessor, /strictActionLabelFromArgs\(args\)/, 'provisional visible starts must require the same strict model-authored label as the UI pill')
+  assert.match(streamProcessor, /function addProvisionalFileActionLabel[\s\S]*args\.action_label/, 'file writes must be able to show a provisional pill before long content finishes streaming')
   assert.match(streamProcessor, /lastVisibleActivityTime/, 'stream processor must track user-visible activity separately from invisible reasoning chunks')
   assert.match(streamProcessor, /visibleInactivityExpired/, 'invisible-only reasoning stalls must trigger recovery instead of waiting for the full iteration timeout')
   assert.match(streamProcessor, /PROGRESS_NARRATION_TEXT_STREAM_CAP\s*=\s*420/, 'progress narration should still have a short visible text cap')

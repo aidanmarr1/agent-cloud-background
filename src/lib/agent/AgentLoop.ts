@@ -2148,7 +2148,6 @@ function compactResearchEvidenceComplete(state: AgentStateData): boolean {
     explicitlyHighEvidenceRequest
 
   if (hasDirectEvidence && compactResearchBreadthSaturated(state, depth)) return true
-  if (compactResearchSourceOpeningExhausted(state, depth)) return true
   if (!reportResearchNeedsSources && !explicitlyHighEvidenceRequest && compactResearchStalledSearchPacketComplete(state, depth)) return true
   if (hasDirectEvidence && state.stepFailureCount >= 2 && !explicitlyHighEvidenceRequest) {
     return state.stepResearchCallCount >= Math.max(2, Math.ceil(requiredResearchCalls * 0.35)) &&
@@ -2466,7 +2465,7 @@ const FINAL_INLINE_ANSWER_MAX_TOKENS = 1_200
 const FINAL_INLINE_REPORT_MAX_TOKENS = 3_000
 const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 2_200
 const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 3_200
-const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 9_000
+const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 3_200
 const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 900
 const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 900
 const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 220
@@ -4348,17 +4347,6 @@ export class AgentLoop {
       ]
     }
     if (useCompactResearchTurn && compactResearchNeedsOpenedSource(state)) {
-      requestMessages = [
-        ...requestMessages,
-        {
-          role: 'system',
-          content: state.suppressedResearchToolName === 'read_document'
-            ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: targeted web_search for a new authoritative URL, browser_navigate to that URL, or browser_get_content from a different already-open useful page. Do not retry the same extracted URL.'
-            : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again. Open or extract one of the strongest URLs already surfaced in the research activity context using read_document, browser_navigate, or browser_get_content if a useful page is already open. After this opened/read source, synthesize or advance instead of doing more query variants.',
-        } as ChatMessageParam,
-      ]
-    }
-    if (compactResearchPhaseCanAdvance) {
       const sourceOpeningExhausted = compactResearchSourceOpeningExhausted(
         state,
         researchDepthProfileForState(state),
@@ -4368,8 +4356,19 @@ export class AgentLoop {
         {
           role: 'system',
           content: sourceOpeningExhausted
-            ? 'SOURCE OPENING EXHAUSTED: repeated attempts to open or extract the surfaced source URLs looped without usable page evidence. Stop rotating source tools for this phase. Write one concise progress paragraph using the available search-result packet, explicitly note that source opening failed for this phase, then emit <next_step/>. Do not call more tools for this phase.'
-            : 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase.',
+            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make exactly one different source action now: web_search for a new authoritative domain, read_document for a different surfaced URL, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer a new domain over retrying the same blocked source.'
+            : state.suppressedResearchToolName === 'read_document'
+              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: targeted web_search for a new authoritative URL, browser_navigate to that URL, or browser_get_content from a different already-open useful page. Do not retry the same extracted URL.'
+              : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again unless the surfaced URLs are blocked or unusable. Open or extract one of the strongest URLs already surfaced in the research activity context using read_document, browser_navigate, or browser_get_content if a useful page is already open. After this opened/read source, synthesize or advance instead of doing more query variants.',
+        } as ChatMessageParam,
+      ]
+    }
+    if (compactResearchPhaseCanAdvance) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase. Do not describe failed source-opening attempts unless they are essential to the user-facing answer.',
         } as ChatMessageParam,
       ]
     }
@@ -4646,8 +4645,7 @@ export class AgentLoop {
         const requiredToolIntent = shouldRequireToolCall && !narrationWindowOpen
         const fastActionTurn = activeTools.length > 0 &&
           !isPostCompletion &&
-          isFastActionToolTurn(state, this.options.messages) &&
-          (requiredToolIntent || compactResearchNeedsTool || agenticStepNeedsTool || narrationWindowOpen)
+          isFastActionToolTurn(state, this.options.messages)
         const fastSourceActionTurn = fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
         const useRequiredToolCall = requiredToolIntent &&
