@@ -1036,7 +1036,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /fastActionTurn[\s\S]*reasoning:\s*\{\s*effort: 'minimal' as const,\s*exclude: true\s*\}/, 'between-tool action turns must suppress expensive hidden reasoning where the provider supports it')
   assert.doesNotMatch(agentLoop, /FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS|Fast action stream start timed out; using compact action completion/, 'between-tool timeouts must not wait again on a second non-streaming fast-action call')
   assert.match(agentLoop, /function shouldStartIterationBudgetFinalization[\s\S]*remainingIterations <= iterationBudgetFinalizationTriggerTurns/, 'iteration budget pressure must force finalization instead of ending with an unfinished plan')
+  assert.match(agentLoop, /function budgetFinalizationWouldSkipRequiredResearch[\s\S]*compactResearchEvidenceComplete\(state\)[\s\S]*return true/, 'iteration budget finalization must not skip unfinished substantive research')
+  assert.match(agentLoop, /shouldStartIterationBudgetFinalization[\s\S]*budgetFinalizationWouldSkipRequiredResearch\(state,\s*messages\)[\s\S]*return false/, 'deep/current research tasks must keep researching instead of being folded into finalization')
   assert.match(agentLoop, /state\.dynamicIterationLimit = Math\.min\([\s\S]*MAX_ITERATIONS[\s\S]*state\.iterations \+ finalizationTurns/, 'iteration budget finalization must reserve enough turns to save or emit the final output')
+  assert.match(toolPipeline, /state\.pendingDeliverableRevision[\s\S]*Make exactly one append_file or edit_file call against/, 'failed final deliverable verification must constrain revisions to the existing file')
+  assert.match(streamProcessor, /pendingDeliverableRevisionAllowsPreview[\s\S]*toolName !== 'append_file' && toolName !== 'edit_file'[\s\S]*return false/, 'blocked final-deliverable recreate attempts must not emit misleading provisional file previews')
   assert.match(agentLoop, /function compactResearchSourceOpeningExhausted[\s\S]*state\.stepLoopDetections >= 4[\s\S]*state\.stepToolCallCount >= Math\.max/, 'source-opening loops must be detected after repeated failed extraction/navigation attempts')
   assert.doesNotMatch(agentLoop, /compactResearchSourceOpeningExhausted\(state,\s*depth\)[\s\S]{0,120}return true/, 'source-opening exhaustion alone must not mark compact research evidence complete')
   assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*do not emit <next_step\/>[\s\S]*different source action now/, 'exhausted source-opening recovery must try a different concrete source route instead of advancing with failure narration')
@@ -2800,6 +2804,45 @@ export async function runLedgerSmoke() {
   }]]), searchBalanceState)
   assert.equal(searchBalanceEvents.filter((event) => event.type === 'tool_start').length, 0, 'search-only research chains must be blocked before visible tool_start')
   assert.match(JSON.stringify(searchBalanceResults[0]?.result || {}), /no opened or extracted source pages yet/)
+
+  const deliverableRevisionEvents: Array<{ type: string; name?: string; result?: unknown }> = []
+  const deliverableRevisionEmitter = {
+    get isClosed() { return false },
+    get terminalStatus() { return null },
+    toolStart(_id: string, name: string) { deliverableRevisionEvents.push({ type: 'tool_start', name }) },
+    toolResult(_id: string, name: string, result: unknown) { deliverableRevisionEvents.push({ type: 'tool_result', name, result }) },
+    terminalOutput() {},
+    creditEvent() {},
+    artifactCreated() {},
+    fileContentStart() {},
+    fileContentDelta() {},
+    browserFrame() {},
+  }
+  const deliverableRevisionState = createInitialState(false, timeouts)
+  deliverableRevisionState.taskStrategy = 'research'
+  deliverableRevisionState.currentPhase = 'deliver'
+  deliverableRevisionState.currentPlanItems = ['Research official release signals', 'Write final probability report']
+  deliverableRevisionState.currentStepIdx = 1
+  deliverableRevisionState.pendingDeliverableRevision = {
+    path: 'deliverables/probability-report.md',
+    failures: ['Only 0 citation(s), minimum 2'],
+    suggestions: ['Add source URLs to support claims'],
+    createdAt: Date.now(),
+  }
+  const deliverableRevisionPipeline = new ToolPipeline(deliverableRevisionEmitter as any, 'deliverable-revision-smoke')
+  const deliverableRevisionResults = await deliverableRevisionPipeline.executeAll(new Map([[0, {
+    id: 'revision-recreate',
+    name: 'create_file',
+    arguments: JSON.stringify({
+      path: 'deliverables/probability-report.md',
+      content: 'This replacement report tries to restart the existing final deliverable instead of revising it with the missing source citations.',
+      action_label: 'Write replacement probability report',
+      plan_step_index: 2,
+    }),
+  }]]), deliverableRevisionState)
+  assert.equal(deliverableRevisionEvents.filter((event) => event.type === 'tool_start').length, 0, 'pending deliverable revision must block recreate before visible tool_start')
+  assert.match(JSON.stringify(deliverableRevisionResults[0]?.result || {}), /already exists and needs a targeted final-deliverable revision/)
+  assert.match(JSON.stringify(deliverableRevisionResults[0]?.result || {}), /append_file or edit_file/)
 
   const attachmentEvents: Array<{ type: string; name?: string; result?: unknown }> = []
   const attachmentEmitter = {

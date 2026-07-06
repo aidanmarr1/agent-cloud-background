@@ -530,6 +530,62 @@ function iterationBudgetFinalizationTriggerTurns(
   return Math.max(8, Math.min(16, iterationBudgetFinalizationReserve(state, messages)))
 }
 
+function isBudgetFinalizationResearchStep(state: AgentStateData, stepIdx: number): boolean {
+  if (!state.currentPlanItems || stepIdx < 0 || stepIdx >= state.currentPlanItems.length - 1) return false
+  if (state.taskStrategy === 'browse' || state.taskStrategy === 'creative') return false
+
+  const stepText = [
+    state.currentPlanItems[stepIdx] || '',
+    state.currentPlanScopes?.[stepIdx] || '',
+  ].join(' ')
+
+  if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
+    return isResearchStepText(stepText)
+  }
+
+  return state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    state.currentPhase === 'research' ||
+    isResearchStepText(stepText)
+}
+
+function budgetFinalizationRequiresResearchIntegrity(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const text = [
+    state.originalUserRequest || '',
+    ...messages.map(message => message.content || ''),
+    ...(state.currentPlanItems || []),
+    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
+  ].join(' ')
+
+  return /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|long report|serious analysis|strategic|technical|comparative|cited|citations?|sources?|source[-\s]?backed|evidence[-\s]?backed)\b/i.test(text) ||
+    SUBSTANTIVE_RESEARCH_RE.test(text) ||
+    taskDefaultsToMarkdownDeliverable(text)
+}
+
+function budgetFinalizationWouldSkipRequiredResearch(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (!budgetFinalizationRequiresResearchIntegrity(state, messages)) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
+
+  if (
+    isBudgetFinalizationResearchStep(state, state.currentStepIdx) &&
+    !compactResearchEvidenceComplete(state)
+  ) {
+    return true
+  }
+
+  for (let i = state.currentStepIdx + 1; i < state.currentPlanItems.length - 1; i++) {
+    if (isBudgetFinalizationResearchStep(state, i)) return true
+  }
+
+  return false
+}
+
 function shouldStartIterationBudgetFinalization(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -538,6 +594,7 @@ function shouldStartIterationBudgetFinalization(
   if (!state.dynamicIterationLimit) return false
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
   if (state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (budgetFinalizationWouldSkipRequiredResearch(state, messages)) return false
 
   const remainingIterations = state.dynamicIterationLimit - state.iterations
   return remainingIterations <= iterationBudgetFinalizationTriggerTurns(state, messages)
@@ -2659,7 +2716,7 @@ export class AgentLoop {
         state.deliverableVerificationDone = false
         contextManager.push({
           role: 'system',
-          content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+          content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
         } as ChatMessageParam)
         return 'STREAMING'
       }
@@ -3677,7 +3734,7 @@ export class AgentLoop {
                       log.info(`Output verification failed (${verification.score.toFixed(2)}): ${failureList}`)
                       contextManager.push({
                         role: 'system',
-                        content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${failureList}. Your next response must be exactly one native append_file or edit_file tool call against "${state.pendingDeliverableRevision.path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+                        content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${failureList}. Your next response must be exactly one native append_file or edit_file tool call against "${state.pendingDeliverableRevision.path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
                       } as ChatMessageParam)
                       // Stay on deliverable step for revision
                       phase = 'EVALUATING'

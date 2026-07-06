@@ -331,6 +331,24 @@ function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, u
   return false
 }
 
+function normalizePreviewPath(path: string): string {
+  return path.replace(/^\/+/, '').replace(/\/+/g, '/')
+}
+
+function pendingDeliverableRevisionAllowsPreview(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): boolean {
+  const pending = state.pendingDeliverableRevision
+  if (!pending) return true
+  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return true
+  if (toolName !== 'append_file' && toolName !== 'edit_file') return false
+
+  const rawPath = typeof args.path === 'string' ? args.path : ''
+  return rawPath.length > 0 && normalizePreviewPath(rawPath) === pending.path
+}
+
 function isCurrentPlanStepPreview(args: Record<string, unknown>, state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return true
   const rawIndex = args.plan_step_index
@@ -737,7 +755,8 @@ export class StreamProcessor {
             if (toolCall.name) {
               const earlyArgs = buildEarlyToolArgs(toolCall.name, toolCall.arguments)
               const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
-              if (currentStepPreview && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs)) {
+              const revisionPreviewAllowed = pendingDeliverableRevisionAllowsPreview(toolCall.name, earlyArgs, state)
+              if (currentStepPreview && revisionPreviewAllowed && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs)) {
                 const signature = provisionalToolStartSignature(toolCall, earlyArgs)
                 if (emittedToolStarts.get(tc.index) !== signature) {
                   emittedToolStarts.set(tc.index, signature)
@@ -751,7 +770,7 @@ export class StreamProcessor {
                 const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
                 const content = extractPartialStringArg(toolCall.arguments, contentKey)
                 const hasDisplayLabel = typeof earlyArgs.action_label === 'string' && earlyArgs.action_label.length > 0
-                if (currentStepPreview && path && hasDisplayLabel) {
+                if (currentStepPreview && revisionPreviewAllowed && path && hasDisplayLabel) {
                   const preview = filePreviewState.get(tc.index) || { path, emittedChars: 0, started: false }
                   if (!preview.started || preview.path !== path) {
                     preview.path = path

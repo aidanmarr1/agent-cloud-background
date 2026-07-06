@@ -362,6 +362,24 @@ function fileWritePreflightBlockReason(
     }
   }
 
+  if (state.pendingDeliverableRevision && FILE_WRITE_TOOLS.has(toolName)) {
+    const pending = state.pendingDeliverableRevision
+    const rawPath = typeof args.path === 'string'
+      ? args.path
+      : typeof args.output_path === 'string'
+        ? args.output_path
+        : ''
+    const requestedPath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
+    const allowedRevisionTool = toolName === 'append_file' || toolName === 'edit_file'
+    if (!allowedRevisionTool || requestedPath !== pending.path) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+      const failures = pending.failures.length > 0
+        ? ` Verification issue: ${pending.failures.join('; ')}.`
+        : ''
+      return `INTERNAL_RECOVERY: "${pending.path}" already exists and needs a targeted final-deliverable revision.${failures} Do not call ${toolName}${requestedPath && requestedPath !== pending.path ? ` on "${requestedPath}"` : ''}. Make exactly one append_file or edit_file call against "${pending.path}". If citations are missing, append a compact Sources section with the URLs/domains from gathered evidence. Do not recreate or restart the report.`
+    }
+  }
+
   if (toolName === 'create_file') {
     const filePath = (args.path as string) || ''
     const isMdFile = filePath.endsWith('.md')

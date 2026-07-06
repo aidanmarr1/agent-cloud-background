@@ -385,7 +385,10 @@ function pendingDeliverableRevisionGuidance(state: AgentStateData, path: string)
   const suggestions = pending?.suggestions?.length
     ? ` Suggested fix: ${pending.suggestions.join('; ')}.`
     : ''
-  return `FINAL DELIVERABLE REVISION REQUIRED: ${path} is already saved.${failures}${suggestions} Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do not write another status sentence, do not create a new file, and do not repeat that the report was created.`
+  const sourceFix = pending?.failures.some(failure => /citation|source|url/i.test(failure))
+    ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.'
+    : ''
+  return `FINAL DELIVERABLE REVISION REQUIRED: ${path} is already saved.${failures}${suggestions}${sourceFix} Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do not write another status sentence, do not create a new file, and do not repeat that the report was created.`
 }
 
 function finalDeliverableRequired(state: AgentStateData): boolean {
