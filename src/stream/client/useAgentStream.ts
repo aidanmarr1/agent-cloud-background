@@ -480,13 +480,10 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
         }
         addMessage(conversationId, userMsg)
         if (attachments && attachments.length > 0) {
-          await bindAttachmentsToTask(attachments, conversationId, userMsg.id)
+          void bindAttachmentsToTask(attachments, conversationId, userMsg.id)
             .catch((error) => {
-              const msg = error instanceof Error && error.message
-                ? error.message
-                : "Your attachments couldn't be linked to this task."
-              addToast(msg, 'error')
-              throw error
+              console.error('[Chat] Failed to bind attachments before task start:', error)
+              addToast('Attachment syncing is lagging, but the task will still start.', 'error')
             })
         }
         playSend()

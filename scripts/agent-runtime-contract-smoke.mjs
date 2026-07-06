@@ -190,7 +190,17 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/components/modals/ActiveTaskConflictModal.tsx'), 'utf8'),
     readFile(join(root, 'src/components/layout/MobileUnsupportedGate.tsx'), 'utf8'),
   ])
-  const creditPillSource = await readFile(join(root, 'src/components/ui/CreditPill.tsx'), 'utf8')
+  const [
+    creditPillSource,
+    taskAccess,
+    attachmentsLib,
+    attachmentsBindRoute,
+  ] = await Promise.all([
+    readFile(join(root, 'src/components/ui/CreditPill.tsx'), 'utf8'),
+    readFile(join(root, 'src/lib/taskAccess.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/attachments.ts'), 'utf8'),
+    readFile(join(root, 'src/app/api/attachments/bind/route.ts'), 'utf8'),
+  ])
   const homeSubmitStart = homePage.indexOf('const handleSubmit = async')
   const homeSubmitEnd = homePage.indexOf('const handleQuickAction')
   assert.notEqual(homeSubmitStart, -1, 'home page must expose a task submit handler')
@@ -199,6 +209,16 @@ async function assertSourceContracts() {
   const homeRoutePushIndex = homeSubmit.indexOf('router.push(`/chat/${id}`)')
   const homeAttachmentBindIndex = homeSubmit.indexOf('bindAttachmentsToTask')
   const homeServerFlushIndex = homeSubmit.indexOf('flushChatServerSync')
+  const readPersistedOwnerStart = taskAccess.indexOf('async function readPersistedOwner')
+  const readPersistedOwnerEnd = taskAccess.indexOf('async function persistOwner')
+  const bindAttachmentsStart = attachmentsLib.indexOf('export async function bindAttachmentsToConversation')
+  const bindAttachmentsEnd = attachmentsLib.indexOf('export async function softDeleteAttachment')
+  assert.notEqual(readPersistedOwnerStart, -1, 'task access must expose persisted owner reads')
+  assert.notEqual(readPersistedOwnerEnd, -1, 'task access must expose persisted owner writes')
+  assert.notEqual(bindAttachmentsStart, -1, 'attachments lib must expose conversation binding')
+  assert.notEqual(bindAttachmentsEnd, -1, 'attachments lib must expose soft delete after binding')
+  const readPersistedOwnerBlock = taskAccess.slice(readPersistedOwnerStart, readPersistedOwnerEnd)
+  const bindAttachmentsBlock = attachmentsLib.slice(bindAttachmentsStart, bindAttachmentsEnd)
   assert.notEqual(homeRoutePushIndex, -1, 'new home tasks must route to the created chat immediately')
   assert.ok(
     homeAttachmentBindIndex === -1 || homeRoutePushIndex < homeAttachmentBindIndex,
@@ -213,6 +233,9 @@ async function assertSourceContracts() {
     /deleteConversation\(id\)/,
     'post-navigation sync failures must not delete the visible local task',
   )
+  assert.match(homeSubmit, /Attachment syncing is lagging, but the task is starting\./, 'home attachment sync failures must leave the opened task usable')
+  assert.match(homeSubmit, /history sync is still catching up\./, 'home history sync failures must be reported separately from attachment binding')
+  assert.doesNotMatch(homeSubmit, /Task opened, but attachment syncing is still having trouble\./, 'home sync warnings must not imply the opened task is blocked')
 
   assert.match(prompts, /Custom Instruction Compliance/, 'custom instructions must be elevated to active runtime constraints')
   assert.match(prompts, /Default work standard: do not skim or do the bare minimum/, 'runtime prompt must counter shallow minimum-effort behavior')
@@ -410,6 +433,18 @@ async function assertSourceContracts() {
   assert.match(conversationsLib, /async function withConversationSchemaFallback/, 'conversation history must keep schema setup out of normal account reads and clears')
   assert.match(conversationsLib, /export async function getUserConversationIndex[\s\S]*withConversationSchemaFallback/, 'conversation index loads must query first and migrate only on missing schema')
   assert.doesNotMatch(conversationsLib, /export async function getUserConversationIndex[\s\S]*?await ensureConversationSchema\(\)/, 'conversation index loads must not run full schema setup before every history read')
+  assert.match(taskAccess, /function isMissingTaskAccessSchemaError/, 'task access reads must detect missing schema explicitly')
+  assert.match(taskAccess, /async function withTaskAccessSchemaFallback/, 'task access must keep schema setup out of normal task-open checks')
+  assert.match(readPersistedOwnerBlock, /withTaskAccessSchemaFallback/, 'task owner reads must query first and migrate only on missing schema')
+  assert.doesNotMatch(readPersistedOwnerBlock, /await ensureDatabaseTaskAccessSchema\(\)/, 'task owner reads must not run full schema setup before every task open')
+  assert.match(attachmentsLib, /function isMissingAttachmentSchemaError/, 'attachment reads must detect missing schema explicitly')
+  assert.match(attachmentsLib, /async function withAttachmentSchemaFallback/, 'attachment sync must keep schema setup out of normal bind/read paths')
+  assert.match(bindAttachmentsBlock, /withAttachmentSchemaFallback/, 'attachment binding must query first and migrate only on missing schema')
+  assert.doesNotMatch(bindAttachmentsBlock, /await ensureAttachmentSchema\(\)/, 'attachment binding must not run full schema setup before every task start')
+  assert.match(attachmentsBindRoute, /preferredRegion = \['syd1', 'iad1'\]/, 'attachment binding must run near the app database region')
+  assert.match(useAgentStream, /void bindAttachmentsToTask/, 'chat attachment binding must run outside the task-start critical path')
+  assert.match(useAgentStream, /Attachment syncing is lagging, but the task will still start\./, 'chat attachment sync failures must not cancel the task request')
+  assert.doesNotMatch(useAgentStream, /Your attachments couldn't be linked to this task\.[\s\S]{0,220}throw error/, 'chat attachment binding failures must not throw before task start')
   assert.doesNotMatch(chatStoreIndex, /persist\(/, 'chat/task history must not use browser-local Zustand persistence as the source of truth')
   assert.doesNotMatch(chatStoreIndex, /debouncedIdbStorage|TASK_STORE_KEY/, 'chat store must not hydrate task history from IndexedDB storage')
   assert.match(chatStoreIndex, /initializeChatStoreServerSync\(userId,\s*useChatStore\)/, 'chat store must initialize account-scoped server persistence')

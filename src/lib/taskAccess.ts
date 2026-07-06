@@ -25,6 +25,21 @@ const taskAccessState: TaskAccessState =
 
 let taskAccessSchemaPromise: Promise<void> | null = null
 
+function isMissingTaskAccessSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table:\s*task_access|no such column|has no column/i.test(message)
+}
+
+async function withTaskAccessSchemaFallback<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query()
+  } catch (error) {
+    if (!isMissingTaskAccessSchemaError(error)) throw error
+    await ensureDatabaseTaskAccessSchema()
+    return query()
+  }
+}
+
 function hashSecret(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
@@ -93,11 +108,10 @@ async function ensureAccessRoot(): Promise<boolean> {
 
 async function readPersistedOwner(taskId: string): Promise<string | null> {
   if (shouldUseDatabaseTaskAccess()) {
-    await ensureDatabaseTaskAccessSchema()
-    const result = await tursoExecute(
+    const result = await withTaskAccessSchemaFallback(() => tursoExecute(
       'select owner_hash from task_access where task_id = ? limit 1',
       [taskId],
-    )
+    ))
     const ownerHash = result.rows[0]?.owner_hash
     return typeof ownerHash === 'string' && /^[a-f0-9]{64}$/i.test(ownerHash) ? ownerHash : null
   }
@@ -119,15 +133,14 @@ async function readPersistedOwner(taskId: string): Promise<string | null> {
 
 async function persistOwner(taskId: string, ownerHash: string): Promise<string> {
   if (shouldUseDatabaseTaskAccess()) {
-    await ensureDatabaseTaskAccessSchema()
     const now = new Date().toISOString()
-    await tursoExecute(
+    await withTaskAccessSchemaFallback(() => tursoExecute(
       `
         insert or ignore into task_access (task_id, owner_hash, created_at, updated_at)
         values (?, ?, ?, ?)
       `,
       [taskId, ownerHash, now, now],
-    )
+    ))
     return (await readPersistedOwner(taskId)) || ''
   }
 

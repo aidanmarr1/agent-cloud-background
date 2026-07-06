@@ -51,14 +51,25 @@ export default function HomePage() {
       .conversations
       .find((conversation) => conversation.id === id)
       ?.messages[0]?.id
+    const hasAttachments = Boolean(
+      attachments?.some((attachment) => typeof attachment.id === 'string' && attachment.id.length > 0),
+    )
 
     void (async () => {
       try {
         await bindAttachmentsToTask(attachments, id, firstMessageId)
+      } catch (error) {
+        console.error('[Home] Failed to bind attachments after navigation:', error)
+        if (hasAttachments) {
+          addToast('Attachment syncing is lagging, but the task is starting.', 'error')
+        }
+      }
+
+      try {
         await flushChatServerSync()
       } catch (error) {
-        console.error('[Home] Failed to sync new task after navigation:', error)
-        addToast('Task opened, but attachment syncing is still having trouble.', 'error')
+        console.error('[Home] Failed to sync new task history after navigation:', error)
+        addToast('Task opened, but history sync is still catching up.', 'error')
       }
     })()
   }

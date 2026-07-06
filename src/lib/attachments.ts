@@ -66,6 +66,21 @@ const TEXT_MIME_TYPES = new Set([
 
 let attachmentSchemaPromise: Promise<void> | null = null
 
+function isMissingAttachmentSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table:\s*attachments|no such column|has no column/i.test(message)
+}
+
+async function withAttachmentSchemaFallback<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query()
+  } catch (error) {
+    if (!isMissingAttachmentSchemaError(error)) throw error
+    await ensureAttachmentSchema()
+    return query()
+  }
+}
+
 export async function ensureAttachmentSchema(): Promise<void> {
   if (!attachmentSchemaPromise) {
     attachmentSchemaPromise = (async () => {
@@ -244,10 +259,10 @@ export async function listAttachmentsForUser(input: {
   conversationId?: string | null
   limit?: number
 }): Promise<AttachmentRecord[]> {
-  await ensureAttachmentSchema()
   const limit = Math.max(1, Math.min(input.limit ?? 100, 200))
-  const rows = input.conversationId
-    ? await tursoExecute(
+  const rows = await withAttachmentSchemaFallback(() => {
+    if (input.conversationId) {
+      return tursoExecute(
         `
           select * from attachments
           where user_id = ? and conversation_id = ? and deleted_at is null
@@ -256,15 +271,18 @@ export async function listAttachmentsForUser(input: {
         `,
         [input.userId, input.conversationId, limit],
       )
-    : await tursoExecute(
-        `
-          select * from attachments
-          where user_id = ? and deleted_at is null
-          order by created_at desc
-          limit ?
-        `,
-        [input.userId, limit],
-      )
+    }
+
+    return tursoExecute(
+      `
+        select * from attachments
+        where user_id = ? and deleted_at is null
+        order by created_at desc
+        limit ?
+      `,
+      [input.userId, limit],
+    )
+  })
 
   return rows.rows
     .map((row) => rowToAttachmentRecord(row as AttachmentRow))
@@ -272,11 +290,10 @@ export async function listAttachmentsForUser(input: {
 }
 
 export async function getAttachmentForUser(userId: string, attachmentId: string): Promise<AttachmentRecord | null> {
-  await ensureAttachmentSchema()
-  const result = await tursoExecute(
+  const result = await withAttachmentSchemaFallback(() => tursoExecute(
     'select * from attachments where id = ? and user_id = ? and deleted_at is null limit 1',
     [attachmentId, userId],
-  )
+  ))
   return rowToAttachmentRecord(result.rows[0] as AttachmentRow | undefined)
 }
 
@@ -287,20 +304,21 @@ export async function bindAttachmentsToConversation(input: {
   messageId?: string | null
 }): Promise<void> {
   if (input.attachmentIds.length === 0) return
-  await ensureAttachmentSchema()
   const nowMessageId = input.messageId || null
 
-  for (const attachmentId of [...new Set(input.attachmentIds)]) {
-    await tursoExecute(
-      `
-        update attachments
-        set conversation_id = coalesce(conversation_id, ?),
-            message_id = coalesce(message_id, ?)
-        where id = ? and user_id = ? and deleted_at is null
-      `,
-      [input.conversationId, nowMessageId, attachmentId, input.userId],
-    )
-  }
+  await withAttachmentSchemaFallback(async () => {
+    for (const attachmentId of [...new Set(input.attachmentIds)]) {
+      await tursoExecute(
+        `
+          update attachments
+          set conversation_id = coalesce(conversation_id, ?),
+              message_id = coalesce(message_id, ?)
+          where id = ? and user_id = ? and deleted_at is null
+        `,
+        [input.conversationId, nowMessageId, attachmentId, input.userId],
+      )
+    }
+  })
 }
 
 export async function softDeleteAttachment(userId: string, attachmentId: string): Promise<boolean> {

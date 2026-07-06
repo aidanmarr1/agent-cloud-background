@@ -4,6 +4,7 @@ import { assertSameOriginRequest, readJsonBody } from '@/lib/api'
 import { assertTaskAccess } from '@/lib/taskAccess'
 
 export const runtime = 'nodejs'
+export const preferredRegion = ['syd1', 'iad1']
 const BIND_BODY_LIMIT_BYTES = 256 * 1024
 const MAX_BIND_ATTACHMENT_IDS = 50
 const SAFE_CLIENT_ID = /^[a-zA-Z0-9_-]{1,128}$/
