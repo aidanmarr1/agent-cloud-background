@@ -71,7 +71,7 @@ async function addTaskWorkerHeartbeatColumn(sql: string): Promise<void> {
   }
 }
 
-async function ensureTaskWorkerHeartbeatSchema(): Promise<void> {
+export async function ensureTaskWorkerHeartbeatSchema(): Promise<void> {
   if (!schemaReady) {
     schemaReady = (async () => {
       await tursoExecute(`

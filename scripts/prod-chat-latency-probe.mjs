@@ -20,6 +20,7 @@ const { createUser } = await jiti.import(fileURLToPath(new URL('../src/lib/auth/
 const { tursoExecute } = await jiti.import(fileURLToPath(new URL('../src/lib/db/turso.ts', import.meta.url)))
 const { topUpServerCredits } = await jiti.import(fileURLToPath(new URL('../src/lib/serverCredits.ts', import.meta.url)))
 const { DEFAULT_MODEL } = await jiti.import(fileURLToPath(new URL('../src/lib/llm.ts', import.meta.url)))
+const { cancelTaskJob } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskJobs.ts', import.meta.url)))
 
 const args = process.argv.slice(2)
 const baseUrl = (readStringArg('--base-url') || args.find(arg => /^https?:\/\//.test(arg)) || 'https://agent1-0.vercel.app').replace(/\/$/, '')
@@ -83,18 +84,52 @@ function parseSseBlock(block) {
   }
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function taskRunIsTerminal(id) {
+  if (!id) return true
+  const rows = await tursoExecute(
+    'select status, terminal_status from agent_task_jobs where run_id = ? limit 1',
+    [id],
+  ).catch(() => ({ rows: [] }))
+  const row = rows.rows[0]
+  const status = String(row?.status || '')
+  const terminalStatus = String(row?.terminal_status || '')
+  return !row || status === 'done' || status === 'error' || status === 'cancelled' || Boolean(terminalStatus)
+}
+
+async function waitForTaskRunTerminal(id, timeoutMs = 3000) {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await taskRunIsTerminal(id)) return true
+    await sleep(150)
+  }
+  return taskRunIsTerminal(id)
+}
+
 async function cleanup() {
   const runIds = [runId].filter(Boolean)
   try {
-    if (runIds.length) {
+    let safeToDeleteTaskRows = true
+    if (userId && runIds.length) {
       for (const id of runIds) {
-        await tursoExecute('delete from agent_task_events where run_id = ?', [id]).catch(() => undefined)
-        await tursoExecute('delete from agent_task_jobs where run_id = ?', [id]).catch(() => undefined)
-        await tursoExecute('delete from user_active_task_leases where run_id = ?', [id]).catch(() => undefined)
-        await tursoExecute('delete from active_tasks where run_id = ?', [id]).catch(() => undefined)
+        await cancelTaskJob(userId, id).catch(() => undefined)
+        safeToDeleteTaskRows = (await waitForTaskRunTerminal(id)) && safeToDeleteTaskRows
       }
     }
-    if (userId) {
+    if (runIds.length) {
+      for (const id of runIds) {
+        if (safeToDeleteTaskRows) {
+          await tursoExecute('delete from agent_task_events where run_id = ?', [id]).catch(() => undefined)
+          await tursoExecute('delete from agent_task_jobs where run_id = ?', [id]).catch(() => undefined)
+          await tursoExecute('delete from user_active_task_leases where run_id = ?', [id]).catch(() => undefined)
+          await tursoExecute('delete from active_tasks where run_id = ?', [id]).catch(() => undefined)
+        }
+      }
+    }
+    if (userId && safeToDeleteTaskRows) {
       await tursoExecute('delete from user_active_task_leases where user_id = ?', [userId]).catch(() => undefined)
       await tursoExecute('delete from conversations where user_id = ? or id = ?', [userId, conversationId]).catch(() => undefined)
       await tursoExecute('delete from credit_ledger where user_id = ?', [userId]).catch(() => undefined)

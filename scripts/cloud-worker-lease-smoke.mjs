@@ -85,6 +85,10 @@ const {
   acquireActiveTaskLease,
   getActiveTaskLeaseForUser,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/activeTasks.ts', import.meta.url)))
+const {
+  markTaskWorkerStopped,
+  recordTaskWorkerHeartbeat,
+} = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskWorkerHeartbeat.ts', import.meta.url)))
 
 const userId = `internal-background-smoke-${randomUUID()}`
 const conversationId = `internal-background-smoke-${randomUUID()}`
@@ -108,17 +112,36 @@ try {
     },
   })
 
-  const firstClaim = await claimNextTaskJob(`lease-smoke-dead-worker-${queueName}`, 10)
+  const firstWorkerId = `lease-smoke-live-worker-${queueName}`
+  const replacementWorkerId = `lease-smoke-replacement-worker-${queueName}`
+  const firstClaim = await claimNextTaskJob(firstWorkerId, 10)
   if (!firstClaim || firstClaim.runId !== runId) {
     throw new Error(`Initial worker did not claim the diagnostic job. Claimed: ${firstClaim?.runId || 'none'}`)
   }
   if (firstClaim.attempts !== 1) {
     throw new Error(`Expected first claim attempt to be 1, got ${firstClaim.attempts}`)
   }
+  await recordTaskWorkerHeartbeat({
+    workerId: firstWorkerId,
+    queueName,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'running',
+    currentRunId: runId,
+    completedTasks: 0,
+  })
 
   await sleep(35)
 
-  const replacementClaim = await claimNextTaskJob(`lease-smoke-replacement-worker-${queueName}`, 60_000)
+  const protectedClaim = await claimNextTaskJob(replacementWorkerId, 60_000)
+  if (protectedClaim) {
+    throw new Error(`A fresh worker heartbeat should prevent stale-lease recovery. Claimed: ${protectedClaim.runId}`)
+  }
+
+  await markTaskWorkerStopped(firstWorkerId)
+
+  const replacementClaim = await claimNextTaskJob(replacementWorkerId, 60_000)
   if (!replacementClaim || replacementClaim.runId !== runId) {
     throw new Error(`Replacement worker did not reclaim the expired diagnostic job. Claimed: ${replacementClaim?.runId || 'none'}`)
   }
@@ -197,6 +220,7 @@ try {
     exhaustedRunId,
     firstWorkerAttempts: firstClaim.attempts,
     replacementWorkerAttempts: replacementClaim.attempts,
+    freshHeartbeatProtected: !protectedClaim,
     maxAttemptsError: sawExhausted,
     activeLeaseReleasedAfterMaxAttempts: !activeLeaseAfterExhaustion,
     replayedEvents: events.map((event) => ({ type: event.type, seq: event.seq })),

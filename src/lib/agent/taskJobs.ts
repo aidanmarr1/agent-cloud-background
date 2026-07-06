@@ -14,6 +14,7 @@ import { getTursoSetupStatus, tursoExecute, tursoTransaction } from '@/lib/db/tu
 import { encodeSSE } from '@/lib/stream'
 import { userErrorMessage } from '@/lib/errorMessages'
 import { releaseActiveTaskLease } from '@/lib/activeTasks'
+import { ensureTaskWorkerHeartbeatSchema } from './taskWorkerHeartbeat'
 import { taskQueueName } from './taskQueue'
 import type { AgentEventEmitter } from './SSEEmitter'
 import type { BackgroundProbeTaskPayload, ChatTaskPayload, TaskJobPayload } from './chatTaskRunner'
@@ -137,11 +138,14 @@ const TASK_JOB_DB_POLL_MS = 100
 const TASK_JOB_STATUS_POLL_MS = 2_000
 const TASK_JOB_WORKER_LEASE_MS = 60_000
 const TASK_JOB_WORKER_REFRESH_MS = 15_000
+const TASK_JOB_WORKER_STALE_MS = 60_000
 const TASK_JOB_CANCEL_POLL_MS = 2_000
 const TASK_JOB_WORKER_MAX_ATTEMPTS = 3
 const TASK_JOB_TEXT_PERSIST_DEBOUNCE_MS = 200
 const TASK_JOB_TEXT_PERSIST_CHUNK_CHARS = 4_096
 const TASK_JOB_STARTUP_PLAN_POLL_MS = 100
+const TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS = 250
+const STARTUP_PLAN_READ_TIMEOUT = Symbol('startupPlanReadTimeout')
 
 function normalizeStartupPlan(raw: unknown): ChatTaskPayload['startupPlan'] | undefined {
   if (!raw || typeof raw !== 'object') return undefined
@@ -166,6 +170,15 @@ function startupPlanDeadlineMs(value: unknown): number | undefined {
   const deadline = Number(value)
   if (!Number.isFinite(deadline) || deadline <= 0) return undefined
   return deadline
+}
+
+function envPositiveInt(name: string, fallback: number): number {
+  const parsed = Number.parseInt(process.env[name] || '', 10)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function taskWorkerStaleMs(): number {
+  return envPositiveInt('AGENT_TASK_WORKER_STALE_MS', TASK_JOB_WORKER_STALE_MS)
 }
 
 let taskJobSchemaPromise: Promise<void> | null = null
@@ -1066,7 +1079,14 @@ export async function waitForTaskJobStartupPlan(
     ? options.deadlineMs
     : Date.now()
   while (!options.signal?.aborted) {
-    const payload = await loadPersistedTaskPayload(runId)
+    const remainingMs = Math.max(1, deadlineMs - Date.now())
+    const payload = await Promise.race([
+      loadPersistedTaskPayload(runId),
+      new Promise<typeof STARTUP_PLAN_READ_TIMEOUT>((resolve) => {
+        setTimeout(() => resolve(STARTUP_PLAN_READ_TIMEOUT), Math.min(TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS, remainingMs))
+      }),
+    ])
+    if (payload === STARTUP_PLAN_READ_TIMEOUT) break
     if (payload?.kind !== 'background_probe') {
       const plan = normalizeStartupPlan((payload as ChatTaskPayload | null)?.startupPlan)
       if (plan) return plan
@@ -1212,6 +1232,15 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
   const leaseExpiresAt = now + leaseMs
   const queueName = taskQueueName()
   const maxAttempts = taskWorkerMaxAttempts()
+  const workerFreshAfterMs = now - taskWorkerStaleMs()
+  const protectLiveWorkerClaims = await ensureTaskWorkerHeartbeatSchema()
+    .then(() => true)
+    .catch((error) => {
+      console.warn('[TaskJobs] Could not verify worker heartbeat schema before stale-lease recovery', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    })
 
   type ClaimResult = ClaimedTaskJob | { exhausted: true; runId: string; userId: string } | null
   const result = await tursoTransaction('write', async (transaction): Promise<ClaimResult> => {
@@ -1228,8 +1257,24 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
           and cancel_requested = 0
           and lease_expires_at_ms is not null
           and lease_expires_at_ms <= ?
+          ${protectLiveWorkerClaims ? `
+          and (
+            worker_id is null
+            or not exists (
+              select 1
+              from agent_task_workers
+              where agent_task_workers.worker_id = agent_task_jobs.worker_id
+                and agent_task_workers.queue_name = agent_task_jobs.queue_name
+                and agent_task_workers.current_run_id = agent_task_jobs.run_id
+                and agent_task_workers.status = 'running'
+                and agent_task_workers.last_seen_at_ms >= ?
+            )
+          )
+          ` : ''}
       `,
-      args: [now, queueName, now],
+      args: protectLiveWorkerClaims
+        ? [now, queueName, now, workerFreshAfterMs]
+        : [now, queueName, now],
     })
 
     const selected = await transaction.execute({
