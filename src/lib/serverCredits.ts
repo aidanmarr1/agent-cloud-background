@@ -108,6 +108,21 @@ const SERVER_LEDGER_MAX_ENTRIES = 200
 const accountLocks = new Map<string, Promise<void>>()
 let creditSchemaPromise: Promise<void> | null = null
 
+function isMissingCreditSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table:\s*(credit_accounts|credit_ledger)|no such column|has no column/i.test(message)
+}
+
+async function withCreditSchemaFallback<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query()
+  } catch (error) {
+    if (!isMissingCreditSchemaError(error)) throw error
+    await ensureCreditSchema()
+    return query()
+  }
+}
+
 function monthKey(time = Date.now()): string {
   return new Date(time).toISOString().slice(0, 7)
 }
@@ -597,93 +612,108 @@ export async function readServerCreditLedger(
   userId: string,
   options: { ensureAccount?: boolean } = {},
 ): Promise<ServerCreditLedger> {
-  await ensureCreditSchema()
-  if (options.ensureAccount !== false) {
-    await ensureAccountCredits(userId)
-  }
-  const result = await tursoExecute(
-    `
-      select id, timestamp, amount, category, reason, conversation_id, tool_name, run_id
-      from credit_ledger
-      where user_id = ?
-      order by timestamp desc
-      limit ?
-    `,
-    [userId, SERVER_LEDGER_MAX_ENTRIES],
-  )
-  return {
-    version: 1,
-    entries: result.rows
-      .map((row) => toLedgerEvent(row as CreditLedgerRow))
-      .filter((entry): entry is CreditLedgerEvent => !!entry),
-  }
+  return withCreditSchemaFallback(async () => {
+    if (options.ensureAccount !== false) {
+      await ensureAccountCredits(userId)
+    }
+    const result = await tursoExecute(
+      `
+        select id, timestamp, amount, category, reason, conversation_id, tool_name, run_id
+        from credit_ledger
+        where user_id = ?
+        order by timestamp desc
+        limit ?
+      `,
+      [userId, SERVER_LEDGER_MAX_ENTRIES],
+    )
+    return {
+      version: 1,
+      entries: result.rows
+        .map((row) => toLedgerEvent(row as CreditLedgerRow))
+        .filter((entry): entry is CreditLedgerEvent => !!entry),
+    }
+  })
 }
 
 export async function readServerCreditUsageSummary(
   userId: string,
   row?: CreditAccountRow | null,
 ): Promise<ServerCreditUsageSummary> {
-  await ensureCreditSchema()
-  const monthlyPeriodStart = periodStartTimestamp(row?.period_key)
+  return withCreditSchemaFallback(async () => {
+    const monthlyPeriodStart = periodStartTimestamp(row?.period_key)
 
-  const spendResult = await tursoExecute(
-    `
-      select
-        coalesce(sum(case when amount > 0 and timestamp >= ? then amount else 0 end), 0) as monthly_spent,
-        coalesce(sum(case when amount > 0 then amount else 0 end), 0) as lifetime_spent
-      from credit_ledger
-      where user_id = ?
-    `,
-    [monthlyPeriodStart, userId],
-  )
-  const spend = spendResult.rows[0] as CreditSpendRow | undefined
+    const spendResult = await tursoExecute(
+      `
+        select
+          coalesce(sum(case when amount > 0 and timestamp >= ? then amount else 0 end), 0) as monthly_spent,
+          coalesce(sum(case when amount > 0 then amount else 0 end), 0) as lifetime_spent
+        from credit_ledger
+        where user_id = ?
+      `,
+      [monthlyPeriodStart, userId],
+    )
+    const spend = spendResult.rows[0] as CreditSpendRow | undefined
 
-  const taskResult = await tursoExecute(
-    `
-      select
-        conversation_id,
-        coalesce(sum(amount), 0) as amount,
-        count(*) as entry_count,
-        min(timestamp) as started_at,
-        max(timestamp) as updated_at
-      from credit_ledger
-      where user_id = ?
-        and conversation_id is not null
-        and conversation_id != ''
-        and amount > 0
-      group by conversation_id
-      order by updated_at desc
-    `,
-    [userId],
-  )
+    const taskResult = await tursoExecute(
+      `
+        select
+          conversation_id,
+          coalesce(sum(amount), 0) as amount,
+          count(*) as entry_count,
+          min(timestamp) as started_at,
+          max(timestamp) as updated_at
+        from credit_ledger
+        where user_id = ?
+          and conversation_id is not null
+          and conversation_id != ''
+          and amount > 0
+        group by conversation_id
+        order by updated_at desc
+      `,
+      [userId],
+    )
 
-  const tasks = taskResult.rows
-    .map((taskRow) => {
-      const task = taskRow as TaskCreditSpendRow
-      if (typeof task.conversation_id !== 'string' || !task.conversation_id) return null
-      const timestamp = finiteCreditNumber(task.updated_at, Date.now())
-      return {
-        conversationId: task.conversation_id,
-        amount: roundCreditAmount(finiteCreditNumber(task.amount)),
-        entryCount: Math.max(0, Math.floor(finiteCreditNumber(task.entry_count))),
-        startedAt: finiteCreditNumber(task.started_at, timestamp),
-        updatedAt: timestamp,
-      }
-    })
-    .filter((task): task is ServerTaskCreditSpend => !!task)
+    const tasks = taskResult.rows
+      .map((taskRow) => {
+        const task = taskRow as TaskCreditSpendRow
+        if (typeof task.conversation_id !== 'string' || !task.conversation_id) return null
+        const timestamp = finiteCreditNumber(task.updated_at, Date.now())
+        return {
+          conversationId: task.conversation_id,
+          amount: roundCreditAmount(finiteCreditNumber(task.amount)),
+          entryCount: Math.max(0, Math.floor(finiteCreditNumber(task.entry_count))),
+          startedAt: finiteCreditNumber(task.started_at, timestamp),
+          updatedAt: timestamp,
+        }
+      })
+      .filter((task): task is ServerTaskCreditSpend => !!task)
 
-  return {
-    monthlySpent: roundCreditAmount(finiteCreditNumber(spend?.monthly_spent)),
-    lifetimeSpent: roundCreditAmount(finiteCreditNumber(spend?.lifetime_spent)),
-    taskCount: tasks.length,
-    tasks,
-  }
+    return {
+      monthlySpent: roundCreditAmount(finiteCreditNumber(spend?.monthly_spent)),
+      lifetimeSpent: roundCreditAmount(finiteCreditNumber(spend?.lifetime_spent)),
+      taskCount: tasks.length,
+      tasks,
+    }
+  })
 }
 
 export async function getServerCreditSnapshot(userId: string): Promise<ServerCreditSnapshot> {
-  await ensureCreditSchema()
-  const balance = await ensureAccountCredits(userId)
-  const row = await readAccountRow(userId)
+  const row = await withCreditSchemaFallback(async () => withAccountLock(userId, async () => {
+    const existing = await readAccountRow(userId)
+    if (existing) {
+      return updateMonthlyPeriodIfNeeded(userId, existing)
+    }
+    await createAccountIfMissing(userId)
+    return (await readAccountRow(userId)) || {
+      user_id: userId,
+      monthly_allowance: ACCOUNT_MONTHLY_CREDITS,
+      monthly_balance: ACCOUNT_MONTHLY_CREDITS,
+      period_key: monthKey(),
+    }
+  }))
+  const balance = {
+    monthly: roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_MONTHLY_CREDITS)),
+  }
   const ledger = await readServerCreditLedger(userId, { ensureAccount: false })
   const usageSummary = await readServerCreditUsageSummary(userId, row)
 

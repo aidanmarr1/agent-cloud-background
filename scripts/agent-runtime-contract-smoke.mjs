@@ -90,6 +90,7 @@ async function assertSourceContracts() {
     chatStoreSync,
     useHydration,
     settingsDataTab,
+    usageTab,
     rootOverlays,
     appFrame,
     mainContent,
@@ -180,6 +181,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/components/chat/ChatStoreSync.tsx'), 'utf8'),
     readFile(join(root, 'src/lib/useHydration.ts'), 'utf8'),
     readFile(join(root, 'src/components/modals/settings/DataTab.tsx'), 'utf8'),
+    readFile(join(root, 'src/components/modals/settings/UsageTab.tsx'), 'utf8'),
     readFile(join(root, 'src/components/layout/RootOverlays.tsx'), 'utf8'),
     readFile(join(root, 'src/components/layout/AppFrame.tsx'), 'utf8'),
     readFile(join(root, 'src/components/layout/MainContent.tsx'), 'utf8'),
@@ -397,12 +399,23 @@ async function assertSourceContracts() {
   assert.match(chatStoreSync, /useSession/, 'chat history sync must wait for the authenticated account')
   assert.match(chatStoreSync, /initializeChatStoreSync\(userId\)/, 'chat history sync must start with the authenticated user id')
   assert.match(chatStoreSync, /window\.setTimeout\(startSync,\s*1_000\)/, 'chat history sync must defer initial account fetch until after first app boot')
-  assert.match(creditPillSource, /window\.setTimeout\(\(\) => \{[\s\S]*syncFromServer\(\)[\s\S]*\},\s*1_000\)/, 'credit sync must not compete with first app paint')
+  assert.match(creditPillSource, /window\.setTimeout\(\(\) => \{[\s\S]*syncFromServer\(\{ force: true \}\)[\s\S]*\},\s*1_000\)/, 'initial credit sync must bypass stale throttles after first paint')
+  assert.match(creditPillSource, /if \(open\) void syncFromServer\(\{ force: true \}\)/, 'opening the credit pill must force the authoritative server ledger instead of showing cached defaults')
+  assert.match(usageTab, /void syncFromServer\(\{ force: true \}\)/, 'Usage settings must force a server credit refresh so spend cannot stay at the local default')
+  assert.match(serverCredits, /function isMissingCreditSchemaError/, 'credit reads must detect missing schema explicitly')
+  assert.match(serverCredits, /async function withCreditSchemaFallback/, 'credit reads must keep schema setup out of the normal account ledger path')
+  assert.match(serverCredits, /export async function getServerCreditSnapshot[\s\S]*withCreditSchemaFallback/, 'credit snapshots must query first and migrate only on missing schema')
+  assert.doesNotMatch(serverCredits, /export async function getServerCreditSnapshot[\s\S]*?await ensureCreditSchema\(\)/, 'credit snapshots must not run full schema setup before every balance read')
+  assert.match(conversationsLib, /function isMissingConversationSchemaError/, 'conversation reads must detect missing schema explicitly')
+  assert.match(conversationsLib, /async function withConversationSchemaFallback/, 'conversation history must keep schema setup out of normal account reads and clears')
+  assert.match(conversationsLib, /export async function getUserConversationIndex[\s\S]*withConversationSchemaFallback/, 'conversation index loads must query first and migrate only on missing schema')
+  assert.doesNotMatch(conversationsLib, /export async function getUserConversationIndex[\s\S]*?await ensureConversationSchema\(\)/, 'conversation index loads must not run full schema setup before every history read')
   assert.doesNotMatch(chatStoreIndex, /persist\(/, 'chat/task history must not use browser-local Zustand persistence as the source of truth')
   assert.doesNotMatch(chatStoreIndex, /debouncedIdbStorage|TASK_STORE_KEY/, 'chat store must not hydrate task history from IndexedDB storage')
   assert.match(chatStoreIndex, /initializeChatStoreServerSync\(userId,\s*useChatStore\)/, 'chat store must initialize account-scoped server persistence')
   assert.match(chatServerSync, /SERVER_FETCH_TIMEOUT_MS\s*=\s*4_000/, 'account task history fetches must have a short startup timeout so the tab cannot spin for many seconds')
   assert.match(chatServerSync, /SERVER_WRITE_TIMEOUT_MS\s*=\s*5_000/, 'account task history writes must have a bounded timeout so large syncs cannot keep the tab loading indefinitely')
+  assert.match(chatServerSync, /SERVER_CLEAR_TIMEOUT_MS\s*=\s*20_000/, 'explicit task-history clearing must have enough time for real account history cleanup')
   assert.match(chatServerSync, /function fetchWithTimeout[\s\S]*AbortController[\s\S]*controller\.abort\(\)/, 'account task history fetches must abort stalled requests')
   assert.match(chatServerSync, /fetchWithTimeout\('\/api\/conversations'/, 'task index hydration must use the bounded fetch helper')
   assert.match(chatServerSync, /fetchWithTimeout\(`\/api\/conversations\?id=\$\{encodeURIComponent\(conversationId\)\}`/, 'single task body loading must use the bounded fetch helper')

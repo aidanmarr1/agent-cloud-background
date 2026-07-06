@@ -48,13 +48,13 @@ export function CreditPill() {
   useEffect(() => {
     refreshAllowances()
     const timeout = window.setTimeout(() => {
-      void syncFromServer()
+      void syncFromServer({ force: true })
     }, 1_000)
     return () => window.clearTimeout(timeout)
   }, [refreshAllowances, syncFromServer])
 
   useEffect(() => {
-    if (open) void syncFromServer()
+    if (open) void syncFromServer({ force: true })
   }, [open, syncFromServer])
 
   useEffect(() => {

@@ -37,6 +37,21 @@ export interface StoredConversationIndex {
 
 let conversationSchemaPromise: Promise<void> | null = null
 
+function isMissingConversationSchemaError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /no such table:\s*(conversations|user_conversation_meta)|no such column|has no column/i.test(message)
+}
+
+async function withConversationSchemaFallback<T>(query: () => Promise<T>): Promise<T> {
+  try {
+    return await query()
+  } catch (error) {
+    if (!isMissingConversationSchemaError(error)) throw error
+    await ensureConversationSchema()
+    return query()
+  }
+}
+
 async function addConversationColumn(sql: string): Promise<void> {
   try {
     await tursoExecute(sql)
@@ -246,182 +261,187 @@ function parseStoredFolders(raw: unknown): string[] {
 }
 
 export async function getUserConversationIndex(userId: string): Promise<StoredConversationIndex> {
-  await ensureConversationSchema()
-  const [conversationRows, metaRows, deletedRows] = await Promise.all([
-    tursoExecute(
-      `
-        select id, title, starred, folder, created_at_ms, updated_at_ms
-        from conversations
-        where user_id = ? and deleted_at_ms is null
-        order by updated_at_ms desc
-        limit ?
-      `,
-      [userId, MAX_SYNC_CONVERSATIONS],
-    ),
-    tursoExecute('select folders_json from user_conversation_meta where user_id = ? limit 1', [userId]),
-    tursoExecute('select id from conversations where user_id = ? and deleted_at_ms is not null', [userId]),
-  ])
+  return withConversationSchemaFallback(async () => {
+    const [conversationRows, metaRows, deletedRows] = await Promise.all([
+      tursoExecute(
+        `
+          select id, title, starred, folder, created_at_ms, updated_at_ms
+          from conversations
+          where user_id = ? and deleted_at_ms is null
+          order by updated_at_ms desc
+          limit ?
+        `,
+        [userId, MAX_SYNC_CONVERSATIONS],
+      ),
+      tursoExecute('select folders_json from user_conversation_meta where user_id = ? limit 1', [userId]),
+      tursoExecute('select id from conversations where user_id = ? and deleted_at_ms is not null', [userId]),
+    ])
 
-  const conversations = conversationRows.rows
-    .map((row) => parseStoredConversationSummary(row as Record<string, unknown>))
-    .filter((conversation): conversation is StoredConversationSummary => conversation !== null)
+    const conversations = conversationRows.rows
+      .map((row) => parseStoredConversationSummary(row as Record<string, unknown>))
+      .filter((conversation): conversation is StoredConversationSummary => conversation !== null)
 
-  const folders = parseStoredFolders(metaRows.rows[0]?.folders_json)
+    const folders = parseStoredFolders(metaRows.rows[0]?.folders_json)
 
-  const deletedIds = deletedRows.rows
-    .map((row) => row.id)
-    .filter(validConversationId)
+    const deletedIds = deletedRows.rows
+      .map((row) => row.id)
+      .filter(validConversationId)
 
-  return { conversations, deletedIds, folders }
+    return { conversations, deletedIds, folders }
+  })
 }
 
 export async function getUserConversationById(userId: string, id: string): Promise<Conversation | null> {
   if (!validConversationId(id)) return null
-  await ensureConversationSchema()
-  const rows = await tursoExecute(
-    `
-      select body_json
-      from conversations
-      where user_id = ? and id = ? and deleted_at_ms is null
-      limit 1
-    `,
-    [userId, id],
-  )
-  return parseStoredConversation(rows.rows[0]?.body_json)
-}
-
-export async function getUserConversationState(userId: string): Promise<StoredConversationState> {
-  await ensureConversationSchema()
-  const [conversationRows, metaRows, deletedRows] = await Promise.all([
-    tursoExecute(
+  return withConversationSchemaFallback(async () => {
+    const rows = await tursoExecute(
       `
         select body_json
         from conversations
-        where user_id = ? and deleted_at_ms is null
-        order by updated_at_ms desc
-        limit ?
+        where user_id = ? and id = ? and deleted_at_ms is null
+        limit 1
       `,
-      [userId, MAX_SYNC_CONVERSATIONS],
-    ),
-    tursoExecute('select folders_json from user_conversation_meta where user_id = ? limit 1', [userId]),
-    tursoExecute('select id from conversations where user_id = ? and deleted_at_ms is not null', [userId]),
-  ])
+      [userId, id],
+    )
+    return parseStoredConversation(rows.rows[0]?.body_json)
+  })
+}
 
-  const conversations = conversationRows.rows
-    .map((row) => parseStoredConversation(row.body_json))
-    .filter((conversation): conversation is Conversation => conversation !== null)
+export async function getUserConversationState(userId: string): Promise<StoredConversationState> {
+  return withConversationSchemaFallback(async () => {
+    const [conversationRows, metaRows, deletedRows] = await Promise.all([
+      tursoExecute(
+        `
+          select body_json
+          from conversations
+          where user_id = ? and deleted_at_ms is null
+          order by updated_at_ms desc
+          limit ?
+        `,
+        [userId, MAX_SYNC_CONVERSATIONS],
+      ),
+      tursoExecute('select folders_json from user_conversation_meta where user_id = ? limit 1', [userId]),
+      tursoExecute('select id from conversations where user_id = ? and deleted_at_ms is not null', [userId]),
+    ])
 
-  const folders = parseStoredFolders(metaRows.rows[0]?.folders_json)
+    const conversations = conversationRows.rows
+      .map((row) => parseStoredConversation(row.body_json))
+      .filter((conversation): conversation is Conversation => conversation !== null)
 
-  const deletedIds = deletedRows.rows
-    .map((row) => row.id)
-    .filter(validConversationId)
+    const folders = parseStoredFolders(metaRows.rows[0]?.folders_json)
 
-  return { conversations, deletedIds, folders }
+    const deletedIds = deletedRows.rows
+      .map((row) => row.id)
+      .filter(validConversationId)
+
+    return { conversations, deletedIds, folders }
+  })
 }
 
 export async function syncUserConversations(userId: string, input: ConversationSyncInput): Promise<void> {
-  await ensureConversationSchema()
-  const nowMs = Date.now()
-  const nowIso = new Date(nowMs).toISOString()
+  return withConversationSchemaFallback(async () => {
+    const nowMs = Date.now()
+    const nowIso = new Date(nowMs).toISOString()
 
-  await tursoTransaction('write', async (transaction) => {
-    for (const conversation of input.conversations) {
-      const createdAtMs = Math.max(0, Math.round(conversation.createdAt || nowMs))
-      const updatedAtMs = Math.max(createdAtMs, Math.round(conversation.updatedAt || nowMs))
-      const updatedAtIso = new Date(updatedAtMs).toISOString()
-      await transaction.execute({
-        sql: `
-          insert into conversations (
-            user_id, id, title, body_json, starred, folder, server_placeholder,
-            created_at_ms, updated_at_ms, deleted_at_ms, created_at, updated_at
-          )
-          values (?, ?, ?, ?, ?, ?, 0, ?, ?, null, ?, ?)
-          on conflict(user_id, id) do update set
-            title = excluded.title,
-            body_json = excluded.body_json,
-            starred = excluded.starred,
-            folder = excluded.folder,
-            server_placeholder = 0,
-            created_at_ms = min(conversations.created_at_ms, excluded.created_at_ms),
-            updated_at_ms = excluded.updated_at_ms,
-            deleted_at_ms = null,
-            updated_at = excluded.updated_at
-          where (
-              excluded.updated_at_ms >= conversations.updated_at_ms
-              and excluded.updated_at_ms >= coalesce(conversations.deleted_at_ms, 0)
+    await tursoTransaction('write', async (transaction) => {
+      for (const conversation of input.conversations) {
+        const createdAtMs = Math.max(0, Math.round(conversation.createdAt || nowMs))
+        const updatedAtMs = Math.max(createdAtMs, Math.round(conversation.updatedAt || nowMs))
+        const updatedAtIso = new Date(updatedAtMs).toISOString()
+        await transaction.execute({
+          sql: `
+            insert into conversations (
+              user_id, id, title, body_json, starred, folder, server_placeholder,
+              created_at_ms, updated_at_ms, deleted_at_ms, created_at, updated_at
             )
-            or conversations.server_placeholder = 1
-        `,
-        args: [
-          userId,
-          conversation.id,
-          conversation.title,
-          JSON.stringify(conversation),
-          conversation.starred ? 1 : 0,
-          conversation.folder || null,
-          createdAtMs,
-          updatedAtMs,
-          new Date(createdAtMs).toISOString(),
-          updatedAtIso,
-        ],
-      })
-    }
+            values (?, ?, ?, ?, ?, ?, 0, ?, ?, null, ?, ?)
+            on conflict(user_id, id) do update set
+              title = excluded.title,
+              body_json = excluded.body_json,
+              starred = excluded.starred,
+              folder = excluded.folder,
+              server_placeholder = 0,
+              created_at_ms = min(conversations.created_at_ms, excluded.created_at_ms),
+              updated_at_ms = excluded.updated_at_ms,
+              deleted_at_ms = null,
+              updated_at = excluded.updated_at
+            where (
+                excluded.updated_at_ms >= conversations.updated_at_ms
+                and excluded.updated_at_ms >= coalesce(conversations.deleted_at_ms, 0)
+              )
+              or conversations.server_placeholder = 1
+          `,
+          args: [
+            userId,
+            conversation.id,
+            conversation.title,
+            JSON.stringify(conversation),
+            conversation.starred ? 1 : 0,
+            conversation.folder || null,
+            createdAtMs,
+            updatedAtMs,
+            new Date(createdAtMs).toISOString(),
+            updatedAtIso,
+          ],
+        })
+      }
 
-    for (const id of input.deletedIds) {
+      for (const id of input.deletedIds) {
+        await transaction.execute({
+          sql: `
+            update conversations
+            set deleted_at_ms = ?,
+                updated_at_ms = max(updated_at_ms, ?),
+                updated_at = ?
+            where user_id = ? and id = ? and coalesce(deleted_at_ms, 0) < ?
+          `,
+          args: [nowMs, nowMs, nowIso, userId, id, nowMs],
+        })
+      }
+
+      if (input.folders) {
+        await transaction.execute({
+          sql: `
+            insert into user_conversation_meta (user_id, folders_json, updated_at_ms, updated_at)
+            values (?, ?, ?, ?)
+            on conflict(user_id) do update set
+              folders_json = excluded.folders_json,
+              updated_at_ms = excluded.updated_at_ms,
+              updated_at = excluded.updated_at
+          `,
+          args: [userId, JSON.stringify(normalizeFolders(input.folders)), nowMs, nowIso],
+        })
+      }
+    })
+  })
+}
+
+export async function clearUserConversations(userId: string): Promise<void> {
+  return withConversationSchemaFallback(async () => {
+    const nowMs = Date.now()
+    const nowIso = new Date(nowMs).toISOString()
+    await tursoTransaction('write', async (transaction) => {
       await transaction.execute({
         sql: `
           update conversations
           set deleted_at_ms = ?,
               updated_at_ms = max(updated_at_ms, ?),
               updated_at = ?
-          where user_id = ? and id = ? and coalesce(deleted_at_ms, 0) < ?
+          where user_id = ? and deleted_at_ms is null
         `,
-        args: [nowMs, nowMs, nowIso, userId, id, nowMs],
+        args: [nowMs, nowMs, nowIso, userId],
       })
-    }
-
-    if (input.folders) {
       await transaction.execute({
         sql: `
           insert into user_conversation_meta (user_id, folders_json, updated_at_ms, updated_at)
-          values (?, ?, ?, ?)
+          values (?, '[]', ?, ?)
           on conflict(user_id) do update set
-            folders_json = excluded.folders_json,
+            folders_json = '[]',
             updated_at_ms = excluded.updated_at_ms,
             updated_at = excluded.updated_at
         `,
-        args: [userId, JSON.stringify(normalizeFolders(input.folders)), nowMs, nowIso],
+        args: [userId, nowMs, nowIso],
       })
-    }
-  })
-}
-
-export async function clearUserConversations(userId: string): Promise<void> {
-  await ensureConversationSchema()
-  const nowMs = Date.now()
-  const nowIso = new Date(nowMs).toISOString()
-  await tursoTransaction('write', async (transaction) => {
-    await transaction.execute({
-      sql: `
-        update conversations
-        set deleted_at_ms = ?,
-            updated_at_ms = max(updated_at_ms, ?),
-            updated_at = ?
-        where user_id = ? and deleted_at_ms is null
-      `,
-      args: [nowMs, nowMs, nowIso, userId],
-    })
-    await transaction.execute({
-      sql: `
-        insert into user_conversation_meta (user_id, folders_json, updated_at_ms, updated_at)
-        values (?, '[]', ?, ?)
-        on conflict(user_id) do update set
-          folders_json = '[]',
-          updated_at_ms = excluded.updated_at_ms,
-          updated_at = excluded.updated_at
-      `,
-      args: [userId, nowMs, nowIso],
     })
   })
 }

@@ -93,7 +93,7 @@ export function UsageTab() {
   const conversations = useChatStore((s) => s.conversations)
 
   useEffect(() => {
-    void syncFromServer()
+    void syncFromServer({ force: true })
   }, [syncFromServer])
 
   const taskTitles = useMemo(() => {

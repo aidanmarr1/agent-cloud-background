@@ -36,6 +36,7 @@ const REFRESH_INTERVAL_MS = 5_000
 const REFRESH_THROTTLE_MS = 1_500
 const SERVER_FETCH_TIMEOUT_MS = 4_000
 const SERVER_WRITE_TIMEOUT_MS = 5_000
+const SERVER_CLEAR_TIMEOUT_MS = 20_000
 
 let storeApi: ChatStoreApi | null = null
 let currentUserId: string | null = null
@@ -464,7 +465,7 @@ export async function flushChatServerSync(): Promise<void> {
 export async function clearServerConversations(): Promise<void> {
   const response = await fetchWithTimeout('/api/conversations', {
     method: 'DELETE',
-  }, SERVER_WRITE_TIMEOUT_MS)
+  }, SERVER_CLEAR_TIMEOUT_MS)
   if (!response.ok) {
     const body = await response.json().catch(() => null) as { error?: unknown } | null
     throw new Error(typeof body?.error === 'string' ? body.error : 'Could not clear task history.')
