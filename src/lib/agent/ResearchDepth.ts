@@ -116,7 +116,7 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
   }
 
   if (isBareResearchOverviewRequest(originalRequest)) {
-    return { requiredCalls: 2, requiredSourceBreadth: 1, label: 'light' }
+    return { requiredCalls: 3, requiredSourceBreadth: 2, label: 'light' }
   }
 
   const quick = QUICK_RE.test(originalRequest) &&

@@ -129,15 +129,16 @@ export function isBareResearchOverviewRequest(text: string | null | undefined): 
 export function taskDefaultsToMarkdownDeliverable(text: string | null | undefined): boolean {
   if (!text) return false
   if (explicitlyRequestsInlineAnswer(text)) return false
-  if (isBareResearchOverviewRequest(text)) return false
   const explicitArtifact = requestsMarkdownDeliverable(text) || FILE_DELIVERABLE_PATTERN.test(text)
+  const reportDefault = REPORT_MARKDOWN_DEFAULT_PATTERN.test(text)
   if (
     !explicitArtifact &&
+    !reportDefault &&
     /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast)\b/i.test(text)
   ) {
     return false
   }
-  return explicitArtifact || REPORT_MARKDOWN_DEFAULT_PATTERN.test(text)
+  return explicitArtifact || reportDefault
 }
 
 export function isSingleWebSearchMarkdownTask(messages: Array<{ role: string; content: string }>): boolean {

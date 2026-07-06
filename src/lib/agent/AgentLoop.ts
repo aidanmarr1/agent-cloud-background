@@ -134,8 +134,8 @@ function customInstructionsForTask(customInstructions: string | undefined, lates
 
 Fast-lane override for this latest request:
 - The latest user request is a lightweight "research about X" overview, not a deep report.
-- Ignore saved instructions that would expand this task into rigorous/deep research, unusually high source counts, or a default Markdown/report file.
-- Do not create a report file unless the latest user explicitly asks for one.
+- Ignore saved instructions that would expand this task into rigorous/deep research, unusually high source counts, or a long-form/deep report scope.
+- Keep the product default: research findings are saved as a concise Markdown deliverable unless the latest user explicitly asks for inline/no-file output.
 - Use fast source extraction, avoid rendered browser navigation for normal article pages, then answer concisely once the compact evidence floor is met.`
 }
 
@@ -943,6 +943,19 @@ function savedFinalDeliverableMinimumChars(
   return 2_600
 }
 
+function savedDeliverableChunkEndsCleanly(content: string): boolean {
+  const text = content.trim()
+  if (!text) return false
+  const fenceCount = (text.match(/```/g) || []).length
+  if (fenceCount % 2 === 1) return false
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const lastLine = lines[lines.length - 1] || ''
+  if (!lastLine) return false
+  if (/^\|.+\|\s*$/.test(lastLine)) return true
+  const stripped = lastLine.replace(/[\])}"'`*_]+$/g, '').trim()
+  return /[.!?:;]$/.test(stripped)
+}
+
 function shouldContinueSavedFinalDeliverableChunk(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -952,6 +965,7 @@ function shouldContinueSavedFinalDeliverableChunk(
   if (!finalSavedDeliverableTurn(state, messages)) return false
   if (!path || !path.toLowerCase().endsWith('.md')) return false
   if (state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS) return false
+  if (!savedDeliverableChunkEndsCleanly(content)) return true
   return content.trim().length < savedFinalDeliverableMinimumChars(state, messages)
 }
 
@@ -967,7 +981,7 @@ function finalSavedDeliverableToolCallInstruction(
       ? `Use append_file or edit_file against "${existingPath}".`
       : 'Use create_file for the final saved output under deliverables/ unless the user named a different path.'
   const chunkGuidance = !pending && !existingPath
-    ? 'For the first create_file call, save a fast opening chunk only: title, short intro, and the first useful section. Do not try to finish the whole deliverable in this first call.'
+    ? 'For the first create_file call, save a concise complete Markdown deliverable when the scope is small; for longer reports, save the title, intro, and first complete section, ending at a clean sentence boundary.'
     : 'Append the next useful chunk only. Do not repeat existing content.'
 
   return [
@@ -1025,7 +1039,7 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     'Use create_file for the first saved output; use append_file only after a file exists; use edit_file only for a targeted fix.',
     'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
     'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
-    'For the first create_file call, write only a fast opening chunk: title, short intro, and first useful complete section. End cleanly at a sentence or section boundary. The worker will continue with append_file chunks until the saved output is complete.',
+    'For the first create_file call, write a concise complete Markdown deliverable when the scope is small. For longer reports, write the title, short intro, and first useful complete section. Always end cleanly at a sentence or section boundary; the worker will continue with append_file chunks until the saved output is complete.',
   ].filter(Boolean).join(' ')
 }
 
@@ -2477,20 +2491,20 @@ const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
 const FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS = 420
 const FINAL_INLINE_ANSWER_MAX_TOKENS = 1_200
 const FINAL_INLINE_REPORT_MAX_TOKENS = 3_000
-const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 2_200
-const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 3_200
-const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 3_200
-const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 900
-const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 900
-const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 220
+const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 4_500
+const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 6_500
+const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 6_500
+const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 1_500
+const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 1_500
+const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 350
 const FINAL_SAVED_DELIVERABLE_TEXT_REQUEST_TIMEOUT_MS = 6_500
 const FINAL_SAVED_DELIVERABLE_TEXT_ITERATION_TIMEOUT_MS = 24_000
 const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 6_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
-const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 520
-const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_200
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_800
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
@@ -2858,7 +2872,7 @@ export class AgentLoop {
     if (isBareResearchOverviewRequest(state.originalUserRequest)) {
       contextManager.push({
         role: 'system',
-        content: 'FAST-LANE RESEARCH OVERRIDE: The latest request is a compact overview. Saved instructions asking for unusually deep research or report files do not apply to this task. Prefer web_search plus read_document/http extraction; do not open rendered browser pages unless the user provided a URL or the page is genuinely interactive. Once compact evidence is gathered, advance or answer instead of waiting through recovery turns.',
+        content: 'FAST-LANE RESEARCH OVERRIDE: The latest request is a compact overview, not a deep report. Saved instructions asking for unusually deep research do not apply to this task, but the product default still saves research findings as concise Markdown unless the user explicitly asks for inline/no-file output. Prefer web_search plus read_document/http extraction; do not open rendered browser pages unless the user provided a URL or the page is genuinely interactive. Once compact multi-source evidence is gathered, advance or write the Markdown deliverable instead of waiting through recovery turns.',
       } as ChatMessageParam, 9)
     }
 
