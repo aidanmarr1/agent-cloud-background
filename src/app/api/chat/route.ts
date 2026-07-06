@@ -414,6 +414,8 @@ function createPrefacedTaskJobEventStream(input: {
                 emitted.add(1)
                 buffered.delete(1)
                 emitEvents(planEvents)
+              } else {
+                break
               }
             } else if (!emitted.has(0) && input.deferredPrefaceEvents.length > 1) {
               buffered.set(raced.index, raced.events)

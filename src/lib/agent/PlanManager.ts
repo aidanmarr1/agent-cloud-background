@@ -570,9 +570,6 @@ export class PlanManager {
     state.planItems = withRequired.titles
     state.planScopes = withRequired.scopes
     state.planEmitted = true
-    this.acknowledgementEmitted = true
-    this.settleAcknowledgementFirstVisible(true)
-    this.settleAcknowledgementDisplay(true)
     this.planPromise = Promise.resolve(null)
     console.log('[AgentDiagnostics] Using route startup plan for worker', {
       steps: withRequired.titles.length,

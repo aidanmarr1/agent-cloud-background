@@ -886,6 +886,7 @@ async function assertSourceContracts() {
   assert.match(taskText, /and\|then[\s\S]*produce\|create\|write\|draft\|deliver\|make\|prepare/, 'task subject extraction must stop before output instructions such as "and produce a report"')
   assert.doesNotMatch(planManager, /Map \$\{compact\} foundations and source angles|Gather authoritative \$\{compact\} sources|Write the sourced \$\{compact\} deep summary/, 'planner must not keep local canned fast research plan templates')
   assert.match(chatRoute, /deferredPrefaceEvents\s*=\s*\[[\s\S]*routeStartupAcknowledgementPromise[\s\S]*routeStartupPlanPromise[\s\S]*\]/, 'chat route must stream the model-generated acknowledgement and plan without blocking worker queueing')
+  assert.match(chatRoute, /if \(raced\.index === 0\)[\s\S]*emitEvents\(raced\.events\)[\s\S]*const planEvents = buffered\.get\(1\)[\s\S]*emitEvents\(planEvents\)[\s\S]*else \{\s*break\s*\}/, 'chat route must emit the acknowledgement as soon as it is ready and stop holding worker events for a slower plan')
   assert.match(chatRoute, /attachTaskJobStartupPlan\(creditRunId,\s*plan\)/, 'chat route must hand the fast visible plan to the queued worker job')
   assert.match(chatTaskRunner, /waitForTaskJobStartupPlan\(creditRunId/, 'worker task runner must briefly wait for the route-owned plan before starting a duplicate planner')
   assert.match(agentLoop, /usePrecomputedPlan\(state,\s*this\.options\.startupPlan\)/, 'agent loop must use the route-owned startup plan instead of planning twice')
@@ -893,6 +894,8 @@ async function assertSourceContracts() {
   assert.doesNotMatch(chatRoute, /ROUTE_STARTUP_ACK_THOUGHTFUL_MIN_MS|waitForRouteStartupAcknowledgementWindow/, 'route startup acknowledgement must not wait behind a timed reveal gate')
   assert.match(chatRoute, /ROUTE_STARTUP_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'route startup acknowledgement must use the fast task-understanding acknowledgement setting')
   assert.match(chatTaskRunner, /skipStartupAcknowledgement:\s*skipStartupAcknowledgement === true/, 'worker must skip startup acknowledgement only when the route already persisted a model-generated one')
+  const usePrecomputedPlanContract = planManager.match(/usePrecomputedPlan\([\s\S]*?\n  private settleAcknowledgementFirstVisible/)?.[0] || ''
+  assert.doesNotMatch(usePrecomputedPlanContract, /this\.acknowledgementEmitted = true|settleAcknowledgementFirstVisible\(true\)|settleAcknowledgementDisplay\(true\)/, 'using a precomputed route plan must not pretend the visible acknowledgement already painted')
   assert.match(planManager, /if \(this\.acknowledgementEmitted && !ownsVisibleAcknowledgement\) return/, 'late acknowledgement streams must not duplicate the planner acknowledgement that already became visible')
   assert.match(planManager, /if \(this\.skipAcknowledgement\) return[\s\S]*if \(this\.acknowledgementEmitted\) \{[\s\S]*suppressFurtherAcknowledgementDeltas = true[\s\S]*if \(this\.acknowledgementDisplayPromise\)/, 'planner must avoid duplicate acknowledgement text while still letting the planner acknowledgement win the startup race')
   assert.doesNotMatch(chatRoute, /acquireActiveTaskLease\(userId,\s*conversationId,\s*creditRunId\)/, 'chat route must not acquire an account-wide active-task lease before starting a new task')
