@@ -74,10 +74,10 @@ export const TIER_TIMEOUTS = {
 } as const
 
 // --- Tool execution ---
-export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
-export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 5_000
-export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 2_000
-export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 5_000
+export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 1_500
+export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 2_800
+export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 1_600
+export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 2_800
 export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
 
 // --- File & content limits ---

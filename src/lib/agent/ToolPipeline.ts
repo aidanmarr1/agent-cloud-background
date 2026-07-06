@@ -1162,7 +1162,7 @@ function toolTargetFromArgs(args: Record<string, unknown>, result?: unknown): st
 function researchUrlFromToolCall(toolName: string, args: Record<string, unknown>, result?: unknown): string | undefined {
   const resultObj = result && typeof result === 'object' ? result as Record<string, unknown> : null
   const value = toolName === 'read_document'
-    ? args.source
+    ? args.source || args.url || resultObj?.source || resultObj?.url
     : toolName === 'http_request'
       ? args.url
       : args.url || resultObj?.url || resultObj?.source
@@ -1956,7 +1956,7 @@ function toolCycleTargetFor(toolName: string, args: Record<string, unknown>): st
     return normalizeToolCycleTarget(args.query)
   }
   if (toolName === 'read_document') {
-    return normalizeToolCycleTarget(researchUrlFromToolCall('read_document', args) || args.source)
+    return normalizeToolCycleTarget(researchUrlFromToolCall('read_document', args) || args.source || args.url)
   }
   if (toolName === 'http_request') {
     const method = typeof args.method === 'string' && args.method.trim()

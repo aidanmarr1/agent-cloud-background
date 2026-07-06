@@ -4,8 +4,7 @@ import { normalizeSearchQuery, simplifiedSearchQuery } from './searchQuery'
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
 const WEB_SEARCH_RESULT_COUNT = 15
-const WEB_SEARCH_REQUEST_TIMEOUT_MS = 5_000
-const WEB_SEARCH_PAGE_TWO_TIMEOUT_MS = 2_200
+const WEB_SEARCH_REQUEST_TIMEOUT_MS = 2_500
 
 interface SerperOrganicResult {
   title?: string
@@ -233,7 +232,7 @@ async function serperSearchPage(query: string, page = 1): Promise<SerperSearchRe
     q: query,
     num: WEB_SEARCH_RESULT_COUNT,
     ...(page > 1 ? { page } : {}),
-  }, page > 1 ? WEB_SEARCH_PAGE_TWO_TIMEOUT_MS : WEB_SEARCH_REQUEST_TIMEOUT_MS)
+  }, WEB_SEARCH_REQUEST_TIMEOUT_MS)
 }
 
 async function firstSerperSearchPage(query: string): Promise<SerperSearchResponse> {
@@ -305,15 +304,6 @@ export async function webSearch(rawQuery: unknown): Promise<SearchResult[]> {
 
   const firstPage = await firstSerperSearchPage(query)
   const rawResults = searchResultsFromResponse(firstPage)
-
-  if (rawResults.length < WEB_SEARCH_RESULT_COUNT) {
-    try {
-      const secondPage = await serperSearchPage(query, 2)
-      rawResults.push(...searchResultsFromResponse(secondPage))
-    } catch (error) {
-      console.warn('[Search] Serper page 2 did not return usable results:', error instanceof Error ? error.message : String(error))
-    }
-  }
 
   return dedupeResults(rawResults, query)
 }

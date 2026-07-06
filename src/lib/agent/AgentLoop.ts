@@ -44,6 +44,7 @@ import {
   MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, URGENCY_FINAL_FRACTION,
   TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL_MS, TOOL_CACHE_MAX_SIZE_CHARS,
   MIN_TOOL_CALLS_BY_COMPLEXITY,
+  MAX_ITERATIONS,
   AGENT_RUN_MAX_DURATION_MS, AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS, AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
   NARRATION_THRESHOLD_DEFAULT,
@@ -283,7 +284,6 @@ const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 250
 const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 220
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 140
 const FAST_SOURCE_ACTION_MAX_TOKENS = 320
-const FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS = 2_600
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -596,18 +596,24 @@ function iterationBudgetFinalizationReserve(
   return artifactReserve + Math.min(8, remainingPlanSteps * 2)
 }
 
+function iterationBudgetFinalizationTriggerTurns(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): number {
+  return Math.max(8, Math.min(16, iterationBudgetFinalizationReserve(state, messages)))
+}
+
 function shouldStartIterationBudgetFinalization(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
-  void state
-  void messages
-  // Do not jump from an unfinished research phase straight to the final
-  // deliverable. That made reports look complete while intermediate plan steps
-  // were skipped. Per-step policies can still advance a worked phase, and the
-  // true runtime-deadline finalizer only runs once the agent is already on the
-  // final step.
-  return false
+  if (state.deadlineFinalizationStarted) return false
+  if (!state.dynamicIterationLimit) return false
+  if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
+  if (state.currentStepIdx >= state.currentPlanItems.length) return false
+
+  const remainingIterations = state.dynamicIterationLimit - state.iterations
+  return remainingIterations <= iterationBudgetFinalizationTriggerTurns(state, messages)
 }
 
 function iterationBudgetFinalizationMessage(state: AgentStateData, overrunStep: string): ChatMessageParam {
@@ -2766,6 +2772,7 @@ export class AgentLoop {
     const stepIdxBefore = state.currentStepIdx
     const finalStepIdx = state.currentPlanItems.length - 1
     const overrunStep = state.currentPlanItems[stepIdxBefore] || 'the current phase'
+    const finalizationTurns = iterationBudgetFinalizationTriggerTurns(state, this.options.messages)
     while (state.currentStepIdx < finalStepIdx) {
       const currentStep = state.currentPlanItems[state.currentStepIdx] || 'phase'
       const finding = state.currentStepIdx === stepIdxBefore
@@ -2779,6 +2786,10 @@ export class AgentLoop {
     state.phaseEndNarrationPending = false
     state.forcedNarrationRepairAttempts = 0
     state.consecutiveNoToolCalls = 0
+    state.dynamicIterationLimit = Math.min(
+      MAX_ITERATIONS,
+      Math.max(state.dynamicIterationLimit, state.iterations + finalizationTurns),
+    )
     contextManager.push(iterationBudgetFinalizationMessage(state, overrunStep))
     if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
     for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
@@ -2787,6 +2798,7 @@ export class AgentLoop {
     console.log('[AgentDiagnostics] Iteration budget finalization started', {
       iteration: state.iterations,
       limit: state.dynamicIterationLimit,
+      finalizationTurns,
       fromStep: stepIdxBefore,
       finalStep: state.currentStepIdx,
       totalSteps: state.currentPlanItems.length,
@@ -4453,9 +4465,7 @@ export class AgentLoop {
     let lastShouldRequireToolCall = false
     for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
       let finalSavedCompactCompletionParams: Parameters<typeof createCompletion>[0] | null = null
-      let fastActionCompactCompletionParams: Parameters<typeof createCompletion>[0] | null = null
       let finalSavedStreamTimeoutMs: number | null = null
-      let fastActionStreamTimeoutMs: number | null = null
       try {
         const budgetFraction = state.dynamicIterationLimit
           ? state.iterations / state.dynamicIterationLimit
@@ -4787,26 +4797,6 @@ export class AgentLoop {
             abortSignal: this.options.signal,
           }
         }
-        if (fastActionTurn && modelTools.length > 0 && !isFinalSavedDeliverableTurn && !useCompactNarration) {
-          fastActionStreamTimeoutMs = requestTimeoutMs
-          fastActionCompactCompletionParams = {
-            model,
-            messages: requestMessages,
-            tools: modelTools as unknown as ChatCompletionTool[],
-            ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
-            temperature: requestTemperature,
-            parallel_tool_calls: false,
-            max_tokens: maxTokens,
-            ...requestReasoning,
-            includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
-            usage: { include: true },
-            requestTimeoutMs: FAST_ACTION_NONSTREAM_REQUEST_TIMEOUT_MS,
-            retryMaxAttempts: 0,
-            retryBaseDelayMs: STREAM_RETRY_BASE_MS,
-            retryMaxDelayMs: STREAM_RETRY_MAX_DELAY_MS,
-            abortSignal: this.options.signal,
-          }
-        }
         console.error('[AgentDiagnostics] Opening streaming model call', {
           iteration: state.iterations,
           phase: state.currentPhase,
@@ -4872,26 +4862,6 @@ export class AgentLoop {
               return completionResponseToStreamingIterable(completion)
             } catch (completionErr) {
               console.warn('[AgentDiagnostics] Compact final-write completion also failed to start', {
-                iteration: state.iterations,
-                phase: state.currentPhase,
-                step: state.currentStepIdx,
-                error: sanitizeAgentServiceError(completionErr),
-              })
-            }
-          }
-          if (fastActionCompactCompletionParams) {
-            try {
-              console.warn('[AgentDiagnostics] Fast action stream start timed out; using compact action completion', {
-                attempt: attempt + 1,
-                iteration: state.iterations,
-                phase: state.currentPhase,
-                step: state.currentStepIdx,
-                timeoutMs: fastActionStreamTimeoutMs,
-              })
-              const completion = await createCompletion(fastActionCompactCompletionParams)
-              return completionResponseToStreamingIterable(completion)
-            } catch (completionErr) {
-              console.warn('[AgentDiagnostics] Compact action completion also failed to start', {
                 iteration: state.iterations,
                 phase: state.currentPhase,
                 step: state.currentStepIdx,

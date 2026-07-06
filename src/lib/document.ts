@@ -21,7 +21,7 @@ export interface DocumentResult {
 const MAX_CONTENT_CHARS = 40_000
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50MB
 const MAX_REDIRECTS = 5
-const URL_FETCH_TIMEOUT_MS = 12_000
+const URL_FETCH_TIMEOUT_MS = 2_500
 
 function detectType(pathOrUrl: string, contentType?: string): 'pdf' | 'docx' | 'text' {
   if (contentType) {

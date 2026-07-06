@@ -429,7 +429,7 @@ export class StreamProcessor {
       // at all) and has stalled. Never fire if tool calls are being streamed.
       const contentOnlyStallMs = this.tierTimeouts.contentOnlyTimeoutMs === null
         ? 5_000
-        : Math.min(5_000, Math.max(1_500, this.tierTimeouts.contentOnlyTimeoutMs))
+        : Math.min(5_000, Math.max(150, this.tierTimeouts.contentOnlyTimeoutMs))
       const streamStalled = now - lastChunkTime > contentOnlyStallMs
       const contentOnlyExpired =
         this.tierTimeouts.contentOnlyTimeoutMs !== null &&
