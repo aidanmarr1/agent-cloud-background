@@ -1127,6 +1127,7 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       revision?.suggestions?.length ? `Use these suggestions: ${revision.suggestions.join('; ')}.` : '',
       'Do not call create_file, do not create a second report, do not write visible prose, and do not emit <next_step/>.',
       'Prefer append_file for missing sections, citations, source URLs, or extra analysis; use edit_file only for a targeted replacement.',
+      'For research/report Markdown, make the saved file clearly structured and expansive by default: # title, ## Executive Summary, numbered thematic sections with inline [n] citations, ## Conclusion, and ## References with URLs.',
       'End cleanly at a sentence or section boundary.',
     ].filter(Boolean).join(' ')
   }
@@ -2446,6 +2447,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
               `Make exactly one native append_file or edit_file call to "${existingPath}" now; do not write visible prose before it.`,
               'Do not call create_file, read-only research tools, browser tools, or emit <next_step/>.',
               'Prefer append_file for missing citations/source URLs, missing sections, or more analysis; use edit_file only for targeted replacement.',
+              'For research/report Markdown, complete the default structure: # title, ## Executive Summary, numbered thematic sections with inline [n] citations, ## Conclusion, and ## References with URLs.',
               'Start the file tool call immediately and end the new content cleanly at a sentence or section boundary.',
             ].join(' ')
         : [

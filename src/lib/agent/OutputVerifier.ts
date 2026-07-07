@@ -76,10 +76,25 @@ export class OutputVerifier {
 
     if (savedMarkdownReport) {
       const headingCount = (fileContent.match(/^#{1,3}\s+\S/gm) || []).length
-      if (headingCount < 2) {
-        failures.push('Saved Markdown report needs a clear title and at least one substantive section')
-        suggestions.push('Add a proper report structure before delivering')
+      if (headingCount < 4) {
+        failures.push('Saved Markdown report needs a title, executive summary, multiple substantive sections, conclusion, and references')
+        suggestions.push('Expand the report structure before delivering')
         score -= 0.2
+      }
+      if (!/^#\s+\S/m.test(fileContent)) {
+        failures.push('Saved Markdown report needs a clear top-level title')
+        suggestions.push('Add a specific # title')
+        score -= 0.1
+      }
+      if (!/^##\s+Executive Summary\b/im.test(fileContent)) {
+        failures.push('Saved Markdown report needs an Executive Summary section')
+        suggestions.push('Add ## Executive Summary with synthesized findings')
+        score -= 0.1
+      }
+      if (!/^##\s+(?:References|Sources)\b/im.test(fileContent)) {
+        failures.push('Saved Markdown report needs a References section with source URLs')
+        suggestions.push('Add ## References with numbered source entries and URLs')
+        score -= 0.1
       }
     }
 
@@ -127,7 +142,7 @@ export class OutputVerifier {
     const minWords = this.researchMinimumWords(originalRequest, taskComplexity, filePath)
     if (words < minWords) {
       failures.push(`Word count ${words}, minimum ${minWords} for this task depth`)
-      suggestions.push('Expand only enough to match the requested depth and complexity')
+      suggestions.push('Expand the report with structured analysis, concrete evidence, caveats, and implications')
     }
 
     // Citation count (URLs or "Source:" references)

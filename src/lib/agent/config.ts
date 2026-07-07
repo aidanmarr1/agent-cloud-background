@@ -22,18 +22,18 @@ export const AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS = 12_000
 export const AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS = 20_000
 
 // --- Step budgets ---
-export const RESEARCH_STEP_BUDGET_MULTIPLIER = 0.78  // Research phases need enough turns to gather real source evidence
+export const RESEARCH_STEP_BUDGET_MULTIPLIER = 0.92  // Research phases need enough turns to gather real source evidence
 export const DELIVERABLE_BUDGET_FRACTION = 1.0       // Use all available iterations
-export const MIN_STEP_BUDGET = 6
-export const MIN_DELIVERABLE_BUDGET = 10
+export const MIN_STEP_BUDGET = 8
+export const MIN_DELIVERABLE_BUDGET = 16
 
 // --- Research nudging ---
 export const RESEARCH_NUDGE_ITERATION = IS_OLLAMA ? 6 : 4   // Start nudging non-final steps after N iterations
 export const NO_TOOL_FORCE_ADVANCE = IS_OLLAMA ? 8 : 4      // Force advance after N consecutive no-tool iterations
 export const MIN_TOOL_CALLS_PER_STEP = 2    // Default minimum — overridden by complexity-aware lookup
-export const MIN_TOOL_CALLS_BY_COMPLEXITY = { 1: 1, 2: 5, 3: 7 } as const
-export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 3, 2: 8, 3: 14 } as const
-export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 2, 2: 5, 3: 7 } as const
+export const MIN_TOOL_CALLS_BY_COMPLEXITY = { 1: 2, 2: 6, 3: 9 } as const
+export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 4, 2: 10, 3: 18 } as const
+export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 2, 2: 6, 3: 8 } as const
 
 // --- Search & browse thresholds ---
 export const CONSECUTIVE_SEARCH_FAILURES_WARN = 4
@@ -158,9 +158,9 @@ export const LAST_STEP_TERMINATE_MULTIPLIER = 2.0
 
 // --- Task complexity ---
 export const COMPLEXITY_BUDGET_MULTIPLIERS = {
-  1: 0.7,   // Simple tasks: tighter budgets, but not one-tool shallow by default
-  2: 1.2,   // Moderate tasks: enough room for verification and polish
-  3: 1.6,   // Complex tasks: expanded for depth, revision, and validation
+  1: 0.85,  // Simple tasks: still enough room for useful verification
+  2: 1.45,  // Moderate tasks: more room for evidence and polish
+  3: 2.05,  // Complex tasks: expanded for depth, revision, and validation
 } as const
 
 // --- Circuit breaker ---
@@ -249,9 +249,9 @@ export const GOAL_AUTO_ADVANCE_ON_MET = true
 
 // --- Output verification ---
 export const MAX_DELIVERABLE_REVISIONS = 6
-export const RESEARCH_MIN_WORDS_BY_COMPLEXITY = { 1: 180, 2: 400, 3: 900, 4: 1300, 5: 1800 } as const
-export const RESEARCH_MIN_CITATIONS = 4
-export const RESEARCH_MIN_PARAGRAPHS = 4
+export const RESEARCH_MIN_WORDS_BY_COMPLEXITY = { 1: 260, 2: 650, 3: 1300, 4: 1800, 5: 2400 } as const
+export const RESEARCH_MIN_CITATIONS = 5
+export const RESEARCH_MIN_PARAGRAPHS = 5
 export const CREATIVE_MIN_WORDS = 800
 export const BUILD_MIN_CONTENT_CHARS = 300
 export const PLACEHOLDER_PATTERNS = ['[TODO]', '[INSERT', '[YOUR', 'Lorem ipsum', '[PLACEHOLDER', '{{', 'TBD']

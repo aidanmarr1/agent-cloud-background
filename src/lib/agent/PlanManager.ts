@@ -72,6 +72,7 @@ const PLANNER_JSON_REQUEST_TIMEOUT_MS = 3_000
 const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_800
 const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_200
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 3_800
+const PLANNER_OVERALL_DEADLINE_MS = 9_000
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
@@ -221,6 +222,11 @@ function stringifyPlannerResponseForRepair(response: PlannerResponseObject | nul
   } catch {
     return ''
   }
+}
+
+function plannerTaskMessages(messages: Array<{ role: string; content: string }>): ChatMessageParam[] {
+  const request = effectiveTaskRequest(messages).slice(0, 6000).trim() || 'Continue the current task.'
+  return [{ role: 'user', content: request }]
 }
 
 function isConcreteBuildStep(strategy: string | undefined, title: string | undefined): boolean {
@@ -494,6 +500,8 @@ export class PlanManager {
   private resolveAcknowledgementFirstVisible: ((emitted: boolean) => void) | null = null
   private acknowledgementFirstVisibleResolved = false
   private suppressFurtherAcknowledgementDeltas = false
+  private plannerDeadlineAtMs = 0
+  private plannerAbortController: AbortController | null = null
   constructor(
     emitter: AgentEventEmitter,
     messages: Array<{ role: string; content: string }>,
@@ -547,7 +555,13 @@ export class PlanManager {
     const start = PLAN_STARTUP_DELAY_MS > 0
       ? new Promise<null>(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
       : Promise.resolve(null)
-    this.planPromise = start.then(() => this.attemptPlanCall(0, true))
+    this.plannerDeadlineAtMs = Date.now() + PLANNER_OVERALL_DEADLINE_MS
+    this.plannerAbortController?.abort()
+    this.plannerAbortController = new AbortController()
+    const deadlineTimer = setTimeout(() => this.plannerAbortController?.abort(), PLANNER_OVERALL_DEADLINE_MS)
+    this.planPromise = start
+      .then(() => this.attemptPlanCall(0, true))
+      .finally(() => clearTimeout(deadlineTimer))
   }
 
   usePrecomputedPlan(
@@ -629,6 +643,15 @@ export class PlanManager {
 
   private async assertCreditRunway(label: string): Promise<void> {
     await this.preflightCredit?.(label)
+  }
+
+  private plannerRequestTimeoutMs(preferredMs: number): number {
+    if (!this.plannerDeadlineAtMs) return preferredMs
+    const remainingMs = this.plannerDeadlineAtMs - Date.now()
+    if (remainingMs <= 250) {
+      throw new Error(`Assistant request timed out after ${Math.round(PLANNER_OVERALL_DEADLINE_MS / 1000)} seconds.`)
+    }
+    return Math.max(250, Math.min(preferredMs, remainingMs - 150))
   }
 
   private async emitModelGeneratedAcknowledgement(taskShape: string, priorInvalidAck?: string): Promise<boolean> {
@@ -1065,7 +1088,7 @@ Rules:
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one very brief direct paragraph, one or two short sentences and 12-38 words, using plain words and saying what Agent will do for the exact task and what it will deliver.
-- Step count is flexible: do not default to 3 or 4 steps. Use 1-2 steps for simple tasks, 3-5 for multi-faceted tasks, and 5+ only for deep/large tasks.
+- Step count is flexible: do not default to 3 or 4 steps, do not use fixed ranges, and do not shrink substantive work into a tiny plan.
 - Scopes must be compact, usually 10-22 words. Preserve depth through the phase goal, not long scope prose.
 - Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
@@ -1082,8 +1105,9 @@ Rules:
         max_tokens: this.plannerJsonMaxTokens(),
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
-        requestTimeoutMs: PLANNER_REPAIR_REQUEST_TIMEOUT_MS,
+        requestTimeoutMs: this.plannerRequestTimeoutMs(PLANNER_REPAIR_REQUEST_TIMEOUT_MS),
         retryMaxAttempts: 0,
+        abortSignal: this.plannerAbortController?.signal,
       }
       let res
       try {
@@ -1211,18 +1235,19 @@ Rules:
               ? getFastPlanningPrompt(this.customInstructions)
               : getPlanningPrompt(this.customInstructions),
           },
-          ...this.messages as ChatMessageParam[],
+          ...plannerTaskMessages(this.messages),
         ],
         temperature: fastPlannerMode ? 0.2 : 0.3,
         max_tokens: fastPlannerMode ? PLANNER_FAST_JSON_MAX_TOKENS : this.plannerJsonMaxTokens(),
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
-        requestTimeoutMs: fastPlannerMode
+        requestTimeoutMs: this.plannerRequestTimeoutMs(fastPlannerMode
           ? PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS
           : relaxedJsonMode
           ? PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS
-          : PLANNER_JSON_REQUEST_TIMEOUT_MS,
+          : PLANNER_JSON_REQUEST_TIMEOUT_MS),
         retryMaxAttempts: 0,
+        abortSignal: this.plannerAbortController?.signal,
       }
       let res
       try {
@@ -1329,7 +1354,7 @@ ${customInstructionContext}
 
 Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should be actionable and specific.`,
           },
-          ...this.messages as ChatMessageParam[],
+          ...plannerTaskMessages(this.messages),
         ],
         temperature: 0.3,
         max_tokens: REPLAN_JSON_MAX_TOKENS,
@@ -1575,12 +1600,13 @@ ${customInstructionContext}
 
 Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should account for what was learned.`,
           },
-          ...this.messages as ChatMessageParam[],
+          ...plannerTaskMessages(this.messages),
         ],
         temperature: 0.3,
         max_tokens: REPLAN_JSON_MAX_TOKENS,
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
+        requestTimeoutMs: PLANNER_REPLAN_REQUEST_TIMEOUT_MS,
         retryMaxAttempts: 0,
       })
 
