@@ -1086,7 +1086,11 @@ export async function waitForTaskJobStartupPlan(
         setTimeout(() => resolve(STARTUP_PLAN_READ_TIMEOUT), Math.min(TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS, remainingMs))
       }),
     ])
-    if (payload === STARTUP_PLAN_READ_TIMEOUT) break
+    if (payload === STARTUP_PLAN_READ_TIMEOUT) {
+      if (Date.now() > deadlineMs) break
+      await new Promise(resolve => setTimeout(resolve, TASK_JOB_STARTUP_PLAN_POLL_MS))
+      continue
+    }
     if (payload?.kind !== 'background_probe') {
       const plan = normalizeStartupPlan((payload as ChatTaskPayload | null)?.startupPlan)
       if (plan) return plan

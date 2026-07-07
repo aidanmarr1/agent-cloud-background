@@ -145,6 +145,7 @@ assert.match(taskJobs, /AGENT_TASK_WORKER_MAX_ATTEMPTS/, 'task jobs must cap rep
 assert.match(taskJobs, /Task stopped after \$\{maxAttempts\} worker claim attempt/, 'task jobs must persist a terminal error when worker retry attempts are exhausted')
 assert.match(taskJobs, /releaseActiveTaskLease\(result\.userId, result\.runId\)/, 'task jobs must release the user active-task lease after worker retry exhaustion')
 assert.match(taskJobs, /TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS = 250/, 'worker startup plan handoff must not wait indefinitely on Turso before tool work')
+assert.match(taskJobs, /payload === STARTUP_PLAN_READ_TIMEOUT[\s\S]*Date\.now\(\) > deadlineMs[\s\S]*TASK_JOB_STARTUP_PLAN_POLL_MS[\s\S]*continue/, 'worker startup plan handoff must keep polling after a bounded Turso read timeout until the route-plan deadline')
 assert.match(taskJobs, /ensureTaskWorkerHeartbeatSchema/, 'expired worker-lease recovery must consult worker heartbeats before requeueing a running job')
 assert.match(taskJobs, /agent_task_workers\.current_run_id = agent_task_jobs\.run_id[\s\S]*agent_task_workers\.last_seen_at_ms >= \?/, 'expired worker-lease recovery must not steal jobs from heartbeat-live workers')
 assert.match(taskJobs, /case 'browser_frame':[\s\S]*type: 'heartbeat'/, 'oversized live browser frames must persist as sequence-preserving heartbeats instead of empty screenshots')

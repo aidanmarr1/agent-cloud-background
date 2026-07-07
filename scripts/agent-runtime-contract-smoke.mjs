@@ -859,6 +859,7 @@ async function assertSourceContracts() {
   assert.match(taskJobs, /TASK_JOB_STATUS_POLL_MS = 2_000/, 'persisted task event replay must keep slower status polling as a terminal fallback')
   assert.match(taskJobs, /TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS = 250/, 'worker startup plan handoff must not block first tool work behind a slow Turso read')
   assert.match(taskJobs, /Promise\.race\(\[[\s\S]*loadPersistedTaskPayload\(runId\)[\s\S]*STARTUP_PLAN_READ_TIMEOUT/, 'worker startup plan handoff must bound each persisted payload read')
+  assert.match(taskJobs, /payload === STARTUP_PLAN_READ_TIMEOUT[\s\S]*Date\.now\(\) > deadlineMs[\s\S]*TASK_JOB_STARTUP_PLAN_POLL_MS[\s\S]*continue/, 'worker startup plan handoff must keep polling after a bounded Turso read timeout until the route-plan deadline')
   assert.match(taskJobs, /ensureTaskWorkerHeartbeatSchema/, 'stale worker-lease recovery must be able to consult the worker heartbeat table')
   assert.match(taskJobs, /agent_task_workers\.current_run_id = agent_task_jobs\.run_id[\s\S]*agent_task_workers\.last_seen_at_ms >= \?/, 'stale worker-lease recovery must not steal a job from a heartbeat-live worker running that exact task')
   assert.match(taskJobs, /job\.conversationId !== input\.conversationId/, 'in-memory task event replay must reject run ids from a different conversation')
