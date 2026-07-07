@@ -52,7 +52,7 @@ import { ToolPipeline, type ToolExecutionResult } from './ToolPipeline'
 import { PolicyEngine } from './PolicyEngine'
 import { PlanManager, type RequiredPlanStep } from './PlanManager'
 import { isPromptInjection, type TierTimeouts } from './guards'
-import { explicitWebSearchLimitFromText, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { currentStepWebSearchLimit, explicitWebSearchLimitFromText, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
 import { ContextManager } from './ContextManager'
@@ -720,13 +720,24 @@ const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
   'http_request',
+  'youtube_transcript',
   'image_search',
   'browser_get_content',
   'browser_navigate',
 ])
+const SOURCE_OPENING_RUNTIME_TOOLS = new Set([
+  'read_document',
+  'http_request',
+  'youtube_transcript',
+  'browser_navigate',
+  'browser_get_content',
+  'browser_find_text',
+])
 const COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
+  'http_request',
+  'youtube_transcript',
   'browser_navigate',
   'browser_get_content',
   'browser_find_text',
@@ -735,6 +746,8 @@ const COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS = new Set([
 const COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
+  'http_request',
+  'youtube_transcript',
   'browser_navigate',
   'browser_get_content',
   'browser_find_text',
@@ -1171,12 +1184,15 @@ function fastSourceActionToolsForState(
 ): ToolDefinitionLike[] {
   if (state.taskStrategy === 'browse' && state.currentPhase !== 'research') return tools
 
+  const needsOpenedSourceBeforeMoreSearch = researchSearchNeedsOpenedSourceBeforeMoreSearch(state)
   const hasKnownSourceTarget =
     !!state.userProvidedUrl ||
     state.stepSearchQueries.size > 0 ||
     state.stepVisitedUrls.size > 0 ||
     stepOpenedSourceDomains(state).size > 0
-  const allowed = hasKnownSourceTarget
+  const allowed = needsOpenedSourceBeforeMoreSearch
+    ? new Set(SOURCE_OPENING_RUNTIME_TOOLS)
+    : hasKnownSourceTarget
     ? new Set(['read_document', 'http_request', 'youtube_transcript', 'browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search'])
     : new Set(['web_search', ...(researchStepAllowsImageSearch(state) ? ['image_search'] : [])])
   const narrowed = tools.filter(tool => {
@@ -1185,6 +1201,31 @@ function fastSourceActionToolsForState(
     return allowed.has(name)
   })
   return narrowed.length > 0 ? narrowed : tools
+}
+
+function totalOpenedSourceReadsForStep(state: AgentStateData): number {
+  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
+}
+
+function researchSearchNeedsOpenedSourceBeforeMoreSearch(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return false
+  if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
+
+  const stepText = currentStepText(state)
+  const isResearchPhase =
+    state.currentPhase === 'research' ||
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    isResearchStepText(stepText)
+  if (!isResearchPhase) return false
+
+  const completedSearches = Math.max(
+    state.stepSearchQueries.size,
+    state.stepToolTypeCounts.get('web_search') || 0,
+  )
+  const openedSourceReads = totalOpenedSourceReadsForStep(state)
+  return completedSearches >= 1 && openedSourceReads === 0
 }
 
 function shouldUseNaturalCadenceNarration(
@@ -1395,7 +1436,7 @@ function compactResearchOpenedSourceToolsForState(
 
   const allowed = needsAlternateSourceRoute
     ? new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
-    : new Set(['read_document'])
+    : new Set(SOURCE_OPENING_RUNTIME_TOOLS)
   if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
   if (!hasRenderedBrowserContext(state)) {
     allowed.delete('browser_get_content')

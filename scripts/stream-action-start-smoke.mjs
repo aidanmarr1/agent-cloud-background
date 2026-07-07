@@ -66,6 +66,12 @@ async function* missingDisplaySearchChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_search', function: { name: 'web_search', arguments: '{\\"query\\":\\"AI agent startup latency benchmark 2026\\"}' } }] } }] }
 }
 
+async function* slowHiddenSearchChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_slow_search', function: { name: 'web_search', arguments: '{\\"query\\":\\"' } }] } }] }
+  await new Promise(resolve => setTimeout(resolve, 90))
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'AI agent startup latency benchmark 2026\\"}' } }] } }] }
+}
+
 async function* longTextThenUsageChunks() {
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
@@ -123,6 +129,23 @@ export async function runSmoke() {
   assert.equal(searchStarts.length, 1, 'missing display metadata must be repaired into a visible search pill')
   assert.equal((searchStarts[0].args as any).plan_step_index, 1)
   assert.match(String((searchStarts[0].args as any).action_label), /^Search AI agent startup latency benchmark/i)
+
+  const slowEmitter = makeEmitter()
+  const slowState = createInitialState(false, {
+    iterationTimeoutMs: 200,
+    inactivityTimeoutMs: 35,
+    contentOnlyTimeoutMs: null,
+    contentOnlyMinChars: 0,
+    checkIntervalMs: 10,
+  })
+  slowState.currentPlanItems = ['Gather current evidence']
+  slowState.currentStepIdx = 0
+  const slowProcessor = new StreamProcessor(slowEmitter as any, slowState.tierTimeouts)
+  const slowStarted = Date.now()
+  const slowResult = await slowProcessor.processStream(slowHiddenSearchChunks() as any, slowState)
+  assert.ok(Date.now() - slowStarted < 85, 'hidden tool-argument streaming must not reset visible inactivity forever')
+  assert.equal(slowResult.toolCalls.size, 1, 'partial hidden tool call should be returned for policy recovery')
+  assert.equal(slowEmitter.events.filter(e => e.type === 'tool_start').length, 0, 'no visible pill should be invented before usable args exist')
 
   const editEmitter = makeEmitter()
   const editState = createInitialState(true, timeouts)

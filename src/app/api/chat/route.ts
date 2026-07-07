@@ -15,6 +15,7 @@ import { auth } from '@/auth'
 import { hydrateMessageAttachmentsForUser } from '@/lib/attachments'
 import { clearLiveDirectives } from '@/lib/liveDirectives'
 import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
+import { cleanTaskSubjectText, humanTopicLabel } from '@/lib/agent/taskText'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
 import {
   assertServerCreditsAvailable,
@@ -612,12 +613,34 @@ function boundedFastStartupPlan(items: string[]): AgentLoopOptions['startupPlan'
   return cleaned.length > 0 ? { items: cleaned } : null
 }
 
+function fastStartupPlanSubject(request: string): string {
+  const urlMatch = request.match(/\bhttps?:\/\/[^\s<>"')\]]+/i)
+  if (urlMatch?.[0]) {
+    try {
+      const host = new URL(urlMatch[0]).hostname.replace(/^www\./i, '')
+      if (host) return humanTopicLabel(host, 'the target page', 56)
+    } catch {
+      // Fall through to text cleanup.
+    }
+  }
+
+  const cleaned = cleanTaskSubjectText(request)
+    .replace(/^(?:summari[sz]e|research|investigate|analy[sz]e|compare|explain|tell\s+me\s+about|look\s+up|find\s+out\s+about)\s+/i, '')
+    .replace(/^(?:the\s+)?(?:current|latest|recent)\s+(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
+    .replace(/^(?:the\s+)?(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  return humanTopicLabel(cleaned || request, 'the request', 56)
+}
+
 function createFastStartupPlan(input: {
   messages: AgentLoopOptions['messages']
 }): AgentLoopOptions['startupPlan'] | null {
   const request = latestUserRequestText(input.messages)
   if (!request) return null
   const text = request.toLowerCase()
+  const subject = fastStartupPlanSubject(request)
   const hasUrl = /\bhttps?:\/\//i.test(request)
   const wantsSiteAction = hasUrl || /\b(?:website|site|browser|page|tab|form|login|sign\s*in|click|fill|submit|navigate|open the|use the app)\b/i.test(text)
   const wantsCode = /\b(?:fix|bug|implement|deploy|restart|worker|commit|push|lint|build|code|repo|runtime|backend|frontend)\b/i.test(text)
@@ -626,48 +649,48 @@ function createFastStartupPlan(input: {
 
   if (wantsCode) {
     return boundedFastStartupPlan([
-      'Inspect the relevant runtime path',
-      'Apply the focused fix',
-      'Verify, deploy, and restart workers',
+      `Inspect ${subject} runtime path`,
+      `Apply the focused ${subject} fix`,
+      `Verify and deploy ${subject}`,
     ])
   }
 
   if (wantsSiteAction) {
     return boundedFastStartupPlan([
-      'Open and inspect the target page',
-      'Complete the requested action',
-      'Confirm the result',
+      `Open and inspect ${subject}`,
+      `Complete the ${subject} action`,
+      `Confirm the ${subject} result`,
     ])
   }
 
   if (wantsResearch && wantsSavedOutput) {
     return boundedFastStartupPlan([
-      'Frame the key questions',
-      'Gather current evidence',
-      'Write and save the deliverable',
+      `Map ${subject} angles`,
+      `Read current ${subject} sources`,
+      `Save the ${subject} deliverable`,
     ])
   }
 
   if (wantsResearch) {
     return boundedFastStartupPlan([
-      'Frame the key questions',
-      'Gather current evidence',
-      'Synthesize the answer',
+      `Map ${subject} angles`,
+      `Read current ${subject} sources`,
+      `Synthesize the ${subject} answer`,
     ])
   }
 
   if (wantsSavedOutput) {
     return boundedFastStartupPlan([
-      'Shape the requested output',
-      'Create the deliverable',
-      'Review and deliver',
+      `Shape the ${subject} output`,
+      `Create the ${subject} deliverable`,
+      `Review the ${subject} deliverable`,
     ])
   }
 
   return boundedFastStartupPlan([
-    'Work through the request',
-    'Verify the result',
-    'Deliver the answer',
+    `Work through ${subject}`,
+    `Verify the ${subject} result`,
+    `Deliver the ${subject} answer`,
   ])
 }
 

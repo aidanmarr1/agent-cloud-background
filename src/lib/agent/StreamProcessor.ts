@@ -747,7 +747,6 @@ export class StreamProcessor {
 
         // Tool calls
         if (delta.tool_calls) {
-          lastVisibleActivityTime = Date.now()
           const tcs = delta.tool_calls as Array<{
             index: number
             id?: string
@@ -782,6 +781,7 @@ export class StreamProcessor {
                   emittedToolStarts.set(tc.index, signature)
                   recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
                   this.emitter.toolStart(toolCall.id, toolCall.name, earlyArgs)
+                  lastVisibleActivityTime = Date.now()
                 }
               }
 
@@ -797,11 +797,13 @@ export class StreamProcessor {
                     preview.started = true
                     preview.emittedChars = 0
                     this.emitter.fileContentStart(toolCall.id, path, toolCall.name)
+                    lastVisibleActivityTime = Date.now()
                   }
                   if (typeof content === 'string' && content.length > preview.emittedChars) {
                     const pendingChars = content.length - preview.emittedChars
                     if (pendingChars >= FILE_PREVIEW_MIN_DELTA_CHARS) {
                       this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
+                      lastVisibleActivityTime = Date.now()
                       preview.emittedChars = content.length
                     }
                   }
