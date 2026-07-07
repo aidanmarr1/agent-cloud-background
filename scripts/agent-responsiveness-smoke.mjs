@@ -85,8 +85,8 @@ assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')
 assert.match(search, /\$\{SERPER_BASE_URL\}\/\$\{path\}/, 'web search must call the configured Serper endpoint')
-assert.match(search, /WEB_SEARCH_RESULT_COUNT\s*=\s*15/, 'web search must return 15 results in the Computer panel')
-assert.match(search, /num:\s*WEB_SEARCH_RESULT_COUNT/, 'web search must pass the 15-result count to Serper')
+assert.match(search, /WEB_SEARCH_RESULT_COUNT\s*=\s*5/, 'web search must return at most 5 results in the Computer panel')
+assert.match(search, /num:\s*WEB_SEARCH_RESULT_COUNT/, 'web search must pass the 5-result count to Serper')
 assert.match(search, /resultFromOrganic\(item,\s*'serper-organic'\)/, 'web search results must be labeled as Serper organic results')
 assert.doesNotMatch(search, /SearXNG|DuckDuckGo|BRAVE_SEARCH|direct-search-page|Promise\.any\(attempts\)/, 'web search must not retain the old free-provider routing')
 

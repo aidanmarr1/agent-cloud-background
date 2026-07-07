@@ -613,6 +613,21 @@ function boundedFastStartupPlan(items: string[]): AgentLoopOptions['startupPlan'
   return cleaned.length > 0 ? { items: cleaned } : null
 }
 
+function fastStartupPlanVariantIndex(seed: string, count: number): number {
+  if (count <= 1) return 0
+  let hash = 2166136261
+  for (let i = 0; i < seed.length; i++) {
+    hash ^= seed.charCodeAt(i)
+    hash = Math.imul(hash, 16777619) >>> 0
+  }
+  return hash % count
+}
+
+function chooseFastStartupPlan(request: string, variants: string[][]): AgentLoopOptions['startupPlan'] | null {
+  const items = variants[fastStartupPlanVariantIndex(request, variants.length)] || variants[0] || []
+  return boundedFastStartupPlan(items)
+}
+
 function fastStartupPlanSubject(request: string): string {
   const urlMatch = request.match(/\bhttps?:\/\/[^\s<>"')\]]+/i)
   if (urlMatch?.[0]) {
@@ -649,49 +664,131 @@ function createFastStartupPlan(input: {
   const wantsResearch = /\b(?:research|summari[sz]e|current|latest|recent|today|state of|overview|landscape|applications|compare|analysis|probability|market|sources?|evidence)\b/i.test(text)
 
   if (wantsCode) {
-    return boundedFastStartupPlan([
-      `Inspect ${subject} runtime path`,
-      `Apply the focused ${subject} fix`,
-      `Verify and deploy ${subject}`,
+    return chooseFastStartupPlan(request, [
+      [
+        `Trace the ${subject} path`,
+        'Patch the affected behavior',
+        'Run checks and deploy',
+      ],
+      [
+        `Inspect the affected ${subject} code`,
+        'Apply the focused runtime fix',
+        'Verify and restart workers',
+      ],
+      [
+        'Locate the regression',
+        `Fix ${subject}`,
+        'Ship the checked change',
+      ],
     ])
   }
 
   if (wantsSiteAction) {
-    return boundedFastStartupPlan([
-      `Open and inspect ${subject}`,
-      `Complete the ${subject} action`,
-      `Confirm the ${subject} result`,
+    return chooseFastStartupPlan(request, [
+      [
+        `Open ${subject}`,
+        'Use the live page controls',
+        'Confirm the result',
+      ],
+      [
+        'Inspect the target page',
+        `Complete ${subject}`,
+        'Report the final state',
+      ],
+      [
+        `Load ${subject}`,
+        'Act on the visible page',
+        'Check the page outcome',
+      ],
     ])
   }
 
   if (wantsResearch && wantsSavedOutput) {
-    return boundedFastStartupPlan([
-      `Map ${subject} angles`,
-      `Read current ${subject} sources`,
-      `Save the ${subject} deliverable`,
+    return chooseFastStartupPlan(request, [
+      [
+        `Set the ${subject} angle`,
+        'Read the best current sources',
+        'Write the saved deliverable',
+      ],
+      [
+        `Find strong ${subject} sources`,
+        'Compare the concrete findings',
+        'Save the polished file',
+      ],
+      [
+        'Scope the deliverable',
+        `Verify ${subject} details`,
+        'Assemble the requested file',
+      ],
+      [
+        `Research ${subject} deeply enough`,
+        'Resolve gaps or contradictions',
+        'Save the final write-up',
+      ],
     ])
   }
 
   if (wantsResearch) {
-    return boundedFastStartupPlan([
-      `Map ${subject} angles`,
-      `Read current ${subject} sources`,
-      `Synthesize the ${subject} answer`,
+    return chooseFastStartupPlan(request, [
+      [
+        `Check current ${subject} signals`,
+        'Read the strongest source pages',
+        'Answer with useful takeaways',
+      ],
+      [
+        `Find the best ${subject} evidence`,
+        'Verify concrete details',
+        'Pull the answer together',
+      ],
+      [
+        `Scope ${subject}`,
+        'Open a few strong sources',
+        'Give the concise synthesis',
+      ],
+      [
+        `Read into ${subject}`,
+        'Cross-check key claims',
+        'Answer with caveats included',
+      ],
     ])
   }
 
   if (wantsSavedOutput) {
-    return boundedFastStartupPlan([
-      `Shape the ${subject} output`,
-      `Create the ${subject} deliverable`,
-      `Review the ${subject} deliverable`,
+    return chooseFastStartupPlan(request, [
+      [
+        `Shape the ${subject} output`,
+        'Create the requested file',
+        'Review the result',
+      ],
+      [
+        `Decide the ${subject} structure`,
+        'Draft the deliverable',
+        'Polish and save it',
+      ],
+      [
+        `Prepare ${subject}`,
+        'Build the file content',
+        'Check the saved output',
+      ],
     ])
   }
 
-  return boundedFastStartupPlan([
-    `Work through ${subject}`,
-    `Verify the ${subject} result`,
-    `Deliver the ${subject} answer`,
+  return chooseFastStartupPlan(request, [
+    [
+      `Start on ${subject}`,
+      'Check the important details',
+      'Deliver the result',
+    ],
+    [
+      `Handle ${subject}`,
+      'Verify the outcome',
+      'Wrap up clearly',
+    ],
+    [
+      `Work through ${subject}`,
+      'Confirm what matters',
+      'Return the answer',
+    ],
   ])
 }
 

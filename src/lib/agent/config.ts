@@ -6,9 +6,9 @@
 const IS_OLLAMA = false
 
 // --- Iteration & timing ---
-export const BASE_ITERATIONS = 44
+export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
-export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 32, 3: 84 } as const
+export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
 export const MAX_CONTEXT_MESSAGES = 8
 export const MAX_TIMEOUT_NUDGES = 1
@@ -31,9 +31,9 @@ export const MIN_DELIVERABLE_BUDGET = 10
 export const RESEARCH_NUDGE_ITERATION = IS_OLLAMA ? 6 : 4   // Start nudging non-final steps after N iterations
 export const NO_TOOL_FORCE_ADVANCE = IS_OLLAMA ? 8 : 4      // Force advance after N consecutive no-tool iterations
 export const MIN_TOOL_CALLS_PER_STEP = 2    // Default minimum — overridden by complexity-aware lookup
-export const MIN_TOOL_CALLS_BY_COMPLEXITY = { 1: 1, 2: 4, 3: 6 } as const
-export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 3, 2: 7, 3: 12 } as const
-export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 2, 2: 4, 3: 6 } as const
+export const MIN_TOOL_CALLS_BY_COMPLEXITY = { 1: 1, 2: 5, 3: 7 } as const
+export const MIN_RESEARCH_CALLS_BY_COMPLEXITY = { 1: 3, 2: 8, 3: 14 } as const
+export const MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = { 1: 2, 2: 5, 3: 7 } as const
 
 // --- Search & browse thresholds ---
 export const CONSECUTIVE_SEARCH_FAILURES_WARN = 4
@@ -159,8 +159,8 @@ export const LAST_STEP_TERMINATE_MULTIPLIER = 2.0
 // --- Task complexity ---
 export const COMPLEXITY_BUDGET_MULTIPLIERS = {
   1: 0.7,   // Simple tasks: tighter budgets, but not one-tool shallow by default
-  2: 1.1,   // Moderate tasks: enough room for verification and polish
-  3: 1.45,  // Complex tasks: expanded for depth, revision, and validation
+  2: 1.2,   // Moderate tasks: enough room for verification and polish
+  3: 1.6,   // Complex tasks: expanded for depth, revision, and validation
 } as const
 
 // --- Circuit breaker ---

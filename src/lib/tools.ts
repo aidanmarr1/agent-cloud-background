@@ -29,7 +29,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Image search query' },
-          count: { type: 'number', description: 'Number of images (1-10, default 5)' },
+          count: { type: 'number', description: 'Number of images (1-5, default 5)' },
         },
         required: ['query'],
       },

@@ -3,7 +3,7 @@ import { normalizeSearchQuery, simplifiedSearchQuery } from './searchQuery'
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
-const WEB_SEARCH_RESULT_COUNT = 15
+const WEB_SEARCH_RESULT_COUNT = 5
 const WEB_SEARCH_REQUEST_TIMEOUT_MS = 2_500
 
 interface SerperOrganicResult {

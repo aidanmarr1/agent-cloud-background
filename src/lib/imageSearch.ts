@@ -106,7 +106,7 @@ async function serperImages(rawQuery: unknown, count: number): Promise<SerperIma
 }
 
 export async function imageSearch(query: unknown, count: number = 5): Promise<ImageSearchResult[]> {
-  count = Math.max(1, Math.min(20, count))
+  count = Math.max(1, Math.min(5, count))
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
