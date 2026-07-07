@@ -992,6 +992,26 @@ function latestSavedFinalDeliverablePath(state: AgentStateData): string | null {
     .slice(-1)[0]?.path || null
 }
 
+function pendingFinalDeliverableRevisionPath(state: AgentStateData): string | null {
+  const path = state.pendingDeliverableRevision?.path?.trim()
+  return path || null
+}
+
+function existingFinalDeliverablePath(state: AgentStateData): string | null {
+  return pendingFinalDeliverableRevisionPath(state) || latestSavedFinalDeliverablePath(state)
+}
+
+function finalDeliverableRevisionToolNames(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): Set<string> {
+  return new Set([
+    'append_file',
+    'edit_file',
+    ...(taskWantsPdfArtifact(state, messages) ? ['export_pdf'] : []),
+  ])
+}
+
 function savedFinalDeliverableMinimumChars(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -1094,6 +1114,20 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       'Do not write visible prose, a status update, a plan, a source summary, or a permission question.',
       'Append only the next missing complete section or paragraph-bounded chunk. End cleanly at a sentence or section boundary; never stop mid-sentence. Do not repeat already-written content, and do not emit <next_step/> until after a successful append clears this partial-file state.',
       'Use the full output budget for the append_file content so long reports and code files continue instead of restarting.',
+    ].filter(Boolean).join(' ')
+  }
+  const existingPath = existingFinalDeliverablePath(state)
+  if (existingPath) {
+    const revision = state.pendingDeliverableRevision
+    return [
+      `FINAL SAVED DELIVERABLE REVISION NOW: make exactly one native append_file or edit_file call to "${existingPath}" immediately.`,
+      request ? `User request: ${request}.` : '',
+      `Current final task: ${step}.`,
+      revision?.failures?.length ? `Fix these verification failures: ${revision.failures.join('; ')}.` : '',
+      revision?.suggestions?.length ? `Use these suggestions: ${revision.suggestions.join('; ')}.` : '',
+      'Do not call create_file, do not create a second report, do not write visible prose, and do not emit <next_step/>.',
+      'Prefer append_file for missing sections, citations, source URLs, or extra analysis; use edit_file only for a targeted replacement.',
+      'End cleanly at a sentence or section boundary.',
     ].filter(Boolean).join(' ')
   }
   return [
@@ -2362,6 +2396,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
   const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Create the requested deliverable.'
   const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final deliverable'
   const pendingPartial = state.partialFileWriteRecoveryPending
+  const existingPath = existingFinalDeliverablePath(state)
   const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
   const findings = [...state.stepFindings.entries()]
     .sort(([a], [b]) => a - b)
@@ -2383,6 +2418,9 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
     `User request: ${request}`,
     `Final task: ${currentStep}`,
     pendingPartial ? `Partial saved file: ${pendingPartial.path} (${pendingPartial.lines} lines, ${pendingPartial.chars} chars).` : '',
+    !pendingPartial && existingPath ? `Existing saved deliverable: ${existingPath}.` : '',
+    !pendingPartial && state.pendingDeliverableRevision?.failures?.length ? `Verification failures:\n- ${state.pendingDeliverableRevision.failures.join('\n- ')}` : '',
+    !pendingPartial && state.pendingDeliverableRevision?.suggestions?.length ? `Revision suggestions:\n- ${state.pendingDeliverableRevision.suggestions.join('\n- ')}` : '',
     memoryText,
     findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
     recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
@@ -2402,6 +2440,14 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             'Do not emit <next_step/> until after a successful append clears the partial-file state.',
             'Use the full available output budget for this append so clipped long reports and code continue cleanly.',
           ].join(' ')
+        : existingPath
+          ? [
+              'FINAL SAVED DELIVERABLE REVISION TOOL CALL ONLY.',
+              `Make exactly one native append_file or edit_file call to "${existingPath}" now; do not write visible prose before it.`,
+              'Do not call create_file, read-only research tools, browser tools, or emit <next_step/>.',
+              'Prefer append_file for missing citations/source URLs, missing sections, or more analysis; use edit_file only for targeted replacement.',
+              'Start the file tool call immediately and end the new content cleanly at a sentence or section boundary.',
+            ].join(' ')
         : [
             'FINAL SAVED DELIVERABLE TOOL CALL ONLY.',
             'Make exactly one native create_file or append_file call now; do not write visible prose before it.',
@@ -4605,15 +4651,18 @@ export class AgentLoop {
           } else {
             const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
             const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
-            const allowedFinalTools = new Set([
-              'create_file',
-              'edit_file',
-              'append_file',
-              'read_file',
-              'list_files',
-              ...(finalWantsPdf ? ['export_pdf'] : []),
-              ...(finalWantsImage ? ['image_search'] : []),
-            ])
+            const existingFinalPath = existingFinalDeliverablePath(state)
+            const allowedFinalTools = existingFinalPath
+              ? finalDeliverableRevisionToolNames(state, this.options.messages)
+              : new Set([
+                  'create_file',
+                  'edit_file',
+                  'append_file',
+                  'read_file',
+                  'list_files',
+                  ...(finalWantsPdf ? ['export_pdf'] : []),
+                  ...(finalWantsImage ? ['image_search'] : []),
+                ])
             activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
               .filter(t => {
                 const name = t.function?.name || ''
@@ -4753,9 +4802,13 @@ export class AgentLoop {
           ]
         }
         const agenticStepNeedsTool = shouldForceAgenticToolCall(state, hasActivePlanStep)
+        const finalSavedDeliverableRevisionNeedsTool = useCompactFinalDeliverable &&
+          !!existingFinalDeliverablePath(state) &&
+          !state.deliverableVerificationDone
         const finalSavedDeliverableNeedsTool = useCompactFinalDeliverable &&
           (
             partialFileContinuationNeedsTool ||
+            finalSavedDeliverableRevisionNeedsTool ||
             !hasSavedFinalDeliverableCandidate(state)
           )
         if (
@@ -4767,6 +4820,21 @@ export class AgentLoop {
           activeTools = activeTools.filter(tool => tool.function?.name === 'create_file')
           console.log('[AgentDiagnostics] Narrowed tools for initial final saved deliverable', {
             step: state.currentStepIdx,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
+        if (
+          finalSavedDeliverableNeedsTool &&
+          !partialFileContinuationNeedsTool &&
+          finalSavedDeliverableRevisionNeedsTool
+        ) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          const allowedRevisionTools = finalDeliverableRevisionToolNames(state, this.options.messages)
+          activeTools = activeTools.filter(tool => allowedRevisionTools.has(tool.function?.name || ''))
+          console.log('[AgentDiagnostics] Narrowed tools for final saved deliverable revision', {
+            step: state.currentStepIdx,
+            finalPath: existingFinalDeliverablePath(state),
             beforeTools,
             afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
           })
@@ -4857,13 +4925,13 @@ export class AgentLoop {
               ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
-          ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+          ? { reasoning: { effort: 'high' as const, exclude: true } }
           : isFinalInlineAnswerTurn
-            ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+            ? { reasoning: { effort: 'high' as const, exclude: true } }
             : isFinalSavedDeliverableTurn
-              ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+              ? { reasoning: { effort: 'high' as const, exclude: true } }
               : fastActionTurn
-                ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+                ? { reasoning: { effort: 'high' as const, exclude: true } }
             : {}
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS

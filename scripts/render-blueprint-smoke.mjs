@@ -129,7 +129,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'DEEPSEEK_REASONING_EFFORT', 'high')
   requireValue(service, 'DEEPSEEK_THINKING_ENABLED', 'true')
   requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.1-flash-lite')
-  requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
+  requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'high')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
   requireValue(service, 'AGENT_STORAGE_DRIVER', 'turso')
   requireValue(service, 'AGENT_TASK_WORKER_MODE', 'external')

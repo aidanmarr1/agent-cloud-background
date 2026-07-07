@@ -541,7 +541,7 @@ export class StreamProcessor {
 
     const inactivityCheck = setInterval(markStreamTimeoutIfExpired, this.tierTimeouts.checkIntervalMs)
 
-    const streamPollMs = Math.max(50, Math.min(this.tierTimeouts.checkIntervalMs, 250))
+    const streamPollMs = Math.max(10, Math.min(this.tierTimeouts.checkIntervalMs, 100))
     const nextStreamChunk = async (
       iterator: AsyncIterator<{ choices: Array<{ delta?: Record<string, unknown> }> }>,
     ): Promise<IteratorResult<{ choices: Array<{ delta?: Record<string, unknown> }> }>> => {

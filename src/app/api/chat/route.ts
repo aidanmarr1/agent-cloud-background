@@ -57,7 +57,7 @@ const TASK_WORKER_READY_CACHE_MS = 10_000
 const ROUTE_STARTUP_ACK_PREFACE_WAIT_MS = 2_200
 const ROUTE_STARTUP_ACK_MAX_TOKENS = 96
 const ROUTE_STARTUP_ACK_TIMEOUT_MS = 2_000
-const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const ROUTE_STARTUP_ACK_REASONING = { effort: 'high' as const, exclude: true }
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
 

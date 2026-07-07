@@ -54,6 +54,7 @@ assert.match(agentLoop, /parallel_tool_calls:\s*fastSourceActionTurn/, 'parallel
 assert.match(toolPipeline, /MAX_PARALLEL_SOURCE_EXTRACTIONS = 4/, 'source extraction parallelism must be capped at four calls')
 assert.match(toolPipeline, /PARALLEL_SOURCE_EXTRACTION_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*youtube_transcript/, 'parallel execution must stay limited to stateless source extraction tools')
 assert.match(toolPipeline, /Promise\.all\(executionBatch\.map[\s\S]*executeSingle\(tc,\s*state,\s*assistantContent\)/, 'source extraction batches must execute concurrently')
+assert.match(toolPipeline, /executeAutoSourceExtractionBatch[\s\S]*immediately after web_search[\s\S]*Promise\.all\(batch\.map/, 'web_search must fan out source extraction immediately instead of waiting for another model turn')
 assert.match(agentLoop, /workingMemory\?\.render\(\{ stepIdx: state\.currentStepIdx, maxFacts: 10, maxChars: 1000 \}\)/, 'compact research turns must keep memory payload lean')
 assert.match(agentLoop, /researchActivity\.entries[\s\S]*?\.slice\(-5\)/, 'compact research turns must not replay too many recent source records')
 assert.match(streamProcessor, /toolName === 'web_search' \|\| toolName === 'image_search'[\s\S]*typeof args\.query === 'string'/, 'search action pills must show from safe provisional tool-call args instead of waiting for the whole tool stream')
@@ -85,8 +86,8 @@ assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')
 assert.match(search, /\$\{SERPER_BASE_URL\}\/\$\{path\}/, 'web search must call the configured Serper endpoint')
-assert.match(search, /WEB_SEARCH_RESULT_COUNT\s*=\s*5/, 'web search must return at most 5 results in the Computer panel')
-assert.match(search, /num:\s*WEB_SEARCH_RESULT_COUNT/, 'web search must pass the 5-result count to Serper')
+assert.match(search, /WEB_SEARCH_RESULT_COUNT\s*=\s*15/, 'web search must return at most 15 results in the Computer panel')
+assert.match(search, /num:\s*WEB_SEARCH_RESULT_COUNT/, 'web search must pass the 15-result count to Serper')
 assert.match(search, /resultFromOrganic\(item,\s*'serper-organic'\)/, 'web search results must be labeled as Serper organic results')
 assert.doesNotMatch(search, /SearXNG|DuckDuckGo|BRAVE_SEARCH|direct-search-page|Promise\.any\(attempts\)/, 'web search must not retain the old free-provider routing')
 
