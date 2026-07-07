@@ -212,6 +212,7 @@ const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 450
 const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 260
+const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -3328,6 +3329,28 @@ export class AgentLoop {
                 break
               }
               if (finalSavedDeliverableTurn(state, this.options.messages)) {
+                if (
+                  hasSavedFinalDeliverableCandidate(state) &&
+                  !state.partialFileWriteRecoveryPending &&
+                  state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP
+                ) {
+                  const stepBeforeComplete = state.currentStepIdx
+                  state.pendingDeliverableRevision = null
+                  state.deliverableVerificationDone = true
+                  state.currentStepIdx = state.currentPlanItems?.length || state.currentStepIdx
+                  for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                    this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                  }
+                  terminalReason = 'saved_deliverable_model_start_timeout'
+                  console.log('[AgentDiagnostics] Completed with existing saved deliverable after repeated model-start timeouts', {
+                    step: stepBeforeComplete,
+                    totalSteps: state.currentPlanItems?.length || 0,
+                    finalPath: latestSavedFinalDeliverablePath(state),
+                    consecutiveNullStreams: state.consecutiveNullStreams,
+                  })
+                  phase = 'COMPLETE'
+                  break
+                }
                 state.forceTextNextIteration = false
                 state.iterationDelayMs = MIN_ITERATION_DELAY_MS
                 contextManager.push({
@@ -5299,6 +5322,26 @@ export class AgentLoop {
       }
 
       if (finalSavedDeliverableTurn(state, this.options.messages)) {
+        if (
+          hasSavedFinalDeliverableCandidate(state) &&
+          !state.partialFileWriteRecoveryPending &&
+          state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES
+        ) {
+          const stepBeforeComplete = state.currentStepIdx
+          state.pendingDeliverableRevision = null
+          state.deliverableVerificationDone = true
+          state.currentStepIdx = state.currentPlanItems?.length || state.currentStepIdx
+          for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+            this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+          }
+          console.log('[AgentDiagnostics] Completed with existing saved deliverable after final-turn timeout nudges', {
+            step: stepBeforeComplete,
+            totalSteps: state.currentPlanItems?.length || 0,
+            finalPath: latestSavedFinalDeliverablePath(state),
+            timeoutNudgeCount: state.timeoutNudgeCount,
+          })
+          return 'COMPLETE'
+        }
         if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
           state.timeoutNudgeCount++
           state.forceTextNextIteration = false

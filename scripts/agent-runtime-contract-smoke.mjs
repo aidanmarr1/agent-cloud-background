@@ -707,6 +707,8 @@ async function assertSourceContracts() {
   assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'route must not fabricate deterministic visible startup plans')
   assert.doesNotMatch(chatRoute, /`Map \$\{subject\} angles`|`Read current \$\{subject\} sources`|`Synthesize the \$\{subject\} answer`|Frame the key questions|Gather current evidence|Open a few strong sources|Give the concise synthesis/, 'route startup must not emit stale generic research placeholders')
   assert.doesNotMatch(agentLoop, /customInstructionsForTask|Fast-lane override for this latest request|FAST-LANE RESEARCH OVERRIDE/, 'broad research prompts must not bypass normal custom instructions or depth logic')
+  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP\s*=\s*2/, 'final saved deliverable model-start recovery must be capped')
+  assert.match(agentLoop, /hasSavedFinalDeliverableCandidate\(state\)[\s\S]*state\.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP[\s\S]*terminalReason = 'saved_deliverable_model_start_timeout'/, 'saved deliverable final revision timeouts must complete with the existing artifact instead of looping forever')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
   assert.match(chatRoute, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
   assert.match(chatRoute, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
