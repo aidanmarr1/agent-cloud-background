@@ -1036,10 +1036,10 @@ async function loadPersistedTaskPayload(runId: string): Promise<TaskJobPayload |
 
 export async function attachTaskJobStartupPlan(
   runId: string,
-  startupPlan: ChatTaskPayload['startupPlan'],
+  startupPlan: ChatTaskPayload['startupPlan'] | null | undefined,
 ): Promise<boolean> {
   const normalized = normalizeStartupPlan(startupPlan)
-  if (!normalized || !shouldUseDatabaseTaskJobs()) return false
+  if (!shouldUseDatabaseTaskJobs()) return false
   const queueName = taskQueueName()
   const rows = await withTaskJobSchemaRepair(() => tursoExecute(
     `
@@ -1054,8 +1054,8 @@ export async function attachTaskJobStartupPlan(
   if (!payload || payload.kind === 'background_probe') return false
   const nextPayload: ChatTaskPayload = {
     ...payload,
-    startupPlan: normalized,
     startupPlanExpected: false,
+    ...(normalized ? { startupPlan: normalized } : {}),
   }
   const updated = await withTaskJobSchemaRepair(() => tursoExecute(
     `
@@ -1092,8 +1092,10 @@ export async function waitForTaskJobStartupPlan(
       continue
     }
     if (payload?.kind !== 'background_probe') {
-      const plan = normalizeStartupPlan((payload as ChatTaskPayload | null)?.startupPlan)
+      const chatPayload = payload as ChatTaskPayload | null
+      const plan = normalizeStartupPlan(chatPayload?.startupPlan)
       if (plan) return plan
+      if (chatPayload?.startupPlanExpected === false) break
     }
     if (Date.now() > deadlineMs) break
     await new Promise(resolve => setTimeout(resolve, TASK_JOB_STARTUP_PLAN_POLL_MS))

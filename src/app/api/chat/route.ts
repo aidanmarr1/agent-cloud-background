@@ -1251,7 +1251,6 @@ export async function POST(request: Request) {
         ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
       )),
       routeStartupPlanPromise.then(async (plan) => {
-        if (!plan?.items?.length) return []
         try {
           await taskStartPromise
           await attachTaskJobStartupPlan(creditRunId, plan)
@@ -1262,6 +1261,7 @@ export async function POST(request: Request) {
             error: error instanceof Error ? error.message : String(error),
           })
         }
+        if (!plan?.items?.length) return []
         return [{ type: 'plan', items: plan.items } as SSEEvent]
       }),
     ]
