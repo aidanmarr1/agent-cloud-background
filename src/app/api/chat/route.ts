@@ -666,6 +666,12 @@ function createFastStartupPlan(input: {
   if (wantsCode) {
     return chooseFastStartupPlan(request, [
       [
+        `Trace ${subject}`,
+        'Patch the behavior',
+        'Verify locally',
+        'Ship the change',
+      ],
+      [
         `Trace the ${subject} path`,
         'Patch the affected behavior',
         'Run checks and deploy',
@@ -678,13 +684,16 @@ function createFastStartupPlan(input: {
       [
         'Locate the regression',
         `Fix ${subject}`,
-        'Ship the checked change',
       ],
     ])
   }
 
   if (wantsSiteAction) {
     return chooseFastStartupPlan(request, [
+      [
+        `Open ${subject}`,
+        'Complete the visible action',
+      ],
       [
         `Open ${subject}`,
         'Use the live page controls',
@@ -698,13 +707,16 @@ function createFastStartupPlan(input: {
       [
         `Load ${subject}`,
         'Act on the visible page',
-        'Check the page outcome',
       ],
     ])
   }
 
   if (wantsResearch && wantsSavedOutput) {
     return chooseFastStartupPlan(request, [
+      [
+        `Research ${subject}`,
+        'Write the saved deliverable',
+      ],
       [
         `Set the ${subject} angle`,
         'Read the best current sources',
@@ -731,6 +743,10 @@ function createFastStartupPlan(input: {
   if (wantsResearch) {
     return chooseFastStartupPlan(request, [
       [
+        `Check current ${subject} evidence`,
+        'Answer with the takeaways',
+      ],
+      [
         `Check current ${subject} signals`,
         'Read the strongest source pages',
         'Answer with useful takeaways',
@@ -748,13 +764,16 @@ function createFastStartupPlan(input: {
       [
         `Read into ${subject}`,
         'Cross-check key claims',
-        'Answer with caveats included',
       ],
     ])
   }
 
   if (wantsSavedOutput) {
     return chooseFastStartupPlan(request, [
+      [
+        `Prepare ${subject}`,
+        'Save the requested file',
+      ],
       [
         `Shape the ${subject} output`,
         'Create the requested file',
@@ -768,12 +787,15 @@ function createFastStartupPlan(input: {
       [
         `Prepare ${subject}`,
         'Build the file content',
-        'Check the saved output',
       ],
     ])
   }
 
   return chooseFastStartupPlan(request, [
+    [
+      `Handle ${subject}`,
+      'Return the result',
+    ],
     [
       `Start on ${subject}`,
       'Check the important details',
@@ -787,7 +809,6 @@ function createFastStartupPlan(input: {
     [
       `Work through ${subject}`,
       'Confirm what matters',
-      'Return the answer',
     ],
   ])
 }

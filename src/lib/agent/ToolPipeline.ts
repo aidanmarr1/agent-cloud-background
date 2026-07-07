@@ -896,11 +896,11 @@ function researchSourceBalanceBlockReason(
   const openedSourceReads = totalOpenedSourceReads(state)
   const sourceReadTools = [...SOURCE_EXTRACTION_TOOLS].join(', ')
 
-  if (completedSearches >= 1 && openedSourceReads === 0) {
+  if (completedSearches >= 1 && openedSourceReads === 0 && state.stepFailureCount < 2) {
     return `INTERNAL_RECOVERY: this web_search was skipped because this research phase has ${completedSearches} search result sets but no opened or extracted source pages yet. Use one of these source-reading tools next: ${sourceReadTools}. Extract concrete facts from the strongest result before searching again.`
   }
 
-  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2)) {
+  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2) && state.stepFailureCount < 2) {
     return `INTERNAL_RECOVERY: this web_search was skipped because this research phase is leaning too heavily on search previews (${completedSearches} searches, ${openedSourceReads} opened/extracted sources). Read or extract another strong source page with ${sourceReadTools} before searching again.`
   }
 

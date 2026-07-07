@@ -130,6 +130,31 @@ export async function runSmoke() {
   assert.equal((searchStarts[0].args as any).plan_step_index, 1)
   assert.match(String((searchStarts[0].args as any).action_label), /^Search AI agent startup latency benchmark/i)
 
+  const blockedSearchEmitter = makeEmitter()
+  const blockedSearchState = createInitialState(false, timeouts)
+  blockedSearchState.currentPlanItems = ['Read evidence before searching again']
+  blockedSearchState.currentStepIdx = 0
+  blockedSearchState.taskStrategy = 'research'
+  blockedSearchState.currentPhase = 'research'
+  blockedSearchState.stepSearchQueries.add('ai agent startup latency benchmark 2026')
+  blockedSearchState.stepToolTypeCounts.set('web_search', 1)
+  const blockedSearchProcessor = new StreamProcessor(blockedSearchEmitter as any, timeouts)
+  await blockedSearchProcessor.processStream(missingDisplaySearchChunks() as any, blockedSearchState)
+  assert.equal(blockedSearchEmitter.events.filter(e => e.type === 'tool_start').length, 0, 'searches known to be preflight-blocked must not flash a provisional pill')
+
+  const failedSourceSearchEmitter = makeEmitter()
+  const failedSourceSearchState = createInitialState(false, timeouts)
+  failedSourceSearchState.currentPlanItems = ['Find extractable evidence']
+  failedSourceSearchState.currentStepIdx = 0
+  failedSourceSearchState.taskStrategy = 'research'
+  failedSourceSearchState.currentPhase = 'research'
+  failedSourceSearchState.stepSearchQueries.add('pet bird vegetable nutrition')
+  failedSourceSearchState.stepToolTypeCounts.set('web_search', 1)
+  failedSourceSearchState.stepFailureCount = 2
+  const failedSourceSearchProcessor = new StreamProcessor(failedSourceSearchEmitter as any, timeouts)
+  await failedSourceSearchProcessor.processStream(missingDisplaySearchChunks() as any, failedSourceSearchState)
+  assert.equal(failedSourceSearchEmitter.events.filter(e => e.type === 'tool_start').length, 1, 'after repeated source extraction failures, a new search for a better source should show normally')
+
   const slowEmitter = makeEmitter()
   const slowState = createInitialState(false, {
     iterationTimeoutMs: 200,

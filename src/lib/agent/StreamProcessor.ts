@@ -1,5 +1,6 @@
 import type { AgentEventEmitter } from './SSEEmitter'
 import type { AgentStateData } from './AgentState'
+import { stepOpenedSourceDomains } from './AgentState'
 import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
@@ -324,10 +325,34 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
   return args
 }
 
-function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>): boolean {
+function totalOpenedSourceReads(state: AgentStateData): number {
+  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
+}
+
+function searchWouldBePreflightBlocked(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
+  if (toolName !== 'web_search') return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
+
+  const query = typeof args.query === 'string' ? args.query.toLowerCase().trim() : ''
+  if (query && state.stepSearchQueries.has(query)) return true
+
+  const completedSearches = Math.max(
+    state.stepSearchQueries.size,
+    state.stepToolTypeCounts.get('web_search') || 0,
+  )
+  const openedSourceReads = totalOpenedSourceReads(state)
+
+  if (completedSearches >= 1 && openedSourceReads === 0 && state.stepFailureCount < 2) return true
+  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2) && state.stepFailureCount < 2) return true
+  return false
+}
+
+function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
   if (!strictActionLabelFromArgs(args)) return false
 
   if (toolName === 'web_search' || toolName === 'image_search') {
+    if (searchWouldBePreflightBlocked(toolName, args, state)) return false
     return typeof args.query === 'string' && args.query.length > 0
   }
 
@@ -775,7 +800,7 @@ export class StreamProcessor {
               addProvisionalRuntimeDisplayContract(earlyArgs, toolCall.name, state)
               const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
               const revisionPreviewAllowed = pendingDeliverableRevisionAllowsPreview(toolCall.name, earlyArgs, state)
-              if (currentStepPreview && revisionPreviewAllowed && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs)) {
+              if (currentStepPreview && revisionPreviewAllowed && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs, state)) {
                 const signature = provisionalToolStartSignature(toolCall, earlyArgs)
                 if (emittedToolStarts.get(tc.index) !== signature) {
                   emittedToolStarts.set(tc.index, signature)

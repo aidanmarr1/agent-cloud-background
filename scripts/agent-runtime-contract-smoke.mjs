@@ -688,6 +688,8 @@ async function assertSourceContracts() {
   assert.match(chatRoute, /fastStartupPlanSubject/, 'route startup plans must derive a visible subject from the user request')
   assert.match(chatRoute, /chooseFastStartupPlan/, 'route startup plans should use varied local plan shapes instead of one repeated template')
   assert.match(chatRoute, /`Find the best \$\{subject\} evidence`[\s\S]*'Verify concrete details'/, 'route startup research plans must stay subject-specific without one rigid skeleton')
+  assert.match(chatRoute, /\[\s*`Check current \$\{subject\} evidence`,\s*'Answer with the takeaways',\s*\]/, 'route startup research plans must include compact two-step variants')
+  assert.match(chatRoute, /\[\s*`Trace \$\{subject\}`,\s*'Patch the behavior',\s*'Verify locally',\s*'Ship the change',\s*\]/, 'route startup plans must include expanded four-step variants when useful')
   assert.doesNotMatch(chatRoute, /`Map \$\{subject\} angles`|`Read current \$\{subject\} sources`|`Synthesize the \$\{subject\} answer`|Frame the key questions|Gather current evidence/, 'route startup plans must not emit stale generic research placeholders')
   assert.doesNotMatch(agentLoop, /customInstructionsForTask|Fast-lane override for this latest request|FAST-LANE RESEARCH OVERRIDE/, 'broad research prompts must not bypass normal custom instructions or depth logic')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
