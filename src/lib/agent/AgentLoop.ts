@@ -2343,24 +2343,30 @@ function compactResearchEvidenceComplete(state: AgentStateData): boolean {
     taskDefaultsToMarkdownDeliverable(originalRequest) &&
     explicitlyHighEvidenceRequest
 
+  const credibleCalls = Math.min(
+    requiredResearchCalls,
+    Math.max(5, Math.ceil(requiredResearchCalls * 0.4)),
+  )
+  const credibleOpenedPages = Math.min(
+    requiredOpenedPages,
+    Math.max(3, Math.ceil(requiredOpenedPages * 0.6)),
+  )
+  const credibleDomains = Math.min(
+    requiredSourceBreadth,
+    Math.max(3, Math.ceil(requiredSourceBreadth * 0.6)),
+  )
+  const credibleEvidencePacket =
+    state.stepResearchCallCount >= credibleCalls &&
+    openedPages >= credibleOpenedPages &&
+    distinctDomains >= credibleDomains
+  const repeatedResearchLoop =
+    state.stepLoopDetections >= 2 ||
+    state.stepToolCallCount >= Math.max(12, credibleCalls * 3)
+
   if (hasDirectEvidence && compactResearchBreadthSaturated(state, depth)) return true
-  if (hasDirectEvidence && state.consecutiveNoToolCalls >= 3) {
-    const credibleCalls = Math.min(
-      requiredResearchCalls,
-      Math.max(5, Math.ceil(requiredResearchCalls * 0.4)),
-    )
-    const credibleOpenedPages = Math.min(
-      requiredOpenedPages,
-      Math.max(3, Math.ceil(requiredOpenedPages * 0.6)),
-    )
-    const credibleDomains = Math.min(
-      requiredSourceBreadth,
-      Math.max(3, Math.ceil(requiredSourceBreadth * 0.6)),
-    )
+  if (hasDirectEvidence && (state.consecutiveNoToolCalls >= 3 || repeatedResearchLoop)) {
     if (
-      state.stepResearchCallCount >= credibleCalls &&
-      openedPages >= credibleOpenedPages &&
-      distinctDomains >= credibleDomains
+      credibleEvidencePacket
     ) {
       return true
     }
