@@ -1,5 +1,5 @@
 export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
-export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5.4-mini'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3-flash-preview'
 
 export const DEEPSEEK_MODEL_PRICING = {
   model: DEFAULT_DEEPSEEK_MODEL,
@@ -17,14 +17,14 @@ export const DEEPSEEK_MODEL_PRICING = {
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.75,
-  cacheHitInputUsdPer1M: 0.075,
-  outputUsdPer1M: 4.50,
-  internalReasoningUsdPer1M: 4.50,
-  longContextThresholdTokens: 400_000,
-  longContextInputUsdPer1M: 0.75,
-  longContextOutputUsdPer1M: 4.50,
-  contextTokens: 400_000,
+  inputUsdPer1M: 0.50,
+  cacheHitInputUsdPer1M: 0.05,
+  outputUsdPer1M: 3.00,
+  internalReasoningUsdPer1M: 3.00,
+  longContextThresholdTokens: 1_000_000,
+  longContextInputUsdPer1M: 0.50,
+  longContextOutputUsdPer1M: 3.00,
+  contextTokens: 1_000_000,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
 } as const
