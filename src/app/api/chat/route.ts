@@ -394,10 +394,14 @@ function createPrefacedTaskJobEventStream(input: {
 
           const emitEvents = (events: SSEEvent[]) => {
             for (const event of events) {
-              enqueue({
+              const eventWithMeta = {
                 ...event,
                 runId: input.runId,
-              } as SSEEvent)
+              } as SSEEvent
+              enqueue(eventWithMeta)
+              if (Number.isFinite(Number(eventWithMeta.seq))) {
+                lastPrefaceSeq = Math.max(lastPrefaceSeq, Number(eventWithMeta.seq))
+              }
             }
           }
 
@@ -1234,6 +1238,9 @@ export async function POST(request: Request) {
       routeStartupAcknowledgementPromise.then((ack) => (
         ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
       )),
+      Promise.resolve(startupPlan?.items?.length
+        ? [{ type: 'plan', items: startupPlan.items, seq: 2, runId: creditRunId } as SSEEvent]
+        : []),
     ]
     const prefaceEvents = [heartbeatEvent].map((event, index) => ({
       ...event,
