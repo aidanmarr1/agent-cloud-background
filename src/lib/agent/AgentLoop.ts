@@ -2344,6 +2344,27 @@ function compactResearchEvidenceComplete(state: AgentStateData): boolean {
     explicitlyHighEvidenceRequest
 
   if (hasDirectEvidence && compactResearchBreadthSaturated(state, depth)) return true
+  if (hasDirectEvidence && state.consecutiveNoToolCalls >= 3) {
+    const credibleCalls = Math.min(
+      requiredResearchCalls,
+      Math.max(5, Math.ceil(requiredResearchCalls * 0.4)),
+    )
+    const credibleOpenedPages = Math.min(
+      requiredOpenedPages,
+      Math.max(3, Math.ceil(requiredOpenedPages * 0.6)),
+    )
+    const credibleDomains = Math.min(
+      requiredSourceBreadth,
+      Math.max(3, Math.ceil(requiredSourceBreadth * 0.6)),
+    )
+    if (
+      state.stepResearchCallCount >= credibleCalls &&
+      openedPages >= credibleOpenedPages &&
+      distinctDomains >= credibleDomains
+    ) {
+      return true
+    }
+  }
   if (!reportResearchNeedsSources && !explicitlyHighEvidenceRequest && compactResearchStalledSearchPacketComplete(state, depth)) return true
   if (hasDirectEvidence && state.stepFailureCount >= 2 && !explicitlyHighEvidenceRequest) {
     return state.stepResearchCallCount >= Math.max(2, Math.ceil(requiredResearchCalls * 0.35)) &&

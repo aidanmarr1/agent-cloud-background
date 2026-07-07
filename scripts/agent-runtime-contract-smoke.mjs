@@ -709,6 +709,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(agentLoop, /customInstructionsForTask|Fast-lane override for this latest request|FAST-LANE RESEARCH OVERRIDE/, 'broad research prompts must not bypass normal custom instructions or depth logic')
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP\s*=\s*2/, 'final saved deliverable model-start recovery must be capped')
   assert.match(agentLoop, /hasSavedFinalDeliverableCandidate\(state\)[\s\S]*state\.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP[\s\S]*terminalReason = 'saved_deliverable_model_start_timeout'/, 'saved deliverable final revision timeouts must complete with the existing artifact instead of looping forever')
+  assert.match(agentLoop, /hasDirectEvidence && state\.consecutiveNoToolCalls >= 3[\s\S]*credibleCalls[\s\S]*credibleOpenedPages[\s\S]*credibleDomains[\s\S]*return true/, 'compact research must advance after credible direct evidence instead of looping on repeated no-tool replies')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
   assert.match(chatRoute, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
   assert.match(chatRoute, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
