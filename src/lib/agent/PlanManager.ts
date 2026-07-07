@@ -68,11 +68,12 @@ const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
 const PLANNER_JSON_MAX_TOKENS = 640
 const REPLAN_JSON_MAX_TOKENS = 520
 const PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 2_200
-const PLANNER_JSON_REQUEST_TIMEOUT_MS = 3_000
+const PLANNER_JSON_REQUEST_TIMEOUT_MS = 4_200
 const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_800
 const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_200
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 3_800
 const PLANNER_OVERALL_DEADLINE_MS = 9_000
+const PLANNER_TIMEOUT_RECOVERY_RETRIES = 2
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
@@ -119,6 +120,7 @@ function isBillableUsageError(error: unknown): boolean {
 }
 
 function isPlannerRequestTimeout(error: unknown): boolean {
+  if ((error as { name?: string })?.name === 'AbortError') return true
   const message = error instanceof Error ? error.message : String(error || '')
   return /Assistant request timed out after \d+ seconds/i.test(message) ||
     /\b(?:timed out|timeout|ETIMEDOUT)\b/i.test(message)
@@ -652,6 +654,17 @@ export class PlanManager {
       throw new Error(`Assistant request timed out after ${Math.round(PLANNER_OVERALL_DEADLINE_MS / 1000)} seconds.`)
     }
     return Math.max(250, Math.min(preferredMs, remainingMs - 150))
+  }
+
+  private continueAfterPlannerTimeout(state: AgentStateData | null): boolean {
+    if (!state || state.planEmitted || this.emitter.isClosed) return false
+    console.warn('[Plan] Planner timed out inside startup deadline; continuing without surfacing provider timeout')
+    state.planItems = []
+    state.planScopes = []
+    state.currentPlanItems = null
+    state.currentPlanScopes = null
+    state.planEmitted = true
+    return true
   }
 
   private async emitModelGeneratedAcknowledgement(taskShape: string, priorInvalidAck?: string): Promise<boolean> {
@@ -1306,11 +1319,14 @@ Rules:
         console.log('[Plan] Fast planner missed parseable JSON; retrying strict planner immediately')
         return this.attemptPlanCall(attempt, false)
       }
-      if (isPlannerRequestTimeout(e) && attempt < PLAN_MAX_RETRIES) {
+      if (isPlannerRequestTimeout(e) && attempt < PLANNER_TIMEOUT_RECOVERY_RETRIES) {
         const backoff = fastPlannerMode ? 25 : 100
         console.log(`[Plan] Planner start timed out on attempt ${attempt + 1}, retrying strict planner mode in ${backoff}ms`)
         await new Promise(r => setTimeout(r, backoff))
         return this.attemptPlanCall(attempt + 1, false)
+      }
+      if (isPlannerRequestTimeout(e) && this.continueAfterPlannerTimeout(state)) {
+        return null
       }
       if (isBillableUsageError(e)) throw e
       console.error('[AgentDiagnostics] Planner call failed', {
