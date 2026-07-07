@@ -91,6 +91,8 @@ async function assertSourceContracts() {
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'agent prompt must enforce the exact 3-4 action narration window')
   assert.match(prompts, /never fewer than 15 words/, 'agent prompt must forbid too-short progress narration')
   assert.match(prompts, /1-2 complete sentences/, 'agent prompt must define short paragraph cadence')
+  assert.match(prompts, /default shape is one strong past-tense result sentence/i, 'agent prompt must not force every progress paragraph to include a Next sentence')
+  assert.match(prompts, /Do not force a Next sentence just to sound busy/, 'agent prompt must make Next/future-focus narration optional')
   assert.match(prompts, /result-first/, 'agent prompt must request result-first evidence narration')
   assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'agent prompt must make narration happen before the next action')
   assert.match(prompts, /standing cadence for every phase/, 'agent prompt must frame narration as a per-phase cadence, not only research narration')
@@ -100,6 +102,7 @@ async function assertSourceContracts() {
   assert.match(prompts, /vary the opening verb and sentence shape/, 'agent prompt must require varied progress narration openings')
   assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
   assert.match(agentLoop, /Never ask permission to continue or write opt-in handoffs/, 'runtime narration nudges must ban permission-to-continue progress text')
+  assert.match(agentLoop, /Default to one strong past-tense result sentence; add a short Next\/Will sentence only when it is specific and useful/, 'compact narration runtime must mirror Manus-style optional Next sentences')
   assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
   assert.match(taskGroupView, /task-thread-body/, 'task group view must render a subtle timeline body')
   assert.match(taskGroupView, /InlineThinkingIndicator/, 'task group view must show inline thinking while the model is deciding after visible actions')
@@ -180,6 +183,10 @@ export function runNarrationSmoke() {
   assert.equal(
     sanitizeNarrationText("DevRev's funding confirms a late-2025 $100M Series A and a $1.2B valuation. Next, I'll compare culture signals.", { requireSignal: true }),
     "DevRev's funding confirms a late-2025 $100M Series A and a $1.2B valuation. Next, I'll compare culture signals.",
+  )
+  assert.equal(
+    sanitizeNarrationText('Generated and verified eight visualizations for the report, including market growth and adoption gap charts.', { requireSignal: true }),
+    'Generated and verified eight visualizations for the report, including market growth and adoption gap charts.',
   )
   assert.equal(
     sanitizeNarrationText('Gathered12 deduped rumor candidates from4 source angles, including the latest MacRumors roundup on iPhone17 expected features and release timeline.', { requireSignal: true }),

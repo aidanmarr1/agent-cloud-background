@@ -31,7 +31,7 @@ import { encodeSSE } from '@/lib/stream'
 import { AGENT_IDENTITY_DISCLOSURE_RESPONSE, latestUserAskedAgentIdentityDisclosure } from '@/lib/agentIdentity'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
-import { attachTaskJobStartupPlan, cancelTaskJob, createTaskJobEventStream, enqueueTaskJob, shouldUseExternalTaskWorker, startTaskJob } from '@/lib/agent/taskJobs'
+import { cancelTaskJob, createTaskJobEventStream, enqueueTaskJob, shouldUseExternalTaskWorker, startTaskJob } from '@/lib/agent/taskJobs'
 import { getRecentTaskWorkerHeartbeats, workerHeartbeatIsHosted, type TaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
 import { runChatTaskJob as runSharedChatTaskJob, type ChatTaskPayload, type TaskJobPayload } from '@/lib/agent/chatTaskRunner'
 import type { SSEEvent } from '@/types'
@@ -61,7 +61,6 @@ const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true 
 const ROUTE_STARTUP_PLAN_MAX_TOKENS = 200
 const ROUTE_STARTUP_PLAN_TIMEOUT_MS = 2_800
 const ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS = 3_200
-const ROUTE_STARTUP_PLAN_WORKER_HANDOFF_WAIT_MS = 5_500
 const ROUTE_STARTUP_PLAN_REASONING = { effort: 'minimal' as const, exclude: true }
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
@@ -1240,27 +1239,19 @@ export async function POST(request: Request) {
     directChat,
     skipStartupAcknowledgement: useExternalWorker,
     startupPlanExpected: !directChat && useExternalWorker,
-    startupPlanDeadlineMs: Date.now() + ROUTE_STARTUP_PLAN_WORKER_HANDOFF_WAIT_MS,
   }
 
   if (useExternalWorker) {
     const initialEvents: SSEEvent[] = [{ type: 'heartbeat', timestamp: postStartedAt }]
     let taskStartPromise: Promise<unknown> = Promise.resolve()
+    const queuedStartupPlanPromise = routeStartupPlanPromise.then((plan) => (
+      plan?.items?.length ? plan : null
+    ))
     const deferredPrefaceEvents = [
       routeStartupAcknowledgementPromise.then((ack) => (
         ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
       )),
-      routeStartupPlanPromise.then(async (plan) => {
-        try {
-          await taskStartPromise
-          await attachTaskJobStartupPlan(creditRunId, plan)
-        } catch (error) {
-          console.warn('[AgentDiagnostics] Route startup plan handoff failed', {
-            conversationId,
-            runId: creditRunId,
-            error: error instanceof Error ? error.message : String(error),
-          })
-        }
+      queuedStartupPlanPromise.then((plan) => {
         if (!plan?.items?.length) return []
         return [{ type: 'plan', items: plan.items } as SSEEvent]
       }),
@@ -1308,13 +1299,18 @@ export async function POST(request: Request) {
       })
     })
 
-    taskStartPromise = Promise.resolve().then(() => {
+    taskStartPromise = queuedStartupPlanPromise.then((plan) => {
       if (taskAccessDenied) throw new Error('Task access denied.')
+      const queuedTaskPayload: ChatTaskPayload = {
+        ...taskPayload,
+        startupPlanExpected: false,
+        ...(plan?.items?.length ? { startupPlan: plan } : {}),
+      }
       return enqueueTaskJob({
         runId: creditRunId,
         userId,
         conversationId,
-        payload: taskPayload,
+        payload: queuedTaskPayload,
         initialEvents,
       })
     }).then((result) => {

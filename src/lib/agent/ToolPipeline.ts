@@ -151,6 +151,14 @@ const SOURCE_EXTRACTION_TOOLS = new Set([
   'youtube_transcript',
 ])
 
+const PARALLEL_SOURCE_EXTRACTION_TOOLS = new Set([
+  'read_document',
+  'http_request',
+  'youtube_transcript',
+])
+
+const MAX_PARALLEL_SOURCE_EXTRACTIONS = 4
+
 const FILE_WRITE_TOOLS = new Set(['create_file', 'edit_file', 'append_file', 'export_pdf'])
 
 const RESEARCH_FILE_DETOUR_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'read_file', 'list_files'])
@@ -491,7 +499,7 @@ function researchFileDetourBlockReason(
   if (hasLiveEvidence && !looksLikeAccessBlockerOrNoteDetour(combinedText)) return null
 
   const current = currentStepText(state) || 'the active research step'
-  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make exactly one concrete source tool call now: web_search for a targeted query, read_document for a known source URL, or browser_get_content/browser_find_text for an already-open relevant page. Use browser_navigate only when rendered state or interaction is needed. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
+  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make a concrete source tool call now: web_search for a targeted query, up to 4 parallel read_document/http_request/youtube_transcript calls for known independent source URLs, or browser_get_content/browser_find_text for an already-open relevant page. Use browser_navigate only when rendered state or interaction is needed. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
 }
 
 const ATTACHMENT_MATCH_STOPWORDS = new Set([
@@ -3190,6 +3198,12 @@ export class ToolPipeline {
     }
   }
 
+  private parallelSourceExtractionBatch(allCalls: ToolCallData[]): ToolCallData[] | null {
+    if (allCalls.length < 2) return null
+    if (!allCalls.every(tc => PARALLEL_SOURCE_EXTRACTION_TOOLS.has(tc.name))) return null
+    return allCalls.slice(0, MAX_PARALLEL_SOURCE_EXTRACTIONS)
+  }
+
   async executeAll(
     toolCalls: Map<number, ToolCallData>,
     state: AgentStateData,
@@ -3199,18 +3213,32 @@ export class ToolPipeline {
 
     const allCalls = [...toolCalls.values()]
     const coalescedSequence = this.coalesceBrowserActionSequence(allCalls)
-    const sequentialBatch = coalescedSequence ? [coalescedSequence] : allCalls.slice(0, 1)
+    const parallelSourceBatch = coalescedSequence ? null : this.parallelSourceExtractionBatch(allCalls)
+    const executionBatch = coalescedSequence ? [coalescedSequence] : parallelSourceBatch ?? allCalls.slice(0, 1)
     const results: ToolExecutionResult[] = []
     if (allCalls.length > 1) {
       if (coalescedSequence) {
         this.logger?.info(`Model requested ${allCalls.length} tool calls; coalescing stable browser actions into browser_action_sequence`)
+      } else if (parallelSourceBatch) {
+        this.logger?.info(`Model requested ${allCalls.length} source extraction calls; executing ${parallelSourceBatch.length} in parallel`)
       } else {
         this.logger?.info(`Model requested ${allCalls.length} tool calls; executing only the first one this turn`)
       }
     }
 
+    if (parallelSourceBatch) {
+      const settled = await Promise.all(executionBatch.map(async (tc) => {
+        this.throwIfAborted()
+        return this.executeSingle(tc, state, assistantContent)
+      }))
+      for (const result of settled) {
+        if (result !== null) results.push(result)
+      }
+      return results
+    }
+
     // Execute sequential tools one at a time
-    for (const tc of sequentialBatch) {
+    for (const tc of executionBatch) {
       this.throwIfAborted()
       const result = await this.executeSingle(tc, state, assistantContent)
       if (result === null) continue  // skipped (pre-validation blocked)

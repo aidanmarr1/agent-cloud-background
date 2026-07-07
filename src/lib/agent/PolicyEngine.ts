@@ -152,7 +152,7 @@ function rewriteInvalidForcedNarrationAction(): PolicyAction {
     type: 'inject_message',
       message: {
         role: 'system',
-        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 15-20 words preferred, hard cap 34 words / 240 characters. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
+        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
       },
     continueLoop: true,
   }
@@ -1375,7 +1375,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
           role: 'system',
           content: stepMsg(
             state,
-            `FALSE LIVE-ACCESS BLOCKER: The previous text claimed this chat environment lacks live access, the web, or tools. That is false for this task. Do not repeat that blocker or save it into research notes. If this phase needs public/current evidence, make exactly one concrete source tool call now using ${sourceToolHint}. If a specific tool just returned a real error, switch route and use a different source/tool; do not generalize it into "no live access."${toolCalls.size === 0 ? ' You also made no native tool call; the next response must be one native tool call.' : ''}`,
+            `FALSE LIVE-ACCESS BLOCKER: The previous text claimed this chat environment lacks live access, the web, or tools. That is false for this task. Do not repeat that blocker or save it into research notes. If this phase needs public/current evidence, make a concrete source tool call now using ${sourceToolHint}; when independent candidate URLs already exist, up to 4 parallel read_document/http_request/youtube_transcript source extraction calls are allowed. If a specific tool just returned a real error, switch route and use a different source/tool; do not generalize it into "no live access."${toolCalls.size === 0 ? ' You also made no native tool call; the next response must use the relevant source tool path.' : ''}`,
           ),
         },
         continueLoop: true,
@@ -2296,7 +2296,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
                 state,
                 state.uploadedAttachmentContextAvailable
                   ? `UPLOADED ATTACHMENT CONTEXT AVAILABLE: This phase should use the attached file content already in context. Do not compensate with web_search/browser_navigate/read_file for the uploaded filename. Answer from the attachment content, emit <next_step/> if this phase is complete, or report that the uploaded file content could not be read.`
-                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make exactly one concrete research tool call now, scoped to this step: use web_search with a new specific query, read_document for a known source URL, browser_get_content on an already-open relevant page, or browser_find_text for a concrete term. Use browser_navigate only when rendered state or interaction is needed.`,
+                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make a concrete research tool call now, scoped to this step: use web_search with a new specific query, up to 4 parallel read_document/http_request/youtube_transcript calls for known independent source URLs, browser_get_content on an already-open relevant page, or browser_find_text for a concrete term. Use browser_navigate only when rendered state or interaction is needed.`,
               ),
             },
             continueLoop: true,
@@ -2420,7 +2420,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 15-20 words preferred, hard cap 34 words / 240 characters. Keep it natural and result-first; the next action can continue immediately after.`,
+          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Keep it natural and result-first; the next action can continue immediately after.`,
         },
         continueLoop: true,
       }
@@ -3169,7 +3169,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
               type: 'inject_message',
               message: {
                 role: 'system',
-                content: stepMsg(state, `${depth.message} Continue this phase with exactly one targeted evidence action: open/read a relevant source domain not already used, or switch query/source route if the current source is blocked. This is extension ${state.borrowedIterations}/2 before the phase must preserve budget for the rest of the plan.`),
+                content: stepMsg(state, `${depth.message} Continue this phase with targeted evidence now: open/read a relevant source domain not already used, use up to 4 parallel source extraction calls for independent known URLs, or switch query/source route if the current source is blocked. This is extension ${state.borrowedIterations}/2 before the phase must preserve budget for the rest of the plan.`),
               },
               continueLoop: true,
             })

@@ -88,6 +88,12 @@ import { toolTypeRateLimitForState } from './ToolLimits'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import { AGENT_IDENTITY_DISCLOSURE_RESPONSE, isAgentIdentityDisclosureQuestion, latestUserAskedAgentIdentityDisclosure } from '@/lib/agentIdentity'
 
+const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request', 'youtube_transcript'])
+
+function executedParallelSourceExtractionBatch(results: ToolExecutionResult[]): boolean {
+  return results.length > 1 && results.every(result => PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES.has(result.tc.name))
+}
+
 /**
  * Phase 12 Fix NNN: scan the user's most recent message for a URL or bare
  * domain. Returns the first match (full URL preferred over bare domain), or
@@ -2057,8 +2063,8 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     {
       role: 'system',
       content: state.phaseEndNarrationPending
-        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 15-20 words preferred, hard cap 34 words / 240 characters before the marker. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
-        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 15-20 words preferred, hard cap 34 words / 240 characters. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
+        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters before the marker. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
+        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful, and never force one. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
     },
     {
       role: 'user',
@@ -2460,11 +2466,11 @@ function compactResearchToolRequiredMessage(state: AgentStateData, reason: strin
     ? 'The evidence floor is already satisfied; emit <next_step/> only if this phase is complete.'
     : 'The evidence floor is not satisfied yet.'
   const recoveryToolNote = shouldUseCompactResearchRecoveryTools(state)
-    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or read_document when candidate URLs already exist. Do not ask for another broad planning turn.'
-    : 'Choose the most useful source/search/browser/document action for this specific step; use strict JSON object arguments.'
+    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or when candidate URLs already exist, use up to 4 parallel read_document/http_request/youtube_transcript source extraction calls. Do not ask for another broad planning turn.'
+    : 'Choose the most useful source/search/browser/document action for this specific step; if independent candidate URLs already exist, you may use up to 4 parallel read_document/http_request/youtube_transcript calls. Use strict JSON object arguments.'
   return [
     'RESEARCH TOOL REQUIRED:',
-    `Continue "${step}" with exactly one appropriate evidence tool call now.`,
+    `Continue "${step}" with an appropriate evidence tool call now; for independent source URLs, up to 4 parallel source extraction calls are allowed.`,
     `Reason: ${reason}.`,
     evidenceNeed,
     recoveryToolNote,
@@ -3544,10 +3550,15 @@ export class AgentLoop {
             const executedCoalescedBrowserSequence =
               lastStreamResult.toolCalls.size > 1 &&
               lastToolResults.some(result => result.tc.name === 'browser_action_sequence')
+            const executedParallelSourceBatch =
+              lastStreamResult.toolCalls.size > 1 &&
+              executedParallelSourceExtractionBatch(lastToolResults)
             if (lastStreamResult.toolCalls.size > executedToolCalls.length && !executedCoalescedBrowserSequence) {
               contextManager.push({
                 role: 'system',
-                content: 'TOOL EXECUTION NOTE: Multiple tool calls were requested in one assistant turn, but this runtime executes one tool at a time. Continue from the executed result and call the next required tool separately.',
+                content: executedParallelSourceBatch
+                  ? 'TOOL EXECUTION NOTE: The runtime executed the allowed parallel source extraction batch, capped at 4 calls. Continue from those source results; use another parallel source batch only if this phase still needs distinct evidence.'
+                  : 'TOOL EXECUTION NOTE: Multiple tool calls were requested in one assistant turn, but only safe source extraction calls can run in parallel. Continue from the executed result and call the next required tool separately.',
               } as ChatMessageParam, 2)
             }
 
@@ -4434,10 +4445,10 @@ export class AgentLoop {
         {
           role: 'system',
           content: sourceOpeningExhausted
-            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make exactly one different source action now: web_search for a new authoritative domain, read_document for a different surfaced URL, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer a new domain over retrying the same blocked source.'
+            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, up to 4 parallel read_document/http_request/youtube_transcript calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
             : state.suppressedResearchToolName === 'read_document'
               ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: targeted web_search for a new authoritative URL, browser_navigate to that URL, or browser_get_content from a different already-open useful page. Do not retry the same extracted URL.'
-              : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again unless the surfaced URLs are blocked or unusable. Open or extract one of the strongest URLs already surfaced in the research activity context using read_document, browser_navigate, or browser_get_content if a useful page is already open. After this opened/read source, synthesize or advance instead of doing more query variants.',
+              : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again unless the surfaced URLs are blocked or unusable. Open or extract the strongest surfaced URLs in the research activity context using up to 4 parallel read_document/http_request/youtube_transcript calls, browser_navigate, or browser_get_content if a useful page is already open. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
         } as ChatMessageParam,
       ]
     }
@@ -4731,7 +4742,9 @@ export class AgentLoop {
             ...requestMessages,
             {
               role: 'system',
-              content: 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
+              content: fastSourceActionTurn
+                ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs, make up to 4 parallel source extraction calls using read_document, http_request, or youtube_transcript. Do not use parallel browser navigation/state tools or file tools. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
+                : 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
             } as ChatMessageParam,
           ]
         }
@@ -4833,7 +4846,7 @@ export class AgentLoop {
             : {}),
           ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
           temperature: requestTemperature,
-          parallel_tool_calls: false,
+          parallel_tool_calls: fastSourceActionTurn,
           max_tokens: maxTokens,
           ...requestReasoning,
           includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
