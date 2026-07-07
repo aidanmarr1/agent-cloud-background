@@ -16,7 +16,7 @@ import {
   isIncompleteBrowserClickActivity,
   isBrowserPreflightBlockResult,
 } from '@/lib/stream/constants'
-import { strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { runtimeVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { playComplete, playError } from '@/lib/useSound'
 import { sendDesktopNotification } from '@/lib/notifications'
 import { useCreditStore } from '@/store/credits'
@@ -43,7 +43,8 @@ const SERVER_CREDIT_ACCOUNTING = true
 type ToolStartEvent = { id: string; name: string; args: Record<string, unknown> }
 
 function isDeferredBrowseToolStart(name: string): boolean {
-  return name === 'read_document' || name === 'http_request'
+  void name
+  return false
 }
 
 function isStaleFutureWorkAck(text: string): boolean {
@@ -233,6 +234,7 @@ export class EventDispatcher {
   private startupAcknowledgment = ''
   private toolsSinceLastNarration = 0
   private pendingNarrationTools: Array<{ toolName: string; result: unknown }> = []
+  private toolStartsById = new Map<string, ToolStartEvent>()
   private deferredBrowseToolStarts = new Map<string, ToolStartEvent>()
   private lastNarrationText = ''
   private seenToolStartIds = new Set<string>()
@@ -495,11 +497,13 @@ export class EventDispatcher {
   }
 
   private handleToolStart(event: ToolStartEvent): void {
-    const modelActionLabel = strictActionLabelFromArgs(event.args)
     if (isInternalActivityTool(event.name)) return
-    if (!modelActionLabel) return
+    this.toolStartsById.set(event.id, event)
+    const strictActionLabel = strictActionLabelFromArgs(event.args)
+    const visibleActionLabel = strictActionLabel || runtimeVisibleActionLabel(event.name, event.args)
+    if (!visibleActionLabel) return
 
-    const isHiddenActivity = isIncompleteBrowserClickActivity({ toolName: event.name, label: modelActionLabel })
+    const isHiddenActivity = isIncompleteBrowserClickActivity({ toolName: event.name, label: visibleActionLabel })
     if (isHiddenActivity) {
       // Internal visual context and incomplete preflight browser actions should
       // not create visible task pills, panel focus changes, or credit charges.
@@ -542,12 +546,12 @@ export class EventDispatcher {
         id: event.id,
         toolName: event.name,
         type: (toolNameToSubtaskType[event.name] || 'browse') as SubtaskType,
-        label: modelActionLabel,
+        label: visibleActionLabel,
         query: event.args.query as string | undefined,
         url: event.args.url as string | undefined,
         command: event.args.command as string | undefined,
         filePath: (event.args.path || event.args.output_path || event.args.source_path || event.args.directory) as string | undefined,
-        labelSource: 'model',
+        labelSource: strictActionLabel ? 'model' : 'system',
         status: 'running',
         startedAt: Date.now(),
       }
@@ -817,7 +821,7 @@ export class EventDispatcher {
             screenshotBase64: prev?.screenshotBase64,
             liveFrame: prev?.liveFrame,
             liveFrameUpdatedAt: prev?.liveFrameUpdatedAt,
-            action: modelActionLabel,
+            action: visibleActionLabel,
           } as BrowserResult,
           timestamp: Date.now(),
           streaming: true,
@@ -834,6 +838,7 @@ export class EventDispatcher {
 
     const deferredStart = this.deferredBrowseToolStarts.get(event.id)
     if (deferredStart) this.deferredBrowseToolStarts.delete(event.id)
+    const startedEvent = deferredStart || this.toolStartsById.get(event.id)
 
     if (isHiddenInternalToolResult(event.name, event.result)) {
       this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
@@ -917,7 +922,9 @@ export class EventDispatcher {
       const group = this.parsedGroups[this.currentGroupIdx]
       if (group) {
         const existingSubtask = group.subtasks.find(s => s.id === event.id)
-        const deferredLabel = deferredStart ? strictActionLabelFromArgs(deferredStart.args) : null
+        const deferredLabel = startedEvent
+          ? (strictActionLabelFromArgs(startedEvent.args) || runtimeVisibleActionLabel(event.name, startedEvent.args))
+          : runtimeVisibleActionLabel(event.name, {}, panelItem.title)
 
         let updatedSubtasks = group.subtasks
         if (existingSubtask) {
@@ -925,17 +932,17 @@ export class EventDispatcher {
           updatedSubtasks = group.subtasks.map(s =>
             s.id === event.id ? { ...s, status: 'done' as const, result: effectiveResult as Subtask['result'] } : s
           )
-        } else if (deferredStart && deferredLabel) {
+        } else if (deferredLabel) {
           const subtask: Subtask = {
             id: event.id,
             toolName: event.name,
             type: (toolNameToSubtaskType[event.name] || 'browse') as SubtaskType,
             label: deferredLabel,
-            query: deferredStart.args.query as string | undefined,
-            url: (deferredStart.args.url || deferredStart.args.source) as string | undefined,
-            command: deferredStart.args.command as string | undefined,
-            filePath: (deferredStart.args.path || deferredStart.args.output_path || deferredStart.args.source_path || deferredStart.args.directory) as string | undefined,
-            labelSource: 'model',
+            query: startedEvent?.args.query as string | undefined,
+            url: (startedEvent?.args.url || startedEvent?.args.source) as string | undefined,
+            command: startedEvent?.args.command as string | undefined,
+            filePath: (startedEvent?.args.path || startedEvent?.args.output_path || startedEvent?.args.source_path || startedEvent?.args.directory) as string | undefined,
+            labelSource: startedEvent && strictActionLabelFromArgs(startedEvent.args) ? 'model' : 'system',
             status: 'done',
             startedAt: Date.now(),
             result: effectiveResult as Subtask['result'],
@@ -961,10 +968,12 @@ export class EventDispatcher {
 
     // A completed visible tool hands control back to the model. Keep the UI in
     // Thinking until the next visible event starts: tool_start, text, done, or error.
+    this.toolStartsById.delete(event.id)
     this.setThinkingIfNoVisibleActionRunning()
   }
 
   private removeHiddenTool(eventId: string): void {
+    this.toolStartsById.delete(eventId)
     if (this.currentGroupIdx < 0) return
     const group = this.parsedGroups[this.currentGroupIdx]
     if (!group) return
@@ -1135,6 +1144,7 @@ export class EventDispatcher {
   private markRunningGroups(status: 'done' | 'error', errorMessage?: string): void {
     let changed = false
     this.deferredBrowseToolStarts.clear()
+    this.toolStartsById.clear()
     for (let gi = 0; gi < this.parsedGroups.length; gi++) {
       const group = this.parsedGroups[gi]
       if (group.status === 'running') {
