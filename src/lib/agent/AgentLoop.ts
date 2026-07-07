@@ -1165,6 +1165,28 @@ function isFastSourceActionToolTurn(
     state.currentPhase === 'research'
 }
 
+function fastSourceActionToolsForState(
+  state: AgentStateData,
+  tools: ToolDefinitionLike[],
+): ToolDefinitionLike[] {
+  if (state.taskStrategy === 'browse' && state.currentPhase !== 'research') return tools
+
+  const hasKnownSourceTarget =
+    !!state.userProvidedUrl ||
+    state.stepSearchQueries.size > 0 ||
+    state.stepVisitedUrls.size > 0 ||
+    stepOpenedSourceDomains(state).size > 0
+  const allowed = hasKnownSourceTarget
+    ? new Set(['read_document', 'http_request', 'youtube_transcript', 'browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search'])
+    : new Set(['web_search', ...(researchStepAllowsImageSearch(state) ? ['image_search'] : [])])
+  const narrowed = tools.filter(tool => {
+    const name = tool.function?.name || ''
+    if (state.suppressedResearchToolName && name === state.suppressedResearchToolName) return false
+    return allowed.has(name)
+  })
+  return narrowed.length > 0 ? narrowed : tools
+}
+
 function shouldUseNaturalCadenceNarration(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -2063,8 +2085,8 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     {
       role: 'system',
       content: state.phaseEndNarrationPending
-        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters before the marker. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
-        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful, and never force one. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
+        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters before the marker. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
+        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful, and never force one. Many updates should stop after the result sentence. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
     },
     {
       role: 'user',
@@ -2982,7 +3004,7 @@ export class AgentLoop {
 
     planManager.setStateRef(state)
     const startupPlanUsed = this.options.startupPlan?.items?.length
-      ? planManager.usePrecomputedPlan(state, this.options.startupPlan)
+      ? planManager.usePrecomputedPlan(state, this.options.startupPlan, { emitPlan: false })
       : false
     if (!startupPlanUsed) planManager.startPlanCall()
 
@@ -4737,6 +4759,10 @@ export class AgentLoop {
           isFastActionToolTurn(state, this.options.messages)
         const fastSourceActionTurn = fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
+        if (fastSourceActionTurn) {
+          const fastSourceTools = fastSourceActionToolsForState(state, activeTools)
+          if (fastSourceTools !== activeTools) activeTools = fastSourceTools
+        }
         if (fastActionTurn && !useCompactNarration) {
           requestMessages = [
             ...requestMessages,

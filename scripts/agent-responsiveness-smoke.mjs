@@ -78,9 +78,9 @@ assert.doesNotMatch(useAgentStream, /Too many dispatch errors, aborting stream|c
 assert.match(useAgentStream, /Repeated dispatch errors; keeping stream alive so the backend task can finish/, 'dispatch failures should be visible but non-fatal')
 assert.doesNotMatch(chatRoute, /Promise\.all\(\[\s*accessPromise,\s*workerAvailabilityPromise\s*\]\)/, 'external-worker chat route must not hold durable job enqueue behind worker readiness checks')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker chat route must not wait for startup planning before enqueueing the durable job')
-assert.match(chatRoute, /const queuedStartupPlanPromise = routeStartupPlanPromise\.then[\s\S]*plan\?\.items\?\.length \? plan : null/, 'external-worker chat route must resolve or timeout the route-owned startup plan before queueing worker work')
-assert.match(chatRoute, /taskStartPromise = queuedStartupPlanPromise\.then\(\(plan\) => \{[\s\S]*startupPlanExpected: false[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must enqueue a payload that already contains the route plan or an explicit no-plan release flag')
-assert.match(chatRoute, /queuedStartupPlanPromise\.then\(\(plan\) => \{[\s\S]*return \[\{ type: 'plan'/, 'visible route plan must come from the same bounded route-plan promise used for the queued worker payload')
+assert.match(chatRoute, /const startupPlan = createFastStartupPlan\(\{ messages \}\)/, 'external-worker chat route must create a startup plan without waiting on planner generation')
+assert.match(chatRoute, /const initialEvents:[\s\S]*heartbeatEvent[\s\S]*type: 'plan', items: startupPlan\.items/, 'external-worker chat route must persist the visible startup plan in initial events')
+assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*startupPlanExpected: false[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must enqueue immediately with startup plan or an explicit no-plan release flag')
 assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'task access must still cancel a prefaced task when ownership validation fails')
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')

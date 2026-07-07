@@ -58,10 +58,6 @@ const ROUTE_STARTUP_ACK_PREFACE_WAIT_MS = 2_200
 const ROUTE_STARTUP_ACK_MAX_TOKENS = 96
 const ROUTE_STARTUP_ACK_TIMEOUT_MS = 2_000
 const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
-const ROUTE_STARTUP_PLAN_MAX_TOKENS = 200
-const ROUTE_STARTUP_PLAN_TIMEOUT_MS = 2_800
-const ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS = 3_200
-const ROUTE_STARTUP_PLAN_REASONING = { effort: 'minimal' as const, exclude: true }
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
 
@@ -393,7 +389,7 @@ function createPrefacedTaskJobEventStream(input: {
           }))
           const buffered = new Map<number, SSEEvent[]>()
           const emitted = new Set<number>()
-          const deadline = Date.now() + ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS
+          const deadline = Date.now() + ROUTE_STARTUP_ACK_PREFACE_WAIT_MS
           let acknowledgementSettled = false
 
           const emitEvents = (events: SSEEvent[]) => {
@@ -593,7 +589,7 @@ Requirements:
   }
 }
 
-function sanitizeRouteStartupPlanStep(value: string): string {
+function sanitizeFastStartupPlanStep(value: string): string {
   const cleaned = value
     .replace(/```[\s\S]*?```/g, '')
     .replace(/^[\s"'`*_>-]+|[\s"'`*_>-]+$/g, '')
@@ -604,76 +600,71 @@ function sanitizeRouteStartupPlanStep(value: string): string {
   return withoutPeriod.charAt(0).toUpperCase() + withoutPeriod.slice(1)
 }
 
-function parseRouteStartupPlan(raw: string): string[] | null {
-  const trimmed = raw.trim()
-  if (!trimmed) return null
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(trimmed)
-  } catch {
-    const match = trimmed.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    try {
-      parsed = JSON.parse(match[0])
-    } catch {
-      return null
-    }
-  }
-
-  const maybeSteps = (parsed as { steps?: unknown; items?: unknown })?.steps ?? (parsed as { items?: unknown })?.items
-  if (!Array.isArray(maybeSteps)) return null
-  const steps = maybeSteps
-    .map((step) => typeof step === 'string' ? sanitizeRouteStartupPlanStep(step) : '')
-    .filter((step) => step.length >= 8 && step.length <= 120)
+function boundedFastStartupPlan(items: string[]): AgentLoopOptions['startupPlan'] | null {
+  const cleaned = items
+    .map(sanitizeFastStartupPlanStep)
+    .filter((item) => item.length >= 8 && item.length <= 120)
     .slice(0, 6)
-  if (steps.length === 0) return null
-  return steps
+  return cleaned.length > 0 ? { items: cleaned } : null
 }
 
-async function createRouteStartupPlan(input: {
+function createFastStartupPlan(input: {
   messages: AgentLoopOptions['messages']
-  signal: AbortSignal
-}): Promise<{ items: string[] } | null> {
+}): AgentLoopOptions['startupPlan'] | null {
   const request = latestUserRequestText(input.messages)
   if (!request) return null
+  const text = request.toLowerCase()
+  const hasUrl = /\bhttps?:\/\//i.test(request)
+  const wantsSiteAction = hasUrl || /\b(?:website|site|browser|page|tab|form|login|sign\s*in|click|fill|submit|navigate|open the|use the app)\b/i.test(text)
+  const wantsCode = /\b(?:fix|bug|implement|deploy|restart|worker|commit|push|lint|build|code|repo|runtime|backend|frontend)\b/i.test(text)
+  const wantsSavedOutput = /\b(?:report|markdown|\.md|pdf|excel|spreadsheet|workbook|deck|slides|presentation|file|save|article|guide|memo|write[-\s]?up)\b/i.test(text)
+  const wantsResearch = /\b(?:research|summari[sz]e|current|latest|recent|today|state of|overview|landscape|applications|compare|analysis|probability|market|sources?|evidence)\b/i.test(text)
 
-  try {
-    const res = await createCompletion({
-      model: DEFAULT_MODEL,
-      messages: [
-        {
-          role: 'system' as const,
-          content: `Return only JSON for a short visible task plan.
-Schema: {"steps":["step title","step title"]}
-Rules:
-- 2-5 steps for most tasks; 1 step only for very small direct answers; 6 only for genuinely large multi-part work.
-- Each step is a concise, natural phrase written for the user's exact request.
-- Use plain words. Start each step with a capital letter. Do not end with punctuation.
-- Do not copy long user wording or command wrappers like "research about", "write a report on", or "conduct the deepest possible".
-- Do not use canned prefixes. Let the wording fit the actual task.`,
-        },
-        {
-          role: 'user' as const,
-          content: request,
-        },
-      ],
-      temperature: 0.35,
-      max_tokens: ROUTE_STARTUP_PLAN_MAX_TOKENS,
-      reasoning: ROUTE_STARTUP_PLAN_REASONING,
-      includeTemporalContext: false,
-      requestTimeoutMs: ROUTE_STARTUP_PLAN_TIMEOUT_MS,
-      retryMaxAttempts: 0,
-      abortSignal: input.signal,
-    })
-    const raw = res.choices[0]?.message?.content || ''
-    const items = parseRouteStartupPlan(raw)
-    return items ? { items } : null
-  } catch (error) {
-    console.warn('[AgentDiagnostics] Route startup plan failed', {
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return null
+  if (wantsCode) {
+    return boundedFastStartupPlan([
+      'Inspect the relevant runtime path',
+      'Apply the focused fix',
+      'Verify, deploy, and restart workers',
+    ])
   }
+
+  if (wantsSiteAction) {
+    return boundedFastStartupPlan([
+      'Open and inspect the target page',
+      'Complete the requested action',
+      'Confirm the result',
+    ])
+  }
+
+  if (wantsResearch && wantsSavedOutput) {
+    return boundedFastStartupPlan([
+      'Frame the key questions',
+      'Gather current evidence',
+      'Write and save the deliverable',
+    ])
+  }
+
+  if (wantsResearch) {
+    return boundedFastStartupPlan([
+      'Frame the key questions',
+      'Gather current evidence',
+      'Synthesize the answer',
+    ])
+  }
+
+  if (wantsSavedOutput) {
+    return boundedFastStartupPlan([
+      'Shape the requested output',
+      'Create the deliverable',
+      'Review and deliver',
+    ])
+  }
+
+  return boundedFastStartupPlan([
+    'Work through the request',
+    'Verify the result',
+    'Deliver the answer',
+  ])
 }
 
 function combineTokenUsage(usages: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; cost: number }>): {
@@ -1162,19 +1153,11 @@ export async function POST(request: Request) {
   const useExternalWorker = shouldUseExternalTaskWorker()
   const workerAvailabilityPromise = timedRoutePromise('workerReadyMs', taskWorkerUnavailableResponse())
   const routeStartupAcknowledgementAbort = new AbortController()
-  const routeStartupPlanAbort = new AbortController()
   request.signal.addEventListener('abort', () => routeStartupAcknowledgementAbort.abort(), { once: true })
-  request.signal.addEventListener('abort', () => routeStartupPlanAbort.abort(), { once: true })
   const routeStartupAcknowledgementPromise = !directChat && useExternalWorker
     ? timedRoutePromise('routeAckReadyMs', createRouteStartupAcknowledgement({
         messages: rawMessages,
         signal: routeStartupAcknowledgementAbort.signal,
-      }))
-    : Promise.resolve(null)
-  const routeStartupPlanPromise = !directChat && useExternalWorker
-    ? timedRoutePromise('routePlanReadyMs', createRouteStartupPlan({
-        messages: rawMessages,
-        signal: routeStartupPlanAbort.signal,
       }))
     : Promise.resolve(null)
 
@@ -1210,7 +1193,6 @@ export async function POST(request: Request) {
   const startIsolatedTaskSandbox = startFreshSandbox || (!directChat && !isContextualTaskUpdate(messages))
   if (!useExternalWorker && access && !access.ok) {
     routeStartupAcknowledgementAbort.abort()
-    routeStartupPlanAbort.abort()
     return access.response
   }
 
@@ -1218,7 +1200,6 @@ export async function POST(request: Request) {
     const unavailableWorker = await workerAvailabilityPromise
     if (unavailableWorker) {
       routeStartupAcknowledgementAbort.abort()
-      routeStartupPlanAbort.abort()
       const headers = new Headers(unavailableWorker.headers)
       headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
       headers.set('X-Agent-Route-Timings', routeTimingsHeaderValue(routeTimings))
@@ -1238,25 +1219,23 @@ export async function POST(request: Request) {
     startIsolatedTaskSandbox,
     directChat,
     skipStartupAcknowledgement: useExternalWorker,
-    startupPlanExpected: !directChat && useExternalWorker,
+    startupPlanExpected: false,
   }
 
   if (useExternalWorker) {
-    const initialEvents: SSEEvent[] = [{ type: 'heartbeat', timestamp: postStartedAt }]
+    const startupPlan = createFastStartupPlan({ messages })
+    const heartbeatEvent: SSEEvent = { type: 'heartbeat', timestamp: postStartedAt }
+    const initialEvents: SSEEvent[] = [
+      heartbeatEvent,
+      ...(startupPlan?.items?.length ? [{ type: 'plan', items: startupPlan.items } as SSEEvent] : []),
+    ]
     let taskStartPromise: Promise<unknown> = Promise.resolve()
-    const queuedStartupPlanPromise = routeStartupPlanPromise.then((plan) => (
-      plan?.items?.length ? plan : null
-    ))
     const deferredPrefaceEvents = [
       routeStartupAcknowledgementPromise.then((ack) => (
         ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
       )),
-      queuedStartupPlanPromise.then((plan) => {
-        if (!plan?.items?.length) return []
-        return [{ type: 'plan', items: plan.items } as SSEEvent]
-      }),
     ]
-    const prefaceEvents = initialEvents.map((event, index) => ({
+    const prefaceEvents = [heartbeatEvent].map((event, index) => ({
       ...event,
       seq: index + 1,
       runId: creditRunId,
@@ -1281,7 +1260,6 @@ export async function POST(request: Request) {
       if (accessResult && !accessResult.ok) {
         taskAccessDenied = true
         routeStartupAcknowledgementAbort.abort()
-        routeStartupPlanAbort.abort()
         await taskStartPromise.catch(() => undefined)
         await cancelTaskJob(userId, creditRunId).catch((error) => {
           console.warn('[AgentDiagnostics] Failed to cancel task after access denial', {
@@ -1299,12 +1277,12 @@ export async function POST(request: Request) {
       })
     })
 
-    taskStartPromise = queuedStartupPlanPromise.then((plan) => {
+    taskStartPromise = Promise.resolve().then(() => {
       if (taskAccessDenied) throw new Error('Task access denied.')
       const queuedTaskPayload: ChatTaskPayload = {
         ...taskPayload,
         startupPlanExpected: false,
-        ...(plan?.items?.length ? { startupPlan: plan } : {}),
+        ...(startupPlan?.items?.length ? { startupPlan } : {}),
       }
       return enqueueTaskJob({
         runId: creditRunId,

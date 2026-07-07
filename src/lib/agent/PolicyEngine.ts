@@ -152,7 +152,7 @@ function rewriteInvalidForcedNarrationAction(): PolicyAction {
     type: 'inject_message',
       message: {
         role: 'system',
-        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
+        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
       },
     continueLoop: true,
   }
@@ -2420,7 +2420,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Keep it natural and result-first; the next action can continue immediately after.`,
+          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Keep it natural and result-first; the next action can continue immediately after.`,
         },
         continueLoop: true,
       }
