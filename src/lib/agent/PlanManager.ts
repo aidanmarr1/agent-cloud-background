@@ -6,7 +6,7 @@ import {
   type StreamingChatCompletionChunk,
 } from '@/lib/llm'
 import type { FileResult } from '@/types'
-import { getPlanningPrompt } from '@/lib/prompts'
+import { getFastPlanningPrompt, getPlanningPrompt } from '@/lib/prompts'
 import { effectiveTaskRequest } from '@/lib/conversationContext'
 import type { AgentEventEmitter } from './SSEEmitter'
 import {
@@ -58,17 +58,19 @@ type PlanCreditPreflight = (label: string) => Promise<void>
 const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usage.'
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
-const PLANNER_QUALITY_REPAIR_ATTEMPTS = 3
+const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 const PLANNER_ACK_MAX_TOKENS = 96
 const PLANNER_ACK_STREAM_TIMEOUT_MS = 4_200
 const PLANNER_ACK_DISPLAY_WAIT_MS = 150
+const PLANNER_FAST_JSON_MAX_TOKENS = 360
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 420
 const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
 const PLANNER_JSON_MAX_TOKENS = 640
 const REPLAN_JSON_MAX_TOKENS = 520
-const PLANNER_JSON_REQUEST_TIMEOUT_MS = 3_800
-const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 4_600
-const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 3_500
+const PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 2_200
+const PLANNER_JSON_REQUEST_TIMEOUT_MS = 3_000
+const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_800
+const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_200
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 3_800
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -76,6 +78,7 @@ const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
+const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 
 function redactPlannerErrorText(text: string): string {
   return text
@@ -1190,24 +1193,33 @@ Rules:
 
   private async attemptPlanCall(attempt = 0, relaxedJsonMode = false): Promise<null> {
     const state = this._stateRef
+    const fastPlannerMode = relaxedJsonMode && attempt === 0
     try {
       console.log('[AgentDiagnostics] Planner call starting', {
         attempt: attempt + 1,
         complexity: this.taskComplexity,
         messages: this.messages.length,
         emitterClosed: this.emitter.isClosed,
+        fastPlannerMode,
       })
       const params = {
         model: DEFAULT_MODEL,
         messages: [
-          { role: 'system' as const, content: getPlanningPrompt(this.customInstructions) },
+          {
+            role: 'system' as const,
+            content: fastPlannerMode
+              ? getFastPlanningPrompt(this.customInstructions)
+              : getPlanningPrompt(this.customInstructions),
+          },
           ...this.messages as ChatMessageParam[],
         ],
-        temperature: 0.3,
-        max_tokens: this.plannerJsonMaxTokens(),
+        temperature: fastPlannerMode ? 0.2 : 0.3,
+        max_tokens: fastPlannerMode ? PLANNER_FAST_JSON_MAX_TOKENS : this.plannerJsonMaxTokens(),
         reasoning: PLANNER_CONTROL_REASONING,
         includeTemporalContext: false,
-        requestTimeoutMs: relaxedJsonMode
+        requestTimeoutMs: fastPlannerMode
+          ? PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS
+          : relaxedJsonMode
           ? PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS
           : PLANNER_JSON_REQUEST_TIMEOUT_MS,
         retryMaxAttempts: 0,
@@ -1244,6 +1256,7 @@ Rules:
       console.log(`[Plan] Planner response received (${raw.length} chars)`)
       if (state && !state.planEmitted && !this.emitter.isClosed) {
         const parsedPlan = parsePlannerResponse(raw)
+        if (fastPlannerMode && !parsedPlan) throw new Error(PLANNER_FAST_PARSE_MISS)
         const emitted = await this.emitParsedPlanWithModelRepair(state, raw, parsedPlan)
         if (emitted) return null
 
@@ -1264,8 +1277,12 @@ Rules:
         await new Promise(r => setTimeout(r, backoff))
         return this.attemptPlanCall(attempt + 1)
       }
+      if (e instanceof Error && e.message === PLANNER_FAST_PARSE_MISS) {
+        console.log('[Plan] Fast planner missed parseable JSON; retrying strict planner immediately')
+        return this.attemptPlanCall(attempt, false)
+      }
       if (isPlannerRequestTimeout(e) && attempt < PLAN_MAX_RETRIES) {
-        const backoff = 100
+        const backoff = fastPlannerMode ? 25 : 100
         console.log(`[Plan] Planner start timed out on attempt ${attempt + 1}, retrying strict planner mode in ${backoff}ms`)
         await new Promise(r => setTimeout(r, backoff))
         return this.attemptPlanCall(attempt + 1, false)

@@ -79,12 +79,12 @@ function normalizeBrowseLikeResult(result: unknown, fallbackTitle: string): Brow
   const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error) ||
     /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(rawContent)
   const content = internalRecovery
-    ? 'This source needs to be opened as a rendered page before it can be read.'
+    ? ''
     : rawContent
   const title = normalizeDocumentTitle(firstStringField(record, ['title', 'name']), url, content, error, status)
   return {
     title: title || fallbackTitleForSource(url, fallbackTitle),
-    content: content || 'No extracted text was returned for this source.',
+    content: internalRecovery ? '' : content || 'No extracted text was returned for this source.',
     url,
   }
 }

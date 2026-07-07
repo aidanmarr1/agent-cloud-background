@@ -404,6 +404,28 @@ Return ONLY a JSON object, no markdown:
 Empty steps [] ONLY for complexity 1 trivial non-tool questions.`
 }
 
+export function getFastPlanningPrompt(customInstructions?: string): string {
+  const custom = normalizeCustomInstructions(customInstructions)
+  const customBlock = custom
+    ? `\nSaved custom instructions are binding unless they conflict with safety/runtime rules. Honour fixed visible step counts, required file formats, source limits, and verification requirements:\n${custom.slice(0, 1400)}\n`
+    : ''
+
+  return `You are Agent's fast task planner. Return valid JSON only. Think briefly and choose a useful plan immediately.
+${customBlock}
+Schema:
+{"ack":"12-38 word direct acknowledgement","taskType":"general|research|action|build|code|creative","complexity":1,"steps":[{"title":"specific 5-15 word step","scope":"compact non-overlapping scope"}]}
+
+Rules:
+- Extract the real topic/artifact/output. Do not copy wrappers like "research about", "write a report on", or "answer whether".
+- Pick step count from the task: 0 for trivial direct answers, 1-2 for simple tasks, 3-5 for multi-angle work, 5+ only for large/deep work. Do not default to 3.
+- No canned titles: avoid "Frame key questions", "Map angles", "Scope topic", "Open a few strong sources", and "Give the concise synthesis".
+- Research/current/comparison/report tasks are research. Reports and substantial findings default to saved .md unless the user asks inline.
+- Website/chat/form tasks are action. Code/repo/debug/deploy tasks are code. Website/app/file creation is build.
+- Action/code/build plans must include final verification or delivery. Website/app builds need a preview/render check.
+- Each title must name the concrete task target or artifact. Each scope must say the distinct work for that phase.
+- Output JSON only. No markdown.`
+}
+
 /**
  * Quick pre-estimate of task complexity from the user's message.
  * Used only before the planning LLM returns its task assessment.

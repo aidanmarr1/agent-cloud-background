@@ -154,22 +154,9 @@ function isHiddenInternalToolResult(name: string, result: unknown): boolean {
   return /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error)
 }
 
-function internalRecoveryText(result: unknown): string {
-  if (!result || typeof result !== 'object') return ''
-  const error = (result as { error?: unknown }).error
-  const content = (result as { content?: unknown }).content
-  return [error, content]
-    .filter((value): value is string => typeof value === 'string')
-    .join('\n')
-}
-
-function shouldPreserveVisibleInternalToolResult(name: string, result: unknown): boolean {
+function shouldPreserveVisibleInternalToolResult(name: string): boolean {
   if (isInternalActivityTool(name)) return false
-  if (BROWSE_TOOLS.includes(name)) return true
-  if (name === 'web_search' || name === 'image_search') {
-    return /\bdid not return results\b/i.test(internalRecoveryText(result))
-  }
-  return false
+  return true
 }
 
 function panelFocusIdForTool(name: string, id: string): string {
@@ -858,12 +845,24 @@ export class EventDispatcher {
     if (deferredStart) this.deferredBrowseToolStarts.delete(event.id)
     const startedEvent = deferredStart || this.toolStartsById.get(event.id)
 
-    const visibleStartedRecovery = !!startedEvent &&
-      shouldPreserveVisibleInternalToolResult(event.name, event.result) &&
-      this.currentGroupIdx >= 0 &&
+    const visibleStartedRecovery = this.currentGroupIdx >= 0 &&
+      shouldPreserveVisibleInternalToolResult(event.name) &&
       !!this.parsedGroups[this.currentGroupIdx]?.subtasks.some((subtask) => subtask.id === event.id)
 
-    if (isHiddenInternalToolResult(event.name, event.result) && !visibleStartedRecovery) {
+    if (isHiddenInternalToolResult(event.name, event.result) && visibleStartedRecovery) {
+      const group = this.parsedGroups[this.currentGroupIdx]
+      const updatedSubtasks = group.subtasks.map((subtask) =>
+        subtask.id === event.id ? { ...subtask, status: 'done' as const } : subtask
+      )
+      this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
+      this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+      this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
+      this.toolStartsById.delete(event.id)
+      this.setThinkingIfNoVisibleActionRunning()
+      return
+    }
+
+    if (isHiddenInternalToolResult(event.name, event.result)) {
       this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
       this.removeHiddenTool(event.id)
       this.setThinkingIfNoVisibleActionRunning()

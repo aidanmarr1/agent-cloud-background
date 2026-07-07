@@ -61,6 +61,12 @@ assert.match(
 
 assert.doesNotMatch(
   panelMapper,
+  /This source needs to be opened as a rendered page before it can be read/,
+  'blocked extracted pages must not surface the old rendered-page recovery sentence as panel content',
+)
+
+assert.doesNotMatch(
+  panelMapper,
   /Source unavailable|Extraction failed/,
   'blocked extracted pages must not use old vague failure titles',
 )
