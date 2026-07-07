@@ -62,6 +62,10 @@ async function* wrongStepFileChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '# Report\\\\n\\\\nThis stale-step write should not be visible.\\\"}' } }] } }] }
 }
 
+async function* missingDisplaySearchChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_search', function: { name: 'web_search', arguments: '{\\"query\\":\\"AI agent startup latency benchmark 2026\\"}' } }] } }] }
+}
+
 async function* longTextThenUsageChunks() {
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
@@ -107,6 +111,18 @@ export async function runSmoke() {
     'export default function Page() {\\n  return <main>Hello</main>\\n}',
     'file content deltas must stream the generated file body incrementally',
   )
+
+  const searchEmitter = makeEmitter()
+  const searchState = createInitialState(false, timeouts)
+  searchState.currentPlanItems = ['Gather current evidence']
+  searchState.currentStepIdx = 0
+  const searchProcessor = new StreamProcessor(searchEmitter as any, timeouts)
+  const searchResult = await searchProcessor.processStream(missingDisplaySearchChunks() as any, searchState)
+  const searchStarts = searchEmitter.events.filter(e => e.type === 'tool_start')
+  assert.equal(searchResult.toolCalls.size, 1, 'tool call without display metadata should still be captured')
+  assert.equal(searchStarts.length, 1, 'missing display metadata must be repaired into a visible search pill')
+  assert.equal((searchStarts[0].args as any).plan_step_index, 1)
+  assert.match(String((searchStarts[0].args as any).action_label), /^Search AI agent startup latency benchmark/i)
 
   const editEmitter = makeEmitter()
   const editState = createInitialState(true, timeouts)

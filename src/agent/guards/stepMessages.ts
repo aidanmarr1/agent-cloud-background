@@ -153,7 +153,7 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
 
   const toolCallContract = `\nTOOL CALL CONTRACT:
 - Include plan_step_index: ${currentIdx + 1}. To work on another step, emit <next_step/> first with no tool call.
-- Include action_label: a model-authored visible action pill, 2-12 words, task-specific, starts with a capital letter, does not end with a period, no first person, no tool names, no raw JSON, no generic text.`
+- Include action_label: a visible action pill, 2-12 words, task-specific, starts with a capital letter, does not end with a period, no first person, no tool names, no raw JSON, no generic text.`
 
   return `PLAN PROGRESS:\n${progress}${findingsSummary}${phaseBoundary}\nStep ${currentIdx + 1}/${planItems.length}: "${planItems[currentIdx]}"${focusBlock}${modeBlock}\n${instruction}${toolCallContract}${extra ? '\n' + extra : ''}`
 }

@@ -4,7 +4,7 @@ import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
 import { fetchGenerationUsage } from '@/lib/llm'
-import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel, runtimeVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import type { ChatCompletionUsage } from '@/lib/llm'
 import { NARRATION_THRESHOLD_DEFAULT } from './config'
 
@@ -159,6 +159,25 @@ function addProvisionalFileActionLabel(args: Record<string, unknown>, toolName: 
   const path = typeof args.path === 'string' ? args.path : ''
   if (!path) return
   args.action_label = fileActionLabelFallback(toolName, path)
+}
+
+function addProvisionalRuntimeDisplayContract(
+  args: Record<string, unknown>,
+  toolName: string,
+  state: AgentStateData,
+): void {
+  if (
+    state.currentPlanItems &&
+    state.currentStepIdx < state.currentPlanItems.length &&
+    args.plan_step_index === undefined
+  ) {
+    args.plan_step_index = state.currentStepIdx + 1
+  }
+
+  if (!strictActionLabelFromArgs(args)) {
+    const fallback = state.currentPlanItems?.[state.currentStepIdx] || 'Continue active step'
+    args.action_label = runtimeVisibleActionLabel(toolName, args, fallback)
+  }
 }
 
 function addDisplayContractArgs(args: Record<string, unknown>, parsed: Record<string, unknown> | null, rawArgs: string): void {
@@ -754,6 +773,7 @@ export class StreamProcessor {
 
             if (toolCall.name) {
               const earlyArgs = buildEarlyToolArgs(toolCall.name, toolCall.arguments)
+              addProvisionalRuntimeDisplayContract(earlyArgs, toolCall.name, state)
               const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
               const revisionPreviewAllowed = pendingDeliverableRevisionAllowsPreview(toolCall.name, earlyArgs, state)
               if (currentStepPreview && revisionPreviewAllowed && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs)) {

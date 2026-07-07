@@ -73,7 +73,7 @@ import {
   isNextWebsiteProjectPath,
 } from '@/lib/tsxWebsitePreview'
 import { analyzeScreenshotQuality } from '@/lib/visualQuality'
-import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel, runtimeVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import {
   addResearchActivityToIndex,
@@ -291,20 +291,17 @@ const UPLOADED_IMAGE_DIRECT_CONTEXT_BLOCKED_TOOLS = new Set([
 
 const TOOL_DISPLAY_CONTRACT_KEYS = ['action_label', 'plan_step_index'] as const
 
-function finalDeliverableContinuationNeedsLabel(
-  toolName: string,
-  state: AgentStateData,
-): boolean {
-  if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
-  if (state.currentStepIdx !== state.currentPlanItems.length - 1) return false
-  if (toolName !== 'append_file' && toolName !== 'edit_file') return false
-  return !!state.partialFileWriteRecoveryPending ||
-    state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable')
-}
-
 function currentStepActionLabel(state: AgentStateData): string {
   const title = state.currentPlanItems?.[state.currentStepIdx] || 'Continue final deliverable'
   return formatVisibleActionLabel(title)
+}
+
+function runtimeDisplayActionLabel(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string {
+  return runtimeVisibleActionLabel(toolName, args, currentStepActionLabel(state))
 }
 
 function repairRuntimeDisplayContractArgs(
@@ -326,8 +323,8 @@ function repairRuntimeDisplayContractArgs(
     repairs.push('plan_step_index')
   }
 
-  if (!strictActionLabelFromArgs(args) && finalDeliverableContinuationNeedsLabel(toolName, state)) {
-    args.action_label = currentStepActionLabel(state)
+  if (!strictActionLabelFromArgs(args)) {
+    args.action_label = runtimeDisplayActionLabel(toolName, args, state)
     repairs.push('action_label')
   }
 
@@ -666,7 +663,7 @@ function planStepIndexBlockReason(args: Record<string, unknown>, state: AgentSta
 function actionLabelBlockReason(args: Record<string, unknown>, state: AgentStateData): string | null {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (strictActionLabelFromArgs(args)) return null
-  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be model-authored visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh 2-12 word purpose label from the task context. Start with a capital letter and do not end with a period. The label must say what the action is for, not expose raw JSON or tool syntax. No first person, no tool names, no raw URL, and no past-tense summary.'
+  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh 2-12 word purpose label from the task context. Start with a capital letter and do not end with a period. The label must say what the action is for, not expose raw JSON or tool syntax. No first person, no tool names, no raw URL, and no past-tense summary.'
 }
 
 function narrationCadenceBlockReason(
@@ -3675,21 +3672,13 @@ export class ToolPipeline {
     // narration cadence from counting an action that did not really happen.
     const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
     if (directNavigationTarget) {
-      const modelActionLabel = strictActionLabelFromArgs(args)
-      if (!modelActionLabel) {
-        const errorResult = { error: actionLabelBlockReason(args, state) || 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be model-authored.' }
-        recordWorkLedgerFailure(state, {
-          tool: tc.name,
-          target: toolTargetFromArgs(args),
-          error: errorResult.error,
-        })
-        trackToolCall(state, tc.name, JSON.stringify(args))
-        state.stepToolCallCount++
-        return preflightResult(errorResult)
-      }
       const reroutedArgs = {
         url: directNavigationTarget.toString(),
-        action_label: modelActionLabel,
+        action_label: runtimeVisibleActionLabel(
+          'browser_navigate',
+          { url: directNavigationTarget.toString() },
+          currentStepActionLabel(state),
+        ),
         plan_step_index: state.currentStepIdx + 1,
       }
       const provisionalSearchWasVisible = state.visibleNarrationToolStartIds.has(tc.id)
