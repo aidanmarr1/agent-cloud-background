@@ -196,7 +196,8 @@ assert.ok(asyncAccessIndex > guardCallIndex, 'task access validation must contin
 assert.ok(enqueueIndex > asyncAccessIndex, 'background task enqueue must be explicit in the external-worker startup path')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'background task enqueue must not wait for the startup plan handoff')
 assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*return enqueueTaskJob\([\s\S]*payload: taskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'background task enqueue must put the durable job in the queue immediately after first-paint prerequisites')
-assert.match(chatRoute, /attachTaskJobStartupPlan\(creditRunId,\s*plan\)/, 'background task startup plan must still attach to the already-queued job when ready')
+assert.match(chatRoute, /ROUTE_STARTUP_PLAN_WORKER_HANDOFF_WAIT_MS = 5_500/, 'background worker should wait long enough to receive the route-owned startup plan')
+assert.match(chatRoute, /await taskStartPromise[\s\S]*await attachTaskJobStartupPlan\(creditRunId,\s*plan\)[\s\S]*return \[\{ type: 'plan'/, 'background task startup plan must attach to the already-queued job before the visible plan event is emitted')
 assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'async task access denial must cancel a prefaced task')
 assert.doesNotMatch(chatRoute, /taskStartPromise = (?:accessPromise|Promise\.all\()[\s\S]*enqueueTaskJob/, 'access and readiness checks must not hold the durable job out of the worker queue')
 

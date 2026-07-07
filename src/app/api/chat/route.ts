@@ -61,6 +61,7 @@ const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true 
 const ROUTE_STARTUP_PLAN_MAX_TOKENS = 200
 const ROUTE_STARTUP_PLAN_TIMEOUT_MS = 2_800
 const ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS = 3_200
+const ROUTE_STARTUP_PLAN_WORKER_HANDOFF_WAIT_MS = 5_500
 const ROUTE_STARTUP_PLAN_REASONING = { effort: 'minimal' as const, exclude: true }
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
@@ -1239,7 +1240,7 @@ export async function POST(request: Request) {
     directChat,
     skipStartupAcknowledgement: useExternalWorker,
     startupPlanExpected: !directChat && useExternalWorker,
-    startupPlanDeadlineMs: Date.now() + ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS,
+    startupPlanDeadlineMs: Date.now() + ROUTE_STARTUP_PLAN_WORKER_HANDOFF_WAIT_MS,
   }
 
   if (useExternalWorker) {
@@ -1251,13 +1252,16 @@ export async function POST(request: Request) {
       )),
       routeStartupPlanPromise.then(async (plan) => {
         if (!plan?.items?.length) return []
-        void taskStartPromise.then(() => attachTaskJobStartupPlan(creditRunId, plan)).catch((error) => {
+        try {
+          await taskStartPromise
+          await attachTaskJobStartupPlan(creditRunId, plan)
+        } catch (error) {
           console.warn('[AgentDiagnostics] Route startup plan handoff failed', {
             conversationId,
             runId: creditRunId,
             error: error instanceof Error ? error.message : String(error),
           })
-        })
+        }
         return [{ type: 'plan', items: plan.items } as SSEEvent]
       }),
     ]
