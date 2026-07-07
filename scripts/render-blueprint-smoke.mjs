@@ -128,7 +128,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'DEEPSEEK_MODEL', 'deepseek-v4-flash')
   requireValue(service, 'DEEPSEEK_REASONING_EFFORT', 'high')
   requireValue(service, 'DEEPSEEK_THINKING_ENABLED', 'true')
-  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.1-flash-lite')
+  requireValue(service, 'OPENROUTER_MODEL', 'openai/gpt-5.4-mini')
   requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
   requireValue(service, 'AGENT_STORAGE_DRIVER', 'turso')

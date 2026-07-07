@@ -36,7 +36,7 @@ const CLOUD_ENV = [
   { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
-  { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite' },
+  { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'openai/gpt-5.4-mini' },
   { name: 'OPENROUTER_REASONING_EFFORT', value: process.env.OPENROUTER_REASONING_EFFORT || 'minimal' },
   { name: 'OPENROUTER_REASONING_EXCLUDE', value: process.env.OPENROUTER_REASONING_EXCLUDE || 'true' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },
