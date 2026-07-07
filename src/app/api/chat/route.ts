@@ -15,7 +15,6 @@ import { auth } from '@/auth'
 import { hydrateMessageAttachmentsForUser } from '@/lib/attachments'
 import { clearLiveDirectives } from '@/lib/liveDirectives'
 import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
-import { cleanTaskSubjectText, humanTopicLabel } from '@/lib/agent/taskText'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
 import {
   assertServerCreditsAvailable,
@@ -594,225 +593,6 @@ Requirements:
   }
 }
 
-function sanitizeFastStartupPlanStep(value: string): string {
-  const cleaned = value
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/^[\s"'`*_>-]+|[\s"'`*_>-]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  if (!cleaned) return ''
-  const withoutPeriod = cleaned.replace(/[.。]+$/g, '').trim()
-  return withoutPeriod.charAt(0).toUpperCase() + withoutPeriod.slice(1)
-}
-
-function boundedFastStartupPlan(items: string[]): AgentLoopOptions['startupPlan'] | null {
-  const cleaned = items
-    .map(sanitizeFastStartupPlanStep)
-    .filter((item) => item.length >= 8 && item.length <= 120)
-    .slice(0, 6)
-  return cleaned.length > 0 ? { items: cleaned } : null
-}
-
-function fastStartupPlanVariantIndex(seed: string, count: number): number {
-  if (count <= 1) return 0
-  let hash = 2166136261
-  for (let i = 0; i < seed.length; i++) {
-    hash ^= seed.charCodeAt(i)
-    hash = Math.imul(hash, 16777619) >>> 0
-  }
-  return hash % count
-}
-
-function chooseFastStartupPlan(request: string, variants: string[][]): AgentLoopOptions['startupPlan'] | null {
-  const items = variants[fastStartupPlanVariantIndex(request, variants.length)] || variants[0] || []
-  return boundedFastStartupPlan(items)
-}
-
-function fastStartupPlanSubject(request: string): string {
-  const urlMatch = request.match(/\bhttps?:\/\/[^\s<>"')\]]+/i)
-  if (urlMatch?.[0]) {
-    try {
-      const host = new URL(urlMatch[0]).hostname.replace(/^www\./i, '')
-      if (host) return humanTopicLabel(host, 'the target page', 56)
-    } catch {
-      // Fall through to text cleanup.
-    }
-  }
-
-  const cleaned = cleanTaskSubjectText(request)
-    .replace(/^(?:summari[sz]e|research|investigate|analy[sz]e|compare|explain|tell\s+me\s+about|look\s+up|find\s+out\s+about)\s+/i, '')
-    .replace(/^(?:one|1|a|an|single)\s+(?:current|latest|recent\s+)?fact\s+(?:about|on|regarding)\s+/i, '')
-    .replace(/^(?:the\s+)?(?:current|latest|recent)\s+(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
-    .replace(/^(?:the\s+)?(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-
-  return humanTopicLabel(cleaned || request, 'the request', 56)
-}
-
-function createFastStartupPlan(input: {
-  messages: AgentLoopOptions['messages']
-}): AgentLoopOptions['startupPlan'] | null {
-  const request = latestUserRequestText(input.messages)
-  if (!request) return null
-  const text = request.toLowerCase()
-  const subject = fastStartupPlanSubject(request)
-  const hasUrl = /\bhttps?:\/\//i.test(request)
-  const wantsSiteAction = hasUrl || /\b(?:website|site|browser|page|tab|form|login|sign\s*in|click|fill|submit|navigate|open the|use the app)\b/i.test(text)
-  const wantsCode = /\b(?:fix|bug|implement|deploy|restart|worker|commit|push|lint|build|code|repo|runtime|backend|frontend)\b/i.test(text)
-  const wantsSavedOutput = /\b(?:report|markdown|\.md|pdf|excel|spreadsheet|workbook|deck|slides|presentation|file|save|article|guide|memo|write[-\s]?up)\b/i.test(text)
-  const wantsResearch = /\b(?:research|summari[sz]e|current|latest|recent|today|state of|overview|landscape|applications|compare|analysis|probability|market|sources?|evidence)\b/i.test(text)
-
-  if (wantsCode) {
-    return chooseFastStartupPlan(request, [
-      [
-        `Trace ${subject}`,
-        'Patch the behavior',
-        'Verify locally',
-        'Ship the change',
-      ],
-      [
-        `Trace the ${subject} path`,
-        'Patch the affected behavior',
-        'Run checks and deploy',
-      ],
-      [
-        `Inspect the affected ${subject} code`,
-        'Apply the focused runtime fix',
-        'Verify and restart workers',
-      ],
-      [
-        'Locate the regression',
-        `Fix ${subject}`,
-      ],
-    ])
-  }
-
-  if (wantsSiteAction) {
-    return chooseFastStartupPlan(request, [
-      [
-        `Open ${subject}`,
-        'Complete the visible action',
-      ],
-      [
-        `Open ${subject}`,
-        'Use the live page controls',
-        'Confirm the result',
-      ],
-      [
-        'Inspect the target page',
-        `Complete ${subject}`,
-        'Report the final state',
-      ],
-      [
-        `Load ${subject}`,
-        'Act on the visible page',
-      ],
-    ])
-  }
-
-  if (wantsResearch && wantsSavedOutput) {
-    return chooseFastStartupPlan(request, [
-      [
-        `Research ${subject}`,
-        'Write the saved deliverable',
-      ],
-      [
-        `Set the ${subject} angle`,
-        'Read the best current sources',
-        'Write the saved deliverable',
-      ],
-      [
-        `Find strong ${subject} sources`,
-        'Compare the concrete findings',
-        'Save the polished file',
-      ],
-      [
-        'Scope the deliverable',
-        `Verify ${subject} details`,
-        'Assemble the requested file',
-      ],
-      [
-        `Research ${subject} deeply enough`,
-        'Resolve gaps or contradictions',
-        'Save the final write-up',
-      ],
-    ])
-  }
-
-  if (wantsResearch) {
-    return chooseFastStartupPlan(request, [
-      [
-        `Check current ${subject} evidence`,
-        'Answer with the takeaways',
-      ],
-      [
-        `Check current ${subject} signals`,
-        'Read the strongest source pages',
-        'Answer with useful takeaways',
-      ],
-      [
-        `Find the best ${subject} evidence`,
-        'Verify concrete details',
-        'Pull the answer together',
-      ],
-      [
-        `Scope ${subject}`,
-        'Open a few strong sources',
-        'Give the concise synthesis',
-      ],
-      [
-        `Read into ${subject}`,
-        'Cross-check key claims',
-      ],
-    ])
-  }
-
-  if (wantsSavedOutput) {
-    return chooseFastStartupPlan(request, [
-      [
-        `Prepare ${subject}`,
-        'Save the requested file',
-      ],
-      [
-        `Shape the ${subject} output`,
-        'Create the requested file',
-        'Review the result',
-      ],
-      [
-        `Decide the ${subject} structure`,
-        'Draft the deliverable',
-        'Polish and save it',
-      ],
-      [
-        `Prepare ${subject}`,
-        'Build the file content',
-      ],
-    ])
-  }
-
-  return chooseFastStartupPlan(request, [
-    [
-      `Handle ${subject}`,
-      'Return the result',
-    ],
-    [
-      `Start on ${subject}`,
-      'Check the important details',
-      'Deliver the result',
-    ],
-    [
-      `Handle ${subject}`,
-      'Verify the outcome',
-      'Wrap up clearly',
-    ],
-    [
-      `Work through ${subject}`,
-      'Confirm what matters',
-    ],
-  ])
-}
-
 function combineTokenUsage(usages: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; cost: number }>): {
   promptTokens: number
   completionTokens: number
@@ -1369,20 +1149,13 @@ export async function POST(request: Request) {
   }
 
   if (useExternalWorker) {
-    const startupPlan = createFastStartupPlan({ messages })
     const heartbeatEvent: SSEEvent = { type: 'heartbeat', timestamp: postStartedAt }
-    const initialEvents: SSEEvent[] = [
-      heartbeatEvent,
-      ...(startupPlan?.items?.length ? [{ type: 'plan', items: startupPlan.items } as SSEEvent] : []),
-    ]
+    const initialEvents: SSEEvent[] = [heartbeatEvent]
     let taskStartPromise: Promise<unknown> = Promise.resolve()
     const deferredPrefaceEvents = [
       routeStartupAcknowledgementPromise.then((ack) => (
         ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
       )),
-      Promise.resolve(startupPlan?.items?.length
-        ? [{ type: 'plan', items: startupPlan.items, seq: 2, runId: creditRunId } as SSEEvent]
-        : []),
     ]
     const prefaceEvents = [heartbeatEvent].map((event, index) => ({
       ...event,
@@ -1431,7 +1204,6 @@ export async function POST(request: Request) {
       const queuedTaskPayload: ChatTaskPayload = {
         ...taskPayload,
         startupPlanExpected: false,
-        ...(startupPlan?.items?.length ? { startupPlan } : {}),
       }
       return enqueueTaskJob({
         runId: creditRunId,

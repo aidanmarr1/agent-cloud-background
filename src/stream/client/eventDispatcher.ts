@@ -154,6 +154,24 @@ function isHiddenInternalToolResult(name: string, result: unknown): boolean {
   return /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error)
 }
 
+function internalRecoveryText(result: unknown): string {
+  if (!result || typeof result !== 'object') return ''
+  const error = (result as { error?: unknown }).error
+  const content = (result as { content?: unknown }).content
+  return [error, content]
+    .filter((value): value is string => typeof value === 'string')
+    .join('\n')
+}
+
+function shouldPreserveVisibleInternalToolResult(name: string, result: unknown): boolean {
+  if (isInternalActivityTool(name)) return false
+  if (BROWSE_TOOLS.includes(name)) return true
+  if (name === 'web_search' || name === 'image_search') {
+    return /\bdid not return results\b/i.test(internalRecoveryText(result))
+  }
+  return false
+}
+
 function panelFocusIdForTool(name: string, id: string): string {
   if (BROWSER_TOOLS.includes(name)) return 'browser_live'
   if (name === 'execute_command' || name === 'run_code') return id + '_live'
@@ -840,7 +858,12 @@ export class EventDispatcher {
     if (deferredStart) this.deferredBrowseToolStarts.delete(event.id)
     const startedEvent = deferredStart || this.toolStartsById.get(event.id)
 
-    if (isHiddenInternalToolResult(event.name, event.result)) {
+    const visibleStartedRecovery = !!startedEvent &&
+      shouldPreserveVisibleInternalToolResult(event.name, event.result) &&
+      this.currentGroupIdx >= 0 &&
+      !!this.parsedGroups[this.currentGroupIdx]?.subtasks.some((subtask) => subtask.id === event.id)
+
+    if (isHiddenInternalToolResult(event.name, event.result) && !visibleStartedRecovery) {
       this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
       this.removeHiddenTool(event.id)
       this.setThinkingIfNoVisibleActionRunning()

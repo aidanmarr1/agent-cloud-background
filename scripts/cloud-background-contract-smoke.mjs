@@ -198,9 +198,9 @@ assert.ok(guardCallIndex > leaseIndex, 'worker guard must start immediately afte
 assert.ok(asyncAccessIndex > guardCallIndex, 'task access validation must continue asynchronously after first paint')
 assert.ok(enqueueIndex > asyncAccessIndex, 'background task enqueue must be explicit in the external-worker startup path')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'background task enqueue must not use the old worker-side startup-plan patch handoff')
-assert.match(chatRoute, /const startupPlan = createFastStartupPlan\(\{ messages \}\)/, 'background task enqueue must use an immediate local startup plan instead of holding the worker behind route planning')
-assert.match(chatRoute, /const initialEvents:[\s\S]*heartbeatEvent[\s\S]*type: 'plan', items: startupPlan\.items/, 'background task startup plan must be persisted with the queued job for replay')
-assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*startupPlanExpected: false[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'background task enqueue must happen immediately with the startup plan in the initial worker payload')
+assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'background task enqueue must not use local canned startup plans')
+assert.match(chatRoute, /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[heartbeatEvent\]/, 'background task startup replay should start with heartbeat only before the worker-owned plan')
+assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*startupPlanExpected: false[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'background task enqueue must happen immediately while worker planning owns visible steps')
 assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'async task access denial must cancel a prefaced task')
 assert.doesNotMatch(chatRoute, /taskStartPromise = (?:accessPromise|Promise\.all\()[\s\S]*enqueueTaskJob/, 'access and readiness checks must not hold the durable job out of the worker queue')
 
