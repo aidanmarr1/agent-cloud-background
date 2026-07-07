@@ -72,7 +72,8 @@ assert.match(useAgentStream, /if \(existingController && isAutoSend\) \{[\s\S]*?
 assert.doesNotMatch(useAgentStream, /Too many dispatch errors, aborting stream|controller\.abort\(\)[\s\S]*?Stream dispatcher failed repeatedly/, 'client-side stream dispatch errors must not abort the backend task')
 assert.match(useAgentStream, /Repeated dispatch errors; keeping stream alive so the backend task can finish/, 'dispatch failures should be visible but non-fatal')
 assert.doesNotMatch(chatRoute, /Promise\.all\(\[\s*accessPromise,\s*workerAvailabilityPromise\s*\]\)/, 'external-worker chat route must not hold durable job enqueue behind worker readiness checks')
-assert.match(chatRoute, /workerStartupPlanPromise[\s\S]*routeStartupPlanPromise[\s\S]*taskStartPromise = workerStartupPlanPromise\.then[\s\S]*return enqueueTaskJob[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route may wait only for the fast visible route plan before enqueueing, not slow access or readiness checks')
+assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker chat route must not wait for startup planning before enqueueing the durable job')
+assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*return enqueueTaskJob\([\s\S]*payload: taskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must enqueue immediately after first paint prerequisites, with startup plan attached later when ready')
 assert.match(chatRoute, /void accessPromise\.then[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'task access must still cancel a prefaced task when ownership validation fails')
 
 assert.match(search, /SERPER_API_KEY/, 'web search must use Serper API credentials')

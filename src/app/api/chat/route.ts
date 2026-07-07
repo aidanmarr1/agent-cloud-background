@@ -1304,29 +1304,13 @@ export async function POST(request: Request) {
       })
     })
 
-    const workerStartupPlanPromise = directChat
-      ? Promise.resolve(null)
-      : Promise.race([
-        routeStartupPlanPromise,
-        new Promise<null>((resolve) => {
-          setTimeout(() => resolve(null), ROUTE_STARTUP_PLAN_PREFACE_WAIT_MS)
-        }),
-      ])
-
-    taskStartPromise = workerStartupPlanPromise.then((startupPlan) => {
+    taskStartPromise = Promise.resolve().then(() => {
       if (taskAccessDenied) throw new Error('Task access denied.')
-      const queuedPayload: TaskJobPayload = startupPlan?.items?.length
-        ? {
-          ...taskPayload,
-          startupPlan,
-          startupPlanExpected: false,
-        }
-        : taskPayload
       return enqueueTaskJob({
         runId: creditRunId,
         userId,
         conversationId,
-        payload: queuedPayload,
+        payload: taskPayload,
         initialEvents,
       })
     }).then((result) => {
