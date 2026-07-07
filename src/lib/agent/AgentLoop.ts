@@ -1466,6 +1466,15 @@ function compactResearchOpenedSourceToolsForState(
 ): ToolDefinitionLike[] {
   const openedDomains = stepOpenedSourceDomains(state).size
   const candidateDomains = state.stepSourceDomainCounts.size
+  const hasSearchCandidatesAwaitingOpen =
+    state.stepSearchQueries.size > 0 &&
+    candidateDomains > 0 &&
+    openedDomains === 0 &&
+    state.stepVisitedUrls.size === 0
+  const recentSourceOpeningFailures = state.failureLog.slice(-8).filter(f =>
+    (f.tool === 'read_document' || f.tool === 'browser_navigate' || f.tool === 'browse_page' || f.tool === 'browser_get_content') &&
+    (f.category === 'access-block' || f.category === 'timeout' || f.category === 'service-down' || /404|403|not found|forbidden|timed out|timeout/i.test(f.error)),
+  ).length
   const needsAlternateSourceRoute =
     state.suppressedResearchToolName === 'read_document' ||
     state.stepLoopDetections > 0 ||
@@ -1475,6 +1484,9 @@ function compactResearchOpenedSourceToolsForState(
   const allowed = needsAlternateSourceRoute
     ? new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
     : new Set(SOURCE_OPENING_RUNTIME_TOOLS)
+  if (hasSearchCandidatesAwaitingOpen && recentSourceOpeningFailures < 2 && state.stepLoopDetections < 4) {
+    allowed.delete('web_search')
+  }
   if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
   if (!hasRenderedBrowserContext(state)) {
     allowed.delete('browser_get_content')
@@ -4561,8 +4573,8 @@ export class AgentLoop {
           content: sourceOpeningExhausted
             ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, up to 4 parallel read_document/http_request/youtube_transcript calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
             : state.suppressedResearchToolName === 'read_document'
-              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: targeted web_search for a new authoritative URL, browser_navigate to that URL, or browser_get_content from a different already-open useful page. Do not retry the same extracted URL.'
-              : 'SOURCE OPENING REQUIRED: search breadth is already high enough for this phase. Do not call web_search again unless the surfaced URLs are blocked or unusable. Extract the strongest surfaced URLs in the research activity context using up to 4 parallel read_document/http_request/youtube_transcript calls, or browser_get_content only if a useful page is already open. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
+              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: browser_navigate to a surfaced authoritative URL, browser_get_content from a different already-open useful page, or http_request/youtube_transcript when appropriate. Do not call web_search again while known result URLs are still unopened.'
+              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using up to 4 parallel read_document/http_request/youtube_transcript calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
         } as ChatMessageParam,
       ]
     }

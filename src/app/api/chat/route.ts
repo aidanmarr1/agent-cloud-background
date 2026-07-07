@@ -3,7 +3,7 @@ import { after } from 'next/server'
 import { ChatRequestSchema } from '@/lib/validation/schemas'
 import { validateRequest } from '@/lib/validation/validate'
 import { checkRateLimit } from '@/lib/rateLimit'
-import { createCompletion, createStreamingCompletion, DEFAULT_MODEL, type ChatMessageParam, type StreamingChatCompletionChunk } from '@/lib/llm'
+import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
 import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody } from '@/lib/api'
 import { getOrCreateLocalSandboxDir, pauseSandboxIfIdle, resetLocalSandboxDir } from '@/lib/sandbox'
 import { ensureE2BRemoteBrowser, getE2BSandboxBillingStartedAtMs, resetE2BSandbox, shouldUseE2BSandbox } from '@/lib/e2bSandbox'
@@ -55,9 +55,6 @@ const DIRECT_CHAT_MAX_CONTINUATIONS = 2
 const DEFAULT_TASK_WORKER_STALE_MS = 60_000
 const TASK_WORKER_READY_CACHE_MS = 10_000
 const ROUTE_STARTUP_ACK_PREFACE_WAIT_MS = 2_200
-const ROUTE_STARTUP_ACK_MAX_TOKENS = 96
-const ROUTE_STARTUP_ACK_TIMEOUT_MS = 2_000
-const ROUTE_STARTUP_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
 
@@ -496,101 +493,6 @@ function createPrefacedTaskJobEventStream(input: {
       // request.signal is wired by the runtime; no extra cleanup needed here.
     },
   })
-}
-
-function latestUserRequestText(messages: AgentLoopOptions['messages']): string {
-  const latest = [...messages].reverse().find((message) => message.role === 'user' && typeof message.content === 'string')
-  return latest?.content?.trim().slice(0, 1200) || ''
-}
-
-function sanitizeStartupAcknowledgement(value: string): string {
-  return value
-    .replace(/```[\s\S]*?```/g, '')
-    .replace(/^[\s"'`*_>-]+|[\s"'`*_>-]+$/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function startupAcknowledgementIsUsable(value: string): boolean {
-  const text = value.trim()
-  if (text.length < 45 || text.length > 280) return false
-  if (!/[.!?]$/.test(text)) return false
-  const words = text.split(/\s+/).filter(Boolean)
-  if (words.length < 10 || words.length > 38) return false
-  if (/^(?:sure|okay|ok|got it|i'?ll (?:help|work on|look into) (?:that|this))/i.test(text)) return false
-  if (/\b(?:conduct|perform|run|carry\s+out)\s+(?:the\s+)?(?:deepest\s+possible|maximum\s+depth)\s+(?:research|analysis|investigation)\b/i.test(text)) return false
-  if (/\bproduce\s+a\s+concise,\s+visually\s+rich\s+markdown\b/i.test(text)) return false
-  return true
-}
-
-function routeAcknowledgementChunkText(chunk: StreamingChatCompletionChunk): string {
-  const delta = chunk.choices[0]?.delta
-  const content = delta?.content
-  return typeof content === 'string' ? content : ''
-}
-
-async function createRouteStartupAcknowledgement(input: {
-  messages: AgentLoopOptions['messages']
-  signal: AbortSignal
-}): Promise<{ content: string } | null> {
-  const request = latestUserRequestText(input.messages)
-  if (!request) return null
-
-  try {
-    const stream = await createStreamingCompletion({
-      model: DEFAULT_MODEL,
-      messages: [
-        {
-          role: 'system' as const,
-          content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts the user's task.
-Requirements:
-- One very brief paragraph, one or two short sentences, 12-38 words total.
-- Use plain words. Avoid fancy, inflated or formal phrasing.
-- Specific to the user's concrete target/topic/artifact and requested output.
-- Say what Agent will actually do for this task and the final answer/artifact shape.
-- Before writing, silently identify the real target, requested deliverable, likely work areas, and any important constraints. Output only the final paragraph.
-- Extract the real topic/artifact first. Do not echo command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", or "produce a concise report".
-- Direct first-person phrasing like "I'll..." is allowed when specific.
-- No markdown, no bullets, no generic filler, no mention of being an AI.`,
-        },
-        {
-          role: 'user' as const,
-          content: request,
-        },
-      ],
-      temperature: 0.4,
-      max_tokens: ROUTE_STARTUP_ACK_MAX_TOKENS,
-      reasoning: ROUTE_STARTUP_ACK_REASONING,
-      includeTemporalContext: false,
-      requestTimeoutMs: ROUTE_STARTUP_ACK_TIMEOUT_MS,
-      retryMaxAttempts: 0,
-      stream_options: { include_usage: false },
-      abortSignal: input.signal,
-    })
-
-    let content = ''
-    try {
-      for await (const chunk of stream) {
-        content += routeAcknowledgementChunkText(chunk)
-        const sanitized = sanitizeStartupAcknowledgement(content)
-        if (startupAcknowledgementIsUsable(sanitized)) {
-          stream.controller.abort()
-          return { content: sanitized }
-        }
-      }
-    } finally {
-      stream.cleanup?.()
-    }
-
-    const sanitized = sanitizeStartupAcknowledgement(content)
-    if (!startupAcknowledgementIsUsable(sanitized)) return null
-    return { content: sanitized }
-  } catch (error) {
-    console.warn('[AgentDiagnostics] Route startup acknowledgement failed', {
-      error: error instanceof Error ? error.message : String(error),
-    })
-    return null
-  }
 }
 
 function combineTokenUsage(usages: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; cost: number }>): {
@@ -1078,14 +980,6 @@ export async function POST(request: Request) {
     : Promise.resolve(null)
   const useExternalWorker = shouldUseExternalTaskWorker()
   const workerAvailabilityPromise = timedRoutePromise('workerReadyMs', taskWorkerUnavailableResponse())
-  const routeStartupAcknowledgementAbort = new AbortController()
-  request.signal.addEventListener('abort', () => routeStartupAcknowledgementAbort.abort(), { once: true })
-  const routeStartupAcknowledgementPromise = !directChat && useExternalWorker
-    ? timedRoutePromise('routeAckReadyMs', createRouteStartupAcknowledgement({
-        messages: rawMessages,
-        signal: routeStartupAcknowledgementAbort.signal,
-      }))
-    : Promise.resolve(null)
 
   let messages: AgentLoopOptions['messages']
   let access: Awaited<ReturnType<typeof assertTaskAccess>> | null
@@ -1118,14 +1012,12 @@ export async function POST(request: Request) {
 
   const startIsolatedTaskSandbox = startFreshSandbox || (!directChat && !isContextualTaskUpdate(messages))
   if (!useExternalWorker && access && !access.ok) {
-    routeStartupAcknowledgementAbort.abort()
     return access.response
   }
 
   if (!useExternalWorker) {
     const unavailableWorker = await workerAvailabilityPromise
     if (unavailableWorker) {
-      routeStartupAcknowledgementAbort.abort()
       const headers = new Headers(unavailableWorker.headers)
       headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
       headers.set('X-Agent-Route-Timings', routeTimingsHeaderValue(routeTimings))
@@ -1144,7 +1036,7 @@ export async function POST(request: Request) {
     startFreshSandbox,
     startIsolatedTaskSandbox,
     directChat,
-    skipStartupAcknowledgement: useExternalWorker,
+    skipStartupAcknowledgement: false,
     startupPlanExpected: false,
   }
 
@@ -1152,11 +1044,6 @@ export async function POST(request: Request) {
     const heartbeatEvent: SSEEvent = { type: 'heartbeat', timestamp: postStartedAt }
     const initialEvents: SSEEvent[] = [heartbeatEvent]
     let taskStartPromise: Promise<unknown> = Promise.resolve()
-    const deferredPrefaceEvents = [
-      routeStartupAcknowledgementPromise.then((ack) => (
-        ack?.content ? [{ type: 'text_delta', content: `${ack.content}\n\n` } as SSEEvent] : []
-      )),
-    ]
     const prefaceEvents = [heartbeatEvent].map((event, index) => ({
       ...event,
       seq: index + 1,
@@ -1181,7 +1068,6 @@ export async function POST(request: Request) {
     void accessPromise.then(async (accessResult) => {
       if (accessResult && !accessResult.ok) {
         taskAccessDenied = true
-        routeStartupAcknowledgementAbort.abort()
         await taskStartPromise.catch(() => undefined)
         await cancelTaskJob(userId, creditRunId).catch((error) => {
           console.warn('[AgentDiagnostics] Failed to cancel task after access denial', {
@@ -1236,7 +1122,6 @@ export async function POST(request: Request) {
 
     const stream = createPrefacedTaskJobEventStream({
       prefaceEvents,
-      deferredPrefaceEvents,
       taskStartPromise,
       userId,
       runId: creditRunId,

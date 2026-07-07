@@ -16,7 +16,8 @@ function splitIntoParagraphs(text: string | undefined): string[] {
 }
 
 export function BrowseView({ result, streaming }: BrowseViewProps) {
-  const paragraphs = splitIntoParagraphs(result.content)
+  const displayContent = result.content?.trim() || 'No extracted text was returned for this source.'
+  const paragraphs = splitIntoParagraphs(displayContent)
 
   let hostname = ''
   try { hostname = new URL(result.url).hostname.replace(/^www\./, '') } catch {}
@@ -60,7 +61,7 @@ export function BrowseView({ result, streaming }: BrowseViewProps) {
         {paragraphs.length > 1 ? (
           paragraphs.map((p, i) => <p key={i}>{p}</p>)
         ) : (
-          <p>{result.content}</p>
+          <p>{displayContent}</p>
         )}
       </div>
     </div>

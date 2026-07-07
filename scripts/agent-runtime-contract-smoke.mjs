@@ -48,6 +48,7 @@ async function assertSourceContracts() {
     prompts,
     globalsCss,
     browserView,
+    browseView,
     computerPanel,
     panelHeader,
     uiStore,
@@ -143,6 +144,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/prompts.ts'), 'utf8'),
     readFile(join(root, 'src/app/globals.css'), 'utf8'),
     readFile(join(root, 'src/components/computer/BrowserView.tsx'), 'utf8'),
+    readFile(join(root, 'src/components/computer/BrowseView.tsx'), 'utf8'),
     readFile(join(root, 'src/components/computer/ComputerPanel.tsx'), 'utf8'),
     readFile(join(root, 'src/components/computer/PanelHeader.tsx'), 'utf8'),
     readFile(join(root, 'src/store/ui.ts'), 'utf8'),
@@ -515,6 +517,10 @@ async function assertSourceContracts() {
   assert.match(computerPanel, /item\.streaming/, 'streaming file/search/terminal/browser items must count as live')
   assert.match(computerPanel, /aria-label="Jump to live activity"/, 'timeline footer must expose a jump-to-live affordance when viewing a stale item')
   assert.doesNotMatch(computerPanel, /isAtLatest && isBrowserActive/, 'live footer must not be limited to the latest browser item only')
+  assert.match(searchResults, /Search result is unavailable/, 'search panel must render a visible fallback for error-shaped search results instead of going blank')
+  assert.doesNotMatch(searchResults, /'error' in results[\s\S]{0,160}return null/, 'search panel must not hide provider-error payloads after an action appears')
+  assert.match(browseView, /No extracted text was returned for this source/, 'browse panel must render a fallback body when a page extraction returns no text')
+  assert.match(computerPanel, /focusedVisibleIndex[\s\S]*setComputerPanelActiveItemId\(null\)/, 'computer panel must clear stale focused item ids instead of staying on an empty activity view')
   assert.doesNotMatch(toolPipeline, new RegExp(['blocked', 'Domains', 'Has'].join('') + '|was previously marked\\s+blocked|hard\\s+navigation\\s+block'), 'browser navigation must not short-circuit based on site-level block heuristics')
   assert.match(toolPipeline, /recordWorkLedgerFailure/, 'tool failures must be recorded in the work ledger')
   assert.match(toolPipeline, /recordWorkLedgerVerification/, 'verified outputs must be recorded in the work ledger')
@@ -618,7 +624,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /max_tokens:\s*PLANNER_ACK_MAX_TOKENS/, 'acknowledgement calls should stay bounded while leaving room for a task-specific paragraph')
   assert.match(planManager, /sentences\.length < 1 \|\| sentences\.length > 2/, 'startup acknowledgements must be compact direct paragraphs, not long defaults')
   assert.match(prompts, /one or two short sentences and 12-38 words/, 'planner prompt must request a fast very brief direct acknowledgement paragraph')
-  assert.match(chatRoute, /words\.length < 10/, 'route startup acknowledgement must not be accepted after a clipped fragment')
+  assert.doesNotMatch(chatRoute, /words\.length < 10|sanitizeStartupAcknowledgement|startupAcknowledgementIsUsable/, 'route startup acknowledgement sanitizer must not return because worker-owned ack is the only startup ack path')
   assert.match(planManager, /PLANNER_CONTROL_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'planner JSON control calls must not spend medium reasoning budget before emitting structured plans')
   assert.match(planManager, /PLANNER_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'startup acknowledgement must use a fast task-understanding pass before visible text')
   assert.match(planManager, /reasoning:\s*PLANNER_ACK_REASONING/, 'planner startup acknowledgement must use the acknowledgement-specific reasoning setting')
@@ -640,7 +646,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /INVALID ACK TO REPLACE/, 'invalid generated acknowledgements must get one model-authored retry')
   assert.match(planManager, /response_format:\s*\{\s*type:\s*'json_object'\s*\}/, 'planner calls should request strict JSON when the provider supports it')
   assert.match(prompts, /Treat command wrappers such as "research about"/, 'planner prompt must extract the real topic instead of using command wrappers as the subject')
-  assert.match(chatRoute, /Do not echo command wrappers/, 'route startup acknowledgement must not echo the user command wrapper as the subject')
+  assert.doesNotMatch(chatRoute, /Do not echo command wrappers|Treat command wrappers such as "research about"/, 'route startup acknowledgement prompt must not return now that worker-owned ack is the only startup ack path')
   assert.match(planManager, /requestedTargetLabel/, 'short-plan expansion must be grounded in the user request')
   assert.doesNotMatch(planManager, /Research the core facts and definitions/, 'planner must not use the generic three-step research scaffold')
   assert.match(prompts, /Every tool call MUST include:[\s\S]*action_label:[\s\S]*plan_step_index:/, 'runtime prompt must require model-authored action pill labels and active step indexes')
@@ -662,6 +668,8 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /search result sets but no opened or extracted source pages yet/, 'research source balance must stop search-only chains before more searches')
   assert.match(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch[\s\S]*completedSearches >= 1 && openedSourceReads === 0/, 'hot-path source tools must mirror the search/source balance guard')
   assert.match(agentLoop, /fastSourceActionToolsForState[\s\S]*needsOpenedSourceBeforeMoreSearch[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)/, 'hot-path source turns must remove web_search when an opened source is required next')
+  assert.match(agentLoop, /hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'compact source-opening recovery must remove web_search while known result URLs are still unopened')
+  assert.match(agentLoop, /Do not call web_search again while known result URLs are still unopened/, 'source-opening recovery prompt must forbid another search when known candidate URLs need opening')
   assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*youtube_transcript/, 'source-opening turns must expose parallel extraction tools')
   assert.match(prompts, /After one or two good searches, read or extract the strongest result pages before searching more/, 'runtime prompt must frame web search as source discovery before extraction')
   assert.match(stepMessages, /Use web_search to discover candidates, then read\/extract the strongest source pages before searching more/, 'per-step research prompt must require source extraction after search discovery')
@@ -910,7 +918,7 @@ async function assertSourceContracts() {
   assert.match(taskText, /conduct\|do\|perform\|run\|carry\\s\+out/, 'task subject extraction must strip command lead-ins such as "conduct the deepest possible research on"')
   assert.match(taskText, /and\|then[\s\S]*produce\|create\|write\|draft\|deliver\|make\|prepare/, 'task subject extraction must stop before output instructions such as "and produce a report"')
   assert.doesNotMatch(planManager, /Map \$\{compact\} foundations and source angles|Gather authoritative \$\{compact\} sources|Write the sourced \$\{compact\} deep summary/, 'planner must not keep local canned fast research plan templates')
-  assert.match(chatRoute, /deferredPrefaceEvents\s*=\s*\[[\s\S]*routeStartupAcknowledgementPromise[\s\S]*\]/, 'chat route must stream the model-generated acknowledgement without holding the worker behind planner output')
+  assert.doesNotMatch(chatRoute, /createRouteStartupAcknowledgement|routeStartupAcknowledgementPromise|routeAckReadyMs|routeStartupAcknowledgementAbort/, 'external-worker startup acknowledgement must be owned by the worker, not a route-side best-effort request that can time out')
   assert.match(chatRoute, /const useExternalWorker = shouldUseExternalTaskWorker\(\)/, 'chat route must compute the external-worker branch once for startup ordering')
   assert.match(chatRoute, /if \(useExternalWorker\) \{[\s\S]*;\[, messages\] = await Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*\]\)[\s\S]*access = null[\s\S]*\} else \{[\s\S]*accessPromise/, 'external task streams must open after credits and messages, without waiting on task access or worker heartbeat')
   assert.doesNotMatch(chatRoute, /;\[, messages, access, unavailableWorker\] = await Promise\.all/, 'worker readiness must stay off the first-paint Promise.all')
@@ -925,10 +933,10 @@ async function assertSourceContracts() {
   assert.match(chatRoute, /if \(raced\.index === 0\)[\s\S]*if \(!ackPrefaceExpired\) emitEvents\(raced\.events\)[\s\S]*await input\.taskStartPromise/, 'chat route must emit acknowledgement first, then release persisted job events without waiting for plan generation')
   assert.match(chatTaskRunner, /waitForTaskJobStartupPlan\(creditRunId/, 'worker task runner must briefly wait for the route-owned plan before starting a duplicate planner')
   assert.match(agentLoop, /usePrecomputedPlan\(state,\s*this\.options\.startupPlan,\s*\{ emitPlan: false \}\)/, 'agent loop must use the persisted startup plan without emitting a duplicate plan event')
-  assert.match(chatRoute, /skipStartupAcknowledgement:\s*useExternalWorker/, 'external workers must skip their duplicate startup acknowledgement while the route-owned acknowledgement streams first')
+  assert.match(chatRoute, /skipStartupAcknowledgement:\s*false/, 'external workers must keep their own startup acknowledgement enabled so every task shows an ack before visible plan/action work')
   assert.doesNotMatch(chatRoute, /ROUTE_STARTUP_ACK_THOUGHTFUL_MIN_MS|waitForRouteStartupAcknowledgementWindow/, 'route startup acknowledgement must not wait behind a timed reveal gate')
-  assert.match(chatRoute, /ROUTE_STARTUP_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'route startup acknowledgement must use the fast task-understanding acknowledgement setting')
-  assert.match(chatTaskRunner, /skipStartupAcknowledgement:\s*skipStartupAcknowledgement === true/, 'worker must skip startup acknowledgement only when the route already persisted a model-generated one')
+  assert.doesNotMatch(chatRoute, /ROUTE_STARTUP_ACK_REASONING|ROUTE_STARTUP_ACK_MAX_TOKENS|ROUTE_STARTUP_ACK_TIMEOUT_MS/, 'route startup acknowledgement tuning must not return; route-side ack failures caused tasks with no visible ack')
+  assert.match(chatTaskRunner, /skipStartupAcknowledgement:\s*skipStartupAcknowledgement === true/, 'worker must skip startup acknowledgement only when a future payload explicitly requests it')
   const usePrecomputedPlanContract = planManager.match(/usePrecomputedPlan\([\s\S]*?\n  private settleAcknowledgementFirstVisible/)?.[0] || ''
   assert.doesNotMatch(usePrecomputedPlanContract, /this\.acknowledgementEmitted = true|settleAcknowledgementFirstVisible\(true\)|settleAcknowledgementDisplay\(true\)/, 'using a precomputed route plan must not pretend the visible acknowledgement already painted')
   assert.match(planManager, /if \(this\.acknowledgementEmitted && !ownsVisibleAcknowledgement\) return/, 'late acknowledgement streams must not duplicate the planner acknowledgement that already became visible')
@@ -1062,7 +1070,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /autoSourceExtractionBatchFromSearch[\s\S]*currentStepWebSearchLimit\(state\) !== null \|\| hasSingleWebSearchLimit\(state\)[\s\S]*MAX_PARALLEL_SOURCE_EXTRACTIONS/, 'successful research searches must auto-build a bounded source extraction batch without violating fixed-search limits')
   assert.match(toolPipeline, /executeAutoSourceExtractionBatch[\s\S]*Auto-extracting \$\{batch\.length\} source result\(s\) immediately after web_search[\s\S]*Promise\.all\(batch\.map/, 'post-search source extraction must run immediately in the tool pipeline instead of waiting for another model turn')
   assert.match(toolPipeline, /this\.autoGeneratedToolCallIds\.has\(tc\.id\)[\s\S]*narrationCadenceBlockReason/, 'auto-generated parallel source pills must be allowed to fill the current action cluster before narration gates the next turn')
-  assert.match(toolPipeline, /AUTO SOURCE EXTRACTION RESULTS[\s\S]*Use this extracted evidence now/, 'auto-extracted source results must be summarized for the next model turn without fake provider tool messages')
+  assert.match(toolPipeline, /AUTO SOURCE EXTRACTION RESULTS[\s\S]*Do not call web_search again just because the visible action was a search[\s\S]*All automatic source extractions were blocked[\s\S]*Do not repeat the same web_search/, 'auto-extracted source results must be summarized for the next model turn without causing follow-up search loops')
   assert.match(agentLoop, /state\.iterations <= 2 && lastStreamResult\.toolCalls\.size === 0[\s\S]*await planManager\.awaitPlan\(state\)/, 'early planner waits must not block already-streamed tool calls')
   assert.match(agentLoop, /fastSourceActionTurn[\s\S]*FAST_SOURCE_ACTION_MAX_TOKENS/, 'source-action turns must use a compact max-token budget instead of a full synthesis budget')
   assert.match(agentLoop, /fastActionTurn[\s\S]*reasoning:\s*\{\s*effort: 'minimal' as const,\s*exclude: true\s*\}/, 'between-tool action turns must suppress expensive hidden reasoning where the provider supports it')
@@ -1342,7 +1350,8 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /state\.suppressedResearchToolName = loopCheck\.rawTool \|\| loopCheck\.tool/, 'research loop detection must suppress the canonical internal tool name, including same-source read_document loops')
   assert.match(agentLoop, /state\.suppressedResearchToolName[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*activeTools = loopRecoveryToolForState\(state,\s*filtered\)/, 'compact research recovery must remove the repeated tool and keep the model on a different evidence route while the evidence floor is still incomplete')
   assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*state\.suppressedResearchToolName === 'read_document'[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)[\s\S]*allowed\.delete\(state\.suppressedResearchToolName\)/, 'opened-source narrowing must widen to alternate source routes when read_document is the looped tool')
-  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*read_document is temporarily suppressed[\s\S]*targeted web_search for a new authoritative URL/, 'opened-source recovery must not keep telling the model to avoid search when read_document is loop-suppressed')
+  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*read_document is temporarily suppressed[\s\S]*Do not call web_search again while known result URLs are still unopened/, 'opened-source recovery must avoid search loops while known result URLs are still unopened')
+  assert.match(toolPipeline, /state\.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT[\s\S]*state\.forceTextNextIteration = true/, 'auto-extracted source clusters must arm the next compact narration turn once they cross the visible-action cadence window')
   assert.match(toolPipeline, /tc\.name !== state\.suppressedResearchToolName[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = null/, 'successful different research tools must clear temporary loop suppression')
   assert.match(agentLoop, /reasoning:\s*\{\s*effort:\s*'minimal'/, 'forced narration turns must use minimal reasoning to avoid slow status updates')
   assert.match(agentLoop, /shouldIncludeTemporalContextForTurn/, 'agent turns should gate temporal context by task type and temporal wording')

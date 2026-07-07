@@ -123,6 +123,9 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   const [filterType, setFilterType] = useState<'all' | 'search' | 'browse' | 'terminal' | 'file' | 'image_search' | 'browser'>('all')
   const contentRef = useRef<HTMLDivElement>(null)
   const visibleItems = items.filter((item) => !isViewportResizePanelItem(item))
+  const focusedVisibleIndex = computerPanelActiveItemId
+    ? visibleItems.findIndex((item) => item.id === computerPanelActiveItemId)
+    : -1
 
   const filteredItems = filterType === 'all' ? visibleItems : visibleItems.filter((i) => i.type === filterType)
   const safeIndex = Math.min(activeIndex, Math.max(0, filteredItems.length - 1))
@@ -138,10 +141,9 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
     if (visibleItems.length === 0) return
 
     if (computerPanelActiveItemId) {
-      const focusedIndex = visibleItems.findIndex((item) => item.id === computerPanelActiveItemId)
-      if (focusedIndex >= 0) {
+      if (focusedVisibleIndex >= 0) {
         setFilterType('all')
-        setActiveIndex(focusedIndex)
+        setActiveIndex(focusedVisibleIndex)
         return
       }
     }
@@ -166,7 +168,21 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
         setActiveIndex(filtered.length - 1)
       }
     }
-  }, [visibleItems.length, lastItemFingerprint, computerPanelActiveItemId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [visibleItems.length, lastItemFingerprint, computerPanelActiveItemId, focusedVisibleIndex]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!computerPanelActiveItemId || focusedVisibleIndex >= 0) return
+    setComputerPanelActiveItemId(null)
+    if (filterType === 'all') {
+      setActiveIndex(Math.max(0, visibleItems.length - 1))
+    }
+  }, [
+    computerPanelActiveItemId,
+    filterType,
+    focusedVisibleIndex,
+    setComputerPanelActiveItemId,
+    visibleItems.length,
+  ])
 
   const isAtLatest = safeIndex === filteredItems.length - 1
   const liveIndex = filteredItems.reduce((latest, item, idx) => isLivePanelItem(item) ? idx : latest, -1)

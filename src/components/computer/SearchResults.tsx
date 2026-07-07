@@ -57,10 +57,17 @@ function SearchContextHeader({ title, count, streaming }: { title?: string; coun
 export function SearchResults({ results, streaming, title }: SearchResultsProps) {
   const items = Array.isArray(results) ? results : []
 
-  // Search execution issues are handled by the agent loop. Keep provider
-  // hiccups out of the Computer panel so the workspace does not look broken.
   if (!Array.isArray(results) && results && typeof results === 'object' && 'error' in results) {
-    return null
+    return (
+      <>
+        <SearchContextHeader title={title} count={0} streaming={streaming} />
+        <div className="flex items-center justify-center h-full py-16 px-6">
+          <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
+            Search result is unavailable
+          </p>
+        </div>
+      </>
+    )
   }
 
   if (items.length === 0 && streaming) {
