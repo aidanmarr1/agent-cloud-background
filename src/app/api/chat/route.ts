@@ -626,6 +626,7 @@ function fastStartupPlanSubject(request: string): string {
 
   const cleaned = cleanTaskSubjectText(request)
     .replace(/^(?:summari[sz]e|research|investigate|analy[sz]e|compare|explain|tell\s+me\s+about|look\s+up|find\s+out\s+about)\s+/i, '')
+    .replace(/^(?:one|1|a|an|single)\s+(?:current|latest|recent\s+)?fact\s+(?:about|on|regarding)\s+/i, '')
     .replace(/^(?:the\s+)?(?:current|latest|recent)\s+(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
     .replace(/^(?:the\s+)?(?:state\s+of|overview\s+of|landscape\s+of|applications?\s+of)\s+/i, '')
     .replace(/\s+/g, ' ')
