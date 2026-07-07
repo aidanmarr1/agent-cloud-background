@@ -69,7 +69,7 @@ function workerEnvs(workerId) {
     SERPER_API_KEY: requireEnv('SERPER_API_KEY', 'Serper web and image search'),
     SERPER_BASE_URL: envOrDefault('SERPER_BASE_URL', 'https://google.serper.dev'),
     OPENROUTER_MODEL: envOrDefault('OPENROUTER_MODEL', 'google/gemini-3.1-flash-lite'),
-    OPENROUTER_REASONING_EFFORT: envOrDefault('OPENROUTER_REASONING_EFFORT', 'high'),
+    OPENROUTER_REASONING_EFFORT: envOrDefault('OPENROUTER_REASONING_EFFORT', 'minimal'),
     OPENROUTER_REASONING_EXCLUDE: envOrDefault('OPENROUTER_REASONING_EXCLUDE', 'true'),
     AGENT_STORAGE_DRIVER: 'turso',
     AGENT_TASK_WORKER_MODE: 'external',

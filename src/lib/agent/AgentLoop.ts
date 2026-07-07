@@ -4925,13 +4925,13 @@ export class AgentLoop {
               ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
-          ? { reasoning: { effort: 'high' as const, exclude: true } }
+          ? { reasoning: { effort: 'minimal' as const, exclude: true } }
           : isFinalInlineAnswerTurn
-            ? { reasoning: { effort: 'high' as const, exclude: true } }
+            ? { reasoning: { effort: 'minimal' as const, exclude: true } }
             : isFinalSavedDeliverableTurn
-              ? { reasoning: { effort: 'high' as const, exclude: true } }
+              ? { reasoning: { effort: 'minimal' as const, exclude: true } }
               : fastActionTurn
-                ? { reasoning: { effort: 'high' as const, exclude: true } }
+                ? { reasoning: { effort: 'minimal' as const, exclude: true } }
             : {}
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS

@@ -44,7 +44,7 @@ services:
       - key: OPENROUTER_MODEL
         value: google/gemini-3.1-flash-lite
       - key: OPENROUTER_REASONING_EFFORT
-        value: high
+        value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER
@@ -136,7 +136,7 @@ services:
       - key: OPENROUTER_MODEL
         value: google/gemini-3.1-flash-lite
       - key: OPENROUTER_REASONING_EFFORT
-        value: high
+        value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER
