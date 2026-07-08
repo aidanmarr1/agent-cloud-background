@@ -956,7 +956,12 @@ export class PolicyEngine {
         requireSignal: false,
         maxSentences: 2,
         maxLength: 300,
-      }) || assistantContent.trim().slice(0, 240)
+      })
+      if (!narrationFinding) {
+        state.iterationsSinceLastContent++
+        state.forcedNarrationRepairAttempts++
+        return [rewriteInvalidForcedNarrationAction()]
+      }
       markPhaseNarrationEmitted(state)
       advanceStep(state, narrationFinding)
       state.iterationsSinceLastContent = 0

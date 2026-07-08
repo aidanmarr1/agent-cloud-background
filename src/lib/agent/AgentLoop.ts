@@ -446,6 +446,9 @@ function shouldPauseForPhaseEndNarrationBeforeAutoAdvance(
     maxLength: 300,
   })) {
     markPhaseNarrationEmitted(state)
+    state.phaseEndNarrationPending = false
+    state.forceTextNextIteration = false
+    state.forcedNarrationRepairAttempts = 0
     return false
   }
 
@@ -3329,8 +3332,22 @@ export class AgentLoop {
               }
               if (wasForcedNarrationRecovery || wasCompactCadenceNarration) {
                 if (state.phaseEndNarrationPending) {
-                  markPhaseNarrationEmitted(state)
-                  state.phaseEndNarrationPending = false
+                  state.forceTextNextIteration = true
+                  state.forcedNarrationRepairAttempts++
+                  state.consecutiveNullStreams = 0
+                  state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                  contextManager.push({
+                    role: 'system',
+                    content: 'PHASE-END NARRATION RETRY: the prior narration-only turn timed out before visible text. Do not call tools and do not advance silently. Write one 18-30 word completed-result progress paragraph from completed work, then put <next_step/> on its own final line.',
+                  } as ChatMessageParam)
+                  state.lastIterationEnd = Date.now()
+                  console.log('[AgentDiagnostics] Retrying required phase-end narration after model-start timeout', {
+                    step: state.currentStepIdx,
+                    totalSteps: state.currentPlanItems?.length || 0,
+                    forcedNarrationRepairAttempts: state.forcedNarrationRepairAttempts,
+                  })
+                  phase = 'STREAMING'
+                  break
                 }
                 state.forceTextNextIteration = false
                 state.forcedNarrationRepairAttempts = 0
@@ -3356,6 +3373,22 @@ export class AgentLoop {
                 state.currentStepIdx < state.currentPlanItems.length - 1
               ) {
                 if (compactResearchEvidenceComplete(state)) {
+                  if (pauseForPhaseEndNarrationBeforeAutoAdvance(
+                    state,
+                    contextManager,
+                    'The compact research phase has enough evidence',
+                    '',
+                  )) {
+                    state.consecutiveNullStreams = 0
+                    state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                    state.lastIterationEnd = Date.now()
+                    console.log('[AgentDiagnostics] Required narration before advancing compact research after model-start timeout', {
+                      step: state.currentStepIdx,
+                      totalSteps: state.currentPlanItems.length,
+                    })
+                    phase = 'STREAMING'
+                    break
+                  }
                   const stepBeforeAdvance = state.currentStepIdx
                   const advanceMsg = planManager.handleStepAdvance(state)
                   if (state.currentStepIdx > stepBeforeAdvance) {
@@ -3525,7 +3558,12 @@ export class AgentLoop {
               processedCompactNarrationTurn &&
               !state.phaseEndNarrationPending &&
               lastStreamResult.toolCalls.size === 0 &&
-              lastStreamResult.assistantContent.trim()
+              lastStreamResult.assistantContent.trim() &&
+              sanitizeNarrationText(lastStreamResult.assistantContent, {
+                requireSignal: false,
+                maxSentences: 2,
+                maxLength: 300,
+              })
             ) {
               markPhaseNarrationEmitted(state)
               state.forceTextNextIteration = false
@@ -3579,6 +3617,16 @@ export class AgentLoop {
               state.currentStepIdx < state.currentPlanItems.length - 1
             ) {
               if (compactResearchEvidenceComplete(state)) {
+                if (pauseForPhaseEndNarrationBeforeAutoAdvance(
+                  state,
+                  contextManager,
+                  'The compact research phase has enough evidence',
+                  lastStreamResult.assistantContent,
+                )) {
+                  state.lastIterationEnd = Date.now()
+                  phase = 'STREAMING'
+                  break
+                }
                 const stepBeforeAdvance = state.currentStepIdx
                 if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
                   contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
@@ -4682,7 +4730,7 @@ export class AgentLoop {
         ...requestMessages,
         {
           role: 'system',
-          content: 'PHASE EVIDENCE READY: write one concise progress paragraph with the main findings from this phase, then emit <next_step/>. Do not call more tools for this phase. Do not describe failed source-opening attempts unless they are essential to the user-facing answer.',
+          content: 'PHASE EVIDENCE READY: write one visible 18-30 word completed-result progress paragraph first, then put <next_step/> on its own final line. Do not call tools. Do not output only <next_step/>. Do not write future-only intent like "Next, I will..."; the paragraph must report a concrete finding from completed work.',
         } as ChatMessageParam,
       ]
     }
