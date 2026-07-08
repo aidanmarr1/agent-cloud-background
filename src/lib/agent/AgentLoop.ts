@@ -226,6 +226,13 @@ function isAssistantRequestTimeout(error: unknown): boolean {
     /\b(?:timed out|timeout|ETIMEDOUT)\b/i.test(message)
 }
 
+function isTransientAssistantStreamError(error: unknown): boolean {
+  if ((error as { name?: string })?.name === 'AbortError') return false
+  if (error instanceof TypeError) return true
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /\b(?:fetch failed|network|socket|terminated|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|temporarily unavailable)\b/i.test(message)
+}
+
 function supportsProviderRequiredToolChoice(): boolean {
   // OpenRouter model routes vary a lot in how they handle provider-forced
   // tool_choice. Gemini Flash Lite currently times out repeatedly on required
@@ -3190,14 +3197,21 @@ export class AgentLoop {
     const outputVerifier = new OutputVerifier()
     const recordPlannerUsage = async (usage: CreditTokenUsage, chargeId: string) => {
       if (!this.options.userId || !this.options.conversationId || !this.options.creditRunId) return
-      const recorded = await chargeServerTokenUsage(
-        this.options.userId,
-        this.options.conversationId,
-        this.options.creditRunId,
-        usage,
-        chargeId,
-      )
-      if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+      try {
+        const recorded = await chargeServerTokenUsage(
+          this.options.userId,
+          this.options.conversationId,
+          this.options.creditRunId,
+          usage,
+          chargeId,
+        )
+        if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+      } catch (error) {
+        log.warn('Failed to record planner token usage; continuing task', {
+          error: error instanceof Error ? error.message : String(error),
+          chargeId,
+        })
+      }
     }
     const assertPlannerCreditRunway = async () => this.assertServerCreditRunwayCached()
     const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, effectiveCustomInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
@@ -3585,14 +3599,21 @@ export class AgentLoop {
             cumulativeCost += u.cost
             console.log(`[COST] iter=${state.iterations} in=${u.promptTokens} out=${u.completionTokens} cost=$${u.cost.toFixed(6)} totalCost=$${cumulativeCost.toFixed(6)}`)
             if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
-              const recorded = await chargeServerTokenUsage(
-                this.options.userId,
-                this.options.conversationId,
-                this.options.creditRunId,
-                u,
-                `tokens:${state.iterations}`,
-              )
-              if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+              try {
+                const recorded = await chargeServerTokenUsage(
+                  this.options.userId,
+                  this.options.conversationId,
+                  this.options.creditRunId,
+                  u,
+                  `tokens:${state.iterations}`,
+                )
+                if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+              } catch (error) {
+                log.warn('Failed to record iteration token usage; continuing task', {
+                  error: error instanceof Error ? error.message : String(error),
+                  iteration: state.iterations,
+                })
+              }
             }
 
             updatePhase(state)
@@ -5562,6 +5583,26 @@ export class AgentLoop {
       }
 
       this.emitter.error('The task took too long to respond. Please try again.')
+      return 'ERROR'
+    }
+
+    if (isTransientAssistantStreamError(error)) {
+      state.consecutiveNullStreams = (state.consecutiveNullStreams || 0) + 1
+      state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+      state.lastIterationEnd = Date.now()
+      if (state.consecutiveNullStreams <= 2) {
+        const narrationRecovery =
+          state.forceTextNextIteration ||
+          (!state.forceTextNextIteration && shouldUseNaturalCadenceNarration(state, this.options.messages))
+        contextManager.push({
+          role: 'system',
+          content: narrationRecovery
+            ? 'MODEL STREAM NETWORK RECOVERY: the previous compact narration stream disconnected before completion. Retry one concise completed-result progress paragraph now. Do not call tools, do not restart the phase, and do not ask permission.'
+            : 'MODEL STREAM NETWORK RECOVERY: the previous model stream disconnected before completion. Retry the active phase immediately with one concrete next action. Do not restart, summarize, apologize, or ask permission.',
+        } as ChatMessageParam)
+        return 'STREAMING'
+      }
+      this.emitter.error('Assistant stream lost connection repeatedly. Please retry the task.')
       return 'ERROR'
     }
 
