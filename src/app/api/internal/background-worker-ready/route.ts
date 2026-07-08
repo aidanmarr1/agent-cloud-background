@@ -117,7 +117,7 @@ export async function GET(request: NextRequest) {
   checks.e2bWarmPoolDisabled = !envBoolExact('AGENT_E2B_WARM_POOL_ENABLED', false)
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', false)
-  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
+  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', false)
   checks.workerDeploymentVersionRequired = requireDeploymentVersion
   checks.workerDeploymentVersionConfigured = Boolean(expectedDeploymentVersion)
   checks.hostedWorkerRequired = requireHostedWorker

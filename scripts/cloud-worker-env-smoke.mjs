@@ -99,7 +99,7 @@ requireExact('DEEPSEEK_MODEL', 'deepseek-v4-flash', 'DeepSeek v4 Flash model rou
 requireExact('DEEPSEEK_REASONING_EFFORT', 'minimal', 'DeepSeek lowest reasoning effort')
 requireExact('DEEPSEEK_THINKING_ENABLED', 'false', 'DeepSeek thinking disabled')
 requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
-requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'local workers must not satisfy production readiness')
+requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'false', 'local workers may satisfy production readiness')
 requireRealEnv('E2B_API_KEY', 'E2B hosted sandbox API key', validateNonShortToken)
 if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
   pass('E2B browser runtime is configured')

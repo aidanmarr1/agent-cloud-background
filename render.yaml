@@ -68,7 +68,7 @@ services:
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
         value: "true"
       - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
-        value: "true"
+        value: "false"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
       - key: E2B_API_KEY
@@ -164,7 +164,7 @@ services:
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
         value: "true"
       - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
-        value: "true"
+        value: "false"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
       - key: E2B_API_KEY

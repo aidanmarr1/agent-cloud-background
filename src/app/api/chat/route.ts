@@ -208,7 +208,7 @@ function requiresTaskWorkerHeartbeat(): boolean {
 function requiresHostedTaskWorkerHeartbeat(): boolean {
   const raw = process.env.AGENT_REQUIRE_HOSTED_TASK_WORKER?.trim().toLowerCase()
   if (raw) return raw !== 'false' && raw !== '0'
-  return process.env.VERCEL === '1'
+  return false
 }
 
 function envBoolEnabled(name: string, fallback = false): boolean {

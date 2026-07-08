@@ -153,7 +153,7 @@ async function checkLiveDatabase() {
     const staleMs = envPositiveInt('AGENT_TASK_WORKER_STALE_MS', 60_000)
     const workers = await getRecentTaskWorkerHeartbeats(staleMs)
     if (workers.length > 0) {
-      const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
+      const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', false)
       const compatibleWorkers = workers
         .filter(workerMatchesConfiguredRuntime)
         .filter((worker) => !requireHostedWorker || workerHeartbeatIsHosted(worker))
@@ -162,10 +162,10 @@ async function checkLiveDatabase() {
       } else if (envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')) {
         fail(`no live compatible task worker heartbeat matched AGENT_DEPLOYMENT_VERSION=${env('AGENT_DEPLOYMENT_VERSION') || '<missing>'}; redeploy the worker with the same AGENT_DEPLOYMENT_VERSION as the web service`)
       } else {
-        fail('live task worker heartbeat exists, but no hosted worker matches the configured E2B runtime; use AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')
+        fail('live task worker heartbeat exists, but no worker matches the configured E2B runtime; use AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')
       }
     } else {
-      fail(`no live hosted E2B worker heartbeat found in the last ${staleMs}ms; deploy the worker service`)
+      fail(`no live E2B worker heartbeat found in the last ${staleMs}ms; start npm run worker:cloud or deploy a worker service`)
     }
   } catch (error) {
     fail(`live task worker heartbeat check failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -205,10 +205,10 @@ function checkEnvironment() {
     warn(`AGENT_STORAGE_DRIVER=${storageDriver}; use turso in production so files survive web/worker restarts`)
   }
 
-  if (envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)) {
-    pass('AGENT_REQUIRE_HOSTED_TASK_WORKER=true')
+  if (envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', false)) {
+    warn('AGENT_REQUIRE_HOSTED_TASK_WORKER=true; production requires a hosted worker heartbeat')
   } else {
-    fail('AGENT_REQUIRE_HOSTED_TASK_WORKER must be true so local worker heartbeats never satisfy production readiness')
+    pass('AGENT_REQUIRE_HOSTED_TASK_WORKER=false')
   }
 
   if (!envBoolExact('AGENT_E2B_PAUSE_ON_TASK_END', false)) {

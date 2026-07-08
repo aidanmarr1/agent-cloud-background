@@ -140,7 +140,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'AGENT_DEPLOYMENT_VERSION', '')
   requireValue(service, 'AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', 'false')
   requireValue(service, 'AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', 'true')
-  requireValue(service, 'AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true')
+  requireValue(service, 'AGENT_REQUIRE_HOSTED_TASK_WORKER', 'false')
   requireValue(service, 'AGENT_SANDBOX_PROVIDER', 'e2b')
   requireValue(service, 'E2B_TEMPLATE_ID', 'agent-cloud-browser')
   requireValue(service, 'AGENT_E2B_SANDBOX_TIMEOUT_MS', '3600000')

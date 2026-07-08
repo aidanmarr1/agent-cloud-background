@@ -48,7 +48,7 @@ const CLOUD_ENV = [
   { name: 'AGENT_DEPLOYMENT_VERSION', source: 'local', required: false },
   { name: 'AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', value: process.env.AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION || 'false' },
   { name: 'AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', value: 'true' },
-  { name: 'AGENT_REQUIRE_HOSTED_TASK_WORKER', value: 'true' },
+  { name: 'AGENT_REQUIRE_HOSTED_TASK_WORKER', value: 'false' },
   { name: 'AGENT_SANDBOX_PROVIDER', value: 'e2b' },
   { name: 'E2B_API_KEY', source: 'local', required: true },
   { name: 'E2B_TEMPLATE_ID', value: process.env.E2B_TEMPLATE_ID || 'agent-cloud-browser' },

@@ -59,7 +59,7 @@ function validateWorkerRuntimeConfig(): void {
     throw new Error('Task worker requires AGENT_TASK_WORKER_MODE=external.')
   }
 
-  if (envBoolDefault('AGENT_REQUIRE_HOSTED_TASK_WORKER', true) && isLikelyLocalWorkerHostname(hostname())) {
+  if (envBoolDefault('AGENT_REQUIRE_HOSTED_TASK_WORKER', false) && isLikelyLocalWorkerHostname(hostname())) {
     throw new Error('Refusing to start a local task worker while AGENT_REQUIRE_HOSTED_TASK_WORKER is true.')
   }
 

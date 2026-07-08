@@ -203,7 +203,7 @@ export async function GET(request: NextRequest) {
   }
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')
-  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
+  const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', false)
   const cloudCapableWorkers = workers.filter((worker) =>
     isCloudCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
   const e2bCapableWorkers = workers.filter((worker) =>
