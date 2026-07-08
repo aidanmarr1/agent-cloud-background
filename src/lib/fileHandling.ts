@@ -79,29 +79,22 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
 }
 
 const DOCUMENT_MIME_TYPES = new Set([
-  'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/rtf',
-  'text/rtf',
 ])
 
-const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'pptx', 'xlsx', 'rtf'])
+const DOCUMENT_EXTENSIONS = new Set(['docx', 'pptx'])
 
 const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
-  pdf: 'application/pdf',
   docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  rtf: 'application/rtf',
 }
 
 export const TEXT_ACCEPT = '.txt,.md,.markdown,.skill,.csv,.json,.xml,.yaml,.yml,.html,.css,.js,.mjs,.cjs,.ts,.jsx,.tsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.cpp,.cc,.h,.hpp,.sh,.sql,.toml,.ini,.cfg,.env,.log,.diff,.patch'
 export const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif'
-export const DOCUMENT_ACCEPT = 'application/pdf,application/rtf,text/rtf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,.pdf,.docx,.pptx,.xlsx,.rtf'
+export const DOCUMENT_ACCEPT = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,.docx,.pptx'
 export const ARCHIVE_ACCEPT = '.zip,application/zip,application/x-zip-compressed'
-export const FILE_ACCEPT = `${TEXT_ACCEPT},${IMAGE_ACCEPT},${DOCUMENT_ACCEPT},${ARCHIVE_ACCEPT}`
+export const FILE_ACCEPT = `${TEXT_ACCEPT},${DOCUMENT_ACCEPT}`
 export const SKILL_IMPORT_ACCEPT = '.skill,.md,.markdown,.txt,.zip,application/zip,application/x-zip-compressed'
 
 interface TextEntry {
@@ -162,6 +155,15 @@ export function getDocumentMimeType(file: File): string | null {
 
 export function isDocumentFile(file: File): boolean {
   return getDocumentMimeType(file) !== null || DOCUMENT_EXTENSIONS.has(getFileExtension(file.name))
+}
+
+export function isAllowedUserUpload(fileName: string, mimeType: string): boolean {
+  const normalizedType = mimeType.split(';')[0].trim().toLowerCase()
+  const ext = getFileExtension(fileName)
+  return TEXT_MIME_TYPES.has(normalizedType) ||
+    TEXT_EXTENSIONS.has(ext) ||
+    DOCUMENT_MIME_TYPES.has(normalizedType) ||
+    DOCUMENT_EXTENSIONS.has(ext)
 }
 
 export function getImageMimeType(file: File): string | null {
@@ -676,44 +678,8 @@ export async function processFilesForAttachments(files: FileList | File[]): Prom
 
   for (const file of list) {
     try {
-      const imageType = getImageMimeType(file)
-
-      if (imageType) {
-        if (file.size > MAX_IMAGE_SIZE) {
-          errors.push(`Image "${file.name}" too large (max ${formatBytes(MAX_IMAGE_SIZE)})`)
-          continue
-        }
-        const image = await createImageAttachmentContent(file, imageType)
-        if (image.compressed) {
-          warnings.push(`Image "${file.name}" was resized for upload`)
-        }
-        attachments.push({
-          name: file.name,
-          type: image.type,
-          size: file.size,
-          content: image.content,
-        })
-      } else if (isArchiveFile(file)) {
-        if (file.size > MAX_FILE_SIZE) {
-          errors.push(`Archive "${file.name}" too large (max ${formatBytes(MAX_FILE_SIZE)})`)
-          continue
-        }
-        const extraction = await readZipTextEntries(file)
-        if (extraction.entries.length === 0) {
-          errors.push(`No readable text files found in "${file.name}"`)
-          continue
-        }
-        const formatted = formatTextEntries(file.name, extraction.entries, extraction.warnings, MAX_ARCHIVE_TOTAL_CHARS)
-        warnings.push(...extraction.warnings)
-        if (extraction.truncated || formatted.truncated) {
-          warnings.push(`Archive "${file.name}" was truncated`)
-        }
-        attachments.push({
-          name: `${file.name} (extracted)`,
-          type: ARCHIVE_ATTACHMENT_TYPE,
-          size: file.size,
-          content: formatted.content,
-        })
+      if (!isAllowedUserUpload(file.name, file.type || 'application/octet-stream')) {
+        errors.push(`Unsupported upload "${file.name}". Use .docx, .pptx, or text files only.`)
       } else if (isTextFile(file)) {
         if (file.size > MAX_FILE_SIZE) {
           errors.push(`File "${file.name}" too large (max ${formatBytes(MAX_FILE_SIZE)})`)

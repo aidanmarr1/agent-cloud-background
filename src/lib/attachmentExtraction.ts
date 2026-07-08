@@ -69,15 +69,6 @@ function extractTextFromXml(xml: string): string {
     .trim()
 }
 
-function stripRtf(text: string): string {
-  return text
-    .replace(/\\'[0-9a-f]{2}/gi, ' ')
-    .replace(/\\[a-z]+\d* ?/gi, ' ')
-    .replace(/[{}]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
 function findEndOfCentralDirectory(buffer: Buffer): number {
   const minOffset = Math.max(0, buffer.length - 66_000)
   for (let offset = buffer.length - 22; offset >= minOffset; offset -= 1) {
@@ -150,12 +141,6 @@ function readZipTextEntries(buffer: Buffer, includePath: (path: string) => boole
   return entries
 }
 
-async function parsePdf(buffer: Buffer): Promise<string> {
-  const pdfParse = runtimeRequire<(buf: Buffer) => Promise<{ text: string }>>('pdf-parse')
-  const data = await pdfParse(buffer)
-  return data.text
-}
-
 async function parseDocx(buffer: Buffer): Promise<string> {
   const mammoth = runtimeRequire<{
     extractRawText(input: { buffer: Buffer }): Promise<{ value: string }>
@@ -173,17 +158,6 @@ function parsePptx(buffer: Buffer): string {
     .join('\n\n')
 }
 
-function parseXlsx(buffer: Buffer): string {
-  const entries = readZipTextEntries(buffer, (path) =>
-    /^xl\/sharedStrings\.xml$/i.test(path) || /^xl\/worksheets\/sheet\d+\.xml$/i.test(path)
-  )
-  return entries
-    .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }))
-    .map((entry) => `${entry.path}\n${extractTextFromXml(entry.text)}`.trim())
-    .filter(Boolean)
-    .join('\n\n')
-}
-
 export async function extractUploadedAttachmentText(input: {
   fileName: string
   mimeType: string
@@ -193,20 +167,11 @@ export async function extractUploadedAttachmentText(input: {
   const mimeType = input.mimeType.toLowerCase()
 
   try {
-    if (mimeType === 'application/pdf' || ext === 'pdf') {
-      return trimExtractedText(await parsePdf(input.body))
-    }
     if (mimeType.includes('wordprocessingml') || ext === 'docx') {
       return trimExtractedText(await parseDocx(input.body))
     }
     if (mimeType.includes('presentationml') || ext === 'pptx') {
       return trimExtractedText(parsePptx(input.body))
-    }
-    if (mimeType.includes('spreadsheetml') || ext === 'xlsx') {
-      return trimExtractedText(parseXlsx(input.body))
-    }
-    if (mimeType === 'application/rtf' || mimeType === 'text/rtf' || ext === 'rtf') {
-      return trimExtractedText(stripRtf(input.body.toString('utf8')))
     }
   } catch {
     return null

@@ -8,12 +8,7 @@ function safeDownloadName(name: string): string {
   return name.replace(/[\r\n"]/g, '_')
 }
 
-const INLINE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-])
+const INLINE_MIME_TYPES = new Set<string>()
 const SAFE_ATTACHMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 function safeMimeType(value: string): string {

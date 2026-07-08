@@ -1,6 +1,6 @@
 'use client'
 
-import { Archive, BookOpen, CheckCircle2, FileCode, FileText, FolderOpen, Image as ImageLucide, X } from '@/components/icons'
+import { Archive, BookOpen, CheckCircle2, FileCode, FileText, FolderOpen, X } from '@/components/icons'
 import type { FileAttachment } from '@/types'
 import { ARCHIVE_ATTACHMENT_TYPE, formatBytes, SKILL_ATTACHMENT_TYPE } from '@/lib/fileHandling'
 
@@ -26,17 +26,12 @@ function getAttachmentKind(attachment: FileAttachment): string {
   if (attachment.type === SKILL_ATTACHMENT_TYPE) return 'Skill'
   if (isFolderAttachment(attachment)) return 'Folder'
   if (attachment.type === ARCHIVE_ATTACHMENT_TYPE) return 'Archive'
-  if (attachment.type.startsWith('image/')) return 'Image'
   if (CODE_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(attachment.name))) return 'Code'
   return 'File'
 }
 
 function AttachmentIcon({ attachment }: { attachment: FileAttachment }) {
   const className = 'text-text-muted'
-  if (attachment.type.startsWith('image/') && attachment.content) {
-    return <img src={attachment.content} className="h-full w-full object-cover" alt="" />
-  }
-  if (attachment.type.startsWith('image/')) return <ImageLucide size={15} className={className} strokeWidth={2.2} />
   if (attachment.type === SKILL_ATTACHMENT_TYPE) return <BookOpen size={15} className={className} strokeWidth={2.2} />
   if (isFolderAttachment(attachment)) return <FolderOpen size={15} className={className} strokeWidth={2.2} />
   if (attachment.type === ARCHIVE_ATTACHMENT_TYPE) return <Archive size={15} className={className} strokeWidth={2.2} />

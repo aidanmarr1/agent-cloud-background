@@ -86,8 +86,8 @@ export async function uploadAttachmentsToServer(
       size: Number.isFinite(stored.size) ? stored.size : current.size,
       url: stored.url,
       persisted: true,
-      content: extractedContent || (current.type.startsWith('image/') ? current.content : undefined),
-      contentEncoding: extractedContent ? 'text' : current.type.startsWith('image/') ? current.contentEncoding : undefined,
+      content: extractedContent,
+      contentEncoding: extractedContent ? 'text' : undefined,
     }
   })
 

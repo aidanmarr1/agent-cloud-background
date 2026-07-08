@@ -1976,7 +1976,7 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
     }
 
     if (imageAttachments.length > 0) {
-      textContent += '\n\nUploaded image bytes are stored with the conversation, but the active DeepSeek API route does not accept direct image input. Use any extracted text or metadata already loaded; if the user asks for visual interpretation of the image itself, state that direct image inspection is unavailable on this route.'
+      textContent += '\n\nUploaded image attachments are not supported on this route. Ask the user for a text description or a supported document/text file if visual interpretation is required.'
     }
 
     const metadataOnlyAttachments = m.attachments.filter(a =>

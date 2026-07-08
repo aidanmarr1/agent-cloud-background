@@ -243,14 +243,18 @@ export default function ChatPage() {
     }
   }, [hydrated, id, conversation, resumeActiveTask, sendMessage, revealServerSummaryForReplay])
 
-  // Get computer panel data from the last assistant message
-  const lastAssistantMsg = conversation?.messages
-    .slice()
+  // Get computer panel data from the newest assistant message that still has
+  // activity. During streaming, internal recovery can briefly remove the latest
+  // placeholder; keep the panel mounted on the last real activity instead of
+  // closing and reopening around every tool event.
+  const assistantMessages = conversation?.messages.filter((m) => m.role === 'assistant') || []
+  const lastAssistantMsg = assistantMessages[assistantMessages.length - 1]
+  const panelAssistantMsg = [...assistantMessages]
     .reverse()
-    .find((m) => m.role === 'assistant')
-  const computerPanelData = lastAssistantMsg?.computerPanelData || []
+    .find((m) => (m.computerPanelData?.length || 0) > 0) || lastAssistantMsg
+  const computerPanelData = panelAssistantMsg?.computerPanelData || []
   const hasComputerPanelContent = computerPanelData.length > 0 || webIdeMode
-  const showComputerPanel = computerPanelOpen && hasComputerPanelContent
+  const showComputerPanel = computerPanelOpen && (hasComputerPanelContent || isStreaming)
 
   // Auto-open computer panel when first tool call data arrives during streaming
   const prevPanelDataLen = useRef(0)
@@ -320,7 +324,7 @@ export default function ChatPage() {
             </span>
           </div>
           <div className="flex min-w-0 items-center gap-0.5 flex-shrink-0 sm:gap-1">
-            {hasComputerPanelContent && (
+            {(hasComputerPanelContent || showComputerPanel) && (
               <button
                 onClick={() => toggleComputerPanel()}
                 aria-label={showComputerPanel ? 'Hide computer panel' : 'Show computer panel'}

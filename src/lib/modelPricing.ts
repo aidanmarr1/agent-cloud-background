@@ -29,7 +29,7 @@ export const OPENROUTER_MODEL_PRICING = {
   source: 'OpenRouter',
 } as const
 
-export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING
+export const DEFAULT_MODEL_PRICING = DEEPSEEK_MODEL_PRICING
 
 export type ModelPricing = typeof DEEPSEEK_MODEL_PRICING | typeof OPENROUTER_MODEL_PRICING
 

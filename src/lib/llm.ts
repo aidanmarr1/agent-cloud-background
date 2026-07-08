@@ -66,10 +66,10 @@ function reasoningEnvForProvider(provider: AssistantProvider): string | undefine
 
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
   reasoningEnvForProvider(ASSISTANT_PROVIDER),
-  ASSISTANT_PROVIDER === 'deepseek' ? 'high' : 'minimal',
+  'minimal',
 )
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
-const DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv(process.env.DEEPSEEK_THINKING_ENABLED, true)
+const DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv(process.env.DEEPSEEK_THINKING_ENABLED, false)
 
 export type ChatMessageParam = {
   role: string

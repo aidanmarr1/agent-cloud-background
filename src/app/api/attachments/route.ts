@@ -6,6 +6,7 @@ import {
   toPublicAttachment,
 } from '@/lib/attachments'
 import { extractUploadedAttachmentText } from '@/lib/attachmentExtraction'
+import { isAllowedUserUpload } from '@/lib/fileHandling'
 import { assertSameOriginRequest } from '@/lib/api'
 import { assertTaskAccess } from '@/lib/taskAccess'
 
@@ -83,6 +84,9 @@ export async function POST(request: Request) {
   for (const file of files) {
     if (file.size > MAX_ATTACHMENT_BYTES) {
       return jsonResponse({ error: `"${file.name}" is larger than 25 MB.` }, { status: 413 })
+    }
+    if (!isAllowedUserUpload(file.name, file.type || 'application/octet-stream')) {
+      return jsonResponse({ error: 'Only .docx, .pptx, and text files can be uploaded. Images are not supported.' }, { status: 415 })
     }
     const body = Buffer.from(await file.arrayBuffer())
     const record = await createStoredAttachment({

@@ -358,17 +358,13 @@ export async function readAttachmentBody(record: AttachmentRecord): Promise<Buff
 }
 
 function shouldHydrateInline(record: AttachmentRecord): boolean {
-  return record.kind === 'image' ||
-    record.kind === 'text' ||
+  return record.kind === 'text' ||
     record.kind === 'archive' ||
     record.kind === 'skill' ||
     isExtractableDocument(record.fileName, record.mimeType)
 }
 
 async function bodyToInlineContent(record: AttachmentRecord, body: Buffer): Promise<{ content: string; contentEncoding?: 'text' } | null> {
-  if (record.kind === 'image') {
-    return { content: `data:${record.mimeType};base64,${body.toString('base64')}` }
-  }
   if (record.kind === 'text' || record.kind === 'archive' || record.kind === 'skill') {
     return { content: body.toString('utf8'), contentEncoding: 'text' }
   }

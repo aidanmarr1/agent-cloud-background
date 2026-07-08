@@ -78,6 +78,8 @@ async function assertSourceContracts() {
     tools,
     toolRegistry,
     attachments,
+    attachmentsRoute,
+    fileHandling,
     agentToolRegistry,
     activityDescriber,
     streamProcessor,
@@ -176,6 +178,8 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/tools.ts'), 'utf8'),
     readFile(join(root, 'src/lib/toolRegistry.ts'), 'utf8'),
     readFile(join(root, 'src/lib/attachments.ts'), 'utf8'),
+    readFile(join(root, 'src/app/api/attachments/route.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/fileHandling.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolRegistry.ts'), 'utf8'),
     readFile(join(root, 'src/lib/stream/ActivityDescriber.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/StreamProcessor.ts'), 'utf8'),
@@ -516,9 +520,10 @@ async function assertSourceContracts() {
   assert.doesNotMatch(creditPillSource, /Monthly balance|Paid credits|Available this month|Renews on/, 'compact credit pill dropdown must not show the monthly balance card')
   assert.doesNotMatch(creditPillSource, />\s*Monthly\s*</, 'compact credit pill dropdown must not show the inactive Monthly badge')
   assert.doesNotMatch(creditPillSource, /Live task/, 'compact credit pill dropdown must not show a live-task badge while tasks run')
+  assert.match(chatPage, /panelAssistantMsg = \[\.\.\.assistantMessages\][\s\S]*?find\(\(m\) => \(m\.computerPanelData\?\.length \|\| 0\) > 0\) \|\| lastAssistantMsg/, 'chat layout must keep the newest non-empty computer panel history instead of flickering closed on empty latest messages')
   assert.match(chatPage, /hasComputerPanelContent = computerPanelData\.length > 0 \|\| webIdeMode/, 'chat layout must know when computer content actually exists')
-  assert.match(chatPage, /showComputerPanel = computerPanelOpen && hasComputerPanelContent/, 'chat layout must not reserve computer-panel space until content is ready')
-  assert.match(chatPage, /\{showComputerPanel && \([\s\S]*?<ComputerPanel items=\{computerPanelData\}/, 'computer panel should render only when the open panel has real content')
+  assert.match(chatPage, /showComputerPanel = computerPanelOpen && \(hasComputerPanelContent \|\| isStreaming\)/, 'chat layout must keep the computer panel mounted during streaming tool transitions')
+  assert.match(chatPage, /\{showComputerPanel && \([\s\S]*?<ComputerPanel items=\{computerPanelData\}/, 'computer panel should render while open during live tool activity')
   assert.match(computerPanel, /function isLivePanelItem/, 'computer panel must classify live activity generically, not only browser frames')
   assert.match(computerPanel, /item\.streaming/, 'streaming file/search/terminal/browser items must count as live')
   assert.match(computerPanel, /aria-label="Jump to live activity"/, 'timeline footer must expose a jump-to-live affordance when viewing a stale item')
@@ -586,14 +591,17 @@ async function assertSourceContracts() {
   assert.match(streamCleaners, /JSON_CHANNEL_MARKER_PATTERN/, 'stream cleaners must strip provider JSON-channel markers')
   assert.match(eventDispatcher, /purpose:\s*'deliverable'/, 'recovered artifacts must carry deliverable purpose')
   assert.match(artifacts, /ArtifactPurpose = 'deliverable' \| 'support' \| 'internal'/, 'artifacts must have purpose metadata')
-  assert.match(agentLoop, /ASSISTANT_SUPPORTS_IMAGE_INPUT[\s\S]*image_url:\s*\{ url: att\.content!, detail: 'high' \}/, 'image attachments must reach the model as image_url parts only on multimodal routes')
+  assert.doesNotMatch(chatInput, /IMAGE_ACCEPT|imageInputRef|Add images|Screenshots, photos/, 'chat input must not expose image upload entry points')
+  assert.match(chatInput, /DOCX, PPTX, and readable text files/, 'chat input must describe the supported attachment types')
+  assert.match(fileHandling, /FILE_ACCEPT = `\$\{TEXT_ACCEPT\},\$\{DOCUMENT_ACCEPT\}`/, 'context uploads must accept only text and supported documents')
+  assert.match(fileHandling, /Unsupported upload[\s\S]*Use \.docx, \.pptx, or text files only/, 'client-side attachment processing must reject image and binary uploads')
+  assert.match(attachmentsRoute, /isAllowedUserUpload[\s\S]*Images are not supported/, 'server attachment uploads must reject unsupported image/binary uploads')
+  assert.doesNotMatch(attachments, /data:\$\{record\.mimeType\};base64/, 'stored image attachments must not be rehydrated as inline renderable data URLs')
   assert.match(llm, /textOnlyMessages[\s\S]*Image payload omitted/, 'text-only model routes must strip image_url payloads before provider requests')
   assert.match(agentLoop, /visualImageUploadedAttachments/, 'agent loop must distinguish visual image attachments from text attachments')
-  assert.match(agentLoop, /Visually inspect uploaded image/, 'image attachment preflight must be framed as visual inspection')
-  assert.match(agentLoop, /direct image inspection is unavailable on this route/, 'planner image context must be honest on text-only routes')
+  assert.match(agentLoop, /Uploaded image attachments are not supported on this route/, 'planner image context must be honest on text-only routes')
   assert.match(agentLoop, /state\.uploadedImageAttachmentAvailable = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments/, 'agent state must record uploaded image visual input availability only on multimodal routes')
   assert.match(planManager, /visualInput\?: boolean/, 'required preloaded steps must be able to mark image visual input')
-  assert.match(planManager, /Load uploaded image visual input/, 'preloaded image attachment event must render as visual input loading')
   assert.match(agentLoop, /Read this skill first/, 'skill attachments must be loaded before the agent starts work')
   assert.match(agentLoop, /attachmentContextForPlanning/, 'uploaded attachment text must be included in bounded planner context')
   assert.match(agentLoop, /hasUploadedAttachments[\s\S]*attachmentSummaryForContext\(m,\s*false\)/, 'runtime model context must include uploaded attachment metadata even when extraction failed')
@@ -746,14 +754,15 @@ async function assertSourceContracts() {
   assert.match(titleRoute, /includeTemporalContext:\s*false/, 'title generation should not pay for temporal context')
   assert.doesNotMatch(titleRoute, /heuristicTitleFromMessage|deterministicDirectTitleFromMessage|TITLE_HEURISTIC|TITLE_EXACT|TITLE_GREETING|TITLE_DOMAIN|Quick Calculation|Exact Reply|Help Request|Agent Identity/, 'title route must not use local deterministic title paths')
   assert.match(titleRoute, /await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'title route should always use provider title generation after credit check')
-  assert.match(llm, /DEFAULT_OPENROUTER_MODEL/, 'runtime must route through the centralized default OpenRouter model')
+  assert.match(llm, /DEFAULT_DEEPSEEK_MODEL/, 'runtime must route through the centralized default DeepSeek model')
   assert.match(llm, /function trimmedEnv\(value: string \| undefined\)/, 'runtime must expose shared env trimming for provider settings')
   assert.match(llm, /modelEnvForProvider\(ASSISTANT_PROVIDER\) \|\| defaultModelForProvider\(ASSISTANT_PROVIDER\)/, 'provider model IDs must be trimmed before request routing')
-  assert.match(llm, /ASSISTANT_PROVIDER === 'deepseek' \? 'high' : 'minimal'/, 'reasoning must default to high effort on DeepSeek and minimal on OpenRouter')
+  assert.match(llm, /DEFAULT_REASONING_EFFORT = normalizeReasoningEffort\([\s\S]*'minimal'[\s\S]*\)/, 'reasoning must default to minimal effort')
   assert.match(llm, /'xhigh'/, 'runtime must preserve xhigh reasoning instead of normalizing it down when explicitly configured')
   assert.match(llm, /DEFAULT_REASONING_EXCLUDE = booleanEnv\(process\.env\.OPENROUTER_REASONING_EXCLUDE,\s*true\)/, 'reasoning exclude flag must tolerate whitespace-padded Vercel env values')
   assert.match(llm, /getAssistantApiKey[\s\S]*trimmedEnv\(process\.env\.DEEPSEEK_API_KEY\)[\s\S]*trimmedEnv\(process\.env\.OPENROUTER_API_KEY\)/, 'provider credentials must be trimmed before request headers are built')
-  assert.match(llm, /reasoning_effort: deepSeekReasoningEffort\(effort\)/, 'DeepSeek calls must include the configured thinking effort by default')
+  assert.match(llm, /DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv\(process\.env\.DEEPSEEK_THINKING_ENABLED,\s*false\)/, 'DeepSeek thinking must be disabled by default')
+  assert.match(llm, /thinking:\s*\{\s*type:\s*'disabled'\s*\}/, 'DeepSeek calls must support explicit no-thinking payloads')
   assert.match(llm, /effort: DEFAULT_REASONING_EFFORT/, 'OpenRouter calls must include the configured reasoning effort by default')
   assert.match(llm, /exclude: DEFAULT_REASONING_EXCLUDE/, 'internal reasoning should be excluded from user-visible responses by default')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')

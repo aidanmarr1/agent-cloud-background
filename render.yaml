@@ -26,15 +26,15 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: openrouter
+        value: deepseek
       - key: DEEPSEEK_API_KEY
         sync: false
       - key: DEEPSEEK_MODEL
         value: deepseek-v4-flash
       - key: DEEPSEEK_REASONING_EFFORT
-        value: high
+        value: minimal
       - key: DEEPSEEK_THINKING_ENABLED
-        value: "true"
+        value: "false"
       - key: OPENROUTER_API_KEY
         sync: false
       - key: SERPER_API_KEY
@@ -118,15 +118,15 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: openrouter
+        value: deepseek
       - key: DEEPSEEK_API_KEY
         sync: false
       - key: DEEPSEEK_MODEL
         value: deepseek-v4-flash
       - key: DEEPSEEK_REASONING_EFFORT
-        value: high
+        value: minimal
       - key: DEEPSEEK_THINKING_ENABLED
-        value: "true"
+        value: "false"
       - key: OPENROUTER_API_KEY
         sync: false
       - key: SERPER_API_KEY

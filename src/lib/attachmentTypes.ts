@@ -1,13 +1,9 @@
 const DOCUMENT_MIME_TYPES = new Set([
-  'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'application/rtf',
-  'text/rtf',
 ])
 
-const DOCUMENT_EXTENSIONS = new Set(['pdf', 'docx', 'pptx', 'xlsx', 'rtf'])
+const DOCUMENT_EXTENSIONS = new Set(['docx', 'pptx'])
 
 export function getAttachmentExtension(fileName: string): string {
   return fileName.split('.').pop()?.toLowerCase().split('?')[0] || ''

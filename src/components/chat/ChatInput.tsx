@@ -1,12 +1,12 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback, KeyboardEvent, ChangeEvent } from 'react'
-import { ArrowUp, Square, Plus, Paperclip, ImageIcon, BookOpen, FolderUp, Loader2 } from '@/components/icons'
+import { ArrowUp, Square, Plus, Paperclip, BookOpen, FolderUp, Loader2 } from '@/components/icons'
 import { useUIStore } from '@/store/ui'
 import { useSettingsStore } from '@/store/settings'
 import type { FileAttachment, SlashCommand } from '@/types'
 import { filterCommands } from '@/lib/slashCommands'
-import { createSkillAttachment, FILE_ACCEPT, IMAGE_ACCEPT, processFilesForAttachments, SKILL_ATTACHMENT_TYPE } from '@/lib/fileHandling'
+import { createSkillAttachment, FILE_ACCEPT, processFilesForAttachments, SKILL_ATTACHMENT_TYPE } from '@/lib/fileHandling'
 import { uploadAttachmentsToServer } from '@/lib/attachmentUpload'
 import { SlashCommandMenu } from './SlashCommandMenu'
 import { VoiceInput } from './VoiceInput'
@@ -76,7 +76,6 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
-  const imageInputRef = useRef<HTMLInputElement>(null)
   const attachMenuRef = useRef<HTMLDivElement>(null)
   const dragDepthRef = useRef(0)
   const prevHasValueRef = useRef(false)
@@ -469,21 +468,8 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
     prevHasValueRef.current = hasValue
   }, [hasValue])
 
-  // Paste from clipboard: detect image items
+  // Paste text only; image uploads are intentionally not supported.
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    const imageFiles: File[] = []
-    for (const item of Array.from(items)) {
-      const file = item.getAsFile()
-      if (file && file.type.startsWith('image/')) imageFiles.push(file)
-    }
-    if (imageFiles.length > 0) {
-      e.preventDefault()
-      processFiles(imageFiles)
-      return
-    }
-
     const pastedText = e.clipboardData?.getData('text')
     if (!pastedText) return
 
@@ -507,7 +493,7 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
       })
       useUIStore.getState().addToast(taskInputLimitMessage(), 'error')
     }
-  }, [cursorPosition, processFiles, value])
+  }, [cursorPosition, value])
 
   return (
     <div
@@ -549,14 +535,6 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
         className="hidden"
         multiple
         accept={FILE_ACCEPT}
-        onChange={handleFileSelect}
-      />
-      <input
-        ref={imageInputRef}
-        type="file"
-        className="hidden"
-        multiple
-        accept={IMAGE_ACCEPT}
         onChange={handleFileSelect}
       />
       <input
@@ -676,7 +654,7 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="block text-[13px] font-semibold text-text-secondary">Attach files</span>
-                    <span className="block truncate text-[11.5px] text-text-muted">PDFs, Office docs, code, ZIP, and .skill</span>
+                    <span className="block truncate text-[11.5px] text-text-muted">DOCX, PPTX, and readable text files</span>
                   </span>
                 </button>
                 <button
@@ -694,23 +672,6 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
                   <span className="min-w-0 flex-1">
                     <span className="block text-[13px] font-semibold text-text-secondary">Attach folder</span>
                     <span className="block truncate text-[11.5px] text-text-muted">Bundle readable project files as context</span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setAttachMenuOpen(false)
-                    imageInputRef.current?.click()
-                  }}
-                  className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all duration-150 hover:bg-bg-secondary"
-                >
-                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-secondary">
-                    <ImageIcon size={14} strokeWidth={2.25} />
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] font-semibold text-text-secondary">Add images</span>
-                    <span className="block truncate text-[11.5px] text-text-muted">Screenshots, photos, PNG, JPG, WebP</span>
                   </span>
                 </button>
                 <button
