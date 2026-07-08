@@ -687,7 +687,7 @@ function narrationCadenceBlockReason(
   const visibleActionsBeforeTool = countedThisTool
     ? Math.max(0, state.visibleToolActionsSinceLastNarration - 1)
     : state.visibleToolActionsSinceLastNarration
-  const narrationDueBeforeTool = state.forceTextNextIteration || visibleActionsBeforeTool >= 4
+  const narrationDueBeforeTool = state.forceTextNextIteration || visibleActionsBeforeTool >= NARRATION_THRESHOLD_DEFAULT
   if (!narrationDueBeforeTool) return null
 
   const validSameTurnNarration = !!sanitizeNarrationText(assistantContent, {
@@ -706,15 +706,14 @@ function narrationCadenceBlockReason(
     return null
   }
 
-  // The 3-action window is advisory so the model can narrate and continue
-  // naturally. After 4 completed visible actions it becomes a hard gate:
-  // the next visible action must wait for a valid LLM-written progress
-  // paragraph, otherwise phases can silently run to 8-10 tools.
+  // The 3-action window is a hard gate: the next visible action must wait for a
+  // valid LLM-written progress paragraph, otherwise phases can silently run to
+  // long action strings with no narration.
   state.forceTextNextIteration = true
   state.forcedNarrationRepairAttempts = 0
   state.iterationsSinceLastContent++
   state.visibleToolActionsSinceLastNarration = Math.max(state.visibleToolActionsSinceLastNarration, visibleActionsBeforeTool)
-  return 'INTERNAL_RECOVERY: this visible tool call was skipped because 4 visible actions have completed without a valid progress narration. Write exactly one concise, result-first progress paragraph from completed work now. Do not call tools in that narration response; continue with the active phase only after the paragraph is accepted.'
+  return 'INTERNAL_RECOVERY: this visible tool call was skipped because 3 visible actions have completed without a valid progress narration. Write exactly one concise, result-first progress paragraph from completed work now. Do not call tools in that narration response; continue with the active phase only after the paragraph is accepted.'
 }
 
 function isRequiredSavedDeliverableWrite(
@@ -3624,6 +3623,8 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.stepFailureCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return preflightResult(errorResult)
     }
 
@@ -3680,6 +3681,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.stepFailureCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return preflightResult(errorResult)
     }
@@ -3694,6 +3696,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.stepFailureCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return preflightResult(errorResult)
     }
@@ -3711,7 +3714,10 @@ export class ToolPipeline {
         target: toolTargetFromArgs(args),
         error: errorResult.error,
       })
+      trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.stepFailureCount++
+      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
       return preflightResult(errorResult)
     }
 

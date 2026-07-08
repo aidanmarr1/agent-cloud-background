@@ -31,6 +31,7 @@ import {
   recordWorkLedgerDeliverable,
   currentStepText,
   isResearchStepText,
+  isSynthesisStepText,
   markPhaseNarrationEmitted,
   needsPhaseNarrationBeforeAdvance,
   stepOpenedSourceDomains,
@@ -2236,6 +2237,7 @@ function shouldUseCompactResearchTurn(state: AgentStateData): boolean {
   if (state.deadlineFinalizationStarted) return false
   if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (isSynthesisStepText(currentStepText(state))) return false
   if (state.currentStepIdx === state.currentPlanItems.length - 1 && state.currentPhase === 'deliver') return false
   return true
 }
@@ -2980,6 +2982,49 @@ export class AgentLoop {
     return true
   }
 
+  private maybeStartIterationCapFinalWrite(
+    state: AgentStateData,
+    contextManager: ContextManager,
+    goalTracker: GoalTracker,
+  ): boolean {
+    if (state.deadlineFinalizationStarted) return false
+    if (!state.dynamicIterationLimit || state.iterations < state.dynamicIterationLimit) return false
+    if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
+    if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) return false
+    if (hasSavedFinalDeliverableCandidate(state)) return false
+
+    const stepIdxBefore = state.currentStepIdx
+    const finalStepIdx = state.currentPlanItems.length - 1
+    const overrunStep = state.currentPlanItems[stepIdxBefore] || 'the current phase'
+    while (state.currentStepIdx < finalStepIdx) {
+      const currentStep = state.currentPlanItems[state.currentStepIdx] || 'phase'
+      advanceStep(state, `Emergency final write after cap pressure; folded ${currentStep} into the final output from available evidence`)
+    }
+    updatePhase(state)
+
+    state.deadlineFinalizationStarted = true
+    state.forceTextNextIteration = false
+    state.phaseEndNarrationPending = false
+    state.forcedNarrationRepairAttempts = 0
+    state.consecutiveNoToolCalls = 0
+    state.recentToolCalls = []
+    state.stepLoopDetections = 0
+    state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 8)
+    contextManager.push(iterationBudgetFinalizationMessage(state, overrunStep))
+    if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+    for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
+      this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+    }
+    console.log('[AgentDiagnostics] Iteration cap final-write rescue started', {
+      iteration: state.iterations,
+      limit: state.dynamicIterationLimit,
+      fromStep: stepIdxBefore,
+      finalStep: state.currentStepIdx,
+      totalSteps: state.currentPlanItems.length,
+    })
+    return true
+  }
+
   async run(): Promise<void> {
     const { messages, model, conversationId, customInstructions, signal } = this.options
 
@@ -3168,6 +3213,10 @@ export class AgentLoop {
             break
           }
           if (this.maybeStartIterationBudgetFinalization(state, contextManager, goalTracker)) {
+            phase = 'STREAMING'
+            continue
+          }
+          if (this.maybeStartIterationCapFinalWrite(state, contextManager, goalTracker)) {
             phase = 'STREAMING'
             continue
           }

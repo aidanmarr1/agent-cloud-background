@@ -275,13 +275,20 @@ export const BROWSER_INTERACTION_TOOLS = new Set([
 
 const BUILD_STEP_PATTERN = /\b(?:build|create|code|implement|develop|design|write|draft|style|css|html|assemble|layout|page|component|file|scaffold|set\s*up|setup|configure|config|install|initialize|initialise|init|bootstrap|wire|package|dependencies?|tailwind|next\.?js|tsx|jsx|react|route|preview|test|verify|run|boot|inspect|responsive)\b/i
 const RESEARCH_STEP_PATTERN = /\b(?:research|gather|find|search|source|sources|collect|asset|assets|image|images|photo|photos|picture|pictures|reference|references|investigate|analy[sz]e|compare|evaluate|assess|impact|risk|policy|evidence|perspective|benefits?|problems?|browse|look\s*up)\b/i
+const SYNTHESIS_STEP_PATTERN = /\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i
+const SOURCE_GATHERING_STEP_PATTERN = /\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look\s*up|current|latest|recent|news|reported|publicly|public|asset|assets|image|images|reference|references)\b/i
 
 export function isBuildStepText(text: string | undefined | null): boolean {
   return BUILD_STEP_PATTERN.test(text || '')
 }
 
 export function isResearchStepText(text: string | undefined | null): boolean {
-  return RESEARCH_STEP_PATTERN.test(text || '')
+  return RESEARCH_STEP_PATTERN.test(text || '') && !isSynthesisStepText(text)
+}
+
+export function isSynthesisStepText(text: string | undefined | null): boolean {
+  const value = text || ''
+  return SYNTHESIS_STEP_PATTERN.test(value) && !SOURCE_GATHERING_STEP_PATTERN.test(value)
 }
 
 export function isBuildStrategyState(state: Pick<AgentStateData, 'currentPhase' | 'taskStrategy' | 'buildTask'>): boolean {
@@ -1148,11 +1155,11 @@ export function updatePhase(state: AgentStateData): void {
     return
   }
   const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
-  if (isLastStep) {
+  const stepText = currentStepText(state).toLowerCase()
+  if (isLastStep || isSynthesisStepText(stepText)) {
     state.currentPhase = 'deliver'
   } else {
     // Check step content for phase hints
-    const stepText = state.currentPlanItems[state.currentStepIdx].toLowerCase()
     if (isConcreteBuildStep(state, stepText)) {
       state.currentPhase = 'build'
     } else {
