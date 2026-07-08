@@ -60,22 +60,22 @@ const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 const PLANNER_ACK_MAX_TOKENS = 96
-const PLANNER_ACK_STREAM_TIMEOUT_MS = 2_000
+const PLANNER_ACK_STREAM_TIMEOUT_MS = 5_500
 const PLANNER_ACK_DISPLAY_WAIT_MS = 150
 const PLANNER_FAST_JSON_MAX_TOKENS = 360
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 420
 const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
 const PLANNER_JSON_MAX_TOKENS = 640
 const REPLAN_JSON_MAX_TOKENS = 520
-const PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_JSON_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_OVERALL_DEADLINE_MS = 9_000
-const PLANNER_TIMEOUT_RECOVERY_RETRIES = 2
+const PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 6_500
+const PLANNER_JSON_REQUEST_TIMEOUT_MS = 7_500
+const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 6_500
+const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 7_500
+const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 7_500
+const PLANNER_OVERALL_DEADLINE_MS = 10_000
+const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_ACK_REASONING = { enabled: false as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
@@ -785,7 +785,9 @@ Requirements:
     if (usage) {
       await this.recordCompletionUsage(usage, 'ack')
     } else if (!emittedAny) {
-      throw new Error(BILLABLE_USAGE_ERROR)
+      this.settleAcknowledgementFirstVisible(false)
+      this.settleAcknowledgementDisplay(false)
+      return false
     }
 
     if (emittedAny) {
@@ -802,8 +804,6 @@ Requirements:
       return true
     }
 
-    this.settleAcknowledgementFirstVisible(false)
-    if (!priorInvalidAck) return this.emitModelGeneratedAcknowledgement(taskShape, sanitizedAck || '(empty acknowledgement)')
     this.settleAcknowledgementDisplay(false)
     throw new Error(PLANNER_QUALITY_ERROR)
   }
@@ -836,12 +836,15 @@ Requirements:
     }
 
     if (this.acknowledgementPromise) {
-      const emitted = await this.acknowledgementPromise
+      const emitted = await Promise.race([
+        this.acknowledgementPromise,
+        new Promise<boolean>(resolve => setTimeout(() => resolve(false), PLANNER_ACK_DISPLAY_WAIT_MS)),
+      ])
       if (this.acknowledgementEmitted || emitted) return
     }
 
-    const emitted = await this.emitModelGeneratedAcknowledgement(taskShape)
-    if (!emitted && !this.emitter.isClosed) throw new Error(PLANNER_QUALITY_ERROR)
+    this.suppressFurtherAcknowledgementDeltas = true
+    this.settleAcknowledgementDisplay(false)
   }
 
   getStepInjection(state: AgentStateData, iterationLimit: number): { role: string; content: string } | null {

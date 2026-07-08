@@ -1,4 +1,4 @@
-import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, markPhaseNarrationEmitted, needsPhaseNarrationBeforeAdvance, stepOpenedSourceDomains } from './AgentState'
+import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, markPhaseNarrationEmitted, stepOpenedSourceDomains } from './AgentState'
 import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
@@ -130,7 +130,7 @@ function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent 
     return false
   }
 
-  return needsPhaseNarrationBeforeAdvance(state) || state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+  return state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
 }
 
 function phaseEndNarrationAction(state: AgentStateData): PolicyAction {

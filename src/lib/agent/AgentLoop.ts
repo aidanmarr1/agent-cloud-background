@@ -33,7 +33,6 @@ import {
   isResearchStepText,
   isSynthesisStepText,
   markPhaseNarrationEmitted,
-  needsPhaseNarrationBeforeAdvance,
   stepOpenedSourceDomains,
 } from './AgentState'
 import {
@@ -206,9 +205,9 @@ function approximateStreamUsageForCompletedTurn(
 }
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
-const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 2_000
-const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000
-const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 2_000
+const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 4_500
+const FAST_ACTION_REQUEST_TIMEOUT_MS = 4_500
+const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 5_000
 const FAST_SOURCE_ACTION_ITERATION_TIMEOUT_MS = 2_800
 const FAST_ACTION_ITERATION_TIMEOUT_MS = 4_500
 const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 700
@@ -464,7 +463,7 @@ function shouldPauseForPhaseEndNarrationBeforeAutoAdvance(
     return false
   }
 
-  return needsPhaseNarrationBeforeAdvance(state) || state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+  return state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
 }
 
 function pauseForPhaseEndNarrationBeforeAutoAdvance(
@@ -2725,7 +2724,7 @@ function displayContractRepairInstruction(state: AgentStateData, results: ToolEx
   ].join(' ')
 }
 
-const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 2_000
+const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 6_000
 const FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS = 5_000
 const FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS = 650
 const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
@@ -2746,8 +2745,8 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
 const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
 const FORCED_NARRATION_MAX_TOKENS = 48
@@ -3352,38 +3351,19 @@ export class AgentLoop {
                 break
               }
               if (wasForcedNarrationRecovery || wasCompactCadenceNarration) {
-                if (state.phaseEndNarrationPending) {
-                  state.forceTextNextIteration = true
-                  state.forcedNarrationRepairAttempts++
-                  state.consecutiveNullStreams = 0
-                  state.iterationDelayMs = MIN_ITERATION_DELAY_MS
-                  contextManager.push({
-                    role: 'system',
-                    content: 'PHASE-END NARRATION RETRY: the prior narration-only turn timed out before visible text. Do not call tools and do not advance silently. Write one 18-30 word completed-result progress paragraph from completed work, then put <next_step/> on its own final line.',
-                  } as ChatMessageParam)
-                  state.lastIterationEnd = Date.now()
-                  console.log('[AgentDiagnostics] Retrying required phase-end narration after model-start timeout', {
-                    step: state.currentStepIdx,
-                    totalSteps: state.currentPlanItems?.length || 0,
-                    forcedNarrationRepairAttempts: state.forcedNarrationRepairAttempts,
-                  })
-                  phase = 'STREAMING'
-                  break
-                }
-                state.forceTextNextIteration = true
-                state.forcedNarrationRepairAttempts++
+                const phaseEndNarrationWasPending = state.phaseEndNarrationPending
+                state.forceTextNextIteration = false
+                state.phaseEndNarrationPending = false
+                state.forcedNarrationRepairAttempts = 0
+                state.visibleToolActionsSinceLastNarration = 0
                 state.consecutiveNullStreams = 0
-                contextManager.push({
-                  role: 'system',
-                  content: 'NARRATION RETRY: the prior narration-only turn timed out before visible text. Do not call tools, do not advance, and do not switch to normal work. Write one 18-30 word completed-result progress paragraph from completed work now.',
-                } as ChatMessageParam)
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
                 state.lastIterationEnd = Date.now()
-                console.log('[AgentDiagnostics] Retrying required narration after model-start timeout', {
+                console.log('[AgentDiagnostics] Skipped narration-only turn after model-start timeout; continuing task work', {
                   step: state.currentStepIdx,
                   totalSteps: state.currentPlanItems?.length || 0,
-                  visibleToolActionsSinceLastNarration: state.visibleToolActionsSinceLastNarration,
-                  phaseEndNarrationPending: state.phaseEndNarrationPending,
-                  forcedNarrationRepairAttempts: state.forcedNarrationRepairAttempts,
+                  phaseEndNarrationWasPending,
+                  compactCadenceNarration: wasCompactCadenceNarration,
                 })
                 phase = 'STREAMING'
                 break
