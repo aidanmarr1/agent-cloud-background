@@ -908,6 +908,10 @@ function countVisibleToolActionForNarration(
   if (state.visibleNarrationToolStartIds.has(toolCallId)) return
   state.visibleNarrationToolStartIds.add(toolCallId)
   state.visibleToolActionsSinceLastNarration++
+  if (state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT) {
+    state.forceTextNextIteration = true
+    state.forcedNarrationRepairAttempts = 0
+  }
 }
 
 function singleWebSearchLimitBlockReason(
@@ -1870,9 +1874,13 @@ function duplicateSourceOpenBlockReason(
   }
   for (const failure of state.workLedger.failedRoutes) {
     if (failure.stepIdx !== state.currentStepIdx) continue
-    if (failure.tool !== toolName) continue
     if (normalizeUrl(failure.target) === normalized) {
-      return `INTERNAL_RECOVERY: ${url} was already attempted with ${toolName} in this phase and did not produce usable evidence. Do not retry the same URL. Use browser_get_content if the current rendered page needs content extraction, choose a different source, or emit <next_step/> if this phase has enough evidence.`
+      if (failure.tool === toolName) {
+        return `INTERNAL_RECOVERY: ${url} was already attempted with ${toolName} in this phase and did not produce usable evidence. Do not retry the same URL. Use browser_get_content if the current rendered page needs content extraction, choose a different source, or emit <next_step/> if this phase has enough evidence.`
+      }
+      if (state.stepLoopDetections >= 2) {
+        return `INTERNAL_RECOVERY: ${url} already failed through ${failure.tool} and this phase is looping. Do not alternate source-opening tools on the same URL. Use a materially different source or targeted web_search query, or emit <next_step/> if this phase has enough evidence.`
+      }
     }
   }
   return null
@@ -4235,16 +4243,20 @@ export class ToolPipeline {
     // Check if error
     const isError = isToolExecutionErrorResult(tc.name, result)
     const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)
+    const usefulResearchProgress =
+      !isError &&
+      RESEARCH_TOOLS.has(tc.name) &&
+      (!BROWSER_RESULT_TOOLS.has(tc.name) || usableBrowserEvidence)
 
     // Real research calls only — note files don't count toward research progress
-    if (!isError && RESEARCH_TOOLS.has(tc.name) && (!BROWSER_RESULT_TOOLS.has(tc.name) || usableBrowserEvidence)) {
+    if (usefulResearchProgress) {
       state.stepResearchCallCount++
     }
 
     // Update tool health for circuit breaker
     updateToolHealth(state, tc.name, !isError)
     if (
-      !isError &&
+      usefulResearchProgress &&
       state.suppressedResearchToolName &&
       tc.name !== state.suppressedResearchToolName &&
       RESEARCH_TOOLS.has(tc.name)

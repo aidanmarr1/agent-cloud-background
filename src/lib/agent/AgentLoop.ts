@@ -760,6 +760,7 @@ const COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS = new Set([
   'browser_get_content',
   'browser_find_text',
 ])
+const SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD = 6
 const BUILD_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
 const FINAL_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
 const BROWSER_ADVANCED_POINTER_TOOLS = new Set(['browser_click_and_hold', 'browser_drag', 'browser_hover'])
@@ -1500,6 +1501,10 @@ function compactResearchOpenedSourceToolsForState(
   const allowed = needsAlternateSourceRoute
     ? new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
     : new Set(SOURCE_OPENING_RUNTIME_TOOLS)
+  if (state.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD && state.suppressedResearchToolName !== 'web_search') {
+    allowed.clear()
+    allowed.add('web_search')
+  }
   if (hasSearchCandidatesAwaitingOpen && recentSourceOpeningFailures < 2 && state.stepLoopDetections < 4) {
     allowed.delete('web_search')
   }
@@ -1553,6 +1558,10 @@ function loopRecoveryToolForState(
   }
 
   if (state.stepLoopDetections < 2) return tools
+  if (state.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD && suppressed !== 'web_search') {
+    const searchOnly = tools.filter(tool => tool.function?.name === 'web_search')
+    if (searchOnly.length > 0) return searchOnly
+  }
 
   const preferred = suppressed === 'read_document'
     ? ['browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search']

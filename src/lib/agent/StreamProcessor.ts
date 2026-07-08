@@ -425,6 +425,10 @@ function recordVisibleToolStartForNarration(
   if (state.visibleNarrationToolStartIds.has(toolCall.id)) return
   state.visibleNarrationToolStartIds.add(toolCall.id)
   state.visibleToolActionsSinceLastNarration++
+  if (state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT) {
+    state.forceTextNextIteration = true
+    state.forcedNarrationRepairAttempts = 0
+  }
 }
 
 function splitCleanVisibleAssistantText(text: string): { text: string; hold: string } {
