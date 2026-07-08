@@ -135,6 +135,9 @@ function selectDirectChatMessages(
 function publicErrorMessage(error: unknown): string {
   if (isOutOfCreditsError(error)) return error.message || OUT_OF_CREDITS_MESSAGE
   const message = userErrorMessage(error, 'An unknown error occurred')
+  if (/Assistant request timed out|timed out|timeout/i.test(message)) {
+    return 'The task took too long to respond. Please try again.'
+  }
   if (/assistant service|openrouter|qwen|gemini|model|provider|api key|env\.local|function\.arguments/i.test(message)) {
     if (/timed out|timeout/i.test(message)) return 'The task took too long to respond. Please try again.'
     if (/rate|429/i.test(message)) return 'The assistant is temporarily busy. Please try again shortly.'

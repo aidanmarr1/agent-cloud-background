@@ -73,6 +73,7 @@ const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 6_500
 const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_OVERALL_DEADLINE_MS = 10_000
+const PLANNER_START_AFTER_ACK_WAIT_MS = 2_500
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { enabled: false as const, exclude: true }
@@ -554,16 +555,30 @@ export class PlanManager {
           return false
         })
     }
-    const start = PLAN_STARTUP_DELAY_MS > 0
-      ? new Promise<null>(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
-      : Promise.resolve(null)
-    this.plannerDeadlineAtMs = Date.now() + PLANNER_OVERALL_DEADLINE_MS
+    const start = async (): Promise<null> => {
+      if (PLAN_STARTUP_DELAY_MS > 0) {
+        await new Promise(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
+      }
+      if (this.acknowledgementDisplayPromise) {
+        await Promise.race([
+          this.acknowledgementDisplayPromise,
+          new Promise(resolve => setTimeout(resolve, PLANNER_START_AFTER_ACK_WAIT_MS)),
+        ])
+      }
+      this.plannerDeadlineAtMs = Date.now() + PLANNER_OVERALL_DEADLINE_MS
+      return null
+    }
     this.plannerAbortController?.abort()
     this.plannerAbortController = new AbortController()
-    const deadlineTimer = setTimeout(() => this.plannerAbortController?.abort(), PLANNER_OVERALL_DEADLINE_MS)
-    this.planPromise = start
-      .then(() => this.attemptPlanCall(0, true))
-      .finally(() => clearTimeout(deadlineTimer))
+    let deadlineTimer: ReturnType<typeof setTimeout> | null = null
+    this.planPromise = start()
+      .then(() => {
+        deadlineTimer = setTimeout(() => this.plannerAbortController?.abort(), PLANNER_OVERALL_DEADLINE_MS)
+        return this.attemptPlanCall(0, true)
+      })
+      .finally(() => {
+        if (deadlineTimer) clearTimeout(deadlineTimer)
+      })
   }
 
   usePrecomputedPlan(
