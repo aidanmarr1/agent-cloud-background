@@ -4765,8 +4765,9 @@ export class ToolPipeline {
         const content = typeof resultObj?.content === 'string'
           ? resultObj.content
           : (typeof resultObj?.body === 'string' ? resultObj.body : '')
-        const preview = resultObj?.error
-          ? `blocked: ${String(resultObj.error).slice(0, 180)}`
+        const blockedExtraction = !!resultObj?.error || /INTERNAL_RECOVERY:\s*source extraction blocked/i.test(content)
+        const preview = blockedExtraction
+          ? 'blocked extraction; use rendered browser content for this URL only if this exact source matters'
           : content.replace(/\s+/g, ' ').trim().slice(0, AUTO_SOURCE_EXTRACTION_RESULT_CONTEXT_CHARS)
         return `${index + 1}. ${title}${source ? ` (${source})` : ''}${preview ? ` - ${preview}` : ''}`
       })

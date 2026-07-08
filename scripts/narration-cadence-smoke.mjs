@@ -33,7 +33,7 @@ async function assertSourceContracts() {
   assert.match(dispatcher, /narration\.position === currentPosition/, 'client must reject multiple narration blocks in the same action gap')
   assert.match(dispatcher, /addGroupNarration\(this\.conversationId,\s*this\.currentGroupIdx,\s*narrationText,\s*currentPosition\)/, 'dispatcher must persist the exact current-frontier narration position')
   assert.match(taskSlice, /addGroupNarration: \(convId: string, groupIndex: number, text: string, position\?: number\)/, 'store action must accept the dispatcher-computed narration position')
-  assert.match(taskSlice, /Math\.max\(0,\s*Math\.min\(g\.subtasks\.length,\s*position \?\? g\.subtasks\.length\)\)/, 'store must clamp narration positions to the current frontier')
+  assert.match(taskSlice, /const subtasks = taskSubtasks\(g\)[\s\S]*Math\.max\(0,\s*Math\.min\(subtasks\.length,\s*position \?\? subtasks\.length\)\)/, 'store must clamp narration positions to the current frontier')
   assert.match(taskGroupView, /\.sort\(\(a, b\) => a\.position - b\.position\)/, 'main task view must render narrations in position order')
   assert.match(actionFeed, /\.sort\(\(a, b\) => a\.position - b\.position\)/, 'action feed must render narrations in position order')
   assert.match(dispatcher, /if \(this\.toolsSinceLastNarration >= TOOLS_BETWEEN_NARRATION_FLUSHES\)/, 'narration flushing must follow the global visible-action count')

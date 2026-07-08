@@ -44,17 +44,28 @@ function isLivePanelItem(item: ComputerPanelItem): boolean {
 }
 
 function FilePreview({ result, streaming, conversationId }: { result: FileResult; streaming?: boolean; conversationId?: string }) {
-  const fileName = result.path?.split('/').pop() || 'file'
+  const safeResult: FileResult = result && typeof result === 'object'
+    ? {
+        action: result.action || 'read',
+        path: typeof result.path === 'string' ? result.path : '',
+        content: typeof result.content === 'string' ? result.content : '',
+        error: typeof result.error === 'string' ? result.error : undefined,
+        files: Array.isArray(result.files) ? result.files.filter((file): file is string => typeof file === 'string') : undefined,
+        size: typeof result.size === 'number' ? result.size : undefined,
+        truncated: !!result.truncated,
+      }
+    : { action: 'read', path: '', content: '' }
+  const fileName = safeResult.path?.split('/').pop() || 'file'
   const fileContentRef = useRef<HTMLDivElement>(null)
-  const fileUrl = conversationId && result.path
-    ? `/api/sandbox/${conversationId}/${result.path.split('/').map(encodeURIComponent).join('/')}`
+  const fileUrl = conversationId && safeResult.path
+    ? `/api/sandbox/${conversationId}/${safeResult.path.split('/').map(encodeURIComponent).join('/')}`
     : null
 
   useEffect(() => {
     if (streaming && fileContentRef.current) {
       fileContentRef.current.scrollTop = fileContentRef.current.scrollHeight
     }
-  }, [streaming, result.content])
+  }, [streaming, safeResult.content])
 
   return (
     <div className="p-4 flex flex-col gap-3">
@@ -80,24 +91,24 @@ function FilePreview({ result, streaming, conversationId }: { result: FileResult
           </a>
         )}
       </div>
-      {result.content && (
+      {safeResult.content && (
         <div ref={fileContentRef} className="bg-bg-primary rounded-2xl px-4 py-3.5 max-h-[500px] overflow-y-auto border border-border-primary">
           <pre className="text-[11.5px] text-text-secondary font-mono whitespace-pre-wrap break-words leading-relaxed">
-            {result.content}
+            {safeResult.content}
             {streaming && <span className="inline-block w-1.5 h-3 bg-text-muted animate-pulse ml-0.5 align-middle" />}
           </pre>
         </div>
       )}
-      {result.files && result.files.length > 0 && (
+      {safeResult.files && safeResult.files.length > 0 && (
         <div className="bg-bg-primary rounded-2xl px-4 py-3.5 border border-border-primary space-y-1">
-          {result.files.map((f, i) => (
+          {safeResult.files.map((f, i) => (
             <div key={i} className="text-[11.5px] text-text-secondary font-mono leading-relaxed">{f}</div>
           ))}
         </div>
       )}
-      {result.size !== undefined && !streaming && (
+      {safeResult.size !== undefined && !streaming && (
         <span className="text-[11px] text-text-muted tabular-nums px-1.5 font-medium">
-          {result.size.toLocaleString()} bytes
+          {safeResult.size.toLocaleString()} bytes
         </span>
       )}
     </div>

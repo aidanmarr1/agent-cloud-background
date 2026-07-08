@@ -118,7 +118,9 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
     if (isRunning) setExpanded(true)
   }, [isRunning])
 
-  const visibleSubtasks = group.subtasks.filter((s) => !isHiddenSubtaskActivity(s))
+  const subtasks = Array.isArray(group.subtasks) ? group.subtasks : []
+  const narrationsList = Array.isArray(group.narrations) ? group.narrations : []
+  const visibleSubtasks = subtasks.filter((s) => !isHiddenSubtaskActivity(s))
   const doneCount = visibleSubtasks.filter((s) => s.status === 'done').length
   const totalCount = visibleSubtasks.length
   const hasRunningVisibleSubtask = visibleSubtasks.some((s) => s.status === 'running')
@@ -198,9 +200,9 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
           <div className="task-thread-body relative ml-[9px] pl-6 pb-2 pt-0.5">
             {(() => {
               const items: Array<{ kind: 'subtask'; data: Subtask } | { kind: 'narration'; data: GroupNarration }> = []
-              const narrations = [...(group.narrations || [])].sort((a, b) => a.position - b.position)
+              const narrations = [...narrationsList].sort((a, b) => a.position - b.position)
               let narrationIdx = 0
-              group.subtasks.forEach((subtask, i) => {
+              subtasks.forEach((subtask, i) => {
                 while (narrationIdx < narrations.length && narrations[narrationIdx].position <= i) {
                   items.push({ kind: 'narration', data: narrations[narrationIdx] })
                   narrationIdx++

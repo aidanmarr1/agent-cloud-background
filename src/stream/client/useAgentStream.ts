@@ -159,18 +159,23 @@ function markActiveAssistantInterrupted(conversationId: string, label: string): 
         messages[i] = {
           ...message,
           content: alreadyMarked ? message.content : `${message.content}${message.content.trim() ? '\n\n' : ''}${label}`,
-          taskGroups: message.taskGroups?.map((group) => ({
-            ...group,
-            status: group.status === 'running' ? 'incomplete' : group.status,
-            subtasks: group.subtasks.map((subtask) => (
-              subtask.status === 'running'
-                ? { ...subtask, status: 'error', errorMessage: 'Interrupted by a newer user message.' }
-                : subtask
-            )),
-          })),
-          steps: message.steps?.map((step) => (
-            step.status === 'running' ? { ...step, status: 'incomplete' } : step
-          )),
+          taskGroups: Array.isArray(message.taskGroups)
+            ? message.taskGroups.map((group) => ({
+                ...group,
+                status: group.status === 'running' ? 'incomplete' : group.status,
+                subtasks: (Array.isArray(group.subtasks) ? group.subtasks : []).map((subtask) => (
+                  subtask.status === 'running'
+                    ? { ...subtask, status: 'error', errorMessage: 'Interrupted by a newer user message.' }
+                    : subtask
+                )),
+                narrations: Array.isArray(group.narrations) ? group.narrations : [],
+              }))
+            : message.taskGroups,
+          steps: Array.isArray(message.steps)
+            ? message.steps.map((step) => (
+                step.status === 'running' ? { ...step, status: 'incomplete' } : step
+              ))
+            : message.steps,
         }
         break
       }

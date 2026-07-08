@@ -3482,8 +3482,9 @@ export class AgentLoop {
                 break
               }
               if (finalSavedDeliverableTurn(state, this.options.messages)) {
+                const hasSavedFinalDeliverable = hasSavedFinalDeliverableCandidate(state)
                 if (
-                  hasSavedFinalDeliverableCandidate(state) &&
+                  hasSavedFinalDeliverable &&
                   state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP
                 ) {
                   const stepBeforeComplete = state.currentStepIdx
@@ -3503,6 +3504,11 @@ export class AgentLoop {
                   phase = 'COMPLETE'
                   break
                 }
+                if (!hasSavedFinalDeliverable && state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP) {
+                  this.emitter.error('The final file write could not start quickly enough. Please retry the task.')
+                  phase = 'ERROR'
+                  break
+                }
                 state.forceTextNextIteration = false
                 state.iterationDelayMs = MIN_ITERATION_DELAY_MS
                 contextManager.push({
@@ -3516,7 +3522,7 @@ export class AgentLoop {
                 console.log('[AgentDiagnostics] Reissued final saved deliverable file-tool instruction after model-start timeout', {
                   step: state.currentStepIdx,
                   totalSteps: state.currentPlanItems?.length || 0,
-                  hasFinalDeliverable: hasSavedFinalDeliverableCandidate(state),
+                  hasFinalDeliverable: hasSavedFinalDeliverable,
                 })
                 phase = 'STREAMING'
                 break
@@ -5491,9 +5497,9 @@ export class AgentLoop {
       }
 
       if (finalSavedDeliverableTurn(state, this.options.messages)) {
+        const hasSavedFinalDeliverable = hasSavedFinalDeliverableCandidate(state)
         if (
-          hasSavedFinalDeliverableCandidate(state) &&
-          !state.partialFileWriteRecoveryPending &&
+          hasSavedFinalDeliverable &&
           state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES
         ) {
           const stepBeforeComplete = state.currentStepIdx
@@ -5510,6 +5516,10 @@ export class AgentLoop {
             timeoutNudgeCount: state.timeoutNudgeCount,
           })
           return 'COMPLETE'
+        }
+        if (!hasSavedFinalDeliverable && state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES) {
+          this.emitter.error('The final file write took too long to start. Please retry the task.')
+          return 'ERROR'
         }
         if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
           state.timeoutNudgeCount++

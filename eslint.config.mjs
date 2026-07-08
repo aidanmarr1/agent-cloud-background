@@ -9,6 +9,9 @@ const eslintConfig = defineConfig([
     ".next/**",
     "out/**",
     "build/**",
+    "scripts/.agent-loop-debug-*/**",
+    "scripts/.browser-nav-runner-*/**",
+    "scripts/.guarded-fetch-smoke-runner-*/**",
     "next-env.d.ts",
   ]),
   {

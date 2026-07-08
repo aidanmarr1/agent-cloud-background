@@ -148,7 +148,13 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
   const lastAssistantMsg = lastAssistantIndex >= 0 ? messages[lastAssistantIndex] : undefined
   const scrollTrigger = useMemo(() =>
     lastAssistantMsg
-      ? (lastAssistantMsg.content?.length || 0) + (lastAssistantMsg.taskGroups?.reduce((a, g) => a + g.subtasks.length + g.narrations.length, 0) || 0)
+      ? (lastAssistantMsg.content?.length || 0) + (Array.isArray(lastAssistantMsg.taskGroups)
+        ? lastAssistantMsg.taskGroups.reduce((a, g) => {
+            const subtasks = Array.isArray(g.subtasks) ? g.subtasks : []
+            const narrations = Array.isArray(g.narrations) ? g.narrations : []
+            return a + subtasks.length + narrations.length
+          }, 0)
+        : 0)
       : 0
   , [lastAssistantMsg])
 

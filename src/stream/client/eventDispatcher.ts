@@ -100,6 +100,14 @@ function cleanStartupAcknowledgmentText(text: string): string {
     .trim()
 }
 
+function safeSubtasks(group: Pick<TaskGroup, 'subtasks'> | null | undefined): Subtask[] {
+  return Array.isArray(group?.subtasks) ? group.subtasks : []
+}
+
+function safeNarrations(group: Pick<TaskGroup, 'narrations'> | null | undefined): TaskGroup['narrations'] {
+  return Array.isArray(group?.narrations) ? group.narrations : []
+}
+
 function looksLikeDuplicatedSavedReport(text: string, savedFileCount: number): boolean {
   if (savedFileCount <= 0) return false
   const trimmed = text.trim()
@@ -375,9 +383,9 @@ export class EventDispatcher {
     if (!uiState.isStreaming) return
 
     const group = this.currentGroupIdx >= 0 ? this.parsedGroups[this.currentGroupIdx] : undefined
-    const hasRunningVisibleSubtask = group?.subtasks.some((subtask) =>
+    const hasRunningVisibleSubtask = safeSubtasks(group).some((subtask) =>
       subtask.status === 'running' && !isHiddenSubtaskActivity(subtask)
-    ) ?? false
+    )
 
     if (!hasRunningVisibleSubtask) {
       uiState.setStreamingStatus('thinking')
@@ -444,7 +452,7 @@ export class EventDispatcher {
     }
     this.captureStartupAcknowledgment()
 
-    const existingSubtasks = this.parsedGroups.length > 0 ? [...this.parsedGroups[0].subtasks] : []
+    const existingSubtasks = this.parsedGroups.length > 0 ? [...safeSubtasks(this.parsedGroups[0])] : []
     this.parsedGroups.length = 0
     this.parsedSteps.length = 0
 
@@ -561,10 +569,11 @@ export class EventDispatcher {
         startedAt: Date.now(),
       }
       const grp = this.parsedGroups[this.currentGroupIdx]
-      const existingIdx = grp.subtasks.findIndex((s) => s.id === event.id)
+      const grpSubtasks = safeSubtasks(grp)
+      const existingIdx = grpSubtasks.findIndex((s) => s.id === event.id)
       if (existingIdx >= 0) {
-        const existing = grp.subtasks[existingIdx]
-        const updatedSubtasks = grp.subtasks.map((s, idx) =>
+        const existing = grpSubtasks[existingIdx]
+        const updatedSubtasks = grpSubtasks.map((s, idx) =>
           idx === existingIdx
             ? {
                 ...existing,
@@ -583,7 +592,7 @@ export class EventDispatcher {
         this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: updatedSubtasks }
         this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       } else {
-        const closedSubtasks = grp.subtasks.map((s) =>
+        const closedSubtasks = grpSubtasks.map((s) =>
           s.status === 'running' ? { ...s, status: 'done' as const } : s
         )
         this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: [...closedSubtasks, subtask] }
@@ -847,11 +856,11 @@ export class EventDispatcher {
 
     const visibleStartedRecovery = this.currentGroupIdx >= 0 &&
       shouldPreserveVisibleInternalToolResult(event.name) &&
-      !!this.parsedGroups[this.currentGroupIdx]?.subtasks.some((subtask) => subtask.id === event.id)
+      safeSubtasks(this.parsedGroups[this.currentGroupIdx]).some((subtask) => subtask.id === event.id)
 
     if (isHiddenInternalToolResult(event.name, event.result) && visibleStartedRecovery) {
       const group = this.parsedGroups[this.currentGroupIdx]
-      const updatedSubtasks = group.subtasks.map((subtask) =>
+      const updatedSubtasks = safeSubtasks(group).map((subtask) =>
         subtask.id === event.id ? { ...subtask, status: 'done' as const } : subtask
       )
       this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
@@ -943,15 +952,16 @@ export class EventDispatcher {
       // Update local cache immutably to stay in sync with store
       const group = this.parsedGroups[this.currentGroupIdx]
       if (group) {
-        const existingSubtask = group.subtasks.find(s => s.id === event.id)
+        const groupSubtasks = safeSubtasks(group)
+        const existingSubtask = groupSubtasks.find(s => s.id === event.id)
         const deferredLabel = startedEvent
           ? (strictActionLabelFromArgs(startedEvent.args) || runtimeVisibleActionLabel(event.name, startedEvent.args))
           : runtimeVisibleActionLabel(event.name, {}, panelItem.title)
 
-        let updatedSubtasks = group.subtasks
+        let updatedSubtasks = groupSubtasks
         if (existingSubtask) {
           this.actions.updateSubtaskInGroup(this.conversationId, this.currentGroupIdx, event.id, 'done', effectiveResult as Subtask['result'])
-          updatedSubtasks = group.subtasks.map(s =>
+          updatedSubtasks = groupSubtasks.map(s =>
             s.id === event.id ? { ...s, status: 'done' as const, result: effectiveResult as Subtask['result'] } : s
           )
         } else if (deferredLabel) {
@@ -970,7 +980,7 @@ export class EventDispatcher {
             result: effectiveResult as Subtask['result'],
           }
           updatedSubtasks = [
-            ...group.subtasks.map((s) => s.status === 'running' ? { ...s, status: 'done' as const } : s),
+            ...groupSubtasks.map((s) => s.status === 'running' ? { ...s, status: 'done' as const } : s),
             subtask,
           ]
           this.actions.setTaskGroups(this.conversationId, [
@@ -999,10 +1009,11 @@ export class EventDispatcher {
     if (this.currentGroupIdx < 0) return
     const group = this.parsedGroups[this.currentGroupIdx]
     if (!group) return
-    const existing = group.subtasks.find((subtask) => subtask.id === eventId)
+    const groupSubtasks = safeSubtasks(group)
+    const existing = groupSubtasks.find((subtask) => subtask.id === eventId)
     if (!existing) return
 
-    const updatedSubtasks = group.subtasks.filter((subtask) => subtask.id !== eventId)
+    const updatedSubtasks = groupSubtasks.filter((subtask) => subtask.id !== eventId)
     this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
     this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
   }
@@ -1170,7 +1181,7 @@ export class EventDispatcher {
     for (let gi = 0; gi < this.parsedGroups.length; gi++) {
       const group = this.parsedGroups[gi]
       if (group.status === 'running') {
-        const subtasks = group.subtasks.map((subtask) =>
+        const subtasks = safeSubtasks(group).map((subtask) =>
           subtask.status === 'running'
             ? { ...subtask, status, ...(status === 'error' ? { errorMessage } : {}) }
             : subtask
@@ -1223,7 +1234,7 @@ export class EventDispatcher {
       const lastGroupIdx = this.parsedGroups.length - 1
       for (let gi = 0; gi < this.parsedGroups.length; gi++) {
         const g = this.parsedGroups[gi]
-        for (const s of g.subtasks) {
+        for (const s of safeSubtasks(g)) {
           if (gi === lastGroupIdx && (s.type === 'create_file' || s.type === 'append_file' || s.type === 'export_pdf') && s.status === 'done') {
             const match = s.label?.match(/(?:Writing|Appending to|Appending|Exporting)[:\s]+(.+?)(?:\s+\(\d+\s+lines?\))?$/i)
             if (match) createdFiles.push(match[1])
@@ -1253,7 +1264,7 @@ export class EventDispatcher {
         let topicHint = ''
         for (let i = this.parsedGroups.length - 1; i >= 0; i--) {
           const g = this.parsedGroups[i]
-          if (g.subtasks.some(s => s.type === 'create_file' || s.type === 'append_file' || s.type === 'export_pdf')) {
+          if (safeSubtasks(g).some(s => s.type === 'create_file' || s.type === 'append_file' || s.type === 'export_pdf')) {
             // Strip leading verbs like "Write a...", "Create a...", "Compile a..."
             const cleaned = g.title
               .replace(/^(?:write|create|compile|generate|produce|build|draft|prepare)\s+(?:a\s+)?(?:comprehensive\s+|detailed\s+|concise\s+|quick\s+|brief\s+)?(?:markdown\s+)?(?:report|document|file|analysis|summary)\s*/i, '')
@@ -1348,19 +1359,20 @@ export class EventDispatcher {
   }
 
   private lastNarrationPosition(group: TaskGroup): number {
-    return group.narrations.reduce((max, narration) => Math.max(max, narration.position), 0)
+    return safeNarrations(group).reduce((max, narration) => Math.max(max, narration.position), 0)
   }
 
   private narrationInsertionPosition(group: TaskGroup, force = false): number | null {
-    if (force) return group.subtasks.length
+    const subtasks = safeSubtasks(group)
+    if (force) return subtasks.length
     const lastPosition = this.lastNarrationPosition(group)
-    const visibleGap = group.subtasks.length - lastPosition
+    const visibleGap = subtasks.length - lastPosition
     if (visibleGap < MIN_TOOLS_BETWEEN_NARRATION_FLUSHES) return null
     // Even if the backend had to recover from a missed narration window, keep
     // the update at the current frontier. Never insert it between completed
     // tool pills.
-    if (visibleGap > MAX_TOOLS_BETWEEN_NARRATION_FLUSHES) return group.subtasks.length
-    return group.subtasks.length
+    if (visibleGap > MAX_TOOLS_BETWEEN_NARRATION_FLUSHES) return subtasks.length
+    return subtasks.length
   }
 
   private addNarration(narrationText: string, force = false): boolean {
@@ -1370,7 +1382,9 @@ export class EventDispatcher {
     const currentPosition = this.narrationInsertionPosition(currentGroup, force)
     if (currentPosition === null) return false
 
-    if (currentGroup.narrations.some(narration => narration.position === currentPosition)) {
+    const currentNarrations = safeNarrations(currentGroup)
+    const currentSubtasks = safeSubtasks(currentGroup)
+    if (currentNarrations.some(narration => narration.position === currentPosition)) {
       return false
     }
 
@@ -1383,13 +1397,14 @@ export class EventDispatcher {
     this.actions.addGroupNarration(this.conversationId, this.currentGroupIdx, narrationText, currentPosition)
     this.parsedGroups[this.currentGroupIdx] = {
       ...currentGroup,
-      narrations: [...currentGroup.narrations, {
+      subtasks: currentSubtasks,
+      narrations: [...currentNarrations, {
         id: 'local_' + Date.now(),
         text: narrationText,
         position: currentPosition,
       }],
     }
-    this.toolsSinceLastNarration = Math.max(0, currentGroup.subtasks.length - currentPosition)
+    this.toolsSinceLastNarration = Math.max(0, currentSubtasks.length - currentPosition)
     return true
   }
 

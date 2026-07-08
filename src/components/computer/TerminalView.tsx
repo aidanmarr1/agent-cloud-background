@@ -11,6 +11,16 @@ interface TerminalViewProps {
 }
 
 export function TerminalView({ result, streaming = false }: TerminalViewProps) {
+  const safeResult: TerminalResult = result && typeof result === 'object'
+    ? {
+        command: typeof result.command === 'string' ? result.command : '',
+        stdout: typeof result.stdout === 'string' ? result.stdout : '',
+        stderr: typeof result.stderr === 'string' ? result.stderr : '',
+        exitCode: typeof result.exitCode === 'number' ? result.exitCode : 1,
+        durationMs: typeof result.durationMs === 'number' ? result.durationMs : 0,
+        timedOut: !!result.timedOut,
+      }
+    : { command: '', stdout: '', stderr: '', exitCode: 1, durationMs: 0, timedOut: false }
   const [copied, setCopied] = useState(false)
   const outputRef = useRef<HTMLDivElement>(null)
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -18,7 +28,7 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
   useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current) }, [])
 
   const handleCopy = () => {
-    const text = [result.stdout, result.stderr].filter(Boolean).join('\n')
+    const text = [safeResult.stdout, safeResult.stderr].filter(Boolean).join('\n')
     navigator.clipboard.writeText(text)
     setCopied(true)
     if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
@@ -30,7 +40,7 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
     if (streaming && outputRef.current) {
       outputRef.current.scrollTop = outputRef.current.scrollHeight
     }
-  }, [streaming, result.stdout, result.stderr])
+  }, [streaming, safeResult.stdout, safeResult.stderr])
 
   return (
     <div className="p-4 flex flex-col gap-3">
@@ -39,7 +49,7 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
         <div className="h-11 px-4 flex items-center gap-2.5">
           <span className="text-text-secondary text-[12.5px] font-mono font-bold flex-shrink-0">$</span>
           <span className="text-[12.5px] text-text-primary font-mono truncate flex-1">
-            {result.command || (streaming ? 'Running…' : '')}
+            {safeResult.command || (streaming ? 'Running…' : '')}
           </span>
           {!streaming && (
             <button
@@ -54,10 +64,10 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
       </div>
 
       {/* Stdout */}
-      {(result.stdout || streaming) && (
+      {(safeResult.stdout || streaming) && (
         <div ref={outputRef} className="bg-bg-primary rounded-2xl px-4 py-3.5 overflow-y-auto border border-border-primary">
           <pre className="text-[11.5px] text-text-secondary font-mono whitespace-pre-wrap break-words leading-relaxed">
-            {result.stdout ? parseAnsi(result.stdout).map((segment, i) => (
+            {safeResult.stdout ? parseAnsi(safeResult.stdout).map((segment, i) => (
               <span key={i} className={segment.className}>{segment.text}</span>
             )) : ''}
             {streaming && <span className="inline-block w-1.5 h-3 bg-text-muted animate-pulse ml-0.5 align-middle" />}
@@ -66,20 +76,20 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
       )}
 
       {/* Stderr */}
-      {result.stderr && (
+      {safeResult.stderr && (
         <div className="bg-accent-red/5 rounded-2xl px-4 py-3.5 max-h-[200px] overflow-y-auto border border-accent-red/15">
           <div className="flex items-center gap-1.5 mb-2">
             <span className="w-1.5 h-1.5 rounded-full bg-accent-red/70" />
             <span className="text-[10.5px] text-accent-red/80 font-semibold uppercase tracking-wider">Needs attention</span>
           </div>
           <pre className="text-[11.5px] text-accent-red/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
-            {result.stderr}
+            {safeResult.stderr}
           </pre>
         </div>
       )}
 
       {/* No output (only when not streaming) */}
-      {!result.stdout && !result.stderr && !streaming && (
+      {!safeResult.stdout && !safeResult.stderr && !streaming && (
         <div className="bg-bg-primary rounded-2xl px-4 py-3.5 border border-border-primary">
           <span className="text-[12px] text-text-muted [font-family:var(--font-display)]">No output</span>
         </div>
@@ -90,17 +100,17 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
         <div className="flex items-center gap-2 px-1.5">
           <span
             className={`flex items-center gap-1.5 text-[11px] font-semibold font-mono ${
-              result.exitCode === 0 ? 'text-text-secondary' : 'text-accent-red'
+              safeResult.exitCode === 0 ? 'text-text-secondary' : 'text-accent-red'
             }`}
           >
-            <span className={`w-1.5 h-1.5 rounded-full ${result.exitCode === 0 ? 'bg-text-secondary' : 'bg-accent-red'}`} />
-            {result.exitCode === 0 ? 'completed' : 'stopped'}
+            <span className={`w-1.5 h-1.5 rounded-full ${safeResult.exitCode === 0 ? 'bg-text-secondary' : 'bg-accent-red'}`} />
+            {safeResult.exitCode === 0 ? 'completed' : 'stopped'}
           </span>
           <span className="text-text-muted/40">·</span>
           <span className="text-[11px] text-text-muted tabular-nums font-medium">
-            {(result.durationMs / 1000).toFixed(1)}s
+            {(safeResult.durationMs / 1000).toFixed(1)}s
           </span>
-          {result.timedOut && (
+          {safeResult.timedOut && (
             <>
               <span className="text-text-muted/40">·</span>
               <span className="text-[11px] font-semibold text-text-secondary">

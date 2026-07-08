@@ -53,8 +53,8 @@ export function truncateResult(result: unknown): unknown {
 }
 
 function normalizePanelItems(items: ComputerPanelItem[] | undefined): ComputerPanelItem[] | undefined {
-  if (!items?.length) return items
-  return items.slice(-MAX_PANEL_ITEMS).map((item) => {
+  if (!Array.isArray(items) || !items.length) return Array.isArray(items) ? items : undefined
+  return items.slice(-MAX_PANEL_ITEMS).filter(Boolean).map((item) => {
     const next = {
       ...item,
       data: truncateResult(item.data) as ComputerPanelItem['data'],
@@ -80,19 +80,24 @@ function normalizeMessage(message: Message): Message {
     }))
   }
   next.computerPanelData = normalizePanelItems(next.computerPanelData)
-  if (next.taskGroups?.length) {
-    next.taskGroups = next.taskGroups.map((group) => ({
-      ...group,
-      subtasks: group.subtasks.map((subtask) => ({
-        ...subtask,
-        result: truncateResult(subtask.result) as typeof subtask.result,
-      })),
-    }))
+  if (Array.isArray(next.taskGroups) && next.taskGroups.length) {
+    next.taskGroups = next.taskGroups.map((group) => {
+      const subtasks = Array.isArray(group.subtasks) ? group.subtasks : []
+      const narrations = Array.isArray(group.narrations) ? group.narrations : []
+      return {
+        ...group,
+        subtasks: subtasks.map((subtask) => ({
+          ...subtask,
+          result: truncateResult(subtask.result) as typeof subtask.result,
+        })),
+        narrations,
+      }
+    })
   }
-  if (next.steps?.length) {
+  if (Array.isArray(next.steps) && next.steps.length) {
     next.steps = next.steps.map((step) => ({
       ...step,
-      items: step.items.map((item) => {
+      items: (Array.isArray(step.items) ? step.items : []).map((item) => {
         if ('result' in item) {
           return { ...item, result: truncateResult(item.result) as typeof item.result }
         }

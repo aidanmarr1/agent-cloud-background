@@ -56,22 +56,39 @@ function visibleBrowserAction(action: string | undefined): string {
 }
 
 export function BrowserView({ result, streaming, conversationId, isLatest, onJumpToLive }: BrowserViewProps) {
-  const hasInlineFrame = !!result.screenshotBase64
-  const hasInlineLiveFrame = hasInlineFrame && !!result.liveFrame
+  const safeResult: BrowserResult = result && typeof result === 'object'
+    ? {
+        success: result.success !== false,
+        url: typeof result.url === 'string' ? result.url : '',
+        title: typeof result.title === 'string' ? result.title : '',
+        recoverable: result.recoverable,
+        screenshotPath: typeof result.screenshotPath === 'string' ? result.screenshotPath : undefined,
+        screenshotUrl: typeof result.screenshotUrl === 'string' ? result.screenshotUrl : undefined,
+        screenshotBase64: typeof result.screenshotBase64 === 'string' ? result.screenshotBase64 : undefined,
+        liveFrame: !!result.liveFrame,
+        liveFrameUpdatedAt: typeof result.liveFrameUpdatedAt === 'number' ? result.liveFrameUpdatedAt : undefined,
+        content: typeof result.content === 'string' ? result.content : undefined,
+        error: typeof result.error === 'string' ? result.error : undefined,
+        visualQuality: result.visualQuality,
+        action: typeof result.action === 'string' ? result.action : 'Browser',
+      }
+    : { success: true, url: '', title: '', action: 'Browser' }
+  const hasInlineFrame = !!safeResult.screenshotBase64
+  const hasInlineLiveFrame = hasInlineFrame && !!safeResult.liveFrame
   const isLive = hasInlineLiveFrame
   const isWaitingForLiveFrame = !!conversationId && streaming && !hasInlineFrame
   const fallbackScreenshot = hasInlineFrame
-    ? `data:image/jpeg;base64,${result.screenshotBase64}`
-    : result.screenshotUrl || ''
+    ? `data:image/jpeg;base64,${safeResult.screenshotBase64}`
+    : safeResult.screenshotUrl || ''
   const hasCurrentLiveEvidence = hasInlineLiveFrame
-  const hasPageError = !hasCurrentLiveEvidence && result.success === false && isPageLevelBrowserError(result.error, result.action)
-  const errorText = result.error && hasPageError ? visibleBrowserError(result.error, result.action) : null
-  const isActionBlocked = isBlockedBrowserAction(result.error, result.action)
+  const hasPageError = !hasCurrentLiveEvidence && safeResult.success === false && isPageLevelBrowserError(safeResult.error, safeResult.action)
+  const errorText = safeResult.error && hasPageError ? visibleBrowserError(safeResult.error, safeResult.action) : null
+  const isActionBlocked = isBlockedBrowserAction(safeResult.error, safeResult.action)
 
   // Status line text
   const statusText = streaming
-    ? `Browsing ${result.url || '...'}`
-    : visibleBrowserAction(result.action)
+    ? `Browsing ${safeResult.url || '...'}`
+    : visibleBrowserAction(safeResult.action)
 
   return (
     <div className="flex flex-col h-full">
@@ -88,7 +105,7 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
         <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
           hasPageError ? 'bg-accent-red/60' : isLive ? 'bg-text-secondary' : isWaitingForLiveFrame ? 'bg-text-muted animate-pulse' : 'bg-bg-secondary'
         }`} />
-        <span className="text-[11px] text-text-muted truncate font-mono flex-1">{result.url || 'Loading…'}</span>
+        <span className="text-[11px] text-text-muted truncate font-mono flex-1">{safeResult.url || 'Loading…'}</span>
         {isLive && (
           <span className="text-[10px] font-semibold text-text-secondary flex items-center gap-1 flex-shrink-0">
             <span className="w-1.5 h-1.5 rounded-full bg-text-secondary animate-pulse" />
@@ -116,14 +133,14 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
         {fallbackScreenshot ? (
           <img
             src={fallbackScreenshot}
-            alt={isLive ? 'Live browser view' : result.title || 'Page screenshot'}
+            alt={isLive ? 'Live browser view' : safeResult.title || 'Page screenshot'}
             className="w-full rounded-xl border border-border-primary object-contain"
           />
         ) : streaming ? (
           <div>
             <div className="w-full aspect-video bg-bg-secondary rounded-xl animate-pulse" />
             <div className="text-center text-[12px] text-text-muted [font-family:var(--font-display)] animate-pulse mt-3">
-              {result.action || 'Loading…'}
+              {safeResult.action || 'Loading…'}
             </div>
           </div>
         ) : null}
@@ -142,19 +159,19 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
       </div>
 
       {/* Page title & content below viewport */}
-      {(result.title || result.content) && (
+      {(safeResult.title || safeResult.content) && (
         <div className="px-3 pb-3 flex-shrink-0">
-          {result.title && (
-            <h2 className="text-[13px] font-semibold text-text-primary tracking-[0] mb-1.5">{result.title}</h2>
+          {safeResult.title && (
+            <h2 className="text-[13px] font-semibold text-text-primary tracking-[0] mb-1.5">{safeResult.title}</h2>
           )}
-          {result.content && visibleBrowserContent(result.content) && (
+          {safeResult.content && visibleBrowserContent(safeResult.content) && (
             <details>
               <summary className="text-[11.5px] text-text-muted hover:text-text-tertiary cursor-pointer transition-colors">
                 Page text
               </summary>
               <div className="bg-bg-secondary border border-border-primary rounded-xl p-3 mt-2 max-h-[220px] overflow-y-auto">
                 <pre className="text-[11px] text-text-secondary font-mono whitespace-pre-wrap break-words leading-relaxed">
-                  {visibleBrowserContent(result.content)}
+                  {visibleBrowserContent(safeResult.content)}
                 </pre>
               </div>
             </details>

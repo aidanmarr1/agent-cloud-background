@@ -98,8 +98,7 @@ export function isBrowserPreflightBlockActivity(subtask: { toolName?: string; la
 
 export function isHiddenSubtaskActivity(subtask: { toolName?: string; label?: string; result?: unknown }): boolean {
   return isInternalSubtaskActivity(subtask) ||
-    isIncompleteBrowserClickActivity(subtask) ||
-    isBrowserPreflightBlockActivity(subtask)
+    isIncompleteBrowserClickActivity(subtask)
 }
 
 export const FILE_TOOLS = ['create_file', 'read_file', 'read_attachment', 'read_skill', 'delete_file', 'list_files', 'edit_file', 'append_file', 'export_pdf']

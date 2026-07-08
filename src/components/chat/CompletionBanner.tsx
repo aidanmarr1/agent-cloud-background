@@ -36,7 +36,8 @@ function TimelineModal({ taskGroups, elapsedMs, completedSteps, totalSteps, sour
 }) {
   const allSubtasks: Array<{ subtask: Subtask; groupTitle: string }> = []
   for (const group of taskGroups) {
-    for (const subtask of group.subtasks) {
+    const subtasks = Array.isArray(group.subtasks) ? group.subtasks : []
+    for (const subtask of subtasks) {
       if (isHiddenSubtaskActivity(subtask)) continue
       if (!subtask.label?.trim()) continue
       allSubtasks.push({ subtask, groupTitle: group.title })

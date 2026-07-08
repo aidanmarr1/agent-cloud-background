@@ -20,6 +20,18 @@ export interface TaskSlice {
   setPlan: (convId: string, items: string[]) => void
 }
 
+function taskGroups(value: TaskGroup[] | null | undefined): TaskGroup[] {
+  return Array.isArray(value) ? value : []
+}
+
+function taskSubtasks(group: Pick<TaskGroup, 'subtasks'>): Subtask[] {
+  return Array.isArray(group.subtasks) ? group.subtasks : []
+}
+
+function taskNarrations(group: Pick<TaskGroup, 'narrations'>): TaskGroup['narrations'] {
+  return Array.isArray(group.narrations) ? group.narrations : []
+}
+
 export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
   // Legacy step actions
   setSteps: (convId, steps) => {
@@ -105,7 +117,7 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => ({
         ...msg,
-        taskGroups: [...groups],
+        taskGroups: taskGroups(groups),
       })),
     }))
   },
@@ -113,7 +125,7 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
   updateTaskGroupStatus: (convId, groupIndex, status) => {
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => {
-        const groups = (msg.taskGroups || []).map((g, i) =>
+        const groups = taskGroups(msg.taskGroups).map((g, i) =>
           i === groupIndex
             ? {
                 ...g,
@@ -130,9 +142,9 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
   addSubtaskToGroup: (convId, groupIndex, subtask) => {
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => {
-        const groups = (msg.taskGroups || []).map((g, i) =>
+        const groups = taskGroups(msg.taskGroups).map((g, i) =>
           i === groupIndex
-            ? { ...g, subtasks: [...g.subtasks, subtask] }
+            ? { ...g, subtasks: [...taskSubtasks(g), subtask] }
             : g
         )
         return { ...msg, taskGroups: groups }
@@ -143,11 +155,11 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
   updateSubtaskInGroup: (convId, groupIndex, subtaskId, status, result, patch) => {
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => {
-        const groups = (msg.taskGroups || []).map((g, i) =>
+        const groups = taskGroups(msg.taskGroups).map((g, i) =>
           i === groupIndex
             ? {
                 ...g,
-                subtasks: g.subtasks.map((s) =>
+                subtasks: taskSubtasks(g).map((s) =>
                   s.id === subtaskId
                     ? { ...s, ...(patch || {}), status, ...(result !== undefined ? { result: truncateResult(result) as Subtask['result'] } : {}) }
                     : s
@@ -163,16 +175,19 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
   addGroupNarration: (convId, groupIndex, text, position) => {
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => {
-        const groups = (msg.taskGroups || []).map((g, i) =>
+        const groups = taskGroups(msg.taskGroups).map((g, i) =>
           i === groupIndex
             ? (() => {
-                const narrationPosition = Math.max(0, Math.min(g.subtasks.length, position ?? g.subtasks.length))
+                const subtasks = taskSubtasks(g)
+                const narrations = taskNarrations(g)
+                const narrationPosition = Math.max(0, Math.min(subtasks.length, position ?? subtasks.length))
                 return {
                   ...g,
-                  narrations: g.narrations.some(narration => narration.position === narrationPosition)
-                    ? g.narrations
+                  subtasks,
+                  narrations: narrations.some(narration => narration.position === narrationPosition)
+                    ? narrations
                     : [
-                        ...g.narrations,
+                        ...narrations,
                         { id: uuidv4(), text, position: narrationPosition },
                       ],
                 }

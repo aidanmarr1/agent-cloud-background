@@ -58,7 +58,9 @@ export function ActionFeed({ taskGroups }: ActionFeedProps) {
   return (
     <div className="space-y-3">
       {taskGroups.map((group) => {
-        const visibleSubtasks = group.subtasks.filter(s => !isHiddenSubtaskActivity(s) && getActionLabel(s))
+        const subtasks = Array.isArray(group.subtasks) ? group.subtasks : []
+        const narrationsList = Array.isArray(group.narrations) ? group.narrations : []
+        const visibleSubtasks = subtasks.filter(s => !isHiddenSubtaskActivity(s) && getActionLabel(s))
         const doneCount = visibleSubtasks.filter(s => s.status === 'done').length
 
         return (
@@ -100,9 +102,9 @@ export function ActionFeed({ taskGroups }: ActionFeedProps) {
             <div className="pl-7">
               {(() => {
                 const items: Array<{ kind: 'subtask'; data: Subtask } | { kind: 'narration'; data: GroupNarration }> = []
-                const narrations = [...(group.narrations || [])].sort((a, b) => a.position - b.position)
+                const narrations = [...narrationsList].sort((a, b) => a.position - b.position)
                 let narrationIdx = 0
-                group.subtasks.forEach((subtask, i) => {
+                subtasks.forEach((subtask, i) => {
                   while (narrationIdx < narrations.length && narrations[narrationIdx].position <= i) {
                     items.push({ kind: 'narration', data: narrations[narrationIdx] })
                     narrationIdx++

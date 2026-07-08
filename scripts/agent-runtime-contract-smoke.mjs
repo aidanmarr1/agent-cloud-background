@@ -50,6 +50,8 @@ async function assertSourceContracts() {
     browserView,
     browseView,
     computerPanel,
+    panelMapper,
+    terminalView,
     panelHeader,
     uiStore,
     useAgentStream,
@@ -146,6 +148,8 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/components/computer/BrowserView.tsx'), 'utf8'),
     readFile(join(root, 'src/components/computer/BrowseView.tsx'), 'utf8'),
     readFile(join(root, 'src/components/computer/ComputerPanel.tsx'), 'utf8'),
+    readFile(join(root, 'src/stream/client/panelMapper.ts'), 'utf8'),
+    readFile(join(root, 'src/components/computer/TerminalView.tsx'), 'utf8'),
     readFile(join(root, 'src/components/computer/PanelHeader.tsx'), 'utf8'),
     readFile(join(root, 'src/store/ui.ts'), 'utf8'),
     readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
@@ -245,19 +249,9 @@ async function assertSourceContracts() {
   assert.match(planManager, /PLANNER_JSON_REQUEST_TIMEOUT_MS = 2_000/, 'strict planner JSON calls must stay inside the 2s startup window')
   assert.match(planManager, /PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_000/, 'planner startup fallback calls must stay inside the 2s startup window')
   assert.match(planManager, /PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_000/, 'planner repair calls must stay inside the 2s startup window')
-  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 6_000/, 'planner startup must have a tight overall bound across deadline-bounded retries')
+  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 9_000/, 'planner startup must have a bounded retry window under 10s without local fallback plans')
   assert.match(planManager, /PLANNER_TIMEOUT_RECOVERY_RETRIES = 2/, 'planner startup timeouts should get a deadline-bounded strict recovery before giving up')
-  assert.match(planManager, /continueAfterPlannerTimeout[\s\S]*continuing without surfacing provider timeout[\s\S]*state\.planEmitted = true/, 'planner startup timeout exhaustion must continue internally instead of surfacing the raw provider timeout')
-  {
-    const timeoutStart = planManager.indexOf('private continueAfterPlannerTimeout')
-    const timeoutEnd = planManager.indexOf('private async emitModelGeneratedAcknowledgement', timeoutStart)
-    const timeoutBody = planManager.slice(timeoutStart, timeoutEnd)
-    assert.match(planManager, /private timeoutFallbackPlan/, 'planner timeout recovery must create a real fallback plan')
-    assert.match(timeoutBody, /const fallback = this\.timeoutFallbackPlan\(state\)/, 'planner timeout recovery must use the fallback plan builder')
-    assert.match(timeoutBody, /this\.emitter\.plan\(fallback\.titles\)/, 'planner timeout recovery must emit visible plan steps')
-    assert.match(timeoutBody, /state\.planItems = fallback\.titles[\s\S]*state\.currentPlanItems = fallback\.titles/, 'planner timeout recovery must keep planItems and currentPlanItems non-empty')
-    assert.doesNotMatch(timeoutBody, /state\.planItems = \[\]|state\.currentPlanItems = null/, 'planner timeout recovery must not mark an empty or null plan as emitted')
-  }
+  assert.doesNotMatch(planManager, /continueAfterPlannerTimeout|timeoutFallbackPlan|Planner timed out inside startup deadline|state\.planEmitted = true[\s\S]{0,240}fallback\.titles/, 'planner startup timeout exhaustion must not fabricate visible local fallback plans')
   assert.match(planManager, /function plannerTaskMessages[\s\S]*effectiveTaskRequest\(messages\)\.slice\(0,\s*6000\)/, 'planner must use the compact effective task request instead of replaying full chat history')
   assert.match(planManager, /fastPlannerMode[\s\S]*getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*getPlanningPrompt\(this\.customInstructions\)/, 'initial planner call must use the compact prompt before the full strict prompt')
   assert.match(planManager, /requestTimeoutMs:\s*this\.plannerRequestTimeoutMs\(fastPlannerMode[\s\S]*PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_JSON_REQUEST_TIMEOUT_MS/, 'initial planner calls must pass the fast bounded planner timeout and lean fallback timeouts')
@@ -722,6 +716,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP\s*=\s*2/, 'final saved deliverable model-start recovery must be capped')
   assert.match(agentLoop, /hasSavedFinalDeliverableCandidate\(state\)[\s\S]*state\.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP[\s\S]*terminalReason = 'saved_deliverable_model_start_timeout'/, 'saved deliverable final revision timeouts must complete with the existing artifact instead of looping forever')
   assert.doesNotMatch(agentLoop, /hasSavedFinalDeliverableCandidate\(state\)[\s\S]{0,120}!state\.partialFileWriteRecoveryPending[\s\S]{0,220}FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP/, 'saved deliverable timeout cap must still apply during partial-file continuation loops')
+  assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP[\s\S]*The final file write could not start quickly enough/, 'final saved deliverable model-start timeouts must error instead of looping when no file exists')
   assert.match(agentLoop, /maybeStartIterationCapFinalWrite[\s\S]*taskNeedsSavedFinalArtifact[\s\S]*hasSavedFinalDeliverableCandidate\(state\)\) return false[\s\S]*state\.dynamicIterationLimit = Math\.max\(state\.dynamicIterationLimit, state\.iterations \+ 8\)/, 'iteration cap must grant a bounded final-write rescue instead of erroring before saving a required artifact')
   assert.match(agentLoop, /credibleEvidencePacket[\s\S]*repeatedResearchLoop[\s\S]*state\.consecutiveNoToolCalls >= 3 \|\| repeatedResearchLoop[\s\S]*return true/, 'compact research must advance after credible direct evidence instead of looping on repeated no-tool/tool-loop replies')
   assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
@@ -1095,6 +1090,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /executeAutoSourceExtractionBatch[\s\S]*Auto-extracting \$\{batch\.length\} source result\(s\) immediately after web_search[\s\S]*Promise\.all\(batch\.map/, 'post-search source extraction must run immediately in the tool pipeline instead of waiting for another model turn')
   assert.match(toolPipeline, /this\.autoGeneratedToolCallIds\.has\(tc\.id\)[\s\S]*narrationCadenceBlockReason/, 'auto-generated parallel source pills must be allowed to fill the current action cluster before narration gates the next turn')
   assert.match(toolPipeline, /AUTO SOURCE EXTRACTION RESULTS[\s\S]*Do not call web_search again just because the visible action was a search[\s\S]*All automatic source extractions were blocked[\s\S]*Do not repeat the same web_search/, 'auto-extracted source results must be summarized for the next model turn without causing follow-up search loops')
+  assert.doesNotMatch(toolPipeline, /blocked: \$\{String\(resultObj\.error\)\.slice/, 'auto-source summaries must not feed long internal extraction recovery text back into the model')
   assert.match(agentLoop, /state\.iterations <= 2 && lastStreamResult\.toolCalls\.size === 0[\s\S]*await planManager\.awaitPlan\(state\)/, 'early planner waits must not block already-streamed tool calls')
   assert.match(agentLoop, /fastSourceActionTurn[\s\S]*FAST_SOURCE_ACTION_MAX_TOKENS/, 'source-action turns must use a compact max-token budget instead of a full synthesis budget')
   assert.match(agentLoop, /fastActionTurn[\s\S]*MINIMAL_THINKING_REASONING/, 'between-tool action turns must use the shared minimal-thinking fast lane')
@@ -1325,10 +1321,22 @@ async function assertSourceContracts() {
   assert.match(browserView, /isBlockedBrowserAction\(error, action\)[\s\S]*return null/, 'browser panel must hide preflight block banners from the user')
   assert.match(browserView, /Browser state refreshed/, 'browser panel should show a neutral refreshed-state status for preflight blocks')
   assert.match(streamConstants, /Blocked browser_/, 'shared stream constants must classify blocked browser actions by action label as well as raw error text')
-  assert.match(browserView, /hasPageError = !hasCurrentLiveEvidence && result\.success === false && isPageLevelBrowserError/, 'browser panel must not show stale page errors over live browser frames')
+  assert.match(browserView, /hasPageError = !hasCurrentLiveEvidence && safeResult\.success === false && isPageLevelBrowserError/, 'browser panel must not show stale page errors over live browser frames')
   assert.match(browserView, /The browser action could not complete\./, 'browser panel must hide raw automation errors')
   assert.match(browserView, /This page could not be opened\./, 'browser panel should describe navigation failures without fallback-route language')
   assert.doesNotMatch(browserView, /choosing another route/, 'browser panel must not show fallback-route narration')
+  assert.match(streamConstants, /isHiddenSubtaskActivity[\s\S]*isInternalSubtaskActivity\(subtask\)[\s\S]*isIncompleteBrowserClickActivity\(subtask\)[\s\S]*\}/, 'once a browser action pill is visible, preflight block results must not hide it from the task timeline')
+  assert.doesNotMatch(streamConstants, /isHiddenSubtaskActivity[\s\S]{0,180}isBrowserPreflightBlockActivity/, 'browser preflight block subtasks should stay visible instead of disappearing after completion')
+  assert.match(eventDispatcher, /function safeSubtasks[\s\S]*Array\.isArray\(group\?\.subtasks\)/, 'stream dispatcher must guard malformed/null task subtasks during live replay')
+  assert.match(eventDispatcher, /function safeNarrations[\s\S]*Array\.isArray\(group\?\.narrations\)/, 'stream dispatcher must guard malformed/null task narrations during live replay')
+  assert.match(useAgentStream, /subtasks:\s*\(Array\.isArray\(group\.subtasks\) \? group\.subtasks : \[\]\)\.map/, 'interrupt handling must not crash when task subtasks are null')
+  assert.match(messageList, /Array\.isArray\(g\.subtasks\) \? g\.subtasks : \[\]/, 'message list scroll triggers must tolerate null subtasks')
+  assert.match(agentMessage, /Array\.isArray\(message\.taskGroups\) \? message\.taskGroups : \[\]/, 'assistant messages must tolerate malformed taskGroups')
+  assert.match(computerPanel, /files:\s*Array\.isArray\(result\.files\)/, 'file preview must guard null file lists before rendering')
+  assert.match(browseView, /const safeResult: BrowseResult/, 'browse preview must guard null page payloads')
+  assert.match(browserView, /const safeResult: BrowserResult/, 'browser preview must guard null browser payloads')
+  assert.match(terminalView, /const safeResult: TerminalResult/, 'terminal preview must guard null command payloads')
+  assert.match(panelMapper, /const rawDownloaded = imgResult\?\.downloaded[\s\S]*Array\.isArray\(rawDownloaded\)/, 'image search panel mapper must guard null downloaded arrays')
   assert.doesNotMatch(eventDispatcher, /liveFrame:\s*!!screenshotBase64/, 'static browser result screenshots must not be mislabeled as live frames')
   assert.match(eventDispatcher, /success:\s*true,[\s\S]*recoverable:\s*undefined,[\s\S]*error:\s*undefined,[\s\S]*screenshotBase64:\s*frame/, 'fresh browser frames must clear stale navigation errors from the live browser panel')
   assert.match(eventDispatcher, /isBrowserPreflightBlockResult/, 'client dispatcher must classify browser preflight blocks before opening the computer panel')
@@ -1486,6 +1494,7 @@ async function assertSourceContracts() {
   assert.match(tools, /Create a workspace file\. Put path before content; write the largest complete useful version that fits/, 'create_file schema must bias providers toward complete path-first visible file writes')
   assert.match(agentLoop, /Math\.min\(0\.35,\s*state\.strategyConfig\?\.temperature \?\? strategy\.temperature\)/, 'final chat-answer turns should use a calmer temperature to avoid status chatter')
   assert.match(agentLoop, /const requestReasoning = useCompactNarration[\s\S]*NO_THINKING_REASONING[\s\S]*isFinalInlineAnswerTurn[\s\S]*MINIMAL_THINKING_REASONING/, 'narration must use no-thinking while final chat-answer turns use minimal thinking')
+  assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES[\s\S]*The final file write took too long to start/, 'nudgeable final saved deliverable timeouts must error instead of resetting forever when no file exists')
   assert.match(agentLoop, /FINAL_OPTIONAL_RUNTIME_TOOLS/, 'final steps should not pay for optional image/browser/PDF/delete schemas unless relevant')
   assert.match(agentLoop, /finalStepAllowsOptionalTool/, 'final optional tools must be restored when task intent or QA state requires them')
   assert.match(agentLoop, /const finalWantsPdf = taskWantsPdfArtifact/, 'lean final synthesis should expose export_pdf only when PDF/export is requested')

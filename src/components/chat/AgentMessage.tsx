@@ -26,9 +26,13 @@ interface AgentMessageProps {
 
 export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, conversationId }: AgentMessageProps) {
   const steps: TaskStepType[] = message.steps || []
-  const taskGroups = message.taskGroups || []
+  const taskGroups = Array.isArray(message.taskGroups) ? message.taskGroups : []
   const activeGroups = taskGroups.filter(
-    (g) => g.status === 'running' || g.subtasks.length > 0 || g.narrations.length > 0 || g.synthesis
+    (g) => {
+      const subtasks = Array.isArray(g.subtasks) ? g.subtasks : []
+      const narrations = Array.isArray(g.narrations) ? g.narrations : []
+      return g.status === 'running' || subtasks.length > 0 || narrations.length > 0 || g.synthesis
+    }
   )
   const followUps = message.followUps || []
   const artifacts = message.artifacts || []
@@ -85,7 +89,8 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
   // Count sources (browse + search subtasks)
   const sourceCount = taskGroups.reduce((acc, g) => {
-    return acc + g.subtasks.filter((s) => s.status === 'done' && (s.type === 'search' || s.type === 'browse')).length
+    const subtasks = Array.isArray(g.subtasks) ? g.subtasks : []
+    return acc + subtasks.filter((s) => s.status === 'done' && (s.type === 'search' || s.type === 'browse')).length
   }, 0)
 
   return (

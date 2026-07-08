@@ -72,7 +72,7 @@ const PLANNER_JSON_REQUEST_TIMEOUT_MS = 2_000
 const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 2_000
 const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 2_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 2_000
-const PLANNER_OVERALL_DEADLINE_MS = 6_000
+const PLANNER_OVERALL_DEADLINE_MS = 9_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 2
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -654,62 +654,6 @@ export class PlanManager {
       throw new Error(`Assistant request timed out after ${Math.round(PLANNER_OVERALL_DEADLINE_MS / 1000)} seconds.`)
     }
     return Math.max(250, Math.min(preferredMs, remainingMs - 150))
-  }
-
-  private timeoutFallbackPlan(state: AgentStateData): { titles: string[]; scopes: (string | null)[] } {
-    const target = conciseTopicLabel(requestSubject(this.messages, 72))
-    const strategy = state.taskStrategy
-    let titles: string[]
-    let scopes: (string | null)[]
-
-    if (strategy === 'build' || strategy === 'code' || strategy === 'creative') {
-      titles = [`Build ${target}`, `Verify and deliver ${target}`]
-      scopes = [
-        `Create the requested ${target} artifact using the available workspace tools and files.`,
-        `Check the result, repair visible issues, and deliver the completed artifact.`,
-      ]
-    } else if (strategy === 'browse') {
-      titles = [`Use the browser for ${target}`, `Report the outcome for ${target}`]
-      scopes = [
-        `Navigate and interact only as needed to complete the user's browser task.`,
-        `Summarize the concrete result or any hard blocker from the browser work.`,
-      ]
-    } else if (strategy === 'research' || strategy === 'analysis') {
-      titles = [`Research ${target}`, `Synthesize ${target}`]
-      scopes = [
-        `Gather credible source evidence for the user's requested depth on ${target}.`,
-        `Turn the gathered evidence into the requested answer or saved deliverable.`,
-      ]
-    } else {
-      titles = [`Handle ${target}`, `Deliver ${target}`]
-      scopes = [
-        `Do the concrete work requested by the user for ${target}.`,
-        `Return the result in the requested format and note any real blockers.`,
-      ]
-    }
-
-    const alignedScopes = this.alignScopesToTitles(titles, scopes)
-    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
-    return this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
-  }
-
-  private continueAfterPlannerTimeout(state: AgentStateData | null): boolean {
-    if (!state || state.planEmitted || this.emitter.isClosed) return false
-    console.warn('[Plan] Planner timed out inside startup deadline; continuing without surfacing provider timeout')
-    const fallback = this.timeoutFallbackPlan(state)
-    this.emitter.plan(fallback.titles)
-    state.planItems = fallback.titles
-    state.planScopes = fallback.scopes
-    state.currentPlanItems = fallback.titles
-    state.currentPlanScopes = fallback.scopes
-    state.currentStepIdx = 0
-    state.stepIterationCount = 0
-    state.phaseNarrationEmittedThisStep = false
-    state.planEmitted = true
-    updatePhase(state)
-    setWorkLedgerObjective(state, fallback.titles[0])
-    setWorkLedgerRequirements(state, this.buildInitialRequirements(fallback.titles, fallback.scopes))
-    return true
   }
 
   private async emitModelGeneratedAcknowledgement(taskShape: string, priorInvalidAck?: string): Promise<boolean> {
@@ -1376,9 +1320,6 @@ Rules:
         console.log(`[Plan] Planner start timed out on attempt ${attempt + 1}, retrying strict planner mode in ${backoff}ms`)
         await new Promise(r => setTimeout(r, backoff))
         return this.attemptPlanCall(attempt + 1, false)
-      }
-      if (isPlannerRequestTimeout(e) && this.continueAfterPlannerTimeout(state)) {
-        return null
       }
       if (isBillableUsageError(e)) throw e
       console.error('[AgentDiagnostics] Planner call failed', {

@@ -130,14 +130,16 @@ function transformPanelData(
   conversationId: string,
 ): SearchResult[] | BrowseResult | TerminalResult | FileResult | ImageSearchPanelItem[] | BrowserResult {
   if (name === 'image_search') {
-    const imgResult = result as {
-      downloaded?: string[]
-      images?: Array<{ title: string; thumbnailUrl: string; sourceUrl: string; imageUrl: string }>
-      conversationId?: string
-    }
-    const images = imgResult.images || []
-    const downloaded = imgResult.downloaded || []
-    const convId = imgResult.conversationId || conversationId
+    const imgResult = asRecord(result)
+    const rawImages = imgResult?.images
+    const rawDownloaded = imgResult?.downloaded
+    const images = Array.isArray(rawImages)
+      ? rawImages as Array<{ title?: string; thumbnailUrl?: string; sourceUrl?: string; imageUrl?: string }>
+      : []
+    const downloaded = Array.isArray(rawDownloaded)
+      ? rawDownloaded.filter((item): item is string => typeof item === 'string')
+      : []
+    const convId = stringField(imgResult, 'conversationId') || conversationId
     return downloaded.map((filePath: string, idx: number) => {
       const image = images[idx]
       return {
@@ -150,11 +152,12 @@ function transformPanelData(
   }
 
   if (name === 'youtube_transcript') {
-    const ytResult = result as { title?: string; transcript?: string; videoId?: string }
+    const ytResult = asRecord(result)
+    const videoId = stringField(ytResult, 'videoId')
     return {
-      title: ytResult.title || 'YouTube Transcript',
-      content: ytResult.transcript || '',
-      url: ytResult.videoId ? `https://youtube.com/watch?v=${ytResult.videoId}` : '',
+      title: stringField(ytResult, 'title') || 'YouTube Transcript',
+      content: stringField(ytResult, 'transcript'),
+      url: videoId ? `https://youtube.com/watch?v=${videoId}` : '',
     } as BrowseResult
   }
 
@@ -163,12 +166,12 @@ function transformPanelData(
   }
 
   if (name === 'http_request') {
-    const httpResult = result as { status?: number; statusText?: string; body?: string; url?: string; source?: string; content?: string; text?: string; error?: string }
-    const status = typeof httpResult.status === 'number' ? httpResult.status : undefined
-    const statusText = httpResult.statusText || ''
-    const body = httpResult.body || httpResult.content || httpResult.text || httpResult.error || ''
+    const httpResult = asRecord(result)
+    const status = numberField(httpResult, 'status')
+    const statusText = stringField(httpResult, 'statusText')
+    const body = firstStringField(httpResult, ['body', 'content', 'text', 'error'])
     const statusLabel = status !== undefined ? `HTTP ${status}${statusText ? ` ${statusText}` : ''}` : (statusText || 'HTTP response')
-    const url = httpResult.url || httpResult.source || ''
+    const url = firstStringField(httpResult, ['url', 'source'])
     return {
       title: statusLabel,
       content: body || statusLabel,
@@ -177,14 +180,14 @@ function transformPanelData(
   }
 
   if (name === 'run_code') {
-    const codeResult = result as { stdout?: string; stderr?: string; exitCode?: number; durationMs?: number; timedOut?: boolean; language?: string }
+    const codeResult = asRecord(result)
     return {
-      command: `[${codeResult.language || 'code'}]`,
-      stdout: codeResult.stdout || '',
-      stderr: codeResult.stderr || '',
-      exitCode: codeResult.exitCode ?? 1,
-      durationMs: codeResult.durationMs ?? 0,
-      timedOut: codeResult.timedOut ?? false,
+      command: `[${stringField(codeResult, 'language') || 'code'}]`,
+      stdout: stringField(codeResult, 'stdout'),
+      stderr: stringField(codeResult, 'stderr'),
+      exitCode: numberField(codeResult, 'exitCode') ?? 1,
+      durationMs: numberField(codeResult, 'durationMs') ?? 0,
+      timedOut: !!codeResult?.timedOut,
     } as TerminalResult
   }
 
