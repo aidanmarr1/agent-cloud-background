@@ -4,26 +4,27 @@ import type { Dirent } from 'fs'
 import { tmpdir } from 'os'
 import { join, relative, dirname, isAbsolute } from 'path'
 import type { FileResult } from '@/types'
-import {
-  appendFileInE2B,
-  createFileInE2B,
-  deleteFileInE2B,
-  destroyE2BSandbox,
-  e2bFileExists,
-  editFileInE2B,
-  executeCommandInE2B,
-  getOrCreateE2BSandbox,
-  listE2BFilesDetailed,
-  listFilesInE2B,
-  pauseE2BSandbox,
-  readE2BFileBytes,
-  readFileInE2B,
-  resetE2BSandbox,
-  shouldUseE2BSandbox,
-  syncE2BWorkspaceToLocal,
-  writeFileBytesInE2B,
-  type SandboxFileReadResult,
-} from './e2bSandbox'
+
+export type SandboxFileReadResult =
+  | { ok: true; body: Uint8Array; size: number }
+  | { ok: false; status: number; error: string }
+
+type E2BSandboxModule = typeof import('./e2bSandbox')
+
+let e2bModulePromise: Promise<E2BSandboxModule> | null = null
+
+function sandboxProvider(): string {
+  return process.env.AGENT_SANDBOX_PROVIDER?.trim().toLowerCase() || ''
+}
+
+function shouldUseE2BProvider(): boolean {
+  return sandboxProvider() === 'e2b'
+}
+
+async function e2bSandbox(): Promise<E2BSandboxModule> {
+  if (!e2bModulePromise) e2bModulePromise = import('./e2bSandbox')
+  return e2bModulePromise
+}
 
 const SAFE_TASK_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const IGNORED_SANDBOX_DIRECTORIES = new Set([
@@ -86,7 +87,7 @@ const IDLE_TIMEOUT_MS = 15 * 60 * 1000 // 15 minutes
 const CLEANUP_INTERVAL_MS = 60_000
 
 export function isCloudSandboxProviderEnabled(): boolean {
-  return shouldUseE2BSandbox()
+  return shouldUseE2BProvider()
 }
 
 export async function getOrCreateLocalSandboxDir(conversationId: string): Promise<string> {
@@ -115,14 +116,14 @@ export async function resetLocalSandboxDir(conversationId: string): Promise<stri
 export async function getOrCreateSandboxDir(conversationId: string): Promise<string> {
   const safeId = sanitizeConversationId(conversationId)
   const dir = await getOrCreateLocalSandboxDir(safeId)
-  if (shouldUseE2BSandbox()) await getOrCreateE2BSandbox(safeId)
+  if (shouldUseE2BProvider()) await (await e2bSandbox()).getOrCreateE2BSandbox(safeId)
   return dir
 }
 
 export async function resetSandboxDir(conversationId: string): Promise<string> {
   const safeId = sanitizeConversationId(conversationId)
   const dir = await resetLocalSandboxDir(safeId)
-  if (shouldUseE2BSandbox()) await resetE2BSandbox(safeId)
+  if (shouldUseE2BProvider()) await (await e2bSandbox()).resetE2BSandbox(safeId)
   return dir
 }
 
@@ -131,16 +132,16 @@ export async function executeInSandbox(
   command: string,
   onOutput?: OutputCallback
 ): Promise<ExecResult> {
-  if (shouldUseE2BSandbox()) {
+  if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return executeCommandInE2B(conversationId, command, onOutput, localRoot, MAX_SANDBOX_FILE_SIZE)
+    return (await e2bSandbox()).executeCommandInE2B(conversationId, command, onOutput, localRoot, MAX_SANDBOX_FILE_SIZE)
   }
 
   await getOrCreateSandboxDir(conversationId)
   const startTime = Date.now()
   return {
     stdout: '',
-    stderr: 'Local process execution is disabled until an OS-level sandbox is available.',
+    stderr: 'Command execution is disabled because no isolated task runner is configured.',
     exitCode: 1,
     durationMs: Date.now() - startTime,
     timedOut: false,
@@ -154,9 +155,9 @@ export async function createFileInSandbox(
   filePath: string,
   content: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
+  if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return createFileInE2B(conversationId, filePath, content, localRoot)
+    return (await e2bSandbox()).createFileInE2B(conversationId, filePath, content, localRoot)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -222,8 +223,8 @@ export async function readFileInSandbox(
   conversationId: string,
   filePath: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
-    return readFileInE2B(conversationId, filePath, MAX_SANDBOX_FILE_SIZE)
+  if (shouldUseE2BProvider()) {
+    return (await e2bSandbox()).readFileInE2B(conversationId, filePath, MAX_SANDBOX_FILE_SIZE)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -261,9 +262,9 @@ export async function deleteFileInSandbox(
   conversationId: string,
   filePath: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
+  if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return deleteFileInE2B(conversationId, filePath, localRoot)
+    return (await e2bSandbox()).deleteFileInE2B(conversationId, filePath, localRoot)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -300,8 +301,8 @@ export async function readSandboxFileBytes(
   conversationId: string,
   filePath: string,
 ): Promise<SandboxFileReadResult> {
-  if (shouldUseE2BSandbox()) {
-    return readE2BFileBytes(conversationId, filePath, MAX_SANDBOX_FILE_SIZE)
+  if (shouldUseE2BProvider()) {
+    return (await e2bSandbox()).readE2BFileBytes(conversationId, filePath, MAX_SANDBOX_FILE_SIZE)
   }
 
   const sandboxDir = getSandboxDirPath(conversationId)
@@ -340,8 +341,8 @@ export async function writeSandboxFileBytes(
   body: Uint8Array,
 ): Promise<void> {
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
-  if (shouldUseE2BSandbox()) {
-    await writeFileBytesInE2B(conversationId, filePath, body, sandboxDir)
+  if (shouldUseE2BProvider()) {
+    await (await e2bSandbox()).writeFileBytesInE2B(conversationId, filePath, body, sandboxDir)
     return
   }
 
@@ -385,18 +386,18 @@ export async function writeSandboxFileBytes(
 }
 
 export async function syncCloudSandboxToLocal(conversationId: string): Promise<void> {
-  if (!shouldUseE2BSandbox()) return
+  if (!shouldUseE2BProvider()) return
   const localRoot = await getOrCreateSandboxDir(conversationId)
-  await syncE2BWorkspaceToLocal(conversationId, localRoot, MAX_SANDBOX_FILE_SIZE)
+  await (await e2bSandbox()).syncE2BWorkspaceToLocal(conversationId, localRoot, MAX_SANDBOX_FILE_SIZE)
 }
 
 export async function pauseSandboxIfIdle(conversationId: string): Promise<void> {
-  if (!shouldUseE2BSandbox()) return
-  await pauseE2BSandbox(conversationId)
+  if (!shouldUseE2BProvider()) return
+  await (await e2bSandbox()).pauseE2BSandbox(conversationId)
 }
 
 export async function fileExistsInActiveSandbox(conversationId: string, filePath: string): Promise<boolean> {
-  if (shouldUseE2BSandbox()) return e2bFileExists(conversationId, filePath)
+  if (shouldUseE2BProvider()) return (await e2bSandbox()).e2bFileExists(conversationId, filePath)
 
   const sandboxDir = getSandboxDirPath(conversationId)
   const resolved = join(sandboxDir, filePath)
@@ -414,8 +415,8 @@ export async function fileExistsInActiveSandbox(conversationId: string, filePath
 export async function listSandboxFilesDetailed(
   conversationId: string,
 ): Promise<{ files: SandboxFileInfo[]; truncated: boolean }> {
-  if (shouldUseE2BSandbox()) {
-    return listE2BFilesDetailed(conversationId)
+  if (shouldUseE2BProvider()) {
+    return (await e2bSandbox()).listE2BFilesDetailed(conversationId)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -482,8 +483,8 @@ export async function listFilesInSandbox(
   conversationId: string,
   directory?: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
-    return listFilesInE2B(conversationId, directory)
+  if (shouldUseE2BProvider()) {
+    return (await e2bSandbox()).listFilesInE2B(conversationId, directory)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -535,9 +536,9 @@ export async function editFileInSandbox(
   oldString: string,
   newString: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
+  if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return editFileInE2B(conversationId, filePath, oldString, newString, localRoot)
+    return (await e2bSandbox()).editFileInE2B(conversationId, filePath, oldString, newString, localRoot)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -611,9 +612,9 @@ export async function appendFileInSandbox(
   filePath: string,
   content: string
 ): Promise<FileResult> {
-  if (shouldUseE2BSandbox()) {
+  if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return appendFileInE2B(conversationId, filePath, content, localRoot)
+    return (await e2bSandbox()).appendFileInE2B(conversationId, filePath, content, localRoot)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -669,8 +670,8 @@ export async function appendFileInSandbox(
 }
 
 export async function destroySandbox(conversationId: string): Promise<void> {
-  if (shouldUseE2BSandbox()) {
-    await destroyE2BSandbox(conversationId)
+  if (shouldUseE2BProvider()) {
+    await (await e2bSandbox()).destroyE2BSandbox(conversationId)
   }
   const entry = sandboxDirs.get(conversationId)
   if (!entry) return

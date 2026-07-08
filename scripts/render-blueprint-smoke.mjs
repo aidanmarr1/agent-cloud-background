@@ -143,7 +143,14 @@ for (const service of [web, worker]) {
   requireValue(service, 'AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true')
   requireValue(service, 'AGENT_SANDBOX_PROVIDER', 'e2b')
   requireValue(service, 'E2B_TEMPLATE_ID', 'agent-cloud-browser')
-  requireValue(service, 'AGENT_E2B_PAUSE_ON_TASK_END', 'true')
+  requireValue(service, 'AGENT_E2B_SANDBOX_TIMEOUT_MS', '3600000')
+  requireValue(service, 'AGENT_E2B_COMMAND_TIMEOUT_MS', '120000')
+  requireValue(service, 'AGENT_E2B_ALLOW_INTERNET', 'true')
+  requireValue(service, 'AGENT_E2B_PAUSE_ON_TASK_END', 'false')
+  requireValue(service, 'AGENT_E2B_KILL_ON_RESET', 'true')
+  requireValue(service, 'AGENT_E2B_BROWSER_PORT', '9222')
+  requireValue(service, 'AGENT_E2B_BROWSER_START_TIMEOUT_MS', '30000')
+  requireValue(service, 'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS', '30000')
   requireValue(service, 'AGENT_E2B_WARM_POOL_ENABLED', 'false')
 }
 
@@ -166,7 +173,14 @@ for (const key of [
   'AGENT_STORAGE_DRIVER',
   'AGENT_SANDBOX_PROVIDER',
   'E2B_TEMPLATE_ID',
+  'AGENT_E2B_SANDBOX_TIMEOUT_MS',
+  'AGENT_E2B_COMMAND_TIMEOUT_MS',
+  'AGENT_E2B_ALLOW_INTERNET',
   'AGENT_E2B_PAUSE_ON_TASK_END',
+  'AGENT_E2B_KILL_ON_RESET',
+  'AGENT_E2B_BROWSER_PORT',
+  'AGENT_E2B_BROWSER_START_TIMEOUT_MS',
+  'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS',
   'AGENT_E2B_WARM_POOL_ENABLED',
 ]) {
   assert.equal(envValue(web, key), envValue(worker, key), `${key} must match between web and worker`)

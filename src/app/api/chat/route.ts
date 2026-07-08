@@ -5,7 +5,7 @@ import { validateRequest } from '@/lib/validation/validate'
 import { checkRateLimit } from '@/lib/rateLimit'
 import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
 import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody } from '@/lib/api'
-import { getOrCreateLocalSandboxDir, pauseSandboxIfIdle, resetLocalSandboxDir } from '@/lib/sandbox'
+import { destroySandbox, getOrCreateLocalSandboxDir, resetLocalSandboxDir } from '@/lib/sandbox'
 import { ensureE2BRemoteBrowser, getE2BSandboxBillingStartedAtMs, resetE2BSandbox, shouldUseE2BSandbox } from '@/lib/e2bSandbox'
 import { assertTaskAccess } from '@/lib/taskAccess'
 import { shouldUseDirectChat } from '@/lib/directChatRouting'
@@ -126,7 +126,7 @@ function publicErrorMessage(error: unknown): string {
   return message
 }
 
-function pauseCloudSandboxAfterTask(
+function destroyCloudSandboxAfterTask(
   conversationId: string,
   remoteSandboxReadyPromise: Promise<void> | null,
   billing?: {
@@ -136,7 +136,7 @@ function pauseCloudSandboxAfterTask(
     emitCreditRecord: (recorded: ServerCreditRecord | null | undefined) => void
   },
 ): void {
-  const pause = async () => {
+  const destroy = async () => {
     if (billing) {
       try {
         const billingStartedAtMs = getE2BSandboxBillingStartedAtMs(conversationId) ?? billing.startedAtMs
@@ -155,8 +155,8 @@ function pauseCloudSandboxAfterTask(
       }
     }
 
-    await pauseSandboxIfIdle(conversationId).catch((error) => {
-      console.error('[AgentDiagnostics] Cloud sandbox pause failed', {
+    await destroySandbox(conversationId).catch((error) => {
+      console.error('[AgentDiagnostics] E2B task sandbox cleanup failed', {
         conversationId,
         error: error instanceof Error ? error.message : String(error),
       })
@@ -164,11 +164,16 @@ function pauseCloudSandboxAfterTask(
   }
 
   if (remoteSandboxReadyPromise) {
-    void remoteSandboxReadyPromise.then(pause, () => undefined)
+    void remoteSandboxReadyPromise.then(destroy, destroy)
     return
   }
 
-  void pause()
+  void destroy().catch((error) => {
+    console.error('[AgentDiagnostics] Task workspace cleanup failed', {
+      conversationId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  })
 }
 
 function normalizeProviderUsage(usage: {
@@ -225,8 +230,6 @@ function workerMatchesConfiguredRuntime(worker: TaskWorkerHeartbeat): boolean {
   ) {
     return false
   }
-
-  if (process.env.AGENT_SANDBOX_PROVIDER?.trim().toLowerCase() !== 'e2b') return true
 
   return worker.taskWorkerMode === 'external' &&
     worker.sandboxProvider === 'e2b' &&
@@ -821,7 +824,7 @@ async function runChatTaskJob(input: {
       await chargeActiveCredit()
     }
     if (conversationId) {
-      pauseCloudSandboxAfterTask(
+      destroyCloudSandboxAfterTask(
         conversationId,
         remoteSandboxReadyPromise,
         remoteSandboxStartedAtMs === null

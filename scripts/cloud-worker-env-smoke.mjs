@@ -58,10 +58,14 @@ function requireExact(name, expected, reason) {
   else fail(`${name} must be ${expected} (${reason})`)
 }
 
-function requireRecommendedTrue(name, reason) {
+function requireExactBool(name, expected, reason) {
   const value = env(name).toLowerCase()
-  if (!value || value === 'true' || value === '1') pass(`${name} keeps ${reason}`)
-  else warn(`${name}=${env(name)}; recommended true for ${reason}`)
+  const normalized = value || (expected ? 'true' : 'false')
+  const matches = expected
+    ? normalized === 'true' || normalized === '1'
+    : normalized === 'false' || normalized === '0'
+  if (matches) pass(`${name}=${expected ? 'true' : 'false'}`)
+  else fail(`${name} must be ${expected ? 'true' : 'false'} (${reason})`)
 }
 
 function validateQueueName(value) {
@@ -94,15 +98,20 @@ requireRealEnv('DEEPSEEK_API_KEY', 'DeepSeek API key for task execution', valida
 requireExact('DEEPSEEK_MODEL', 'deepseek-v4-flash', 'DeepSeek v4 Flash model route')
 requireExact('DEEPSEEK_REASONING_EFFORT', 'minimal', 'DeepSeek lowest reasoning effort')
 requireExact('DEEPSEEK_THINKING_ENABLED', 'false', 'DeepSeek thinking disabled')
-requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'Manus-style cloud computer execution')
-requireRealEnv('E2B_API_KEY', 'E2B runtime API key for cloud sandboxes', validateNonShortToken)
-requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
-
+requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
+requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'local workers must not satisfy production readiness')
+requireRealEnv('E2B_API_KEY', 'E2B hosted sandbox API key', validateNonShortToken)
 if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
-  pass('E2B browser runtime source is configured')
+  pass('E2B browser runtime is configured')
 } else {
-  fail('Set E2B_TEMPLATE_ID=agent-cloud-browser or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND before starting the worker')
+  fail('E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND must be set')
 }
+requireExactBool('AGENT_E2B_PAUSE_ON_TASK_END', false, 'finished tasks must destroy their E2B sandbox instead of pausing it')
+requireExactBool('AGENT_E2B_KILL_ON_RESET', true, 'each new task must start from a fresh E2B sandbox')
+requireExactBool('AGENT_E2B_WARM_POOL_ENABLED', false, 'tasks must not reuse a warm sandbox')
+requireExactBool('AGENT_E2B_VERIFY_ON_WORKER_STARTUP', true, 'hosted worker should prove E2B command execution before serving tasks')
+requireExactBool('AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', true, 'hosted worker should prove E2B browser readiness before serving tasks')
+requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
 
 const storageDriver = env('AGENT_STORAGE_DRIVER') || 'turso'
 if (storageDriver === 'turso') pass('AGENT_STORAGE_DRIVER=turso')
@@ -115,15 +124,6 @@ if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowe
 } else {
   warn('AGENT_DEPLOYMENT_VERSION is not set; set it with AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true if you need stale-worker rejection')
 }
-
-requireRecommendedTrue('AGENT_E2B_PAUSE_ON_TASK_END', 'idle E2B sandbox cost bounded')
-if (['true', '1'].includes(env('AGENT_E2B_WARM_POOL_ENABLED').toLowerCase())) {
-  warn('AGENT_E2B_WARM_POOL_ENABLED is on; warm sandbox runtime should be treated as billable startup latency for the adopting task')
-} else {
-  pass('AGENT_E2B_WARM_POOL_ENABLED is off by default, so E2B starts only when a task can be billed')
-}
-requireRecommendedTrue('AGENT_E2B_VERIFY_ON_WORKER_STARTUP', 'invalid E2B keys or templates failing before worker heartbeat')
-requireRecommendedTrue('AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', 'Chromium browser template failures surfacing before worker heartbeat')
 
 if (!env('AGENT_TASK_WORKER_ID')) {
   warn('AGENT_TASK_WORKER_ID is not set; the worker will generate a unique ID at startup')
@@ -138,6 +138,9 @@ for (const name of [
   'AGENT_TASK_WORKER_MAX_ATTEMPTS',
   'AGENT_E2B_SANDBOX_TIMEOUT_MS',
   'AGENT_E2B_COMMAND_TIMEOUT_MS',
+  'AGENT_E2B_BROWSER_PORT',
+  'AGENT_E2B_BROWSER_START_TIMEOUT_MS',
+  'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS',
 ]) {
   const value = env(name)
   if (!value) {

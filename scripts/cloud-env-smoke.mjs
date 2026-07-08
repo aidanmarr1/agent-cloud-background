@@ -64,6 +64,16 @@ function requireRecommendedTrue(name, reason) {
   else warn(`${name}=${env(name)}; recommended true for ${reason}`)
 }
 
+function requireExactBool(name, expected, reason) {
+  const value = env(name).toLowerCase()
+  const normalized = value || (expected ? 'true' : 'false')
+  const matches = expected
+    ? normalized === 'true' || normalized === '1'
+    : normalized === 'false' || normalized === '0'
+  if (matches) pass(`${name}=${expected ? 'true' : 'false'}`)
+  else fail(`${name} must be ${expected ? 'true' : 'false'} (${reason})`)
+}
+
 function validateQueueName(value) {
   return /^[a-zA-Z0-9_.:-]{1,128}$/.test(value)
 }
@@ -94,7 +104,6 @@ requireExact('DEEPSEEK_REASONING_EFFORT', 'minimal', 'DeepSeek lowest reasoning 
 requireExact('DEEPSEEK_THINKING_ENABLED', 'false', 'DeepSeek thinking disabled')
 requireRealEnv('AUTH_SECRET', 'Auth.js signing secret', validateSecret)
 requireRealEnv('AGENT_INTERNAL_HEALTH_SECRET', 'internal health signing secret', validateSecret)
-requireRealEnv('E2B_API_KEY', 'E2B runtime API key', validateNonShortToken)
 requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
 
 requireExact('AGENT_TASK_WORKER_MODE', 'external', 'web requests must enqueue durable background tasks')
@@ -102,15 +111,23 @@ requireRealEnv('AGENT_TASK_QUEUE_NAME', 'deployment queue namespace', validateQu
 if (env('AGENT_TASK_QUEUE_NAME') === 'default') {
   fail('AGENT_TASK_QUEUE_NAME must not be default for cloud deployment; use production, staging, or another explicit namespace')
 }
-requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'Manus-style cloud computer execution')
+requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
+requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'local workers must not satisfy production readiness')
+requireRealEnv('E2B_API_KEY', 'E2B hosted sandbox API key', validateNonShortToken)
+if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
+  pass('E2B browser runtime is configured')
+} else {
+  fail('E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND must be set')
+}
+requireExactBool('AGENT_E2B_PAUSE_ON_TASK_END', false, 'finished tasks must destroy their E2B sandbox instead of pausing it')
+requireExactBool('AGENT_E2B_KILL_ON_RESET', true, 'each new task must start from a fresh E2B sandbox')
+requireExactBool('AGENT_E2B_WARM_POOL_ENABLED', false, 'tasks must not reuse a warm sandbox')
 
 const storageDriver = env('AGENT_STORAGE_DRIVER') || 'turso'
 if (storageDriver === 'turso') pass('AGENT_STORAGE_DRIVER=turso')
 else fail('AGENT_STORAGE_DRIVER must be turso so task files survive web/worker restarts')
 
 requireRecommendedTrue('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', 'failing fast when no worker is alive')
-requireRecommendedTrue('AGENT_E2B_PAUSE_ON_TASK_END', 'avoiding idle E2B sandbox cost')
-
 if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowerCase())) {
   requireRealEnv('AGENT_DEPLOYMENT_VERSION', 'web/worker deployment version match')
 } else if (env('AGENT_DEPLOYMENT_VERSION')) {
@@ -119,18 +136,15 @@ if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowe
   warn('AGENT_DEPLOYMENT_VERSION is not set; set it with AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true if you need stale-worker rejection')
 }
 
-if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
-  pass('E2B browser runtime source is configured')
-} else {
-  fail('Set E2B_TEMPLATE_ID=agent-cloud-browser or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND before cloud deployment')
-}
-
 for (const name of [
   'AGENT_TASK_WORKER_HEARTBEAT_MS',
   'AGENT_TASK_WORKER_STALE_MS',
   'AGENT_TASK_WORKER_MAX_ATTEMPTS',
   'AGENT_E2B_SANDBOX_TIMEOUT_MS',
   'AGENT_E2B_COMMAND_TIMEOUT_MS',
+  'AGENT_E2B_BROWSER_PORT',
+  'AGENT_E2B_BROWSER_START_TIMEOUT_MS',
+  'AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS',
 ]) {
   const value = env(name)
   if (!value) {

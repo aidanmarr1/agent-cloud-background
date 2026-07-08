@@ -34,7 +34,6 @@ const [
   backgroundWorkerReadyScript,
   backgroundWorkerSmokeRoute,
   backgroundWorkerSmokeScript,
-  localBackgroundWorkerSmokeScript,
   taskStartPersistenceSmokeScript,
   workerLeaseSmokeScript,
   workerCancelSmokeScript,
@@ -81,7 +80,6 @@ const [
   readFile(join(root, 'scripts/prod-background-worker-ready.mjs'), 'utf8'),
   readFile(join(root, 'src/app/api/internal/background-worker-smoke/route.ts'), 'utf8'),
   readFile(join(root, 'scripts/prod-background-worker-smoke.mjs'), 'utf8'),
-  readFile(join(root, 'scripts/local-background-worker-smoke.mjs'), 'utf8'),
   readFile(join(root, 'scripts/cloud-task-start-persistence-smoke.mjs'), 'utf8'),
   readFile(join(root, 'scripts/cloud-worker-lease-smoke.mjs'), 'utf8'),
   readFile(join(root, 'scripts/cloud-worker-cancel-smoke.mjs'), 'utf8'),
@@ -240,7 +238,7 @@ assert.match(cloudEnvSmokeScript, /AGENT_INTERNAL_HEALTH_SECRET/, 'cloud env smo
 assert.match(cloudEnvSmokeScript, /AGENT_TASK_WORKER_MAX_ATTEMPTS/, 'cloud env smoke must validate the worker retry attempt cap when provided')
 assert.match(cloudEnvSmokeScript, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'cloud env smoke must understand deployment-version enforcement')
 assert.match(cloudEnvSmokeScript, /AGENT_DEPLOYMENT_VERSION/, 'cloud env smoke must require a deployment version when version enforcement is enabled')
-assert.match(cloudEnvSmokeScript, /E2B_TEMPLATE_ID=agent-cloud-browser/, 'cloud env smoke must guide E2B browser template configuration')
+assert.match(cloudEnvSmokeScript, /E2B_TEMPLATE_ID.*AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND/, 'cloud env smoke must require an E2B browser runtime source')
 assert.match(cloudEnvSmokeScript, /Cloud environment values look production-ready/, 'cloud env smoke must report production readiness')
 assert.match(cloudWorkerEnvSmokeScript, /Cloud worker environment smoke report/, 'worker env smoke must report worker host readiness')
 assert.match(cloudWorkerEnvSmokeScript, /AGENT_TASK_WORKER_MODE[\s\S]*external/, 'worker env smoke must require external worker mode')
@@ -320,7 +318,7 @@ assert.match(cloudPreflightScript, /cloud:task-start-smoke/, 'cloud preflight mu
 assert.match(cloudPreflightScript, /cloud:worker-lease-smoke/, 'cloud preflight must run stale worker lease recovery smoke')
 assert.match(cloudPreflightScript, /cloud:worker-cancel-smoke/, 'cloud preflight must run worker cancellation terminal-state smoke')
 assert.match(cloudPreflightScript, /cloud:worker-shutdown-smoke/, 'cloud preflight must run graceful shutdown handoff smoke')
-assert.match(cloudPreflightScript, /cloud:worker-smoke:local/, 'cloud preflight must run the local web plus worker smoke')
+assert.doesNotMatch(cloudPreflightScript, /cloud:worker-smoke:local/, 'cloud preflight must not rely on a local worker smoke')
 assert.match(cloudPreflightScript, /cloud:worker-ready/, 'cloud preflight must run deployed worker readiness when a deployed URL is provided')
 assert.match(cloudPreflightScript, /cloud:worker-smoke/, 'cloud preflight must run deployed worker smoke when a deployed URL is provided')
 assert.match(cloudPreflightScript, /--source-only/, 'cloud preflight must offer source-only mode for no-credential checks')
@@ -357,14 +355,14 @@ assert.match(backgroundWorkerReadyRoute, /getRecentTaskWorkerHeartbeats/, 'deplo
 assert.match(backgroundWorkerReadyRoute, /liveCloudWorkerHeartbeat/, 'deployed background worker readiness must require an E2B-capable worker heartbeat, not just any poller')
 assert.match(backgroundWorkerReadyRoute, /workerHeartbeatIsHosted/, 'deployed background worker readiness must reject local laptop worker heartbeats for offline-safe status')
 assert.match(backgroundWorkerReadyRoute, /AGENT_REQUIRE_HOSTED_TASK_WORKER/, 'deployed background worker readiness must allow local workers when hosted-worker enforcement is disabled')
-assert.match(backgroundWorkerReadyRoute, /Only local worker heartbeats were found/, 'deployed background worker readiness must explain when only local workers are live')
+assert.match(backgroundWorkerReadyRoute, /Only local E2B worker heartbeats were found/, 'deployed background worker readiness must explain when only local workers are live')
 assert.match(backgroundWorkerReadyRoute, /hostname: worker\.hostname/, 'deployed background worker readiness must expose worker hostnames for diagnostics')
 assert.match(backgroundWorkerSmokeRoute, /workerHeartbeatIsHosted/, 'deployed closed-tab smoke must understand hosted worker heartbeats')
 assert.match(backgroundWorkerSmokeRoute, /AGENT_REQUIRE_HOSTED_TASK_WORKER/, 'deployed closed-tab smoke must allow local workers when hosted-worker enforcement is disabled')
 assert.match(backgroundWorkerReadyRoute, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'deployed background worker readiness must support deployment-version matching')
 assert.match(backgroundWorkerReadyRoute, /AGENT_DEPLOYMENT_VERSION/, 'deployed background worker readiness must compare expected worker deployment version')
-assert.match(backgroundWorkerReadyRoute, /No live E2B-capable worker heartbeat matched AGENT_DEPLOYMENT_VERSION/, 'deployed background worker readiness must explain version mismatches')
-assert.match(backgroundWorkerReadyRoute, /No E2B-capable live worker heartbeat found/, 'deployed background worker readiness must explain missing E2B-capable workers')
+assert.match(backgroundWorkerReadyRoute, /No live task worker heartbeat matched AGENT_DEPLOYMENT_VERSION/, 'deployed background worker readiness must explain version mismatches')
+assert.match(backgroundWorkerReadyRoute, /No hosted E2B task worker heartbeat found/, 'deployed background worker readiness must explain missing hosted E2B-capable workers')
 assert.match(backgroundWorkerReadyRoute, /AGENT_SANDBOX_PROVIDER/, 'deployed background worker readiness route must verify E2B sandbox provider config')
 assert.match(backgroundWorkerReadyRoute, /E2B_TEMPLATE_ID/, 'deployed background worker readiness route must verify E2B browser runtime config')
 assert.match(backgroundWorkerReadyScript, /\/api\/internal\/background-worker-ready/, 'deployed background worker readiness script must call the signed readiness endpoint')
@@ -378,7 +376,7 @@ assert.match(backgroundWorkerSmokeRoute, /findActiveTaskJobForConversation/, 'de
 assert.match(backgroundWorkerSmokeRoute, /Durable active-run discovery could not find the queued probe/, 'deployed background worker smoke route must fail if early-close run discovery is broken')
 assert.match(backgroundWorkerSmokeRoute, /createTaskJobEventStream/, 'deployed background worker smoke route must exercise event replay streams')
 assert.match(backgroundWorkerSmokeRoute, /getRecentTaskWorkerHeartbeats/, 'deployed background worker smoke route must fail fast without a live worker heartbeat')
-assert.match(backgroundWorkerSmokeRoute, /No E2B-capable live background worker heartbeat found/, 'deployed background worker smoke must fail fast unless the live worker can run E2B-backed tasks')
+assert.match(backgroundWorkerSmokeRoute, /No hosted E2B task worker heartbeat found/, 'deployed background worker smoke must fail fast unless the live worker can run E2B-backed tasks')
 assert.match(backgroundWorkerSmokeRoute, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'deployed background worker smoke must support deployment-version matching')
 assert.match(backgroundWorkerSmokeRoute, /matched AGENT_DEPLOYMENT_VERSION/, 'deployed background worker smoke must explain deployment-version mismatch')
 assert.match(backgroundWorkerSmokeRoute, /__background_probe_start__/, 'deployed background worker smoke route must wait for worker claim before disconnect')
@@ -387,21 +385,13 @@ assert.match(backgroundWorkerSmokeRoute, /__background_probe_finish__/, 'deploye
 assert.match(backgroundWorkerSmokeRoute, /cleanupProbeRows/, 'deployed background worker smoke route must clean up successful diagnostic rows')
 assert.match(backgroundWorkerSmokeRoute, /cancelAndCleanupProbe/, 'deployed background worker smoke route must try to cancel and clean up failed diagnostic rows')
 assert.match(backgroundWorkerSmokeRoute, /cleanedUp/, 'deployed background worker smoke response must report cleanup status')
-assert.match(backgroundWorkerSmokeRoute, /cloudWorkerCount/, 'deployed background worker smoke response must report E2B-capable worker count')
+assert.match(backgroundWorkerSmokeRoute, /hostedWorkerCount/, 'deployed background worker smoke response must report hosted E2B-capable worker count')
 assert.match(backgroundWorkerSmokeRoute, /activeDiscovery:\s*true/, 'deployed background worker smoke response must report active-run discovery proof')
 assert.match(backgroundWorkerSmokeScript, /\/api\/internal\/background-worker-smoke/, 'deployed background worker smoke script must call the signed smoke endpoint')
 assert.match(backgroundWorkerSmokeScript, /x-agent-health-signature/, 'deployed background worker smoke script must sign the internal smoke request')
 assert.match(backgroundWorkerSmokeScript, /--timeout-ms/, 'deployed background worker smoke script must support a timeout override')
 assert.match(backgroundWorkerSmokeScript, /Smoke endpoint did not return JSON/, 'deployed background worker smoke script must explain stale or wrong deployment responses')
 assert.match(backgroundWorkerSmokeScript, /loadLocalEnvFiles/, 'deployed background worker smoke script must use the shared local env loader')
-assert.match(localBackgroundWorkerSmokeScript, /local-smoke-\$\{Date\.now\(\)\}/, 'local background worker smoke must use a unique queue namespace')
-assert.match(localBackgroundWorkerSmokeScript, /AGENT_TASK_QUEUE_NAME:\s*queueName/, 'local background worker smoke must force web and worker onto the isolated queue')
-assert.match(localBackgroundWorkerSmokeScript, /\/api\/internal\/background-worker-ready/, 'local background worker smoke must verify readiness before the disconnect probe')
-assert.match(localBackgroundWorkerSmokeScript, /next.*start/s, 'local background worker smoke must run a production Next server')
-assert.match(localBackgroundWorkerSmokeScript, /npm.*run.*worker/s, 'local background worker smoke must run the real task worker process')
-assert.match(localBackgroundWorkerSmokeScript, /does not call the LLM or start E2B/, 'local background worker smoke must document the no-credit probe contract')
-assert.match(localBackgroundWorkerSmokeScript, /body\.errors/, 'local background worker smoke must retry readiness responses that report heartbeat errors in an errors array')
-assert.match(localBackgroundWorkerSmokeScript, /stale or incomplete/, 'local background worker smoke must fail clearly when --skip-build uses a stale production build')
 assert.match(taskStartPersistenceSmokeScript, /ensureUserConversationForTaskStart/, 'task-start persistence smoke must call the server task-start conversation helper')
 assert.match(taskStartPersistenceSmokeScript, /server_placeholder/, 'task-start persistence smoke must verify the server placeholder marker')
 assert.match(taskStartPersistenceSmokeScript, /getUserConversationById/, 'task-start persistence smoke must prove the placeholder is visible in account history')
@@ -448,7 +438,7 @@ assert.match(cloudReadiness, /workerMatchesConfiguredRuntime/, 'cloud readiness 
 assert.match(cloudReadiness, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'cloud readiness must support deployment-version enforcement')
 assert.match(cloudReadiness, /AGENT_DEPLOYMENT_VERSION/, 'cloud readiness must validate deployment version when stale-worker rejection is enabled')
 assert.match(cloudReadiness, /live compatible task worker heartbeat found/, 'cloud readiness must report compatible live worker heartbeats')
-assert.match(cloudReadiness, /no live task worker heartbeat found/, 'cloud readiness must fail when no live worker is present')
+assert.match(cloudReadiness, /no live hosted E2B worker heartbeat found/, 'cloud readiness must fail when no hosted worker is present')
 assert.match(cloudReadiness, /task requests require a recent worker heartbeat/, 'cloud readiness must report the runtime worker guard')
 assert.match(cloudReadiness, /AGENT_INTERNAL_HEALTH_SECRET/, 'cloud readiness must report dedicated internal health signing secret coverage')
 assert.match(cloudReadiness, /cloud-secrets\.mjs/, 'cloud readiness must require the deployment secret generator')
@@ -475,7 +465,7 @@ assert.match(cloudReadiness, /cloud-worker-lease-smoke\.mjs/, 'cloud readiness m
 assert.match(cloudReadiness, /cloud-worker-cancel-smoke\.mjs/, 'cloud readiness must require the worker cancellation terminal-state smoke script')
 assert.match(cloudReadiness, /cloud-worker-shutdown-smoke\.mjs/, 'cloud readiness must require the worker graceful shutdown smoke script')
 assert.match(cloudReadiness, /prod-background-worker-ready\.mjs/, 'cloud readiness must require the deployed worker readiness script')
-assert.match(cloudReadiness, /local-background-worker-smoke\.mjs/, 'cloud readiness must require the local isolated-queue worker smoke script')
+assert.doesNotMatch(cloudReadiness, /local-background-worker-smoke\.mjs/, 'cloud readiness must not require a local worker smoke script')
 assert.match(cloudReadiness, /api\/health\/route\.ts/, 'cloud readiness must require the public deployment health endpoint')
 assert.match(cloudReadiness, /background-worker-smoke\/route\.ts/, 'cloud readiness must require the deployed worker smoke endpoint')
 assert.match(cloudReadiness, /background-worker-ready\/route\.ts/, 'cloud readiness must require the deployed worker readiness endpoint')
@@ -503,7 +493,7 @@ assert.match(packageJson, /"cloud:worker-cancel-smoke":\s*"node scripts\/cloud-w
 assert.match(packageJson, /"cloud:worker-shutdown-smoke":\s*"node scripts\/cloud-worker-shutdown-smoke\.mjs"/, 'package scripts must include the worker graceful shutdown handoff smoke command')
 assert.match(packageJson, /"cloud:worker-ready":\s*"node scripts\/prod-background-worker-ready\.mjs"/, 'package scripts must include the deployed worker readiness command')
 assert.match(packageJson, /"cloud:worker-smoke":\s*"node scripts\/prod-background-worker-smoke\.mjs"/, 'package scripts must include the deployed worker reconnect smoke command')
-assert.match(packageJson, /"cloud:worker-smoke:local":\s*"node scripts\/local-background-worker-smoke\.mjs"/, 'package scripts must include the local isolated-queue worker reconnect smoke command')
+assert.doesNotMatch(packageJson, /"cloud:worker-smoke:local"/, 'package scripts must not expose a local worker smoke command')
 assert.match(packageJson, /"e2b:template:build":\s*"node scripts\/e2b-template-build-v2\.mjs --dockerfile e2b\.Dockerfile --name agent-cloud-browser"/, 'package scripts must include an E2B v2 template build command')
 assert.match(packageJson, /"engines":\s*\{\s*"node":\s*"22\.x"\s*\}/, 'package must pin Node 22 for cloud builds')
 assert.equal(nodeVersion.trim(), '22', '.node-version must pin Node 22 for cloud builds')
@@ -545,7 +535,7 @@ assert.match(renderWorkerEnvExample, /AGENT_STORAGE_DRIVER=turso/, 'Render worke
 assert.match(renderWorkerEnvExample, /AGENT_SANDBOX_PROVIDER=e2b/, 'Render worker env checklist must enable E2B cloud sandboxes')
 assert.match(renderWorkerEnvExample, /^E2B_API_KEY=$/m, 'Render worker env checklist must include the E2B runtime key slot without committing a value')
 assert.match(renderWorkerEnvExample, /E2B_TEMPLATE_ID=agent-cloud-browser/, 'Render worker env checklist must use the included E2B browser template by default')
-assert.match(renderWorkerEnvExample, /AGENT_E2B_PAUSE_ON_TASK_END=true/, 'Render worker env checklist must pause idle E2B sandboxes by default')
+assert.match(renderWorkerEnvExample, /AGENT_E2B_PAUSE_ON_TASK_END=false/, 'Render worker env checklist must destroy E2B sandboxes after each task')
 assert.match(renderWorkerEnvExample, /AGENT_E2B_WARM_POOL_ENABLED=false/, 'Render worker env checklist must disable unowned E2B warm pool by default')
 assert.match(renderWorkerEnvExample, /AGENT_E2B_VERIFY_ON_WORKER_STARTUP=true/, 'Render worker env checklist must verify E2B before worker heartbeat')
 assert.match(renderWorkerEnvExample, /AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP=true/, 'Render worker env checklist must verify browser runtime before worker heartbeat')
@@ -570,7 +560,7 @@ assert.match(envExample, /AGENT_REQUIRE_HOSTED_TASK_WORKER=true/, '.env.example 
 assert.match(envExample, /^AGENT_DEPLOYMENT_VERSION=$/m, '.env.example must document the optional deployment version')
 assert.match(envExample, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=false/, '.env.example must document opt-in deployment-version enforcement')
 assert.match(envExample, /AGENT_INTERNAL_HEALTH_SECRET=/, '.env.example must document the internal health signing secret')
-assert.match(envExample, /AGENT_SANDBOX_PROVIDER=/, '.env.example must document the cloud sandbox provider')
+assert.match(envExample, /AGENT_SANDBOX_PROVIDER=e2b/, '.env.example must document the hosted E2B sandbox provider')
 assert.match(envExample, /E2B_API_KEY=/, '.env.example must document E2B credentials')
 assert.match(envExample, /AGENT_E2B_WARM_POOL_ENABLED=false/, '.env.example must default E2B warm pooling off for honest billing')
 assert.match(envExample, /AGENT_E2B_VERIFY_ON_WORKER_STARTUP=false/, '.env.example must document the optional E2B startup verification flag')
@@ -615,7 +605,7 @@ assert.match(cloudDocs, /npm run cloud:worker-ready/, 'cloud docs must document 
 assert.match(cloudDocs, /npm run cloud:worker-smoke/, 'cloud docs must document the deployed worker disconnect/reconnect smoke')
 assert.match(cloudDocs, /AGENT_INTERNAL_HEALTH_SECRET/, 'cloud docs must document the deployed smoke signing secret requirement')
 assert.match(cloudDocs, /npm run cloud:secrets/, 'cloud docs must show the cloud secret generation command')
-assert.match(cloudDocs, /npm run cloud:worker-smoke:local/, 'cloud docs must document the local isolated-queue worker disconnect/reconnect smoke')
+assert.doesNotMatch(cloudDocs, /npm run cloud:worker-smoke:local/, 'cloud docs must not document local worker smoke as a supported path')
 assert.match(cloudDocs, /npm run e2b:template:build/, 'cloud docs must document building the E2B browser template')
 assert.match(cloudDocs, /E2B_TEMPLATE_ID=agent-cloud-browser/, 'cloud docs must document the default E2B browser template name')
 assert.match(cloudDocs, /AGENT_E2B_VERIFY_ON_WORKER_STARTUP=true/, 'cloud docs must document worker E2B startup verification')

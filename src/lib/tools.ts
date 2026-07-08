@@ -429,7 +429,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
 
 function shouldExposeExecutionTools(): boolean {
   return process.env.AGENT_SANDBOX_PROVIDER?.trim().toLowerCase() === 'e2b' &&
-    !!process.env.E2B_API_KEY?.trim()
+    Boolean(process.env.E2B_API_KEY?.trim())
 }
 
 const executionToolDefinitions: ChatCompletionTool[] = shouldExposeExecutionTools()

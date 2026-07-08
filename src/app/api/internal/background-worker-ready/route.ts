@@ -53,13 +53,19 @@ function envBoolEnabled(name: string, fallback = true): boolean {
   return value !== 'false' && value !== '0'
 }
 
+function envBoolExact(name: string, fallback = false): boolean {
+  const value = env(name).toLowerCase()
+  if (!value) return fallback
+  return value === 'true' || value === '1'
+}
+
 function isCloudCapableWorker(worker: {
   hostname?: string | null
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
-  e2bApiKeyConfigured?: boolean
-  e2bBrowserRuntimeConfigured?: boolean
+  e2bApiKeyConfigured?: boolean | null
+  e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
@@ -76,8 +82,8 @@ function isE2BCapableWorker(worker: {
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
-  e2bApiKeyConfigured?: boolean
-  e2bBrowserRuntimeConfigured?: boolean
+  e2bApiKeyConfigured?: boolean | null
+  e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
@@ -107,7 +113,8 @@ export async function GET(request: NextRequest) {
   checks.e2bProviderEnabled = env('AGENT_SANDBOX_PROVIDER').toLowerCase() === 'e2b'
   checks.e2bApiKeyConfigured = Boolean(env('E2B_API_KEY'))
   checks.e2bBrowserRuntimeConfigured = Boolean(env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND'))
-  checks.e2bPauseOnTaskEnd = env('AGENT_E2B_PAUSE_ON_TASK_END').toLowerCase() === 'true'
+  checks.e2bFreshTaskReset = envBoolExact('AGENT_E2B_KILL_ON_RESET', true)
+  checks.e2bWarmPoolDisabled = !envBoolExact('AGENT_E2B_WARM_POOL_ENABLED', false)
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION', false)
   const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
@@ -117,10 +124,11 @@ export async function GET(request: NextRequest) {
 
   if (!checks.externalWorkerMode) errors.push('AGENT_TASK_WORKER_MODE must be external.')
   if (!checks.persistentQueueConfigured) errors.push('Persistent Turso task queue is not configured.')
-  if (!checks.e2bProviderEnabled) errors.push('AGENT_SANDBOX_PROVIDER must be e2b for Manus-style cloud computer execution.')
-  if (!checks.e2bApiKeyConfigured) errors.push('E2B_API_KEY is missing.')
-  if (!checks.e2bBrowserRuntimeConfigured) errors.push('No E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND is configured for browser tools.')
-  if (!checks.e2bPauseOnTaskEnd) warnings.push('AGENT_E2B_PAUSE_ON_TASK_END should be true to reduce idle sandbox cost.')
+  if (!checks.e2bProviderEnabled) errors.push('AGENT_SANDBOX_PROVIDER must be e2b.')
+  if (!checks.e2bApiKeyConfigured) errors.push('E2B_API_KEY must be set.')
+  if (!checks.e2bBrowserRuntimeConfigured) errors.push('E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND must be set.')
+  if (!checks.e2bFreshTaskReset) errors.push('AGENT_E2B_KILL_ON_RESET must be true so each task starts from a fresh sandbox.')
+  if (!checks.e2bWarmPoolDisabled) errors.push('AGENT_E2B_WARM_POOL_ENABLED must be false so tasks do not reuse warm sandboxes.')
   if (requireDeploymentVersion && !expectedDeploymentVersion) errors.push('AGENT_DEPLOYMENT_VERSION must be set when AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true.')
   if (!checks.workerHeartbeatRequired) warnings.push('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT is disabled; tasks may queue without a live worker.')
 
@@ -188,13 +196,13 @@ export async function GET(request: NextRequest) {
   if (workers.length === 0) {
     errors.push(`No live worker heartbeat found for queue "${queueName}" in the last ${staleMs}ms.`)
   } else if (requireHostedWorker && e2bCapableWorkers.length > 0 && cloudCapableWorkers.length === 0) {
-    errors.push(`Only local worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Start a hosted background worker so tasks can continue when this Mac is offline.`)
+    errors.push(`Only local E2B worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Start a hosted E2B background worker so tasks can continue when this Mac is offline.`)
   } else if (!requireHostedWorker && e2bCapableWorkers.length > 0 && cloudCapableWorkers.length === 0) {
-    warnings.push(`Only local worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Tasks can run while this worker stays online, but they are not offline-safe.`)
+    warnings.push(`Only local E2B worker heartbeats were found for queue "${queueName}" (${localOnlyWorkerHosts.join(', ')}). Tasks can run while this worker stays online, but they are not offline-safe.`)
   } else if (requireDeploymentVersion && acceptedWorkers.length === 0) {
-    errors.push(`No live E2B-capable worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}" for queue "${queueName}". Redeploy the worker with the same AGENT_DEPLOYMENT_VERSION as the web service.`)
+    errors.push(`No live task worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}" for queue "${queueName}". Redeploy the worker with the same AGENT_DEPLOYMENT_VERSION as the web service.`)
   } else if (acceptedWorkers.length === 0) {
-    errors.push(`No E2B-capable live worker heartbeat found for queue "${queueName}". Redeploy the worker with AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND.`)
+    errors.push(`No hosted E2B task worker heartbeat found for queue "${queueName}". Redeploy the worker with AGENT_TASK_WORKER_MODE=external and AGENT_SANDBOX_PROVIDER=e2b.`)
   }
 
   const ok = errors.length === 0
@@ -211,8 +219,6 @@ export async function GET(request: NextRequest) {
       storageDriver: env('AGENT_STORAGE_DRIVER') || null,
       sandboxProvider: env('AGENT_SANDBOX_PROVIDER') || null,
       deploymentVersion: expectedDeploymentVersion,
-      e2bTemplateConfigured: Boolean(env('E2B_TEMPLATE_ID')),
-      e2bBrowserBootstrapConfigured: Boolean(env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')),
     },
   }, { status: ok ? 200 : 503 })
 }

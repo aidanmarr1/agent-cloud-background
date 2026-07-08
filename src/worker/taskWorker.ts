@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
+import { hostname } from 'os'
 import { runChatTaskJob, type BackgroundProbeTaskPayload, type TaskJobPayload } from '@/lib/agent/chatTaskRunner'
 import { claimNextTaskJob, runClaimedTaskJob } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
-import { markTaskWorkerStopped, recordTaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
+import { isLikelyLocalWorkerHostname, markTaskWorkerStopped, recordTaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
 import { getTursoSetupStatus } from '@/lib/db/turso'
 import {
   destroyWarmE2BSandbox,
@@ -30,15 +31,14 @@ function env(name: string): string {
   return process.env[name]?.trim() || ''
 }
 
-function envBool(name: string): boolean {
-  const value = env(name).toLowerCase()
-  return value === 'true' || value === '1'
-}
-
 function envBoolDefault(name: string, fallback: boolean): boolean {
   const value = env(name).toLowerCase()
   if (!value) return fallback
   return value === 'true' || value === '1'
+}
+
+function envBool(name: string): boolean {
+  return envBoolDefault(name, false)
 }
 
 function e2bWarmPoolEnabled(): boolean {
@@ -59,7 +59,13 @@ function validateWorkerRuntimeConfig(): void {
     throw new Error('Task worker requires AGENT_TASK_WORKER_MODE=external.')
   }
 
-  if (env('AGENT_SANDBOX_PROVIDER').toLowerCase() !== 'e2b') return
+  if (envBoolDefault('AGENT_REQUIRE_HOSTED_TASK_WORKER', true) && isLikelyLocalWorkerHostname(hostname())) {
+    throw new Error('Refusing to start a local task worker while AGENT_REQUIRE_HOSTED_TASK_WORKER is true.')
+  }
+
+  if (env('AGENT_SANDBOX_PROVIDER').toLowerCase() !== 'e2b') {
+    throw new Error('Task worker requires AGENT_SANDBOX_PROVIDER=e2b.')
+  }
 
   if (!env('E2B_API_KEY')) {
     throw new Error('Task worker is configured for AGENT_SANDBOX_PROVIDER=e2b but E2B_API_KEY is missing.')

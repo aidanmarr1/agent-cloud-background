@@ -117,8 +117,12 @@ for (const key of template.keys()) {
 
 assert.equal(String(template.get('AGENT_TASK_WORKER_MODE')), 'external', 'worker template must force external task worker mode')
 assert.equal(String(template.get('AGENT_TASK_QUEUE_NAME')), 'production', 'worker template must use the production queue')
-assert.equal(String(template.get('AGENT_SANDBOX_PROVIDER')), 'e2b', 'worker template must enable E2B sandboxes')
-assert.equal(String(template.get('E2B_TEMPLATE_ID')), 'agent-cloud-browser', 'worker template must use the included E2B browser template')
-assert.equal(String(template.get('AGENT_E2B_PAUSE_ON_TASK_END')), 'true', 'worker template must pause idle E2B sandboxes')
+assert.equal(String(template.get('AGENT_SANDBOX_PROVIDER')), 'e2b', 'worker template must use hosted E2B sandboxes')
+assert.equal(String(template.get('E2B_TEMPLATE_ID')), 'agent-cloud-browser', 'worker template must configure an E2B browser runtime')
+assert.equal(String(template.get('AGENT_E2B_PAUSE_ON_TASK_END')), 'false', 'worker template must destroy sandboxes after tasks')
+assert.equal(String(template.get('AGENT_E2B_KILL_ON_RESET')), 'true', 'worker template must force fresh sandboxes per task')
+assert.equal(String(template.get('AGENT_E2B_WARM_POOL_ENABLED')), 'false', 'worker template must not reuse warm sandboxes')
+assert.equal(String(template.get('AGENT_E2B_VERIFY_ON_WORKER_STARTUP')), 'true', 'worker template must verify E2B command execution at startup')
+assert.equal(String(template.get('AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP')), 'true', 'worker template must verify E2B browser readiness at startup')
 
 console.log('Render worker env template smoke checks passed')

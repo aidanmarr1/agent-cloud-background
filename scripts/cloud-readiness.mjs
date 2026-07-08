@@ -30,6 +30,12 @@ function envBoolEnabled(name, fallback = false) {
   return value !== 'false' && value !== '0'
 }
 
+function envBoolExact(name, fallback = false) {
+  const value = env(name).toLowerCase()
+  if (!value) return fallback
+  return value === 'true' || value === '1'
+}
+
 function workerMatchesConfiguredRuntime(worker) {
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')
@@ -86,7 +92,7 @@ function readPackageJson() {
 
 function checkPackageScripts(pkg) {
   const scripts = pkg.scripts || {}
-  for (const name of ['build', 'start', 'worker', 'worker:once', 'worker:cloud', 'cloud:secrets', 'cloud:env-smoke', 'cloud:worker-env', 'cloud:vercel-env', 'cloud:render-worker-env', 'cloud:e2b-smoke', 'cloud:queue', 'cloud:status', 'cloud:finish-setup', 'cloud:preflight', 'cloud:check', 'cloud:render-smoke', 'cloud:worker-template-smoke', 'cloud:smoke', 'cloud:reconnect-smoke', 'cloud:event-smoke', 'cloud:task-start-smoke', 'cloud:worker-lease-smoke', 'cloud:worker-cancel-smoke', 'cloud:worker-shutdown-smoke', 'cloud:worker-ready', 'cloud:worker-smoke', 'cloud:worker-smoke:local', 'e2b:template:build']) {
+  for (const name of ['build', 'start', 'worker', 'worker:once', 'worker:cloud', 'cloud:secrets', 'cloud:env-smoke', 'cloud:worker-env', 'cloud:vercel-env', 'cloud:render-worker-env', 'cloud:e2b-smoke', 'cloud:queue', 'cloud:status', 'cloud:finish-setup', 'cloud:preflight', 'cloud:check', 'cloud:render-smoke', 'cloud:worker-template-smoke', 'cloud:smoke', 'cloud:reconnect-smoke', 'cloud:event-smoke', 'cloud:task-start-smoke', 'cloud:worker-lease-smoke', 'cloud:worker-cancel-smoke', 'cloud:worker-shutdown-smoke', 'cloud:worker-ready', 'cloud:worker-smoke', 'e2b:template:build']) {
     if (scripts[name]) pass(`package script "${name}" exists`)
     else fail(`package script "${name}" is missing`)
   }
@@ -130,7 +136,10 @@ async function checkLiveDatabase() {
     },
   })
   const { getTursoClient } = await jiti.import(fileURLToPath(new URL('src/lib/db/turso.ts', rootUrl)))
-  const { getRecentTaskWorkerHeartbeats } = await jiti.import(fileURLToPath(new URL('src/lib/agent/taskWorkerHeartbeat.ts', rootUrl)))
+  const {
+    getRecentTaskWorkerHeartbeats,
+    workerHeartbeatIsHosted,
+  } = await jiti.import(fileURLToPath(new URL('src/lib/agent/taskWorkerHeartbeat.ts', rootUrl)))
   try {
     const result = await getTursoClient().execute('select 1 as ok')
     if (result.rows.length >= 1) pass('live Turso connectivity works')
@@ -144,16 +153,19 @@ async function checkLiveDatabase() {
     const staleMs = envPositiveInt('AGENT_TASK_WORKER_STALE_MS', 60_000)
     const workers = await getRecentTaskWorkerHeartbeats(staleMs)
     if (workers.length > 0) {
-      const compatibleWorkers = workers.filter(workerMatchesConfiguredRuntime)
+      const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)
+      const compatibleWorkers = workers
+        .filter(workerMatchesConfiguredRuntime)
+        .filter((worker) => !requireHostedWorker || workerHeartbeatIsHosted(worker))
       if (compatibleWorkers.length > 0) {
         pass(`live compatible task worker heartbeat found: ${compatibleWorkers.map((worker) => `${worker.workerId}:${worker.status}`).join(', ')}`)
       } else if (envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')) {
         fail(`no live compatible task worker heartbeat matched AGENT_DEPLOYMENT_VERSION=${env('AGENT_DEPLOYMENT_VERSION') || '<missing>'}; redeploy the worker with the same AGENT_DEPLOYMENT_VERSION as the web service`)
       } else {
-        fail('live task worker heartbeat exists, but no worker matches the configured runtime; use AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')
+        fail('live task worker heartbeat exists, but no hosted worker matches the configured E2B runtime; use AGENT_TASK_WORKER_MODE=external, AGENT_SANDBOX_PROVIDER=e2b, E2B_API_KEY, and E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')
       }
     } else {
-      fail(`no live task worker heartbeat found in the last ${staleMs}ms; start the worker process with npm run worker:cloud`)
+      fail(`no live hosted E2B worker heartbeat found in the last ${staleMs}ms; deploy the worker service`)
     }
   } catch (error) {
     fail(`live task worker heartbeat check failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -165,7 +177,7 @@ function checkEnvironment() {
   requireEnv('TURSO_AUTH_TOKEN', 'persistent task queue and event replay')
   requireEnv('DEEPSEEK_API_KEY', 'agent LLM calls from the worker')
   requireEnv('AUTH_SECRET', 'auth/session signing')
-  requireEnv('E2B_API_KEY', 'cloud microVM sandbox creation and resume')
+  requireEnv('E2B_API_KEY', 'hosted E2B sandbox creation')
 
   if (env('AGENT_TASK_WORKER_MODE') === 'external') {
     pass('AGENT_TASK_WORKER_MODE=external')
@@ -183,7 +195,7 @@ function checkEnvironment() {
   if (env('AGENT_SANDBOX_PROVIDER').toLowerCase() === 'e2b') {
     pass('AGENT_SANDBOX_PROVIDER=e2b')
   } else {
-    fail('AGENT_SANDBOX_PROVIDER must be set to e2b for Manus-style cloud computer execution')
+    fail('AGENT_SANDBOX_PROVIDER must be set to e2b for hosted task sandboxes')
   }
 
   const storageDriver = env('AGENT_STORAGE_DRIVER')
@@ -193,10 +205,28 @@ function checkEnvironment() {
     warn(`AGENT_STORAGE_DRIVER=${storageDriver}; use turso in production so files survive web/worker restarts`)
   }
 
-  if (env('AGENT_E2B_PAUSE_ON_TASK_END').toLowerCase() === 'true') {
-    pass('AGENT_E2B_PAUSE_ON_TASK_END=true')
+  if (envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', true)) {
+    pass('AGENT_REQUIRE_HOSTED_TASK_WORKER=true')
   } else {
-    warn('AGENT_E2B_PAUSE_ON_TASK_END should be true to avoid paying for idle sandboxes')
+    fail('AGENT_REQUIRE_HOSTED_TASK_WORKER must be true so local worker heartbeats never satisfy production readiness')
+  }
+
+  if (!envBoolExact('AGENT_E2B_PAUSE_ON_TASK_END', false)) {
+    pass('AGENT_E2B_PAUSE_ON_TASK_END=false')
+  } else {
+    fail('AGENT_E2B_PAUSE_ON_TASK_END must be false because completed tasks should destroy their E2B sandbox')
+  }
+
+  if (envBoolExact('AGENT_E2B_KILL_ON_RESET', true)) {
+    pass('AGENT_E2B_KILL_ON_RESET=true')
+  } else {
+    fail('AGENT_E2B_KILL_ON_RESET must be true so each task starts from a fresh E2B sandbox')
+  }
+
+  if (!envBoolExact('AGENT_E2B_WARM_POOL_ENABLED', false)) {
+    pass('AGENT_E2B_WARM_POOL_ENABLED=false')
+  } else {
+    fail('AGENT_E2B_WARM_POOL_ENABLED must be false so tasks do not reuse warm sandboxes')
   }
 
   const requireHeartbeat = env('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT').toLowerCase()
@@ -227,7 +257,7 @@ function checkEnvironment() {
   if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
     pass('E2B browser runtime source is configured')
   } else {
-    warn('No E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND is set; E2B base template must already include Chromium')
+    fail('E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND must be set for hosted browser tools')
   }
 }
 
@@ -252,7 +282,6 @@ function checkFiles() {
   requireFile('scripts/cloud-worker-shutdown-smoke.mjs', 'worker graceful shutdown handoff smoke command')
   requireFile('scripts/prod-background-worker-ready.mjs', 'deployed worker readiness command')
   requireFile('scripts/prod-background-worker-smoke.mjs', 'deployed worker reconnect smoke command')
-  requireFile('scripts/local-background-worker-smoke.mjs', 'local isolated-queue worker reconnect smoke command')
   requireFile('src/worker/taskWorker.ts', 'worker loop')
   requireFile('src/lib/agent/taskJobs.ts', 'durable task queue')
   requireFile('src/lib/e2bSandbox.ts', 'E2B cloud sandbox provider')

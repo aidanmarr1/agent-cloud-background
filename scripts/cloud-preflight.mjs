@@ -49,16 +49,8 @@ function runNpmScript(label, scriptName, scriptArgs = []) {
 
 const sourceOnly = args.includes('--source-only')
 const deployedOnly = args.includes('--deployed-only')
-const skipLocalWorker = args.includes('--skip-local-worker') || sourceOnly
-const skipBuild = args.includes('--skip-build')
 const deployedUrl = readArg('--url') || readArg('--deployed-url')
 const timeoutMs = readArg('--timeout-ms')
-const port = readArg('--port')
-
-const localWorkerArgs = []
-if (skipBuild) localWorkerArgs.push('--skip-build')
-if (timeoutMs) localWorkerArgs.push('--timeout-ms', timeoutMs)
-if (port) localWorkerArgs.push('--port', port)
 
 const deployedArgs = deployedUrl ? [deployedUrl] : []
 if (timeoutMs) deployedArgs.push('--timeout-ms', timeoutMs)
@@ -90,12 +82,6 @@ try {
   await runNpmScript('Worker stale-lease recovery smoke', 'cloud:worker-lease-smoke')
   await runNpmScript('Worker cancellation terminal-state smoke', 'cloud:worker-cancel-smoke')
   await runNpmScript('Worker graceful-shutdown handoff smoke', 'cloud:worker-shutdown-smoke')
-
-  if (skipLocalWorker) {
-    console.log('\nSkipped local web+worker smoke by request. Run without --skip-local-worker before deploying.')
-  } else {
-    await runNpmScript('Local production web+worker closed-tab smoke', 'cloud:worker-smoke:local', localWorkerArgs)
-  }
 
   if (deployedUrl) {
     await runNpmScript('Deployed worker readiness', 'cloud:worker-ready', deployedArgs)

@@ -37,7 +37,6 @@
     "cloud:worker-shutdown-smoke": "node scripts/cloud-worker-shutdown-smoke.mjs",
     "cloud:worker-ready": "node scripts/prod-background-worker-ready.mjs",
     "cloud:worker-smoke": "node scripts/prod-background-worker-smoke.mjs",
-    "cloud:worker-smoke:local": "node scripts/local-background-worker-smoke.mjs",
     "cloud:e2b-browser-url-smoke": "node scripts/e2b-browser-debugger-url-smoke.mjs",
     "cloud:e2b-worker-host": "node scripts/e2b-worker-host.mjs",
     "e2b:template:build": "node scripts/e2b-template-build-v2.mjs --dockerfile e2b.Dockerfile --name agent-cloud-browser",

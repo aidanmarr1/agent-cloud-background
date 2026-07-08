@@ -192,9 +192,8 @@ const liveReady = readiness.ok
 const readinessChecks = typeof readiness.body === 'object' && readiness.body !== null && readiness.body.checks
   ? readiness.body.checks
   : {}
-const localWorkerModeAllowed = readinessChecks.hostedWorkerRequired === false
 const vercelValueMismatches = vercel.checked
-  ? (vercel.valueMismatches || []).filter((name) => !(localWorkerModeAllowed && name === 'AGENT_REQUIRE_HOSTED_TASK_WORKER'))
+  ? (vercel.valueMismatches || [])
   : []
 
 const nextActions = []
@@ -241,9 +240,6 @@ if (vercel.skipped) {
   printLine(vercel.ok || (vercelValueMismatches.length === 0 && vercel.missingRequired?.length === 0), `required Vercel env names present; missing required: ${formatList(vercel.missingRequired)}`)
   if (vercel.missingOptional?.length > 0) console.log(`INFO optional missing names: ${vercel.missingOptional.join(', ')}`)
   if (vercelValueMismatches.length > 0) console.log(`FAIL Vercel env value drift: ${vercelValueMismatches.join(', ')}`)
-  if (localWorkerModeAllowed && vercel.valueMismatches?.includes('AGENT_REQUIRE_HOSTED_TASK_WORKER')) {
-    console.log('INFO AGENT_REQUIRE_HOSTED_TASK_WORKER=false is intentional for local-worker mode.')
-  }
 }
 
 console.log('\nLive worker readiness')

@@ -84,8 +84,8 @@ function isCloudCapableWorker(worker: {
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
-  e2bApiKeyConfigured?: boolean
-  e2bBrowserRuntimeConfigured?: boolean
+  e2bApiKeyConfigured?: boolean | null
+  e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
@@ -102,8 +102,8 @@ function isE2BCapableWorker(worker: {
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
-  e2bApiKeyConfigured?: boolean
-  e2bBrowserRuntimeConfigured?: boolean
+  e2bApiKeyConfigured?: boolean | null
+  e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
@@ -214,10 +214,10 @@ export async function GET(request: NextRequest) {
       .filter((worker) => isLikelyLocalWorkerHostname(worker.hostname))
       .map((worker) => worker.hostname)
     const error = requireHostedWorker && localOnlyWorkerHosts.length > 0
-      ? `Only local background worker heartbeats were found (${localOnlyWorkerHosts.join(', ')}). Start a hosted worker before running this smoke.`
+      ? `Only local E2B background worker heartbeats were found (${localOnlyWorkerHosts.join(', ')}). Start a hosted worker before running this smoke.`
       : requireDeploymentVersion
-      ? `No E2B-capable live background worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}".`
-      : 'No E2B-capable live background worker heartbeat found.'
+      ? `No task worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}".`
+      : 'No hosted E2B task worker heartbeat found.'
     return NextResponse.json({ ok: false, error }, { status: 503 })
   }
 
@@ -267,7 +267,7 @@ export async function GET(request: NextRequest) {
       runId,
       queueName: taskQueueName(),
       workerCount: workers.length,
-      cloudWorkerCount: cloudCapableWorkers.length,
+      hostedWorkerCount: cloudCapableWorkers.length,
       activeDiscovery: true,
       cleanedUp,
       firstViewerEvents: first.events.map(eventSummary),
@@ -297,7 +297,7 @@ export async function GET(request: NextRequest) {
       queueName: taskQueueName(),
       activeDiscovery: true,
       workerCount: workers.length,
-      cloudWorkerCount: cloudCapableWorkers.length,
+      hostedWorkerCount: cloudCapableWorkers.length,
       cleanedUp,
       firstViewerLastSeq: first.lastSeq,
       firstViewerEvents: first.events.map(eventSummary),
@@ -313,7 +313,7 @@ export async function GET(request: NextRequest) {
     runId,
     queueName: taskQueueName(),
     workerCount: workers.length,
-    cloudWorkerCount: cloudCapableWorkers.length,
+    hostedWorkerCount: cloudCapableWorkers.length,
     activeDiscovery: true,
     cleanedUp,
     workers: workers.map((worker) => ({
@@ -325,8 +325,6 @@ export async function GET(request: NextRequest) {
       taskWorkerMode: worker.taskWorkerMode,
       sandboxProvider: worker.sandboxProvider,
       deploymentVersion: worker.deploymentVersion,
-      e2bApiKeyConfigured: worker.e2bApiKeyConfigured,
-      e2bBrowserRuntimeConfigured: worker.e2bBrowserRuntimeConfigured,
     })),
     firstViewerLastSeq: first.lastSeq,
     firstViewerEvents: first.events.map(eventSummary),
