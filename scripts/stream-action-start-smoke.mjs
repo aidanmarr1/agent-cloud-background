@@ -72,6 +72,12 @@ async function* slowHiddenSearchChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'AI agent startup latency benchmark 2026\\"}' } }] } }] }
 }
 
+async function* iterationCappedToolChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_iteration_capped_search', function: { name: 'web_search', arguments: '{\\"action_label\\":\\"Search Manus AI company background\\",\\"plan_step_index\\":1,\\"query\\":\\"' } }] } }] }
+  await new Promise(resolve => setTimeout(resolve, 80))
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'Manus AI company background capabilities' } }] } }] }
+}
+
 async function* longTextThenUsageChunks() {
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
   yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
@@ -171,6 +177,25 @@ export async function runSmoke() {
   assert.ok(Date.now() - slowStarted < 85, 'hidden tool-argument streaming must not reset visible inactivity forever')
   assert.equal(slowResult.toolCalls.size, 1, 'partial hidden tool call should be returned for policy recovery')
   assert.equal(slowEmitter.events.filter(e => e.type === 'tool_start').length, 0, 'no visible pill should be invented before usable args exist')
+
+  const cappedEmitter = makeEmitter()
+  const cappedState = createInitialState(false, {
+    iterationTimeoutMs: 45,
+    inactivityTimeoutMs: 500,
+    contentOnlyTimeoutMs: null,
+    contentOnlyMinChars: 0,
+    checkIntervalMs: 10,
+  })
+  cappedState.currentPlanItems = ['Identify Manus AI company background']
+  cappedState.currentStepIdx = 0
+  const cappedProcessor = new StreamProcessor(cappedEmitter as any, cappedState.tierTimeouts)
+  const cappedResult = await cappedProcessor.processStream(iterationCappedToolChunks() as any, cappedState)
+  assert.equal(cappedResult.toolCalls.size, 1, 'iteration-capped tool calls must return partial args for recovery instead of throwing')
+  assert.match(
+    cappedResult.toolCalls.get(0)?.arguments || '',
+    /Search Manus AI company background/,
+    'partial streamed tool args must be preserved for malformed-tool recovery',
+  )
 
   const editEmitter = makeEmitter()
   const editState = createInitialState(true, timeouts)

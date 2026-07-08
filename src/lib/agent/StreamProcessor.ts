@@ -776,6 +776,9 @@ export class StreamProcessor {
 
         // Tool calls
         if (delta.tool_calls) {
+          // Tool-call argument chunks are real model progress even before a
+          // strict visible action label is complete enough to show a pill.
+          lastVisibleActivityTime = Date.now()
           const tcs = delta.tool_calls as Array<{
             index: number
             id?: string
@@ -853,15 +856,10 @@ export class StreamProcessor {
       const elapsed = Date.now() - iterationStartTime
 
       // Timeout with tool calls in progress:
-      // - Iteration timeout (hard limit exceeded) → fatal, always throw
-      // - Inactivity/content-only during tool streaming → graceful, return partial results
-      //   so the tool pipeline can process whatever content was streamed
+      // Return partial results so the tool pipeline can execute complete calls
+      // or route malformed/incomplete JSON through internal recovery.
       if (toolCalls.size > 0) {
-        if ((timeoutReason as 'inactivity' | 'iteration' | 'content_only' | null) === 'iteration') {
-          throw new IterationTimeoutError(elapsed)
-        }
-        // Non-fatal timeout during tool streaming — fall through to return partial results
-        // This prevents killing create_file/append_file operations mid-write
+        // Non-fatal timeout during tool streaming — fall through.
       } else {
         // No tool calls → nudgeable timeouts
         if (timeoutReason === 'content_only') {
