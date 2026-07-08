@@ -207,9 +207,13 @@ function approximateStreamUsageForCompletedTurn(
 }
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
-const FAST_ACTION_REQUEST_TIMEOUT_MS = 1_500
-const FAST_ACTION_ITERATION_TIMEOUT_MS = 2_000
-const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 450
+const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 2_200
+const FAST_ACTION_REQUEST_TIMEOUT_MS = 3_200
+const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 4_500
+const FAST_SOURCE_ACTION_ITERATION_TIMEOUT_MS = 2_800
+const FAST_ACTION_ITERATION_TIMEOUT_MS = 4_500
+const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 700
+const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 1_100
 const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 260
@@ -1317,10 +1321,17 @@ function tierTimeoutsForIteration(
     }
   }
   if (isFastActionToolTurn(state, messages)) {
+    const sourceAction = isFastSourceActionToolTurn(state, messages)
     return {
       ...state.tierTimeouts,
-      iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FAST_ACTION_ITERATION_TIMEOUT_MS),
-      inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FAST_ACTION_INACTIVITY_TIMEOUT_MS),
+      iterationTimeoutMs: Math.min(
+        state.tierTimeouts.iterationTimeoutMs,
+        sourceAction ? FAST_SOURCE_ACTION_ITERATION_TIMEOUT_MS : FAST_ACTION_ITERATION_TIMEOUT_MS,
+      ),
+      inactivityTimeoutMs: Math.min(
+        state.tierTimeouts.inactivityTimeoutMs,
+        sourceAction ? FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS : FAST_ACTION_INACTIVITY_TIMEOUT_MS,
+      ),
       contentOnlyTimeoutMs: state.tierTimeouts.contentOnlyTimeoutMs === null
         ? null
         : Math.min(state.tierTimeouts.contentOnlyTimeoutMs, FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS),
@@ -2718,10 +2729,10 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 1_500
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_000
-const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 450
-const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 450
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_800
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 3_500
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 900
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 900
 const FORCED_NARRATION_MAX_TOKENS = 48
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
@@ -3363,6 +3374,29 @@ export class AgentLoop {
                   totalSteps: state.currentPlanItems?.length || 0,
                   visibleToolActionsSinceLastNarration: state.visibleToolActionsSinceLastNarration,
                   phaseEndNarrationPending: state.phaseEndNarrationPending,
+                })
+                phase = 'STREAMING'
+                break
+              }
+              if (
+                !wasForcedNarrationRecovery &&
+                !wasCompactCadenceNarration &&
+                isFastActionToolTurn(state, this.options.messages) &&
+                !(shouldUseCompactResearchTurn(state) && state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length - 1) &&
+                !finalSavedDeliverableTurn(state, this.options.messages) &&
+                state.consecutiveNullStreams <= 2
+              ) {
+                state.forceTextNextIteration = false
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                contextManager.push({
+                  role: 'system',
+                  content: 'HOT ACTION START RETRY: the previous action-selection call did not start streaming in the first fast window. Retry the same active phase now with exactly one concrete native tool call; do not detour into progress narration, planning, apologies, or a final answer.',
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                console.log('[AgentDiagnostics] Retrying hot action after model-start timeout without narration detour', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  consecutiveNullStreams: state.consecutiveNullStreams,
                 })
                 phase = 'STREAMING'
                 break
@@ -5112,8 +5146,12 @@ export class AgentLoop {
                   agentRunRemainingMs(state) - (state.deadlineHardStopBufferMs || AGENT_DEADLINE_HARD_STOP_BUFFER_MS),
                 ),
               )
+          : fastSourceActionTurn
+            ? FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS
           : fastActionTurn
-            ? FAST_ACTION_REQUEST_TIMEOUT_MS
+            ? state.consecutiveNullStreams > 0
+              ? FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS
+              : FAST_ACTION_REQUEST_TIMEOUT_MS
           : STREAM_REQUEST_TIMEOUT_MS
         console.error('[AgentDiagnostics] Opening streaming model call', {
           iteration: state.iterations,

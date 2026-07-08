@@ -45,8 +45,10 @@ assert.match(toolPipeline, /function documentTimeoutRecoveryResult[\s\S]*INTERNA
 assert.match(toolPipeline, /function searchExecutionRecoveryResult[\s\S]*INTERNAL_RECOVERY:[\s\S]*search provider call failed or timed out/, 'search provider failures must become internal recovery results instead of visible search-unavailable panels')
 
 assert.match(agentLoop, /requestTimeoutMs,/, 'agent loop must pass the computed streaming request timeout into the LLM client')
-assert.match(agentLoop, /const FAST_ACTION_REQUEST_TIMEOUT_MS = 1_500/, 'fast action turns must stay inside the 1-2 second first-token window')
-assert.match(agentLoop, /const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 450/, 'fast action turns should recover quickly from invisible provider stalls')
+assert.match(agentLoop, /const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 2_200/, 'source action turns must keep a tight first-token window')
+assert.match(agentLoop, /const FAST_ACTION_REQUEST_TIMEOUT_MS = 3_200/, 'non-source action turns must avoid provider-start churn while staying bounded')
+assert.match(agentLoop, /const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 700/, 'source action turns should recover quickly from invisible provider stalls')
+assert.match(agentLoop, /const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 1_100/, 'non-source action turns should recover quickly without self-cancelling normal provider pauses')
 assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'final saved writes must not wait on a second non-stream fallback request')
 assert.match(agentLoop, /const FAST_SOURCE_ACTION_MAX_TOKENS = 260/, 'source/action selection turns must keep a small output budget')
 assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*up to 4 parallel source extraction calls/, 'source/action turns should allow bounded parallel source reads after search results are available')

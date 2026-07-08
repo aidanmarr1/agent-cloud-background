@@ -111,26 +111,6 @@ export async function runSmoke() {
       'blocked different-path create must not emit a visible tool_start pill',
     )
 
-    const appendElsewhere = await call(
-      pipeline,
-      state,
-      'append-elsewhere',
-      'append_file',
-      JSON.stringify({
-        path: 'other.md',
-        content: '\\\\nThis continuation targets the wrong file, so it should be blocked before any visible action starts.',
-        action_label: 'Append recovered draft elsewhere',
-        plan_step_index: 1,
-      }),
-    )
-    assert.equal(appendElsewhere.isError, true)
-    assert.match(String((appendElsewhere.result as any).error), /Do not append to "other\.md"/)
-    assert.equal(
-      emitter.events.filter(event => event.type === 'tool_start').length,
-      visibleStartsBeforeBadContinuation,
-      'blocked different-path append must not emit a visible tool_start pill',
-    )
-
     const editPending = await call(
       pipeline,
       state,
@@ -152,20 +132,22 @@ export async function runSmoke() {
       'blocked edit during partial recovery must not emit a visible tool_start pill',
     )
 
-    const append = await call(
+    const appendElsewhere = await call(
       pipeline,
       state,
-      'append1',
+      'append-elsewhere',
       'append_file',
       JSON.stringify({
-        path: 'draft.md',
-        content: '\\\\nContinuation after the recovered partial write. This proves the agent continues instead of restarting.',
-        action_label: 'Append recovered draft continuation',
+        path: 'other.md',
+        content: '\\\\nThis continuation supplied the wrong path, but recovery should route it back to the saved draft file.',
+        action_label: 'Append recovered draft elsewhere',
         plan_step_index: 1,
       }),
     )
-    assert.equal(append.isError, false)
+    assert.equal(appendElsewhere.isError, false)
     assert.equal(state.partialFileWriteRecoveryPending, null)
+    const readAfterRepairedAppend = await readFileInSandbox(conversationId, 'draft.md')
+    assert.match(String(readAfterRepairedAppend.content || ''), /recovery should route it back to the saved draft file/)
   } finally {
     await rm(getSandboxDirPath(conversationId), { recursive: true, force: true })
   }

@@ -2512,6 +2512,18 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
     const isLastStep = !!state.currentPlanItems &&
       state.currentStepIdx === state.currentPlanItems.length - 1
+    if (
+      isLastStep &&
+      state.partialFileWriteRecoveryPending &&
+      loopCheck.rawTool === 'append_file'
+    ) {
+      // Chunked saved deliverables are expected to use append_file repeatedly.
+      // The partial-file guard already constrains the path and content; generic
+      // loop recovery would incorrectly tell the model to stop doing the only
+      // valid recovery action.
+      state.stepLoopDetections = Math.max(0, state.stepLoopDetections - 1)
+      return null
+    }
     if (!isLastStep && state.currentPlanItems && isResearchLikeStep(state)) {
       state.suppressedResearchToolName = loopCheck.rawTool || loopCheck.tool
     }

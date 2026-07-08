@@ -338,6 +338,38 @@ function repairRuntimeDisplayContractArgs(
   return repairs
 }
 
+function repairRequiredFileContinuationArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string[] {
+  const repairs: string[] = []
+
+  const pendingPartial = state.partialFileWriteRecoveryPending
+  if (pendingPartial && toolName === 'append_file') {
+    const requestedPath = typeof args.path === 'string'
+      ? normalizeSandboxFilePath(args.path)
+      : ''
+    if (requestedPath !== pendingPartial.path) {
+      args.path = pendingPartial.path
+      repairs.push('partial_file_path')
+    }
+  }
+
+  const pendingRevision = state.pendingDeliverableRevision
+  if (pendingRevision && toolName === 'append_file') {
+    const requestedPath = typeof args.path === 'string'
+      ? normalizeSandboxFilePath(args.path)
+      : ''
+    if (requestedPath !== pendingRevision.path) {
+      args.path = pendingRevision.path
+      repairs.push('revision_file_path')
+    }
+  }
+
+  return repairs
+}
+
 function isTaskTrackingMarkdownPath(filePath: string): boolean {
   const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
   return /^(?:todo|todos|task|tasks|plan|plans|checklist|progress|status|scratch|notes?)\.md$/.test(base)
@@ -3549,6 +3581,17 @@ export class ToolPipeline {
         step: state.currentStepIdx + 1,
         repairs: displayRepairs,
         actionLabel: typeof args.action_label === 'string' ? args.action_label : undefined,
+      })
+    }
+
+    const continuationRepairs = repairRequiredFileContinuationArgs(tc.name, args, state)
+    if (continuationRepairs.length > 0) {
+      tc.arguments = JSON.stringify(args)
+      console.log('[ToolPipeline] Repaired required file continuation target', {
+        tool: tc.name,
+        step: state.currentStepIdx + 1,
+        repairs: continuationRepairs,
+        path: typeof args.path === 'string' ? args.path : undefined,
       })
     }
 
