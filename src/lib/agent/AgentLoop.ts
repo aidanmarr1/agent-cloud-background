@@ -2747,9 +2747,9 @@ const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 3_500
-const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 900
-const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 900
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
 const FORCED_NARRATION_MAX_TOKENS = 48
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
@@ -3370,20 +3370,20 @@ export class AgentLoop {
                   phase = 'STREAMING'
                   break
                 }
-                state.forceTextNextIteration = false
-                state.forcedNarrationRepairAttempts = 0
-                state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
+                state.forceTextNextIteration = true
+                state.forcedNarrationRepairAttempts++
                 state.consecutiveNullStreams = 0
                 contextManager.push({
                   role: 'system',
-                  content: 'The progress narration window timed out before streaming. Continue the active phase with one concrete action now; the narration window should open again after the next visible action.',
+                  content: 'NARRATION RETRY: the prior narration-only turn timed out before visible text. Do not call tools, do not advance, and do not switch to normal work. Write one 18-30 word completed-result progress paragraph from completed work now.',
                 } as ChatMessageParam)
                 state.lastIterationEnd = Date.now()
-                console.log('[AgentDiagnostics] Released narration timeout back to active work', {
+                console.log('[AgentDiagnostics] Retrying required narration after model-start timeout', {
                   step: state.currentStepIdx,
                   totalSteps: state.currentPlanItems?.length || 0,
                   visibleToolActionsSinceLastNarration: state.visibleToolActionsSinceLastNarration,
                   phaseEndNarrationPending: state.phaseEndNarrationPending,
+                  forcedNarrationRepairAttempts: state.forcedNarrationRepairAttempts,
                 })
                 phase = 'STREAMING'
                 break
@@ -3484,7 +3484,6 @@ export class AgentLoop {
               if (finalSavedDeliverableTurn(state, this.options.messages)) {
                 if (
                   hasSavedFinalDeliverableCandidate(state) &&
-                  !state.partialFileWriteRecoveryPending &&
                   state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP
                 ) {
                   const stepBeforeComplete = state.currentStepIdx
