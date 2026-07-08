@@ -87,7 +87,6 @@ import { cleanTaskSubjectText, humanTopicLabel } from './taskText'
 import { researchDepthProfileForState } from './ResearchDepth'
 import { toolTypeRateLimitForState } from './ToolLimits'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
-import { AGENT_IDENTITY_DISCLOSURE_RESPONSE, isAgentIdentityDisclosureQuestion, latestUserAskedAgentIdentityDisclosure } from '@/lib/agentIdentity'
 
 const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request', 'youtube_transcript'])
 
@@ -207,9 +206,9 @@ function approximateStreamUsageForCompletedTurn(
 }
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
-const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 2_200
-const FAST_ACTION_REQUEST_TIMEOUT_MS = 3_200
-const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 4_500
+const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 2_000
+const FAST_ACTION_REQUEST_TIMEOUT_MS = 2_000
+const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 2_000
 const FAST_SOURCE_ACTION_ITERATION_TIMEOUT_MS = 2_800
 const FAST_ACTION_ITERATION_TIMEOUT_MS = 4_500
 const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 700
@@ -218,6 +217,8 @@ const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 260
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
+const NO_THINKING_REASONING = { enabled: false as const, exclude: true }
+const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -2724,7 +2725,7 @@ function displayContractRepairInstruction(state: AgentStateData, results: ToolEx
   ].join(' ')
 }
 
-const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 2_800
+const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 2_000
 const FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS = 5_000
 const FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS = 650
 const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
@@ -2745,7 +2746,7 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_800
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 2_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 3_500
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 900
 const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 900
@@ -2760,13 +2761,6 @@ export class AgentLoop {
   constructor(emitter: AgentEventEmitter, options: AgentLoopOptions) {
     this.emitter = emitter
     this.options = options
-  }
-
-  private emitAgentIdentityDisclosureAnswer(): void {
-    if (this.emitter.isClosed) return
-    this.emitter.textDelta(AGENT_IDENTITY_DISCLOSURE_RESPONSE)
-    this.emitter.done()
-    this.emitter.close()
   }
 
   private async assertServerCreditRunwayCached(): Promise<void> {
@@ -3061,11 +3055,6 @@ export class AgentLoop {
     // ── Security: Prompt Injection Check ───────────────────────────────
 
     const latestUserMessage = [...messages].reverse().find(m => m.role === 'user')
-    if (latestUserAskedAgentIdentityDisclosure(messages)) {
-      this.emitAgentIdentityDisclosureAnswer()
-      return
-    }
-
     const injectionDetected = latestUserMessage ? isPromptInjection(latestUserMessage.content || '') : false
     if (injectionDetected) {
       this.emitter.textDelta("I can't reveal or override internal instructions. Send the task normally and I'll work on it.")
@@ -3309,9 +3298,7 @@ export class AgentLoop {
               state.iterationDelayMs = Math.max(MIN_ITERATION_DELAY_MS, state.iterationDelayMs - 500)
             }
 
-            const streamingDirectiveStatus = this.injectLiveDirectives(contextManager)
-            if (streamingDirectiveStatus === 'identity') return
-            if (streamingDirectiveStatus) {
+            if (this.injectLiveDirectives(contextManager)) {
               log.info('Injected live user directive before model turn')
             }
 
@@ -3762,9 +3749,7 @@ export class AgentLoop {
 
             const stepIdxBeforeExec = state.currentStepIdx
 
-            const preToolDirectiveStatus = this.injectLiveDirectives(contextManager)
-            if (preToolDirectiveStatus === 'identity') return
-            if (preToolDirectiveStatus) {
+            if (this.injectLiveDirectives(contextManager)) {
               log.info('Live user directive superseded pending tool calls')
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -3903,9 +3888,7 @@ export class AgentLoop {
               toolRegistry.recordCall(result.tc.name)
             }
 
-            const postToolDirectiveStatus = this.injectLiveDirectives(contextManager)
-            if (postToolDirectiveStatus === 'identity') return
-            if (postToolDirectiveStatus) {
+            if (this.injectLiveDirectives(contextManager)) {
               log.info('Injected live user directive after tool results')
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -4637,17 +4620,12 @@ export class AgentLoop {
     })
   }
 
-  private injectLiveDirectives(contextManager: ContextManager): false | 'injected' | 'identity' {
+  private injectLiveDirectives(contextManager: ContextManager): false | 'injected' {
     const { conversationId, userId } = this.options
     if (!conversationId) return false
 
     const directives = drainLiveDirectives(conversationId, userId)
     if (directives.length === 0) return false
-
-    if (directives.some(directive => isAgentIdentityDisclosureQuestion(directive.content))) {
-      this.emitAgentIdentityDisclosureAnswer()
-      return 'identity'
-    }
 
     contextManager.push({
       role: 'user',
@@ -5150,14 +5128,14 @@ export class AgentLoop {
               ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
-          ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+          ? { reasoning: NO_THINKING_REASONING }
           : isFinalInlineAnswerTurn
-            ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+            ? { reasoning: MINIMAL_THINKING_REASONING }
             : isFinalSavedDeliverableTurn
-              ? { reasoning: { effort: 'minimal' as const, exclude: true } }
+              ? { reasoning: MINIMAL_THINKING_REASONING }
               : fastActionTurn
-                ? { reasoning: { effort: 'minimal' as const, exclude: true } }
-            : {}
+                ? { reasoning: MINIMAL_THINKING_REASONING }
+            : { reasoning: MINIMAL_THINKING_REASONING }
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS
           : isFinalInlineAnswerTurn
