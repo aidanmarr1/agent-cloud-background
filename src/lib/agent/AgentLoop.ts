@@ -159,6 +159,14 @@ function executedToolCallsForProviderHistory(
     }))
 }
 
+function isMalformedToolArgumentsRecovery(result: ToolExecutionResult): boolean {
+  if (result.internalRecovery === 'malformed_tool_arguments') return true
+  const error = result.result && typeof result.result === 'object'
+    ? (result.result as { error?: unknown }).error
+    : null
+  return typeof error === 'string' && /^INTERNAL_RECOVERY:\s*malformed tool arguments\b/i.test(error)
+}
+
 function assistantHistoryMessageForStreamResult(
   result: StreamResult,
   contentOverride?: string,
@@ -2612,8 +2620,7 @@ function toolJsonRecoveryMessage(
   return [
     'TOOL FORMAT RECOVERY: The previous assistant response was rejected before streaming because the tool-call format or forced tool-call mode was not accepted.',
     'Do not expose this provider/runtime issue to the user.',
-    'For this recovery turn, write one concise progress update from evidence already gathered if any exists, then stop.',
-    'On the following turn, continue with exactly one native tool call using strict JSON object arguments, or finish directly if the user only needed a direct answer.',
+    'Retry the current step immediately with exactly one native tool call using strict JSON object arguments, or finish directly only if the current plan no longer requires a tool.',
     'If the current browser page is blocked by CAPTCHA, Cloudflare, human verification, access denial, or a hard error, do not click it and do not retry the same URL. Switch to a different credible source, a same-site search result, or synthesize from existing evidence.',
     'Never write raw XML-like tool markup such as <toolcall> or <function=...>.',
   ].filter(Boolean).join(' ')
@@ -3771,6 +3778,32 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
+
+            if (lastToolResults.some(isMalformedToolArgumentsRecovery)) {
+              state.consecutiveNoToolCalls = 0
+              state.consecutiveNullStreams = 0
+              state.forceTextNextIteration = false
+              state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+              state.recentToolCalls = []
+              state.recentToolSequence = []
+              contextManager.push({
+                role: 'system',
+                content: [
+                  'TOOL JSON RECOVERY: The previous model turn streamed an incomplete or malformed native tool-call argument object before execution.',
+                  'Do not expose this runtime issue to the user.',
+                  'Retry the active step now with exactly one native tool call using complete strict JSON arguments.',
+                  'For web_search, include both action_label and query as real strings; never use placeholder text such as Search Results.',
+                ].join(' '),
+              } as ChatMessageParam)
+              console.warn('[AgentDiagnostics] Reissued tool call after malformed streamed tool arguments', {
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems?.length || 0,
+                tools: lastToolResults.map(result => result.tc.name),
+              })
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
 
             if (lastToolResults.length > 0 && lastToolResults.every(isDisplayContractRepairResult)) {
               if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {

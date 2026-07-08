@@ -1057,6 +1057,9 @@ async function assertSourceContracts() {
   assert.match(outputVerifier, /savedResearchReport[\s\S]*taskDefaultsToMarkdownDeliverable\(originalRequest\)/, 'brief saved markdown reports must not use tiny inline-answer word floors')
   assert.match(outputVerifier, /brief\|quick\|short\|concise/, 'research verifier must respect explicitly concise report requests')
   assert.match(agentLoop, /recoveringFinalSavedDeliverable[\s\S]*state\.forceTextNextIteration = !recoveringFinalSavedDeliverable && state\.taskStrategy !== 'browse'/, 'tool-call recovery must keep browser tools enabled and keep final deliverables out of narration-only mode')
+  assert.match(toolPipeline, /internalRecovery\?: 'malformed_tool_arguments'/, 'malformed tool-call JSON must be represented as internal recovery metadata')
+  assert.match(toolPipeline, /INTERNAL_RECOVERY: malformed tool arguments/, 'malformed tool-call JSON must not surface as a normal failed tool result')
+  assert.match(agentLoop, /lastToolResults\.some\(isMalformedToolArgumentsRecovery\)[\s\S]*TOOL JSON RECOVERY/, 'malformed streamed tool args must trigger an immediate retry nudge before provider tool history is written')
   assert.match(goalTracker, /state\.taskStrategy === 'browse'[\s\S]*?state\.browserTaskCompleted/, 'browser goals must not complete from generic tool evidence')
   assert.match(goalTracker, /MAX_RENDERED_GOALS = 8/, 'goal context should be bounded for long plans')
   assert.match(goalTracker, /visibleGoalsForContext/, 'goal tracker must compact long goal lists around the active goal')
@@ -2918,6 +2921,39 @@ export async function runLedgerSmoke() {
   }]]), searchBalanceState)
   assert.equal(searchBalanceEvents.filter((event) => event.type === 'tool_start').length, 0, 'search-only research chains must be blocked before visible tool_start')
   assert.match(JSON.stringify(searchBalanceResults[0]?.result || {}), /no opened or extracted source pages yet/)
+
+  const malformedSearchEvents: Array<{ type: string; name?: string; result?: unknown }> = []
+  const malformedSearchEmitter = {
+    get isClosed() { return false },
+    get terminalStatus() { return null },
+    toolStart(_id: string, name: string) { malformedSearchEvents.push({ type: 'tool_start', name }) },
+    toolResult(_id: string, name: string, result: unknown) { malformedSearchEvents.push({ type: 'tool_result', name, result }) },
+    terminalOutput() {},
+    creditEvent() {},
+    artifactCreated() {},
+    fileContentStart() {},
+    fileContentDelta() {},
+    browserFrame() {},
+  }
+  const malformedSearchState = createInitialState(false, timeouts)
+  malformedSearchState.taskStrategy = 'research'
+  malformedSearchState.currentPhase = 'research'
+  malformedSearchState.currentPlanItems = [
+    "Identify Manus AI's core product and company background",
+    'Compile findings into a structured summary',
+  ]
+  malformedSearchState.currentStepIdx = 0
+  const malformedSearchPipeline = new ToolPipeline(malformedSearchEmitter as any, 'malformed-search-smoke')
+  const malformedSearchResults = await malformedSearchPipeline.executeAll(new Map([[0, {
+    id: 'malformed-search',
+    name: 'web_search',
+    arguments: '{"action_label":"Search Manus AI company',
+  }]]), malformedSearchState)
+  assert.equal(malformedSearchEvents.length, 0, 'malformed web_search args must not create visible search activity or panel events')
+  assert.equal(malformedSearchResults[0]?.internalRecovery, 'malformed_tool_arguments', 'malformed web_search args must return internal recovery metadata')
+  assert.match(JSON.stringify(malformedSearchResults[0]?.result || {}), /INTERNAL_RECOVERY: malformed tool arguments/, 'malformed web_search args must be hidden internal recovery, not a user-facing search error')
+  assert.equal(malformedSearchState.stepResearchCallCount, 0, 'malformed web_search args must not count as research evidence')
+  assert.equal(malformedSearchState.stepSearchQueries.size, 0, 'malformed web_search args must not record placeholder search queries')
 
   const deliverableRevisionEvents: Array<{ type: string; name?: string; result?: unknown }> = []
   const deliverableRevisionEmitter = {
