@@ -656,14 +656,59 @@ export class PlanManager {
     return Math.max(250, Math.min(preferredMs, remainingMs - 150))
   }
 
+  private timeoutFallbackPlan(state: AgentStateData): { titles: string[]; scopes: (string | null)[] } {
+    const target = conciseTopicLabel(requestSubject(this.messages, 72))
+    const strategy = state.taskStrategy
+    let titles: string[]
+    let scopes: (string | null)[]
+
+    if (strategy === 'build' || strategy === 'code' || strategy === 'creative') {
+      titles = [`Build ${target}`, `Verify and deliver ${target}`]
+      scopes = [
+        `Create the requested ${target} artifact using the available workspace tools and files.`,
+        `Check the result, repair visible issues, and deliver the completed artifact.`,
+      ]
+    } else if (strategy === 'browse') {
+      titles = [`Use the browser for ${target}`, `Report the outcome for ${target}`]
+      scopes = [
+        `Navigate and interact only as needed to complete the user's browser task.`,
+        `Summarize the concrete result or any hard blocker from the browser work.`,
+      ]
+    } else if (strategy === 'research' || strategy === 'analysis') {
+      titles = [`Research ${target}`, `Synthesize ${target}`]
+      scopes = [
+        `Gather credible source evidence for the user's requested depth on ${target}.`,
+        `Turn the gathered evidence into the requested answer or saved deliverable.`,
+      ]
+    } else {
+      titles = [`Handle ${target}`, `Deliver ${target}`]
+      scopes = [
+        `Do the concrete work requested by the user for ${target}.`,
+        `Return the result in the requested format and note any real blockers.`,
+      ]
+    }
+
+    const alignedScopes = this.alignScopesToTitles(titles, scopes)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
+    return this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
+  }
+
   private continueAfterPlannerTimeout(state: AgentStateData | null): boolean {
     if (!state || state.planEmitted || this.emitter.isClosed) return false
     console.warn('[Plan] Planner timed out inside startup deadline; continuing without surfacing provider timeout')
-    state.planItems = []
-    state.planScopes = []
-    state.currentPlanItems = null
-    state.currentPlanScopes = null
+    const fallback = this.timeoutFallbackPlan(state)
+    this.emitter.plan(fallback.titles)
+    state.planItems = fallback.titles
+    state.planScopes = fallback.scopes
+    state.currentPlanItems = fallback.titles
+    state.currentPlanScopes = fallback.scopes
+    state.currentStepIdx = 0
+    state.stepIterationCount = 0
+    state.phaseNarrationEmittedThisStep = false
     state.planEmitted = true
+    updatePhase(state)
+    setWorkLedgerObjective(state, fallback.titles[0])
+    setWorkLedgerRequirements(state, this.buildInitialRequirements(fallback.titles, fallback.scopes))
     return true
   }
 
@@ -1161,6 +1206,13 @@ Rules:
     const mappedTaskType = this.applyPlannerMetadata(state, obj)
 
     if (arrays.titles.length === 0) {
+      if (
+        mappedTaskType !== 'general' ||
+        this.requiredFirstSteps.length > 0 ||
+        this.customInstructionsRequestTrackingFile()
+      ) {
+        return false
+      }
       await this.emitAcknowledgement(obj.ack, mappedTaskType)
       state.planItems = null
       state.planScopes = null
