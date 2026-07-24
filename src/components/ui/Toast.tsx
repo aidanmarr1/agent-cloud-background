@@ -24,22 +24,26 @@ export function Toast() {
         return (
           <div
             key={toast.id}
+            role={toast.type === 'error' ? 'alert' : 'status'}
+            aria-live={toast.type === 'error' ? 'assertive' : 'polite'}
+            aria-atomic="true"
             className={`relative overflow-hidden flex items-center gap-3 bg-bg-card border border-border-primary rounded-2xl pl-3.5 pr-2 py-3 ${isDismissing ? 'animate-slide-out-right' : 'animate-slide-in-from-right'} min-w-[280px] max-w-[420px]`}
             style={{ boxShadow: 'var(--shadow-xl)' }}
           >
-            <div className={`w-8 h-8 rounded-xl ${bgColor} flex items-center justify-center flex-shrink-0`}>
+            <div aria-hidden="true" className={`w-8 h-8 rounded-xl ${bgColor} flex items-center justify-center flex-shrink-0`}>
               <Icon size={15} className={color} strokeWidth={2.25} />
             </div>
             <span className="text-[13px] text-text-primary flex-1 leading-snug font-medium tracking-[0]">{toast.message}</span>
             <button
+              type="button"
               onClick={() => removeToast(toast.id)}
               className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary flex-shrink-0 transition-all duration-150"
-              aria-label="Dismiss"
+              aria-label="Dismiss notification"
             >
-              <X size={12} />
+              <X size={12} aria-hidden="true" />
             </button>
             {/* Auto-dismiss progress bar — duration must match the auto-dismiss timer in src/store/ui.ts (4000ms) */}
-            <div className="absolute bottom-0 left-0 right-0 h-[2px]">
+            <div aria-hidden="true" className="absolute bottom-0 left-0 right-0 h-[2px]">
               <div
                 className={`h-full ${progressColor} opacity-60`}
                 style={{ animation: 'shrinkWidth 4s linear forwards', width: '100%' }}

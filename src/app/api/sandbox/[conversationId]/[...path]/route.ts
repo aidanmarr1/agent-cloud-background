@@ -1,5 +1,7 @@
 import { readSandboxFileBytes } from '@/lib/sandbox'
+import { findActiveTaskJobForConversation } from '@/lib/agent/taskJobs'
 import { assertTaskAccess } from '@/lib/taskAccess'
+import { getTaskFileForUser, readTaskFileBody } from '@/lib/taskFiles'
 import { auth } from '@/auth'
 
 const MIME_TYPES: Record<string, string> = {
@@ -57,6 +59,30 @@ export async function GET(
   if (!access.ok) return access.response
 
   const filePath = pathSegments.join('/')
+  const persistedFile = await getTaskFileForUser(userId, conversationId, filePath).catch(() => null)
+  if (persistedFile) {
+    try {
+      const body = await readTaskFileBody(persistedFile)
+      return new Response(new Uint8Array(body), {
+        headers: {
+          ...sandboxHeaders(persistedFile.mimeType),
+          ...access.headers,
+          'Content-Length': String(body.byteLength),
+        },
+      })
+    } catch {
+      return Response.json({ error: 'Failed to read file' }, { status: 500 })
+    }
+  }
+
+  // Preview requests must not recreate an E2B sandbox after a task has
+  // finished (or while it is idle). Only an authenticated, conversation-owned
+  // run that is still queued/running may fall back to the live sandbox.
+  const activeJob = await findActiveTaskJobForConversation(userId, conversationId)
+  if (!activeJob) {
+    return Response.json({ error: 'Not Found' }, { status: 404 })
+  }
+
   const read = await readSandboxFileBytes(conversationId, filePath)
   if (!read.ok) {
     if (read.status === 403) return Response.json({ error: 'Forbidden' }, { status: 403 })

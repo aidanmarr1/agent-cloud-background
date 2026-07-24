@@ -21,6 +21,11 @@ const WebIdeView = dynamic(
 )
 import { Search, Globe, Terminal, FileText, ImageIcon, Monitor, ChevronLeft, ChevronRight, SkipBack, SkipForward, Code2 } from '@/components/icons'
 
+const MIN_COMPUTER_PANEL_PX = 380
+const MIN_CHAT_PANE_PX = 620
+const MIN_COMPUTER_PANEL_PERCENT = 20
+const MAX_COMPUTER_PANEL_PERCENT = 70
+
 function isVisualBrowserPayload(data: unknown): data is BrowserResult {
   return !!data &&
     typeof data === 'object' &&
@@ -128,11 +133,11 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   const setComputerPanelActiveItemId = useUIStore((s) => s.setComputerPanelActiveItemId)
   const webIdeMode = useUIStore((s) => s.webIdeMode)
   const webIdeEntryFile = useUIStore((s) => s.webIdeEntryFile)
-  const computerPanelWidth = useUIStore((s) => s.computerPanelWidth)
   const setComputerPanelWidth = useUIStore((s) => s.setComputerPanelWidth)
   const [activeIndex, setActiveIndex] = useState(0)
   const [filterType, setFilterType] = useState<'all' | 'search' | 'browse' | 'terminal' | 'file' | 'image_search' | 'browser'>('all')
   const contentRef = useRef<HTMLDivElement>(null)
+  const resizeCleanupRef = useRef<(() => void) | null>(null)
   const visibleItems = items.filter((item) => !isViewportResizePanelItem(item))
   const focusedVisibleIndex = computerPanelActiveItemId
     ? visibleItems.findIndex((item) => item.id === computerPanelActiveItemId)
@@ -205,23 +210,78 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   }, [filteredItems.length, hasLiveItem, liveIndex, setComputerPanelActiveItemId])
 
   // Resize handle
-  const isDragging = useRef(false)
+  useEffect(() => () => resizeCleanupRef.current?.(), [])
+
   const handlePointerDown = useCallback((e: ReactPointerEvent) => {
+    const handle = e.currentTarget as HTMLElement
+    const layout = handle.closest<HTMLElement>('[data-chat-layout]')
+    if (!layout) return
+
     e.preventDefault()
-    isDragging.current = true
-    const onMove = (ev: globalThis.PointerEvent) => {
-      const newWidth = ((window.innerWidth - ev.clientX) / window.innerWidth) * 100
-      setComputerPanelWidth(Math.min(70, Math.max(20, newWidth)))
+    e.stopPropagation()
+    resizeCleanupRef.current?.()
+    const pointerId = e.pointerId
+    const bounds = layout.getBoundingClientRect()
+    const maxPanelPx = Math.max(MIN_COMPUTER_PANEL_PX, bounds.width - MIN_CHAT_PANE_PX)
+    let nextWidthPercent = useUIStore.getState().computerPanelWidth
+    let pendingFrame: number | null = null
+
+    const widthForPointer = (clientX: number) => {
+      const widthPx = Math.min(maxPanelPx, Math.max(MIN_COMPUTER_PANEL_PX, bounds.right - clientX))
+      const widthPercent = (widthPx / bounds.width) * 100
+      return Math.min(MAX_COMPUTER_PANEL_PERCENT, Math.max(MIN_COMPUTER_PANEL_PERCENT, widthPercent))
     }
-    const onUp = () => {
-      isDragging.current = false
-      document.removeEventListener('pointermove', onMove)
-      document.removeEventListener('pointerup', onUp)
+
+    const paintWidth = () => {
+      pendingFrame = null
+      layout.style.setProperty('--computer-panel-width', `${nextWidthPercent}%`)
+    }
+
+    const onMove = (ev: globalThis.PointerEvent) => {
+      if (ev.pointerId !== pointerId) return
+      ev.preventDefault()
+      nextWidthPercent = widthForPointer(ev.clientX)
+      if (pendingFrame === null) {
+        pendingFrame = window.requestAnimationFrame(paintWidth)
+      }
+    }
+
+    const cleanupResize = () => {
+      if (pendingFrame !== null) {
+        window.cancelAnimationFrame(pendingFrame)
+        pendingFrame = null
+      }
+      layout.style.setProperty('--computer-panel-width', `${useUIStore.getState().computerPanelWidth}%`)
+      handle.removeEventListener('pointermove', onMove)
+      handle.removeEventListener('pointerup', finishResize)
+      handle.removeEventListener('pointercancel', finishResize)
+      try {
+        if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId)
+      } catch {
+        // The panel may have closed between pointer events; cleanup still proceeds.
+      }
+      document.body.removeAttribute('data-computer-panel-resizing')
       document.body.style.cursor = ''
       document.body.style.userSelect = ''
+      resizeCleanupRef.current = null
     }
-    document.addEventListener('pointermove', onMove)
-    document.addEventListener('pointerup', onUp)
+
+    function finishResize(ev: globalThis.PointerEvent) {
+      if (ev.pointerId !== pointerId) return
+      if (pendingFrame !== null) {
+        window.cancelAnimationFrame(pendingFrame)
+        paintWidth()
+      }
+      setComputerPanelWidth(nextWidthPercent)
+      cleanupResize()
+    }
+
+    resizeCleanupRef.current = cleanupResize
+    handle.setPointerCapture(pointerId)
+    handle.addEventListener('pointermove', onMove)
+    handle.addEventListener('pointerup', finishResize)
+    handle.addEventListener('pointercancel', finishResize)
+    document.body.setAttribute('data-computer-panel-resizing', 'true')
     document.body.style.cursor = 'col-resize'
     document.body.style.userSelect = 'none'
   }, [setComputerPanelWidth])
@@ -263,30 +323,20 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
       {/* Mobile backdrop */}
       <button
         type="button"
-        className="fixed inset-0 bg-[var(--overlay-scrim)] z-[125] md:hidden cursor-default"
+        className="computer-panel-backdrop fixed inset-0 z-[125] cursor-default bg-[var(--overlay-scrim)]"
         onClick={() => useUIStore.getState().setComputerPanelOpen(false, { source: 'user' })}
         aria-label="Close computer panel"
       />
 
-      {/* Desktop width via CSS custom prop */}
-      <style>{`
-        @media (min-width: 768px) {
-          [data-computer-panel] {
-            width: calc(${computerPanelWidth}% - 24px);
-          }
-        }
-      `}</style>
-
       <div
         data-computer-panel=""
-        className="fixed bg-bg-primary border border-border-primary flex flex-col animate-panel-in z-[130] overflow-hidden inset-0 h-[100dvh] rounded-none md:inset-auto md:right-2 md:top-2 md:bottom-2 md:h-auto md:rounded-2xl md:z-30"
-        style={{ boxShadow: 'var(--shadow-lg)' }}
+        className="computer-panel-shell fixed inset-0 z-[130] flex h-[100dvh] flex-col overflow-hidden border-l border-border-primary bg-bg-primary animate-panel-in"
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
       >
         {/* Resize handle — left edge */}
         <div
-          className="hidden md:block absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize z-50 hover:bg-bg-secondary transition-colors"
+          className="computer-panel-resize-handle absolute bottom-0 left-0 top-0 z-50 hidden w-2 cursor-col-resize touch-none transition-colors hover:bg-bg-secondary"
           onPointerDown={handlePointerDown}
         />
         <PanelHeader />

@@ -10,16 +10,40 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [error, setError] = useState<string | null>(null)
   const [svg, setSvg] = useState<string>('')
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('light')
+
+  useEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const syncTheme = () => {
+      const root = document.documentElement
+      setResolvedTheme(
+        root.classList.contains('dark') || (!root.classList.contains('light') && media.matches)
+          ? 'dark'
+          : 'light',
+      )
+    }
+
+    syncTheme()
+    const observer = new MutationObserver(syncTheme)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] })
+    media.addEventListener('change', syncTheme)
+
+    return () => {
+      observer.disconnect()
+      media.removeEventListener('change', syncTheme)
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
+    setSvg('')
 
     async function render() {
       try {
         const mermaid = (await import('mermaid')).default
         mermaid.initialize({
           startOnLoad: false,
-          theme: document.documentElement.classList.contains('dark') ? 'dark' : 'default',
+          theme: resolvedTheme === 'dark' ? 'dark' : 'default',
           securityLevel: 'strict',
         })
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -37,7 +61,7 @@ export function MermaidBlock({ code }: MermaidBlockProps) {
 
     render()
     return () => { cancelled = true }
-  }, [code])
+  }, [code, resolvedTheme])
 
   if (error) {
     return (

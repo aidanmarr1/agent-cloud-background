@@ -1,6 +1,6 @@
 import { hostname } from 'os'
 import { tursoExecute } from '@/lib/db/turso'
-import { taskQueueName } from '@/lib/agent/taskQueue'
+import { TASK_ORCHESTRATION_PROTOCOL_VERSION, taskQueueName } from '@/lib/agent/taskQueue'
 
 export interface TaskWorkerHeartbeatInput {
   workerId: string
@@ -34,6 +34,7 @@ export interface TaskWorkerHeartbeat {
   taskWorkerMode: string | null
   sandboxProvider: string | null
   deploymentVersion: string | null
+  orchestrationProtocolVersion: string | null
   e2bApiKeyConfigured: boolean
   e2bBrowserRuntimeConfigured: boolean
   e2bPauseOnTaskEnd: boolean
@@ -57,6 +58,12 @@ export function isLikelyLocalWorkerHostname(value: string | null | undefined): b
 export function workerHeartbeatIsHosted(worker: { hostname?: string | null }): boolean {
   if (envBoolEnabled('AGENT_ALLOW_LOCAL_WORKER_HEARTBEAT', false)) return true
   return !isLikelyLocalWorkerHostname(worker.hostname)
+}
+
+export function workerHeartbeatMatchesCurrentProtocol(worker: {
+  orchestrationProtocolVersion?: string | null
+}): boolean {
+  return worker.orchestrationProtocolVersion === TASK_ORCHESTRATION_PROTOCOL_VERSION
 }
 
 let schemaReady: Promise<void> | null = null
@@ -93,12 +100,16 @@ export async function ensureTaskWorkerHeartbeatSchema(): Promise<void> {
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column task_worker_mode text')
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column sandbox_provider text')
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column deployment_version text')
+      await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column orchestration_protocol_version text')
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column e2b_api_key_configured integer not null default 0')
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column e2b_browser_runtime_configured integer not null default 0')
       await addTaskWorkerHeartbeatColumn('alter table agent_task_workers add column e2b_pause_on_task_end integer not null default 0')
       await tursoExecute('create index if not exists agent_task_workers_seen_idx on agent_task_workers(last_seen_at_ms desc)')
       await tursoExecute('create index if not exists agent_task_workers_queue_seen_idx on agent_task_workers(queue_name, last_seen_at_ms desc)')
-    })()
+    })().catch((error) => {
+      schemaReady = null
+      throw error
+    })
   }
   await schemaReady
 }
@@ -130,6 +141,9 @@ function rowToHeartbeat(row: Record<string, unknown> | undefined): TaskWorkerHea
     taskWorkerMode: typeof row.task_worker_mode === 'string' ? row.task_worker_mode : null,
     sandboxProvider: typeof row.sandbox_provider === 'string' ? row.sandbox_provider : null,
     deploymentVersion: typeof row.deployment_version === 'string' ? row.deployment_version : null,
+    orchestrationProtocolVersion: typeof row.orchestration_protocol_version === 'string'
+      ? row.orchestration_protocol_version
+      : null,
     e2bApiKeyConfigured: rowBool(row.e2b_api_key_configured),
     e2bBrowserRuntimeConfigured: rowBool(row.e2b_browser_runtime_configured),
     e2bPauseOnTaskEnd: rowBool(row.e2b_pause_on_task_end),
@@ -141,17 +155,18 @@ export async function recordTaskWorkerHeartbeat(input: TaskWorkerHeartbeatInput)
   await ensureTaskWorkerHeartbeatSchema()
   const now = Date.now()
   const queueName = input.queueName || taskQueueName()
-  await tursoExecute(
+  const result = await tursoExecute(
     `
       insert into agent_task_workers (
         worker_id, queue_name, started_at_ms, last_seen_at_ms, poll_ms, heartbeat_ms,
         status, current_run_id, completed_tasks, process_id, hostname,
-        task_worker_mode, sandbox_provider, deployment_version, e2b_api_key_configured,
+        task_worker_mode, sandbox_provider, deployment_version, orchestration_protocol_version, e2b_api_key_configured,
         e2b_browser_runtime_configured, e2b_pause_on_task_end
       )
-      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(worker_id) do update set
         queue_name = excluded.queue_name,
+        started_at_ms = excluded.started_at_ms,
         last_seen_at_ms = excluded.last_seen_at_ms,
         poll_ms = excluded.poll_ms,
         heartbeat_ms = excluded.heartbeat_ms,
@@ -163,9 +178,11 @@ export async function recordTaskWorkerHeartbeat(input: TaskWorkerHeartbeatInput)
         task_worker_mode = excluded.task_worker_mode,
         sandbox_provider = excluded.sandbox_provider,
         deployment_version = excluded.deployment_version,
+        orchestration_protocol_version = excluded.orchestration_protocol_version,
         e2b_api_key_configured = excluded.e2b_api_key_configured,
         e2b_browser_runtime_configured = excluded.e2b_browser_runtime_configured,
         e2b_pause_on_task_end = excluded.e2b_pause_on_task_end
+      where excluded.started_at_ms >= agent_task_workers.started_at_ms
     `,
     [
       input.workerId,
@@ -182,26 +199,34 @@ export async function recordTaskWorkerHeartbeat(input: TaskWorkerHeartbeatInput)
       input.taskWorkerMode || null,
       input.sandboxProvider || null,
       input.deploymentVersion || null,
+      TASK_ORCHESTRATION_PROTOCOL_VERSION,
       input.e2bApiKeyConfigured ? 1 : 0,
       input.e2bBrowserRuntimeConfigured ? 1 : 0,
       input.e2bPauseOnTaskEnd ? 1 : 0,
     ],
   )
+  if (result.rowsAffected !== 1) {
+    throw new Error(`Worker heartbeat identity "${input.workerId}" was superseded by a newer process.`)
+  }
 }
 
-export async function markTaskWorkerStopped(workerId: string): Promise<void> {
+export async function markTaskWorkerStopped(workerId: string, startedAtMs?: number): Promise<void> {
   if (!workerId) return
   await ensureTaskWorkerHeartbeatSchema()
   const queueName = taskQueueName()
+  const startedAtGuard = Number.isFinite(startedAtMs) ? ' and started_at_ms = ?' : ''
+  const args = Number.isFinite(startedAtMs)
+    ? [Date.now(), workerId, queueName, Number(startedAtMs)]
+    : [Date.now(), workerId, queueName]
   await tursoExecute(
     `
       update agent_task_workers
       set status = 'stopped',
           current_run_id = null,
           last_seen_at_ms = ?
-      where worker_id = ? and queue_name = ?
+      where worker_id = ? and queue_name = ?${startedAtGuard}
     `,
-    [Date.now(), workerId, queueName],
+    args,
   )
 }
 

@@ -2,10 +2,10 @@
 
 import type { ComponentType } from 'react'
 import { useState } from 'react'
-import { ChevronDown, CornerDownLeft, Keyboard, LayoutGrid, MessageSquare, Monitor, Search } from '@/components/icons'
-import { SectionLabel } from '@/components/ui/SectionLabel'
+import { ChevronDown, Keyboard, LayoutGrid, MessageSquare, Monitor, Search } from '@/components/icons'
 import { getKeyboardShortcutCategories, type ShortcutCategory, type ShortcutItem } from '@/lib/keyboardShortcuts'
 import { useSettingsStore } from '@/store/settings'
+import { SettingsSection } from './SettingsSection'
 
 const categoryIcons: Record<string, ComponentType<{ size?: number; className?: string; strokeWidth?: number }>> = {
   global: Keyboard,
@@ -74,7 +74,7 @@ function ShortcutCategoryCard({
   const Icon = categoryIcons[category.id] || Keyboard
 
   return (
-    <section className="overflow-hidden rounded-2xl border border-border-primary bg-bg-card">
+    <section className="overflow-hidden rounded-xl border border-border-primary bg-bg-card">
       <button
         type="button"
         onClick={onToggle}
@@ -132,33 +132,26 @@ export function ShortcutsTab() {
   }
 
   return (
-    <div className="space-y-5">
-      <div>
-        <SectionLabel>Keyboard shortcuts</SectionLabel>
-        <div className="mb-3 flex flex-col gap-2 rounded-xl border border-border-primary bg-bg-card px-3.5 py-3 text-[11.5px] leading-relaxed text-text-tertiary sm:flex-row sm:items-center sm:justify-between">
-          <span>Shortcuts are grouped by where they work. Use Ctrl in place of ⌘ on Windows and Linux.</span>
-          <span className="w-fit rounded-md border border-border-primary bg-bg-primary px-2.5 py-1 text-[10.5px] font-semibold text-text-secondary">
-            {sendWithEnter ? 'Enter sends' : '⌘/Ctrl + Enter sends'}
-          </span>
-        </div>
-        <div className="space-y-3">
-          {categories.map((category) => (
-            <ShortcutCategoryCard
-              key={category.id}
-              category={category}
-              open={openCategories.has(category.id)}
-              onToggle={() => toggleCategory(category.id)}
-            />
-          ))}
-        </div>
+    <SettingsSection
+      title="Keyboard shortcuts"
+      description="Reference commands by the part of Agent where they work."
+    >
+      <div className="mb-3 flex flex-col gap-2.5 rounded-xl border border-border-primary bg-bg-secondary px-3.5 py-3 text-[11.5px] leading-relaxed text-text-tertiary sm:flex-row sm:items-center sm:justify-between">
+        <span>Use Ctrl in place of ⌘ on Windows and Linux. Typing fields ignore global shortcuts unless they use ⌘/Ctrl.</span>
+        <span className="w-fit flex-shrink-0 rounded-md border border-border-primary bg-bg-primary px-2.5 py-1 text-[10.5px] font-semibold text-text-secondary">
+          {sendWithEnter ? 'Enter sends' : '⌘/Ctrl + Enter sends'}
+        </span>
       </div>
-
-      <div className="flex items-start gap-2 rounded-xl border border-border-primary bg-bg-card px-3.5 py-3 text-[11.5px] leading-relaxed text-text-tertiary">
-        <CornerDownLeft size={14} className="mt-0.5 flex-shrink-0 text-text-tertiary" strokeWidth={2.25} />
-        <p>
-          Composer shortcuts only apply while the message box is focused. Global shortcuts are ignored while typing unless they use ⌘/Ctrl.
-        </p>
+      <div className="space-y-2.5">
+        {categories.map((category) => (
+          <ShortcutCategoryCard
+            key={category.id}
+            category={category}
+            open={openCategories.has(category.id)}
+            onToggle={() => toggleCategory(category.id)}
+          />
+        ))}
       </div>
-    </div>
+    </SettingsSection>
   )
 }

@@ -18,7 +18,7 @@ npm start
 npm run worker:cloud
 ```
 
-The web process serves Next.js. The cloud worker entrypoint runs `cloud:worker-env` first, then starts `scripts/task-worker.mjs`, claims queued jobs from Turso, executes the agent loop, and writes stream events/results back to Turso.
+The web process serves Next.js. The cloud worker entrypoint runs `cloud:worker-env` first, then starts `scripts/task-worker-supervisor.mjs`. The supervisor runs `scripts/task-worker.mjs`, which claims queued jobs from Turso, executes the agent loop, and writes stream events/results back to Turso. The raw worker deliberately exits if a cancelled provider or tool ignores its abort signal; the supervisor immediately replaces that fenced process so one aborted task cannot leave the queue without a worker.
 
 The public `/api/health` endpoint is intentionally lightweight and unauthenticated so cloud hosts can verify the web process is alive. It does not prove the worker is running; use `cloud:worker-ready` and `cloud:worker-smoke` for that.
 
@@ -73,6 +73,8 @@ AGENT_TASK_QUEUE_NAME=production
 AGENT_TASK_WORKER_HEARTBEAT_MS=15000
 AGENT_TASK_WORKER_STALE_MS=60000
 AGENT_TASK_WORKER_MAX_ATTEMPTS=3
+AGENT_WORKER_HARD_TASK_EXIT_MS=930000
+AGENT_WORKER_CANCEL_HARD_EXIT_MS=5000
 AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true
 AGENT_REQUIRE_HOSTED_TASK_WORKER=false
 AGENT_DEPLOYMENT_VERSION=
@@ -83,6 +85,8 @@ AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=false
 
 If you want the web service to reject stale workers from an older deployment, set the same `AGENT_DEPLOYMENT_VERSION` on the web and worker services, then set `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true` on the web service. Use a release id, git SHA, or deployment label that you update when both services are redeployed. With that flag enabled, `/api/chat`, `cloud:worker-ready`, and `cloud:worker-smoke` accept only workers heartbeating the matching version.
 
+This orchestration release changes the queue protocol, task lifecycle fences, conversation revision schema, and attempt-scoped billing records. Do not run it as an overlapping rolling upgrade with older workers. Pause new task intake, let every old worker finish or durably cancel its claimed run, stop those workers and verify their heartbeats are gone, then deploy the web/schema changes and start only matching-version workers. Reopen intake after `cloud:worker-ready` confirms the new protocol and deployment version. This drain is required to prevent an old process from writing legacy lifecycle or billing state into a run owned by the new protocol.
+
 Optional worker tuning:
 
 ```bash
@@ -92,9 +96,17 @@ AGENT_TASK_WORKER_POLL_MS=100
 
 If you set `AGENT_TASK_WORKER_ID` manually, keep it unique per queue. Leaving it blank is fine; the worker generates a unique ID at startup.
 
-Keep `AGENT_E2B_WARM_POOL_ENABLED=false` by default so E2B runtime starts only when a task can be billed. If you explicitly turn warm pooling on for lower startup latency, the next task that adopts the warm sandbox is charged from the sandbox's original start time.
+Workers must publish a fresh, protocol-compatible `idle` heartbeat before claiming a queued task. Each boot appends a UUID to the configured logical ID, so cancellation fencing can reason about the exact process generation instead of a reused service label.
+
+Keep `AGENT_E2B_WARM_POOL_ENABLED=false` by default so E2B runtime starts only when a task can be billed. If you explicitly turn warm pooling on for lower startup latency, prewarm time is an operational cost; user runtime billing starts only after a task adopts and confirms the sandbox.
 
 `AGENT_TASK_WORKER_MAX_ATTEMPTS` caps repeated claims for a task whose worker keeps dying before completion. The default is `3`. When the next claim would exceed the cap, the job is marked terminal with a replayable error event and the user's active-task lease is released, preventing an infinite crash/retry loop and unbounded cloud spend.
+
+`AGENT_WORKER_HARD_TASK_EXIT_MS` is the process-level backstop for SDKs or tool handlers that ignore cooperative abort signals. Keep it above the normal worker run limit plus its cleanup allowance (the default `930000` is 15 minutes plus 30 seconds). When it fires, the worker exits immediately, stops refreshing its fenced claim, and lets the host restart a clean process for durable recovery.
+
+`AGENT_WORKER_CANCEL_HARD_EXIT_MS` is the shorter cancellation backstop for the dedicated worker process. After a worker observes a durable stop request it publishes a `stopping` heartbeat, stops refreshing that claim, and gives cooperative cleanup five seconds by default; if the runner is still stuck, the dedicated process exits so ignored aborts cannot continue side effects or E2B billing in the background. Values above 30 seconds are rejected. Keep `AGENT_TASK_WORKER_STALE_MS` greater than the heartbeat interval plus this hard-exit window and the 5-second proof jitter. A cross-instance cancellation remains nonterminal until the exact boot-unique worker/run heartbeat is no longer live, then destroys the sandbox before publishing the terminal event. Heartbeat staleness is the process-loss evidence available across hosts; forced recovery therefore retains an explicit warning that late external side effects could not be ruled out instead of claiming a perfectly clean stop.
+
+In-process tasks share the web process and never use `process.exit` for cancellation. Their owner retains and refreshes the full durable claim while cooperative abort, in-flight operations, and cleanup settle. If that web process disappears, lease-expiry recovery resets the workspace and publishes an explicitly uncertain error so the UI never claims a clean hard stop that the shared-process architecture cannot prove.
 
 ## Manus-Style E2B Sandbox
 
@@ -174,9 +186,13 @@ Browser starts task
   -> if local run state is gone, /api/chat/active finds the active run from durable queued/running job state
 ```
 
-If the browser closes, only the viewer disconnects. The worker keeps running the task. When the user reopens the task, the client first uses its local resume record; if that is missing, it asks `/api/chat/active` for the current server-side run ID. That endpoint checks durable queued/running jobs first, so it still works if the browser closed before a worker claimed the job or if the short active-task lease expired. New `/api/chat` starts also check durable queued/running jobs before accepting work, so an expired active-task lease does not allow a second background task to start while the first is still queued or running. The client then reconnects to `/api/chat?runId=...`. If the worker crashes, stale running jobs are returned to the queue after their lease expires. If the cloud host sends SIGTERM during a deploy or restart, the worker releases its current claim back to the queue immediately so a replacement worker can reclaim it without waiting for the lease timeout.
+If the browser closes, only the viewer disconnects. The worker keeps running the task. When the user reopens the task, the client first uses its local resume record; if that is missing, it asks `/api/chat/active` for the current server-side run ID. That endpoint checks durable queued/running jobs first, so it still works if the browser closed before a worker claimed the job or if the short active-task lease expired. New `/api/chat` starts validate task ownership and worker readiness, then check durable queued/running jobs for that same conversation before accepting work. This preserves concurrent work across different conversations while preventing two runs from mutating one conversation's sandbox, files, and directives. The client then reconnects to `/api/chat?runId=...`. If the worker crashes, stale running jobs are returned to the queue after their lease expires. If the cloud host sends SIGTERM during a deploy or restart, the worker releases its current claim back to the queue immediately so a replacement worker can reclaim it without waiting for the lease timeout.
 
 With E2B enabled, the worker also connects or creates the task's cloud sandbox before the agent loop starts. If the worker restarts, it reconnects to the persisted E2B sandbox ID from Turso; if E2B can no longer resume that sandbox, a replacement sandbox is created and durable task files are restored from object storage before contextual work continues.
+
+E2B runtime billing is durable and attempt-scoped. A billing segment is activated only after the sandbox and remote browser are confirmed, then checkpointed while the task runs. Each checkpoint advances the segment, debits the account, and inserts its ledger event in one Turso write transaction. Cleanup records the exact provider sandbox ID and lifecycle generation it fenced, confirms that provider instance has stopped, and closes only segments owned by that exact generation. A worker crash therefore does not depend on its `finally` block: stale-task, cancellation, reset, or destroy recovery settles the interrupted segment without double charging a retried checkpoint.
+
+There is one unavoidable provider-discovery boundary: if the process dies after E2B creates a provider sandbox but before its ID is durably committed, or after browser confirmation but before the billing segment transaction commits, the app has no durable provider identity/segment to reconcile. The sandbox's configured E2B timeout still limits that orphan's provider cost, but the app cannot attribute that narrow window without an E2B account-level sandbox enumeration/reconciliation API. Keep the timeout bounded and monitor provider-side usage for these rare creation-window orphans.
 
 ## What You Need To Do
 

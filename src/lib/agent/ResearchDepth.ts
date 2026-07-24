@@ -1,4 +1,4 @@
-import { currentStepText, type AgentStateData } from './AgentState'
+import { currentStepText, stepOpenedSourceDomains, type AgentStateData } from './AgentState'
 import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import {
   MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY,
@@ -187,4 +187,51 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
     requiredSourceBreadth: Math.max(1, Math.min(label === 'wide' ? 12 : 10, allocated.breadth)),
     label,
   }
+}
+
+/**
+ * A conservative evidence floor for deterministic recovery after the model has
+ * started repeating or has failed to produce an executable next action.
+ *
+ * This is deliberately stricter than ordinary early-step progress: search
+ * snippets alone never qualify. The runtime must already have opened several
+ * distinct source domains, and deeper single-phase requests scale the floor up
+ * with their configured depth instead of being advanced after one search.
+ */
+export function hasCredibleResearchRecoveryPacket(state: AgentStateData): boolean {
+  const profile = researchDepthProfileForState(state)
+  const requiredOpenedPages = Math.min(
+    profile.requiredSourceBreadth,
+    Math.max(1, Math.ceil(profile.requiredCalls / 3)),
+  )
+  const credibleCalls = Math.min(
+    profile.requiredCalls,
+    Math.max(5, Math.ceil(profile.requiredCalls * 0.4)),
+  )
+  const credibleOpenedPages = Math.min(
+    requiredOpenedPages,
+    Math.max(3, Math.ceil(requiredOpenedPages * 0.6)),
+  )
+  const credibleDomains = Math.min(
+    profile.requiredSourceBreadth,
+    Math.max(3, Math.ceil(profile.requiredSourceBreadth * 0.6)),
+  )
+
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const openedPages = state.stepVisitedUrls.size
+  const meetsPrimaryFloor = state.stepResearchCallCount >= credibleCalls &&
+    openedPages >= credibleOpenedPages &&
+    openedDomains >= credibleDomains
+
+  // A single search action may open/extract several full pages in parallel.
+  // Let one *extra opened page* compensate for exactly one missing research
+  // action, while retaining the configured domain floor. This covers the live
+  // 4-page/3-domain packet without turning snippets or shallow searches into
+  // sufficient evidence, and never relaxes deeper profiles by more than one.
+  const breadthCompensatesForOneCall = credibleCalls > 1 &&
+    state.stepResearchCallCount >= Math.max(4, credibleCalls - 1) &&
+    openedPages >= Math.max(4, credibleOpenedPages + 1) &&
+    openedDomains >= credibleDomains
+
+  return meetsPrimaryFloor || breadthCompensatesForOneCall
 }

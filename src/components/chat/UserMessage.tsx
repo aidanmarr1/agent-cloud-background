@@ -12,19 +12,14 @@ export function UserMessage({ message }: UserMessageProps) {
   const attachmentCount = message.attachments?.length ?? 0
 
   return (
-    <div className="animate-slide-in-from-right group relative">
+    <article className="animate-slide-in-from-right group relative flex justify-end [@media(hover:none)]:pt-3" aria-label="Your message">
       <MessageActions
         variant="user"
         onCopy={() => navigator.clipboard.writeText(message.content)}
       />
-      <div className="bg-bg-message-user rounded-2xl px-4 py-3.5 max-w-[calc(100vw-2rem)] overflow-hidden ml-auto transition-all duration-200 border border-border-primary sm:max-w-[88%] sm:px-5 sm:py-4 md:max-w-[75%]">
+      <div className="w-fit max-w-[94%] overflow-hidden rounded-[18px] rounded-br-md border border-border-primary bg-bg-message-user px-4 py-3 transition-colors duration-200 sm:max-w-[84%] sm:px-4.5 sm:py-3.5 md:max-w-[72%]">
         {message.attachments && attachmentCount > 0 && (
-          <div className="mb-3 flex max-h-[212px] flex-col gap-1.5 overflow-y-auto rounded-xl border border-border-primary bg-bg-secondary p-1.5">
-            <div className="flex h-6 items-center px-1">
-              <span className="text-[10.5px] font-medium uppercase tracking-[0.12em] text-text-muted">
-                {attachmentCount === 1 ? '1 context item sent' : `${attachmentCount} context items sent`}
-              </span>
-            </div>
+          <div className={`${message.content ? 'mb-3' : ''} scrollbar-none flex max-w-full gap-2 overflow-x-auto`}>
             {message.attachments.map((att, i) => (
               <AttachmentPreviewRow
                 key={`${att.name}-${i}`}
@@ -34,10 +29,12 @@ export function UserMessage({ message }: UserMessageProps) {
             ))}
           </div>
         )}
-        <p className="chat-user-text text-text-primary whitespace-pre-wrap break-words">
-          {message.content}
-        </p>
+        {message.content && (
+          <p className="chat-user-text whitespace-pre-wrap break-words text-text-primary">
+            {message.content}
+          </p>
+        )}
       </div>
-    </div>
+    </article>
   )
 }

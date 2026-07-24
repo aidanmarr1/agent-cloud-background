@@ -89,6 +89,9 @@ const {
   enqueueTaskJob,
   runClaimedTaskJob,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskJobs.ts', import.meta.url)))
+const { recordTaskWorkerHeartbeat } = await jiti.import(
+  fileURLToPath(new URL('../src/lib/agent/taskWorkerHeartbeat.ts', import.meta.url)),
+)
 const { tursoExecute } = await jiti.import(fileURLToPath(new URL('../src/lib/db/turso.ts', import.meta.url)))
 
 const userId = `internal-background-smoke-${randomUUID()}`
@@ -120,7 +123,17 @@ try {
     },
   })
 
-  const claim = await claimNextTaskJob(`event-smoke-worker-${queueName}`, 60_000)
+  const workerId = `event-smoke-worker-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const claim = await claimNextTaskJob(workerId, 60_000)
   if (!claim || claim.runId !== runId) {
     throw new Error(`Worker did not claim the diagnostic event job. Claimed: ${claim?.runId || 'none'}`)
   }

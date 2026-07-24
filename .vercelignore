@@ -1,0 +1,11 @@
+.agent-runtime/
+.agent-storage/
+.codex-qa/
+.pnpm-store/
+outputs/
+design-qa.md
+scripts/.agent-loop-debug-*/
+.next/
+.next.*/
+node_modules/
+.env*

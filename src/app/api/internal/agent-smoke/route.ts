@@ -69,6 +69,9 @@ function createSmokeEmitter(startedAt: number) {
       textDelta(content: string) {
         push({ type: 'text_delta', content: preview(content) })
       },
+      progressUpdate(content: string) {
+        push({ type: 'progress_update', content: preview(content) })
+      },
       reasoningDelta(content: string) {
         push({ type: 'reasoning_delta', content: preview(content) })
       },

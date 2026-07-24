@@ -8,12 +8,28 @@ export interface FollowUpSuggestion {
 
 export type StepAdvanceStatus = 'done' | 'incomplete'
 
+export interface ProgressUpdatePlacement {
+  stepIndex?: number
+  afterToolId?: string
+  remainingVisibleActions?: number
+}
+
+export interface ToolStartMetadata {
+  /**
+   * A streamed preview was published before execution reached its durable
+   * side-effect checkpoint. Recovery must not treat this event alone as proof
+   * that the tool ran.
+   */
+  provisional?: boolean
+}
+
 export type SSEEventPayload =
   | { type: 'heartbeat'; timestamp: number }
   | { type: 'text_delta'; content: string }
+  | ({ type: 'progress_update'; content: string } & ProgressUpdatePlacement)
   | { type: 'reasoning_delta'; content: string }
   | { type: 'reasoning_done' }
-  | { type: 'tool_start'; id: string; name: string; args: Record<string, unknown> }
+  | ({ type: 'tool_start'; id: string; name: string; args: Record<string, unknown> } & ToolStartMetadata)
   | { type: 'tool_result'; id: string; name: string; result: SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult }
   | { type: 'browser_frame'; frame: string; timestamp: number }
   | { type: 'terminal_output'; id: string; stream: 'stdout' | 'stderr'; data: string }
@@ -32,4 +48,4 @@ export type SSEEvent = SSEEventPayload & {
   runId?: string
 }
 
-export type StreamingStatus = 'startup' | 'thinking' | 'searching' | 'browsing' | 'coding' | 'writing' | 'analyzing' | 'running' | null
+export type StreamingStatus = 'startup' | 'thinking' | 'searching' | 'browsing' | 'coding' | 'writing' | 'analyzing' | 'running' | 'stopping' | null

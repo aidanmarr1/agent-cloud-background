@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { ChevronUp, Check, Loader2, Circle, AlertTriangle } from '@/components/icons'
+import { ChevronRight, Check, Loader2, Circle, AlertTriangle } from '@/components/icons'
 import { TaskStep as TaskStepType, StepItem } from '@/types'
 import { ActionPill } from './ActionPill'
 
@@ -18,11 +18,11 @@ function formatElapsed(ms: number): string {
 }
 
 export function TaskStep({ step }: TaskStepProps) {
-  const [expanded, setExpanded] = useState(step.status === 'running')
+  const [expanded, setExpanded] = useState(step.status === 'running' || step.status === 'done')
   const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
-    if (step.status === 'running') setExpanded(true)
+    if (step.status === 'running' || step.status === 'done') setExpanded(true)
   }, [step.status])
 
   useEffect(() => {
@@ -45,25 +45,25 @@ export function TaskStep({ step }: TaskStepProps) {
     switch (step.status) {
       case 'done':
         return (
-          <div className="w-5 h-5 rounded-full bg-bg-secondary flex items-center justify-center flex-shrink-0">
-            <Check size={11} className="text-text-secondary" strokeWidth={3} />
+          <div className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full bg-success-bg">
+            <Check size={10} className="text-success-icon" strokeWidth={3} />
           </div>
         )
       case 'running':
         return (
-          <div className="w-5 h-5 rounded-full bg-bg-secondary flex items-center justify-center flex-shrink-0">
+          <div className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full bg-bg-secondary">
             <Loader2 size={11} className="text-accent-blue" style={{ animation: 'spin 1s linear infinite' }} />
           </div>
         )
       case 'incomplete':
         return (
-          <div className="w-5 h-5 rounded-full bg-bg-secondary flex items-center justify-center flex-shrink-0">
+          <div className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full bg-bg-secondary">
             <AlertTriangle size={11} className="text-text-secondary" strokeWidth={2.5} />
           </div>
         )
       default:
         return (
-          <div className="w-5 h-5 rounded-full border border-border-tertiary flex items-center justify-center flex-shrink-0">
+          <div className="flex h-[18px] w-[18px] flex-shrink-0 items-center justify-center rounded-full border border-border-tertiary">
             <Circle size={6} className="text-text-muted/40" fill="currentColor" />
           </div>
         )
@@ -74,10 +74,10 @@ export function TaskStep({ step }: TaskStepProps) {
     <div className="animate-fade-in">
       <button
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2.5 py-2 hover:bg-bg-secondary rounded-lg px-2 -mx-2 transition-all duration-150 group"
+        className="group flex h-7 w-full items-center gap-1 text-text-secondary transition-colors duration-150 hover:text-text-primary"
       >
         {statusIcon()}
-        <span className={`chat-task-title font-semibold flex-1 text-left tracking-[0] ${
+        <span className={`flex-1 text-left text-[14px] font-normal leading-5 tracking-[0] ${
           step.status === 'done' ? 'text-text-primary' :
           step.status === 'running' ? 'text-text-primary' :
           step.status === 'incomplete' ? 'text-text-secondary' : 'text-text-tertiary'
@@ -89,11 +89,9 @@ export function TaskStep({ step }: TaskStepProps) {
             {formatElapsed(elapsed)}
           </span>
         )}
-        <ChevronUp
+        <ChevronRight
           size={13}
-          className={`text-text-muted transition-transform duration-200 group-hover:text-text-secondary ${
-            expanded ? '' : 'rotate-180'
-          }`}
+          className={`text-text-muted opacity-0 transition-all duration-150 group-hover:opacity-100 group-focus-visible:opacity-100 ${expanded ? 'rotate-90' : ''}`}
         />
       </button>
 
@@ -103,7 +101,7 @@ export function TaskStep({ step }: TaskStepProps) {
         }`}
       >
         <div className="overflow-hidden">
-          <div className="pl-[30px] pr-2 pb-2 space-y-1.5">
+          <div className="relative ml-[9px] space-y-1.5 border-l border-border-secondary pb-2 pl-5 pr-2">
             {items.map((item, i) => {
               if (item.type === 'update') {
                 const isLastItem = i === items.length - 1

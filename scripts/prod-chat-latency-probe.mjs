@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
+import { auditPersistedNarrationCadence } from './lib/narration-event-audit.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
 const srcPath = fileURLToPath(new URL('../src', import.meta.url))
@@ -27,6 +28,9 @@ const baseUrl = (readStringArg('--base-url') || args.find(arg => /^https?:\/\//.
 const timeoutMs = readIntArg('--timeout-ms', 30_000)
 const minToolResultsBeforeExit = readIntArg('--min-tool-results', 1)
 const stopAfterPlan = args.includes('--stop-after-plan')
+const assertNarrationCadence = args.includes('--assert-narration-cadence')
+const waitForTerminal = args.includes('--wait-for-terminal')
+const requireDone = args.includes('--require-done')
 const prompt = readStringArg('--prompt') ||
   'Research one current fact about AI agent startup latency and answer in one sentence.'
 const email = `latency-probe-${Date.now()}-${randomUUID().slice(0, 8)}@example.com`
@@ -152,10 +156,11 @@ async function loadPersistedTimingSnapshot() {
         [runId],
       ),
       tursoExecute(
-        'select seq, event_json, created_at_ms from agent_task_events where run_id = ? order by seq asc limit 20',
+        'select seq, event_json, created_at_ms from agent_task_events where run_id = ? order by seq asc limit 1000',
         [runId],
       ),
     ])
+    const narrationAudit = auditPersistedNarrationCadence(eventRows.rows)
     return {
       job: jobRows.rows[0] || null,
       events: eventRows.rows.map((row) => {
@@ -173,6 +178,7 @@ async function loadPersistedTimingSnapshot() {
           createdElapsedMs: Number.isFinite(createdAt) && postStartedAt ? createdAt - postStartedAt : null,
         }
       }),
+      narrationAudit,
     }
   } catch (error) {
     return {
@@ -216,7 +222,12 @@ try {
     throw new Error(`Credentials callback did not issue a session cookie. HTTP ${callbackResponse.status}`)
   }
 
+  // Task starts are idempotent and client-owned. Generate the stable run ID
+  // before POSTing so a lost response can be replayed without creating a
+  // second run.
+  runId = randomUUID()
   const body = {
+    runId,
     conversationId,
     model: DEFAULT_MODEL,
     startFreshSandbox: true,
@@ -235,7 +246,7 @@ try {
     signal: fetchController.signal,
   })
   const headersMs = Date.now() - postStartedAt
-  runId = response.headers.get('x-agent-run-id') || ''
+  runId = response.headers.get('x-agent-run-id') || runId
   const routeElapsedHeader = response.headers.get('x-agent-route-elapsed-ms')
   const routeTimingsHeader = response.headers.get('x-agent-route-timings')
   if (!response.ok || !response.body) {
@@ -268,7 +279,10 @@ try {
   let targetToolResult = null
   let firstTextAfterTargetToolResult = null
   let terminal = null
+  let streamedText = ''
   const firstEvents = []
+  const streamedEvents = []
+  const receivedElapsedBySeq = new Map()
 
   while (Date.now() < deadline) {
     const remaining = Math.max(1, deadline - Date.now())
@@ -284,7 +298,14 @@ try {
     for (const block of blocks) {
       const event = parseSseBlock(block)
       if (!event) continue
+      streamedEvents.push(event)
       const elapsed = Date.now() - postStartedAt
+      if (Number.isFinite(Number(event.seq))) {
+        receivedElapsedBySeq.set(Number(event.seq), elapsed)
+      }
+      if (event.type === 'text_delta' && typeof event.content === 'string') {
+        streamedText += event.content
+      }
       if (firstEvents.length < 8) {
         firstEvents.push({
           elapsed,
@@ -325,7 +346,21 @@ try {
         terminal = { elapsed, type: event.type, seq: event.seq, message: event.message }
       }
     }
-    const targetSatisfied = stopAfterPlan
+    const streamedNarrationAudit = assertNarrationCadence
+      ? auditPersistedNarrationCadence(streamedEvents)
+      : null
+    const narrationCadenceSatisfied = Boolean(
+      streamedNarrationAudit?.acceptedNarrations.some(narration => (
+        narration.gap >= streamedNarrationAudit.minGap &&
+        narration.gap <= streamedNarrationAudit.maxGap &&
+        (narration.continuesWithTool || narration.verifiedTerminalSynthesis)
+      )),
+    )
+    const targetSatisfied = waitForTerminal
+      ? Boolean(terminal)
+      : assertNarrationCadence
+      ? narrationCadenceSatisfied
+      : stopAfterPlan
       ? !!(firstText && firstPlan)
       : minToolResultsBeforeExit <= 1
       ? !!(secondTool || firstPostToolText)
@@ -342,9 +377,34 @@ try {
   ])
 
   const persistedTiming = await loadPersistedTimingSnapshot()
+  const persistedNarrationAudit = persistedTiming?.narrationAudit || null
+  const narrationAssertionPassed = !assertNarrationCadence || Boolean(
+    persistedNarrationAudit?.ok &&
+    persistedNarrationAudit.acceptedNarrations.some(narration => (
+      narration.gap >= persistedNarrationAudit.minGap &&
+      narration.gap <= persistedNarrationAudit.maxGap &&
+      (narration.continuesWithTool || narration.verifiedTerminalSynthesis)
+    )),
+  )
+  const terminalAssertionPassed = !requireDone || terminal?.type === 'done'
+  const deliveryLag = Array.isArray(persistedTiming?.events)
+    ? persistedTiming.events
+      .map((event) => {
+        const receivedElapsedMs = receivedElapsedBySeq.get(event.seq)
+        if (!Number.isFinite(receivedElapsedMs) || !Number.isFinite(event.createdElapsedMs)) return null
+        return {
+          seq: event.seq,
+          type: event.type,
+          createdElapsedMs: event.createdElapsedMs,
+          receivedElapsedMs,
+          deliveryLagMs: receivedElapsedMs - event.createdElapsedMs,
+        }
+      })
+      .filter(Boolean)
+    : []
 
   console.log(JSON.stringify({
-    ok: !!firstText && !!firstPlan,
+    ok: !!firstText && !!firstPlan && narrationAssertionPassed && terminalAssertionPassed,
     baseUrl,
     conversationId,
     runId,
@@ -361,6 +421,11 @@ try {
     firstToolResultToPostToolTextMs: firstToolResult && firstPostToolText ? firstPostToolText.elapsed - firstToolResult.elapsed : null,
     minToolResultsBeforeExit,
     stopAfterPlan,
+    assertNarrationCadence,
+    narrationAssertionPassed,
+    waitForTerminal,
+    requireDone,
+    terminalAssertionPassed,
     toolResultCount,
     targetToolResult,
     firstTextAfterTargetToolResult,
@@ -372,9 +437,18 @@ try {
     firstToolResult,
     firstPostToolText,
     secondTool,
+    finalText: streamedText.trim().slice(-6000),
+    deliveryLag,
     firstEvents,
     persistedTiming,
   }, null, 2))
+  if (!narrationAssertionPassed) {
+    const failures = persistedNarrationAudit?.failures?.join(' ') || 'No accepted action-3/action-4 narration followed by a tool start or verified terminal synthesis was durably persisted.'
+    throw new Error(`Persisted narration cadence assertion failed: ${failures}`)
+  }
+  if (!terminalAssertionPassed) {
+    throw new Error(`Task completion assertion failed: expected done, received ${terminal?.type || 'no terminal event'}.`)
+  }
 } finally {
   await cleanup()
 }

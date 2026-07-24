@@ -1,7 +1,11 @@
-import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, markPhaseNarrationEmitted, stepOpenedSourceDomains } from './AgentState'
+import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, stepOpenedSourceDomains } from './AgentState'
 import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
-import { sanitizeNarrationText } from '@/lib/stream/cleaners'
+import {
+  acceptProgressNarration,
+  deferNarrationCadenceAttempt,
+  narrationAcceptedThisIteration,
+} from './NarrationMemory'
 import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import type { ToolCallData } from './StreamProcessor'
 import {
@@ -31,10 +35,13 @@ import {
   REPLAN_MAX_TIMES,
   MIN_STEP_BUDGET,
   MIN_DELIVERABLE_BUDGET,
-  NARRATION_MAX_VISIBLE_ACTION_GAP,
-  NARRATION_THRESHOLD_DEFAULT,
 } from './config'
-import { isExactSingleSourceLookupText, researchDepthProfileForState } from './ResearchDepth'
+import {
+  hasCredibleResearchRecoveryPacket,
+  isExactSingleSourceLookupText,
+  researchDepthProfileForState,
+} from './ResearchDepth'
+import { analyzeTaskIntent } from './TaskIntent'
 
 export type PolicyActionType = 'inject_message' | 'step_advance' | 'terminate' | 'continue_loop'
 
@@ -88,94 +95,28 @@ function stepMsg(state: AgentStateData, extra?: string): string {
   )
 }
 
-function isValidProgressNarration(content: string, options: { requireSignal?: boolean } = {}): boolean {
-  return !!sanitizeNarrationText(content, {
-    requireSignal: options.requireSignal ?? true,
-    maxSentences: 2,
-    maxLength: 300,
-  })
-}
-
-function isAcceptableForcedNarration(content: string): boolean {
-  return isValidProgressNarration(content, { requireSignal: true }) ||
-    isValidProgressNarration(content, { requireSignal: false })
-}
-
-function visibleActionsAfterAcceptedNarration(visibleActions: number): number {
-  return Math.max(0, visibleActions - NARRATION_MAX_VISIBLE_ACTION_GAP)
-}
-
-function missedCadenceNarrationAction(state: AgentStateData): PolicyAction {
-  return {
-    type: 'inject_message',
-    message: {
-      role: 'system',
-      content: stepMsg(
-        state,
-        'NARRATION CADENCE MISSED: the compact progress paragraph attempt was not usable. Do not write another status paragraph now. Make exactly one concrete tool call for the active phase; the narration window will open again after the next visible action.',
-      ),
-    },
-    continueLoop: true,
-  }
-}
-
 function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent = ''): boolean {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
 
-  if (assistantContent.trim() && isAcceptableForcedNarration(assistantContent)) {
-    markPhaseNarrationEmitted(state)
-    state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
-    state.forceTextNextIteration = false
-    state.forcedNarrationRepairAttempts = 0
-    return false
+  if (assistantContent.trim()) {
+    acceptProgressNarration(state, assistantContent, {
+      requireSignal: false,
+      clearPhaseEndPending: true,
+    })
   }
-
-  return state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+  // Narration is observational UI feedback, never a phase transition gate.
+  return false
 }
 
 function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
-  state.phaseEndNarrationPending = true
-  state.forceTextNextIteration = true
-  state.forcedNarrationRepairAttempts = 0
+  deferNarrationCadenceAttempt(state)
   return {
-    type: 'inject_message',
-    message: {
-      role: 'system',
-      content: stepMsg(state, 'PHASE-END NARRATION REQUIRED: This phase is ready to advance, but every phase must have at least one visible LLM-written progress paragraph before it starts the next phase. This applies across every phase and task type, even short phases with fewer than 3 tool actions. Write one concise, result-first progress paragraph from completed work, then emit <next_step/> with no tool call. Do not start the next phase before that paragraph.'),
-    },
-    continueLoop: true,
-  }
-}
-
-function rewriteInvalidForcedNarrationAction(): PolicyAction {
-  return {
-    type: 'inject_message',
-      message: {
-        role: 'system',
-        content: 'The previous progress update was not valid user-facing narration. Rewrite it as one concrete, result-first Manus-style paragraph based only on completed work. Use 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting. No internal step numbers, no "sufficient evidence" phrasing, no command/action fragments, no malformed sentence joins, and no tool calls.',
-      },
-    continueLoop: true,
-  }
-}
-
-function forcedNarrationBeforeToolAction(state: AgentStateData): PolicyAction {
-  return {
-    type: 'inject_message',
-    message: {
-      role: 'system',
-      content: stepMsg(state, 'NARRATION REQUIRED BEFORE NEXT ACTION: a visible-action cadence is overdue. Write exactly one concise, result-first progress paragraph from completed work. Do not call tools in this response, do not ask permission to continue, and do not describe future intent without a concrete completed result.'),
-    },
-    continueLoop: true,
+    type: 'continue_loop',
   }
 }
 
 function releaseForcedNarrationForProgress(state: AgentStateData): void {
-  state.forceTextNextIteration = false
-  state.forcedNarrationRepairAttempts = 0
-  state.iterationsSinceLastContent = 0
-  // Leave the cadence close to the boundary so the next visible action gets
-  // another chance to produce narration, but do not keep tools disabled.
-  state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
+  deferNarrationCadenceAttempt(state)
 }
 
 /** Get the minimum tool calls required for this task's complexity level */
@@ -396,16 +337,13 @@ function finalDeliverableRequired(state: AgentStateData): boolean {
   if (isBrowserActionTask(state)) return false
   if (currentStepWantsImageArtifact(state)) return false
   if (isFixedWebSearchInlineAnswerState(state)) return false
-  const taskText = [
-    state.originalUserRequest || '',
-    ...(state.currentPlanItems || []),
-    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
-  ].join(' ')
+  const userRequest = state.originalUserRequest || ''
+  const taskIntent = analyzeTaskIntent([{ role: 'user', content: userRequest }])
   return state.buildTask ||
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'code' ||
     state.taskStrategy === 'creative' ||
-    explicitSavedArtifactRequested(taskText)
+    taskIntent.requiresSavedArtifact
 }
 
 function isFinalInlineAnswerStep(state: AgentStateData): boolean {
@@ -462,18 +400,6 @@ function finalInlineAnswerRecoveryGuidance(state: AgentStateData): string {
   ].filter(Boolean).join(' ')
 }
 
-function explicitSavedArtifactRequested(text: string): boolean {
-  const cleaned = text
-    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
-    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
-  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
-  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
-    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
-    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
-    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned)
-  return positiveArtifactRequest && !declinesSavedArtifact
-}
-
 function looksLikeSubstantiveInlineAnswer(content: string): boolean {
   const text = content.trim()
   if (text.length < 80) return false
@@ -515,17 +441,13 @@ function looksLikeSubstantialFinalInlineText(content: string): boolean {
 }
 
 function isBriefInlineResearchRequest(state: AgentStateData): boolean {
-  const text = [
-    state.originalUserRequest || '',
-    ...(state.currentPlanItems || []),
-    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
-  ].join(' ').toLowerCase()
-  if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|serious analysis|strategic|technical|comparative)\b/.test(text)) {
-    return false
-  }
-  const brief = /\b(?:brief|briefly|quick|quickly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/.test(text)
-  const inline = /\b(?:no file|no document|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/.test(text)
-  return (brief || inline) && !explicitSavedArtifactRequested(text)
+  const intent = analyzeTaskIntent([{
+    role: 'user',
+    content: state.originalUserRequest || '',
+  }])
+  return !intent.wantsDeep &&
+    (intent.wantsQuick || intent.wantsInlineAnswer) &&
+    !intent.requiresSavedArtifact
 }
 
 function hasMinimumResearchEvidence(state: AgentStateData): boolean {
@@ -571,6 +493,16 @@ function hasStalledResearchEvidence(state: AgentStateData): boolean {
 function hasLoopLimitedResearchEvidence(state: AgentStateData): boolean {
   const depth = researchDepthStatus(state)
   if (depth.complete) return true
+  if (state.stepLoopDetections < 1) return false
+
+  // A web_search can now open several strong sources in the same runtime
+  // action. If the model then repeats one of those reads, the first detected
+  // repeat is enough to move on once that multi-domain packet is already
+  // credible. Waiting for a second loop warning suppresses the repeated tool,
+  // invites a malformed alternate call, and spends recovery turns without
+  // adding evidence.
+  if (hasCredibleResearchRecoveryPacket(state)) return true
+
   return state.stepLoopDetections >= 2 && (
     hasStalledResearchEvidence(state) ||
     hasFailureLimitedResearchEvidence(state, depth)
@@ -934,184 +866,17 @@ export class PolicyEngine {
       ]
     }
 
-    if (
-      state.phaseEndNarrationPending &&
-      state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      !assistantContent.trim()
-    ) {
-      state.iterationsSinceLastContent++
-      state.forcedNarrationRepairAttempts++
-      return [phaseEndNarrationAction(state)]
-    }
-
-    if (
-      state.phaseEndNarrationPending &&
-      state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      assistantContent.trim() &&
-      !stepAdvancedThisIteration
-    ) {
-      const narrationFinding = sanitizeNarrationText(assistantContent, {
+    const narrationWasForced = state.forceTextNextIteration || state.phaseEndNarrationPending
+    if (assistantContent.trim() && narrationWasForced) {
+      acceptProgressNarration(state, assistantContent, {
         requireSignal: false,
-        maxSentences: 2,
-        maxLength: 300,
+        clearPhaseEndPending: true,
       })
-      if (!narrationFinding) {
-        state.iterationsSinceLastContent++
-        state.forcedNarrationRepairAttempts++
-        return [rewriteInvalidForcedNarrationAction()]
-      }
-      markPhaseNarrationEmitted(state)
-      advanceStep(state, narrationFinding)
-      state.iterationsSinceLastContent = 0
-      state.consecutiveNoToolCalls = 0
-      state.forceTextNextIteration = false
-      state.forcedNarrationRepairAttempts = 0
-      const actions: PolicyAction[] = [{ type: 'step_advance' }]
-      if (state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
-        const isLast = state.currentStepIdx === state.currentPlanItems.length - 1
-        const stepHint = isLast
-          ? finalStepStartGuidance(state)
-          : isResearchLikeStep(state)
-            ? phaseStartGuidance(state)
-            : 'Use the next concrete action for this step. Keep it scoped, avoid repeat work, and advance once the objective is satisfied.'
-        actions.push({
-          type: 'inject_message',
-          message: {
-            role: 'system',
-            content: stepMsg(state, stepHint),
-          },
-          continueLoop: true,
-        })
-      }
-      return actions
     }
-
-    if (
-      state.phaseEndNarrationPending &&
-      state.forceTextNextIteration &&
-      toolCalls.size > 0
-    ) {
-      state.iterationsSinceLastContent++
-      state.forcedNarrationRepairAttempts++
-      return [phaseEndNarrationAction(state)]
-    }
-
-    if (state.forceTextNextIteration && isAcceptableForcedNarration(assistantContent) && toolCalls.size === 0) {
-      state.forceTextNextIteration = false
-      state.forcedNarrationRepairAttempts = 0
-      state.iterationsSinceLastContent = 0
-      markPhaseNarrationEmitted(state)
-      state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
-    }
-
-    if (
-      state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      !assistantContent.trim()
-    ) {
-      state.forcedNarrationRepairAttempts++
-      state.iterationsSinceLastContent++
-      state.consecutiveNoToolCalls = 0
-      if (state.forcedNarrationRepairAttempts >= 2) {
-        releaseForcedNarrationForProgress(state)
-        return []
-      }
-      return [forcedNarrationBeforeToolAction(state)]
-    }
-
-    if (
-      !state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      assistantContent.trim() &&
-      state.currentPlanItems &&
-      state.currentStepIdx < state.currentPlanItems.length &&
-      state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
-      isValidProgressNarration(assistantContent)
-    ) {
-      const narrationOnlyResearchTurn =
-        !stepAdvancedThisIteration &&
-        isResearchLikeStep(state) &&
-        state.currentStepIdx < state.currentPlanItems.length - 1
-      state.iterationsSinceLastContent = 0
-      state.forcedNarrationRepairAttempts = 0
-      markPhaseNarrationEmitted(state)
-      state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(state.visibleToolActionsSinceLastNarration)
-      state.consecutiveNoToolCalls = 0
-      if (narrationOnlyResearchTurn) {
-        state.visibleToolActionsSinceLastNarration = 0
-        return []
-      }
-      if (!stepAdvancedThisIteration) return []
-    }
-
-    if (
-      !state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      assistantContent.trim() &&
-      state.currentPlanItems &&
-      state.currentStepIdx < state.currentPlanItems.length &&
-      state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
-      !isValidProgressNarration(assistantContent)
-    ) {
-      state.iterationsSinceLastContent++
-      state.forcedNarrationRepairAttempts++
-      if (state.forcedNarrationRepairAttempts >= 2) {
-        releaseForcedNarrationForProgress(state)
-        state.consecutiveNoToolCalls = 0
-        return [missedCadenceNarrationAction(state)]
-      }
-      return [rewriteInvalidForcedNarrationAction()]
-    }
-
-    if (
-      toolCalls.size === 0 &&
-      assistantContent.trim() &&
-      state.currentPlanItems &&
-      state.currentStepIdx < state.currentPlanItems.length - 1 &&
-      state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP &&
-      !isAcceptableForcedNarration(assistantContent)
-    ) {
-      state.forcedNarrationRepairAttempts++
-      if (state.forcedNarrationRepairAttempts >= 2) {
-        releaseForcedNarrationForProgress(state)
-        return []
-      }
-      state.iterationsSinceLastContent++
-      return []
-    }
-
-    // Invalid forced narration must be repaired before generic no-tool guards.
-    // Otherwise malformed progress text can be treated like an ordinary
-    // text-only iteration and the mandatory narration turn gets lost.
-    if (
-      state.forceTextNextIteration &&
-      toolCalls.size === 0 &&
-      assistantContent.trim() &&
-      !isAcceptableForcedNarration(assistantContent)
-    ) {
-      state.forcedNarrationRepairAttempts++
-      if (state.forcedNarrationRepairAttempts >= 2) {
-        releaseForcedNarrationForProgress(state)
-        return []
-      }
-      state.iterationsSinceLastContent++
-      return [rewriteInvalidForcedNarrationAction()]
-    }
-
-    if (state.forceTextNextIteration && toolCalls.size > 0) {
-      if (isAcceptableForcedNarration(assistantContent)) {
-        state.forceTextNextIteration = false
-        state.forcedNarrationRepairAttempts = 0
-        state.iterationsSinceLastContent = 0
-        markPhaseNarrationEmitted(state)
-        state.visibleToolActionsSinceLastNarration = Math.min(1, state.visibleToolActionsSinceLastNarration)
-      } else {
-        state.forcedNarrationRepairAttempts++
-        state.iterationsSinceLastContent++
-        return [forcedNarrationBeforeToolAction(state)]
-      }
+    if (narrationWasForced) {
+      // A missing, malformed, or duplicate update is simply skipped. It must
+      // never trigger a narration-only retry or hold back concrete work.
+      deferNarrationCadenceAttempt(state)
     }
 
     // Always track step iterations BEFORE any early returns.
@@ -1380,7 +1145,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
           role: 'system',
           content: stepMsg(
             state,
-            `FALSE LIVE-ACCESS BLOCKER: The previous text claimed this chat environment lacks live access, the web, or tools. That is false for this task. Do not repeat that blocker or save it into research notes. If this phase needs public/current evidence, make a concrete source tool call now using ${sourceToolHint}; when independent candidate URLs already exist, up to 4 parallel read_document/http_request/youtube_transcript source extraction calls are allowed. If a specific tool just returned a real error, switch route and use a different source/tool; do not generalize it into "no live access."${toolCalls.size === 0 ? ' You also made no native tool call; the next response must use the relevant source tool path.' : ''}`,
+            `FALSE LIVE-ACCESS BLOCKER: The previous text claimed this chat environment lacks live access, the web, or tools. That is false for this task. Do not repeat that blocker or save it into research notes. If this phase needs public/current evidence, make a concrete source tool call now using ${sourceToolHint}; when independent candidate URLs already exist, up to 3 parallel read_document/http_request source extraction calls are allowed. If a specific tool just returned a real error, switch route and use a different source/tool; do not generalize it into "no live access."${toolCalls.size === 0 ? ' You also made no native tool call; the next response must use the relevant source tool path.' : ''}`,
           ),
         },
         continueLoop: true,
@@ -1440,10 +1205,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
     if (!looksLikeFutureTenseWorkNarration(assistantContent)) return null
 
     state.consecutiveNoToolCalls++
-    state.forceTextNextIteration = false
-    state.phaseEndNarrationPending = false
-    state.visibleToolActionsSinceLastNarration = 0
-    state.forcedNarrationRepairAttempts = 0
+    deferNarrationCadenceAttempt(state)
     if (isResearchLikeStep(state)) {
       state.researchNoToolRecoveryAttempts++
     }
@@ -2301,7 +2063,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
                 state,
                 state.uploadedAttachmentContextAvailable
                   ? `UPLOADED ATTACHMENT CONTEXT AVAILABLE: This phase should use the attached file content already in context. Do not compensate with web_search/browser_navigate/read_file for the uploaded filename. Answer from the attachment content, emit <next_step/> if this phase is complete, or report that the uploaded file content could not be read.`
-                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make a concrete research tool call now, scoped to this step: use web_search with a new specific query, up to 4 parallel read_document/http_request/youtube_transcript calls for known independent source URLs, browser_get_content on an already-open relevant page, or browser_find_text for a concrete term. Use browser_navigate only when rendered state or interaction is needed.`,
+                  : `RESEARCH DEPTH INCOMPLETE: ${researchDepth.message} The previous text-only turns did not finish this phase. Do not write another progress update, synthesis, or failure report. Make a concrete research tool call now, scoped to this step: use web_search with a new specific query, up to 3 parallel read_document/http_request calls for known independent source URLs, browser_get_content on an already-open relevant page, or browser_find_text for a concrete term. Use browser_navigate only when rendered state or interaction is needed.`,
               ),
             },
             continueLoop: true,
@@ -2375,62 +2137,19 @@ Then make your first tool call. Your plan will be remembered across iterations o
     assistantContent: string,
   ): PolicyAction | null {
     if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
-
-    const visibleActions = state.visibleToolActionsSinceLastNarration
-
-    if (assistantContent.trim()) {
-      const validProgressNarration = state.forceTextNextIteration
-        ? isAcceptableForcedNarration(assistantContent)
-        : isValidProgressNarration(assistantContent)
-      if (!validProgressNarration) {
-        state.iterationsSinceLastContent++
-        if (state.forceTextNextIteration) {
-          state.forcedNarrationRepairAttempts++
-          if (state.forcedNarrationRepairAttempts >= 2) {
-            state.forceTextNextIteration = false
-            state.forcedNarrationRepairAttempts = 0
-            state.visibleToolActionsSinceLastNarration = Math.min(NARRATION_THRESHOLD_DEFAULT - 1, state.visibleToolActionsSinceLastNarration)
-            state.iterationsSinceLastContent = 0
-            return null
-          }
-          return rewriteInvalidForcedNarrationAction()
-        }
-        return null
-      }
-      // Narration before the visible action window is too early. Do not let it reset
-      // the mandatory cadence, otherwise the UI suppresses it and
-      // the backend never forces a properly timed update.
-      if (visibleActions < NARRATION_THRESHOLD_DEFAULT && !state.forceTextNextIteration) {
-        state.iterationsSinceLastContent++
-        return null
-      }
-      state.iterationsSinceLastContent = 0
-      markPhaseNarrationEmitted(state)
-      state.visibleToolActionsSinceLastNarration = visibleActionsAfterAcceptedNarration(visibleActions)
-      state.forceTextNextIteration = false
-      state.forcedNarrationRepairAttempts = 0
-    } else {
-      state.iterationsSinceLastContent++
+    if (narrationAcceptedThisIteration(state)) return null
+    if (
+      assistantContent.trim() &&
+      (state.forceTextNextIteration || state.phaseEndNarrationPending)
+    ) {
+      const review = acceptProgressNarration(state, assistantContent, {
+        requireSignal: false,
+        clearPhaseEndPending: true,
+      })
+      if (review.status !== 'accepted') deferNarrationCadenceAttempt(state)
     }
-
-    // After enough completed visible action pills, add cadence pressure based on
-    // what the user actually sees. AgentLoop handles this as a compact
-    // narration-first turn so the paragraph stays natural without dragging a
-    // full tool-selection pass into the same response.
-    const threshold = NARRATION_THRESHOLD_DEFAULT
-
-    if (state.visibleToolActionsSinceLastNarration >= threshold && !state.forceTextNextIteration) {
-      state.forcedNarrationRepairAttempts = 0
-      return {
-        type: 'inject_message',
-        message: {
-          role: 'system',
-          content: `NARRATION CADENCE RECOVERY: ${threshold} visible action pills have completed without a valid user-facing progress paragraph. The next response should be one concrete Manus-style paragraph from completed work, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Keep it natural and result-first; the next action can continue immediately after.`,
-        },
-        continueLoop: true,
-      }
-    }
-
+    // Cadence is scheduled by AgentLoop on the next normal tool-selection call.
+    // Policy never emits a narration-only recovery turn.
     return null
   }
 
@@ -3186,7 +2905,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
               type: 'inject_message',
               message: {
                 role: 'system',
-                content: stepMsg(state, `${depth.message} Continue this phase with targeted evidence now: open/read a relevant source domain not already used, use up to 4 parallel source extraction calls for independent known URLs, or switch query/source route if the current source is blocked. This is extension ${state.borrowedIterations}/2 before the phase must preserve budget for the rest of the plan.`),
+                content: stepMsg(state, `${depth.message} Continue this phase with targeted evidence now: open/read a relevant source domain not already used, use up to 3 parallel source extraction calls for independent known URLs, or switch query/source route if the current source is blocked. This is extension ${state.borrowedIterations}/2 before the phase must preserve budget for the rest of the plan.`),
               },
               continueLoop: true,
             })
@@ -3416,7 +3135,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: `PARTIAL FILE WRITE RECOVERED: ${p.path} was saved from an interrupted streamed ${p.toolName} call (${p.lines} lines, ${p.chars} chars). Do NOT recreate, overwrite, edit, read, export, or switch files yet. Continue from the saved file with exactly one append_file call for the next missing chunk. The user should never see the file restart from the top.`,
+          content: `PARTIAL FILE WRITE RECOVERED: ${p.path} was saved from an interrupted streamed ${p.toolName} call (${p.lines} lines, ${p.chars} chars). Do NOT recreate, overwrite, edit, read, export, or switch files yet. Continue from the saved file with exactly one append_file call for the next complete, substantive missing section; do not repeat existing headings or paragraphs. The user should never see the file restart from the top.`,
         },
       }
     }

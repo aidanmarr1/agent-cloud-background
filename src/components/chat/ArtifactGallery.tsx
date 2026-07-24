@@ -104,7 +104,8 @@ export function ArtifactGallery({ open, onClose, artifacts }: ArtifactGalleryPro
                     </div>
                     <button
                       onClick={() => handleDownload(artifact)}
-                      className="w-7 h-7 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary opacity-0 group-hover:opacity-100 transition-all duration-150"
+                      aria-label={`Download ${artifact.fileName}`}
+                      className="flex h-8 w-8 items-center justify-center rounded-md text-text-muted transition-all duration-150 hover:bg-bg-tertiary hover:text-text-primary sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                     >
                       <Download size={12} />
                     </button>

@@ -9,7 +9,6 @@ export function sendDesktopNotification(title: string, body: string) {
   if (!('Notification' in window) || Notification.permission !== 'granted') return
   new Notification(title, {
     body,
-    icon: '/logo.svg',
     silent: false,
   })
 }

@@ -57,6 +57,7 @@ function makeEmitter() {
   return {
     events,
     textDelta(content: string) { events.push({ type: 'text_delta', content }) },
+    progressUpdate(content: string) { events.push({ type: 'progress_update', content }) },
     reasoningDelta(content: string) { events.push({ type: 'reasoning_delta', content }) },
     reasoningDone() { events.push({ type: 'reasoning_done' }) },
     toolStart(id: string, name: string, args: Record<string, unknown>) {
@@ -120,12 +121,17 @@ async function runSmoke() {
   const textDeltas = emitter.events
     .filter(event => event.type === 'text_delta' && typeof event.content === 'string' && event.content.trim())
     .map(event => String(event.content).trim())
+  const progressUpdates = emitter.events
+    .filter(event => event.type === 'progress_update' && typeof event.content === 'string' && event.content.trim())
+    .map(event => String(event.content).trim())
   const stepAdvances = emitter.events.filter(event => event.type === 'step_advance')
   const errors = emitter.events.filter(event => event.type === 'error')
   console.log('[smoke] summary', JSON.stringify({
     toolStarts: toolStarts.map(event => event.name),
     textDeltaCount: textDeltas.length,
     textPreview: textDeltas.slice(0, 6),
+    progressUpdateCount: progressUpdates.length,
+    progressPreview: progressUpdates.slice(0, 6),
     stepAdvanceCount: stepAdvances.length,
     errors: errors.map(event => event.message),
     done: emitter.events.some(event => event.type === 'done'),

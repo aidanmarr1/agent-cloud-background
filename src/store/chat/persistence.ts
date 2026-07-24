@@ -63,7 +63,8 @@ import type { Conversation, Message } from '@/types'
 export function updateLastAssistantMessage(
   conversations: Conversation[],
   convId: string,
-  updater: (msg: Message) => Message
+  updater: (msg: Message) => Message,
+  options: { touchUpdatedAt?: boolean } = {},
 ): Conversation[] {
   return conversations.map((c) => {
     if (c.id !== convId) return c
@@ -74,6 +75,10 @@ export function updateLastAssistantMessage(
         break
       }
     }
-    return { ...c, messages, updatedAt: Date.now() }
+    return {
+      ...c,
+      messages,
+      updatedAt: options.touchUpdatedAt === false ? c.updatedAt : Date.now(),
+    }
   })
 }

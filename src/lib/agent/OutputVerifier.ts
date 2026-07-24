@@ -17,6 +17,7 @@ import {
   OUTLINE_ONLY_THRESHOLD,
 } from './config'
 import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { requestedBriefInlineSourceCount } from './BriefInlineResearch'
 
 export interface VerificationResult {
   passed: boolean
@@ -151,8 +152,10 @@ export class OutputVerifier {
     const urls = content.match(urlPattern) || []
     const sourceRefs = content.match(sourcePattern) || []
     const citationCount = new Set([...urls]).size + sourceRefs.length
-    if (citationCount < RESEARCH_MIN_CITATIONS) {
-      failures.push(`Only ${citationCount} citation(s), minimum ${RESEARCH_MIN_CITATIONS}`)
+    const explicitSourceCount = requestedBriefInlineSourceCount(originalRequest)
+    const requiredCitations = explicitSourceCount ?? RESEARCH_MIN_CITATIONS
+    if (citationCount < requiredCitations) {
+      failures.push(`Only ${citationCount} citation(s), minimum ${requiredCitations}`)
       suggestions.push('Add source URLs to support claims')
     }
 

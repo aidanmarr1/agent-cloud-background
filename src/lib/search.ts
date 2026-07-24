@@ -195,9 +195,15 @@ function compactSerperErrorBody(body: string): string {
     .slice(0, 260)
 }
 
-async function serperPost<T>(path: 'search', body: Record<string, unknown>, timeoutMs = WEB_SEARCH_REQUEST_TIMEOUT_MS): Promise<T> {
+async function serperPost<T>(
+  path: 'search',
+  body: Record<string, unknown>,
+  timeoutMs = WEB_SEARCH_REQUEST_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<T> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
     const response = await fetch(`${SERPER_BASE_URL}/${path}`, {
       method: 'POST',
@@ -207,7 +213,7 @@ async function serperPost<T>(path: 'search', body: Record<string, unknown>, time
         Accept: 'application/json',
       },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal: requestSignal,
     })
     const responseText = await response.text()
     if (!response.ok) {
@@ -227,23 +233,23 @@ function shouldRetryWithSimplifiedQuery(error: unknown): boolean {
   return error instanceof SerperHttpError && error.status === 400
 }
 
-async function serperSearchPage(query: string, page = 1): Promise<SerperSearchResponse> {
+async function serperSearchPage(query: string, page = 1, signal?: AbortSignal): Promise<SerperSearchResponse> {
   return serperPost<SerperSearchResponse>('search', {
     q: query,
     num: WEB_SEARCH_RESULT_COUNT,
     ...(page > 1 ? { page } : {}),
-  }, WEB_SEARCH_REQUEST_TIMEOUT_MS)
+  }, WEB_SEARCH_REQUEST_TIMEOUT_MS, signal)
 }
 
-async function firstSerperSearchPage(query: string): Promise<SerperSearchResponse> {
+async function firstSerperSearchPage(query: string, signal?: AbortSignal): Promise<SerperSearchResponse> {
   try {
-    return await serperSearchPage(query)
+    return await serperSearchPage(query, 1, signal)
   } catch (error) {
     const simplified = simplifiedSearchQuery(query)
     if (!shouldRetryWithSimplifiedQuery(error) || !simplified || simplified === query) {
       throw error
     }
-    return serperSearchPage(simplified)
+    return serperSearchPage(simplified, 1, signal)
   }
 }
 
@@ -298,11 +304,11 @@ function searchResultsFromResponse(data: SerperSearchResponse): SearchResult[] {
   ]
 }
 
-export async function webSearch(rawQuery: unknown): Promise<SearchResult[]> {
+export async function webSearch(rawQuery: unknown, signal?: AbortSignal): Promise<SearchResult[]> {
   const query = normalizeSearchQuery(rawQuery)
   if (!query) throw new Error('Search query is empty after cleanup')
 
-  const firstPage = await firstSerperSearchPage(query)
+  const firstPage = await firstSerperSearchPage(query, signal)
   const rawResults = searchResultsFromResponse(firstPage)
 
   return dedupeResults(rawResults, query)

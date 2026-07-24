@@ -189,7 +189,7 @@ export function CustomSelect({ value, options, onChange, label = 'Select option'
             width: position.width,
             maxHeight: position.maxHeight,
             transformOrigin: position.placement === 'top' ? 'bottom right' : 'top right',
-            boxShadow: 'var(--shadow-lg)',
+            boxShadow: 'var(--shadow-menu)',
           }}
         >
           {options.map((option, index) => {
@@ -204,7 +204,7 @@ export function CustomSelect({ value, options, onChange, label = 'Select option'
                 onMouseEnter={() => setActiveIndex(index)}
                 onClick={() => commitValue(option.value)}
                 className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] font-medium transition-colors ${
-                  isActive ? 'bg-bg-secondary text-text-primary' : 'text-text-secondary hover:bg-bg-secondary hover:text-text-primary'
+                  isActive ? 'bg-bg-hover text-text-primary' : 'text-text-secondary hover:bg-bg-hover hover:text-text-primary focus-visible:bg-bg-hover'
                 }`}
               >
                 <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">

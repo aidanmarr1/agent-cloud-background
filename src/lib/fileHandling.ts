@@ -163,7 +163,9 @@ export function isAllowedUserUpload(fileName: string, mimeType: string): boolean
   return TEXT_MIME_TYPES.has(normalizedType) ||
     TEXT_EXTENSIONS.has(ext) ||
     DOCUMENT_MIME_TYPES.has(normalizedType) ||
-    DOCUMENT_EXTENSIONS.has(ext)
+    DOCUMENT_EXTENSIONS.has(ext) ||
+    normalizedType === SKILL_ATTACHMENT_TYPE ||
+    normalizedType === ARCHIVE_ATTACHMENT_TYPE
 }
 
 export function getImageMimeType(file: File): string | null {

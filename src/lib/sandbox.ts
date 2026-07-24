@@ -4,6 +4,7 @@ import type { Dirent } from 'fs'
 import { tmpdir } from 'os'
 import { join, relative, dirname, isAbsolute } from 'path'
 import type { FileResult } from '@/types'
+import { acquireRegisteredBrowserSessionFence } from './browserSessionLifecycle'
 
 export type SandboxFileReadResult =
   | { ok: true; body: Uint8Array; size: number }
@@ -29,7 +30,7 @@ async function e2bSandbox(): Promise<E2BSandboxModule> {
 const SAFE_TASK_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const IGNORED_SANDBOX_DIRECTORIES = new Set([
   'node_modules', '.git', '__pycache__',
-  '.agent',
+  '.agent', '.browser-profile',
   'venv', '.venv', 'env',
   'Library', '.matplotlib', '.cache', '.local', '.pip', '.fontconfig',
 ])
@@ -122,19 +123,32 @@ export async function getOrCreateSandboxDir(conversationId: string): Promise<str
 
 export async function resetSandboxDir(conversationId: string): Promise<string> {
   const safeId = sanitizeConversationId(conversationId)
-  const dir = await resetLocalSandboxDir(safeId)
-  if (shouldUseE2BProvider()) await (await e2bSandbox()).resetE2BSandbox(safeId)
-  return dir
+  const releaseBrowserFence = await acquireRegisteredBrowserSessionFence(safeId)
+  try {
+    const dir = await resetLocalSandboxDir(safeId)
+    if (shouldUseE2BProvider()) await (await e2bSandbox()).resetE2BSandbox(safeId)
+    return dir
+  } finally {
+    releaseBrowserFence()
+  }
 }
 
 export async function executeInSandbox(
   conversationId: string,
   command: string,
-  onOutput?: OutputCallback
+  onOutput?: OutputCallback,
+  signal?: AbortSignal,
 ): Promise<ExecResult> {
   if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return (await e2bSandbox()).executeCommandInE2B(conversationId, command, onOutput, localRoot, MAX_SANDBOX_FILE_SIZE)
+    return (await e2bSandbox()).executeCommandInE2B(
+      conversationId,
+      command,
+      onOutput,
+      localRoot,
+      MAX_SANDBOX_FILE_SIZE,
+      signal,
+    )
   }
 
   await getOrCreateSandboxDir(conversationId)
@@ -670,16 +684,23 @@ export async function appendFileInSandbox(
 }
 
 export async function destroySandbox(conversationId: string): Promise<void> {
-  if (shouldUseE2BProvider()) {
-    await (await e2bSandbox()).destroyE2BSandbox(conversationId)
-  }
-  const entry = sandboxDirs.get(conversationId)
-  if (!entry) return
-  sandboxDirs.delete(conversationId)
+  const safeId = sanitizeConversationId(conversationId)
+  const releaseBrowserFence = await acquireRegisteredBrowserSessionFence(safeId)
   try {
-    await rm(entry.path, { recursive: true, force: true })
-  } catch {
-    // Best effort cleanup
+    if (shouldUseE2BProvider()) {
+      await (await e2bSandbox()).destroyE2BSandbox(safeId)
+    }
+    const entry = sandboxDirs.get(safeId)
+    sandboxDirs.delete(safeId)
+    try {
+      // The process-local registry is only a cache. After a crash/restart it can
+      // be empty while the deterministic sandbox directory still exists.
+      await rm(entry?.path ?? getSandboxDirPath(safeId), { recursive: true, force: true })
+    } catch {
+      // Best effort cleanup
+    }
+  } finally {
+    releaseBrowserFence()
   }
 }
 

@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   Download,
   File,
+  FileText,
   FolderOpen,
   LayoutGrid,
   RefreshCw,
@@ -15,6 +16,7 @@ import { useChatStore } from '@/store/chat'
 import { useUIStore } from '@/store/ui'
 import type { Conversation, FileResult } from '@/types'
 import { categoryForFileName, FileBadge } from './FileBadge'
+import { ControlTooltip } from './ControlTooltip'
 
 interface SandboxFile {
   name: string
@@ -458,30 +460,25 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
   const selectedFileUrl = selectedFileInfo ? taskFileUrl(conversationId, selectedFileInfo.path) : null
 
   return (
-    <div className="relative">
+    <div className="group/tooltip relative">
       <button
         type="button"
         onClick={() => setOpen(true)}
-        aria-label={open ? 'Close task files' : 'Open task files'}
-        className={`h-9 flex items-center gap-1.5 px-3 rounded-lg text-[13px] font-medium transition-all duration-150 ${
-          open
-            ? 'bg-bg-tertiary text-text-primary'
-            : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'
+        aria-label={displayedFiles.length > 0 ? `Open task files (${displayedFiles.length})` : 'Open task files'}
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        className={`subtle-icon-button flex h-9 w-9 items-center justify-center rounded-lg transition-all duration-150 active:scale-[0.96] ${
+          open ? 'is-active' : ''
         }`}
       >
-        <FolderOpen size={15} strokeWidth={2.25} />
-        <span className="hidden sm:inline">Files</span>
-        {displayedFiles.length > 0 && !open && (
-          <span className="text-[11px] text-text-muted tabular-nums font-semibold">
-            {displayedFiles.length}
-          </span>
-        )}
+        <FileText size={16} strokeWidth={2.2} />
       </button>
+      {!open && <ControlTooltip label="Task files" />}
 
       <Modal
         open={open}
         onClose={closeProjectFiles}
-        panelClassName={selectedFileInfo ? 'max-w-[1160px] h-[720px] max-h-[90vh]' : 'max-w-[620px] h-[620px] max-h-[86vh]'}
+        panelClassName={selectedFileInfo ? 'max-w-[1160px] h-[720px] max-h-[90vh]' : 'max-w-[760px] h-[720px] max-h-[88vh]'}
       >
         {selectedFileInfo ? (
           <div className="flex h-full min-h-0 flex-col">
@@ -570,9 +567,9 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
             </div>
           </div>
         ) : (
-          <div className="flex h-full min-h-0 flex-col px-6 py-5">
+          <div className="flex h-full min-h-0 flex-col px-6 py-5 sm:px-7 sm:py-6">
             <div className="flex flex-shrink-0 items-center justify-between gap-3">
-              <h2 className="text-[18px] font-semibold tracking-[0] text-text-primary">All files in this task</h2>
+              <h2 className="text-[18px] font-semibold tracking-[-0.015em] text-text-primary">All files in this task</h2>
               <div className="flex items-center gap-1">
                 <button
                   type="button"
@@ -593,7 +590,7 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
               </div>
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-2">
+            <div className="mt-5 flex flex-wrap gap-1.5" role="tablist" aria-label="File categories">
               {CATEGORY_CONFIGS.map((category) => {
                 const active = selectedCategory === category.id
                 const count = categoryCounts.get(category.id) || 0
@@ -602,20 +599,27 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
                     key={category.id}
                     type="button"
                     onClick={() => setSelectedCategory(category.id)}
-                    className={`h-9 rounded-full border px-3.5 text-[12.5px] font-semibold transition-colors duration-150 ${
+                    role="tab"
+                    aria-selected={active}
+                    aria-controls="task-files-list"
+                    aria-label={`${category.label}, ${count} ${count === 1 ? 'file' : 'files'}`}
+                    className={`h-9 rounded-full border border-transparent px-3.5 text-[12.5px] font-semibold transition-colors duration-150 ${
                       active
-                        ? 'border-text-primary bg-text-primary text-primary-foreground'
-                        : 'border-border-primary bg-bg-primary text-text-secondary hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary'
+                        ? 'bg-bg-tertiary text-text-primary'
+                        : 'bg-transparent text-text-tertiary hover:bg-bg-secondary hover:text-text-primary'
                     }`}
                   >
                     {category.label}
-                    {count > 0 && <span className={`ml-1.5 tabular-nums ${active ? 'text-primary-foreground' : 'text-text-muted'}`}>{count}</span>}
                   </button>
                 )
               })}
             </div>
 
-            <div className="mt-5 min-h-0 flex-1 overflow-y-auto">
+            <div
+              id="task-files-list"
+              role="tabpanel"
+              className="mt-5 min-h-0 flex-1 overflow-y-auto pr-1"
+            >
               {loading && displayedFiles.length === 0 ? (
                 <div className="flex h-full items-center justify-center">
                   <RefreshCw size={16} className="animate-spin text-text-muted" strokeWidth={2.2} />
@@ -641,27 +645,27 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
                   </p>
                 </div>
               ) : (
-                <div className="space-y-5">
+                <div className="space-y-6 pb-2">
                   {dateGroups.map((group) => (
                     <section key={group.label}>
-                      <div className="mb-2 text-[12px] font-semibold text-text-tertiary">{group.label}</div>
-                      <div className="space-y-1">
+                      <div className="mb-2.5 text-[12px] font-medium text-text-tertiary">{group.label}</div>
+                      <div className="space-y-0.5">
                         {group.files.map((file) => (
                           <div
                             key={file.path}
-                            className="group flex items-center gap-3 rounded-xl px-1.5 py-2 transition-colors duration-150 hover:bg-bg-secondary"
+                            className="group flex items-center gap-3 rounded-lg px-1.5 py-2.5 transition-colors duration-150 hover:bg-bg-secondary"
                           >
                             <button
                               type="button"
                               onClick={() => viewFile(file.path)}
-                              aria-label={`Open ${file.path}`}
+                              aria-label={`Open ${file.path}, ${formatSize(file.size)}`}
                               className="flex min-w-0 flex-1 items-center gap-3 text-left"
                             >
                               <FileBadge name={file.name} />
                               <span className="min-w-0 flex-1">
-                                <span className="block truncate text-[13.5px] font-semibold tracking-[0] text-text-primary">{file.name}</span>
-                                <span className="mt-0.5 block truncate text-[11.5px] font-medium text-text-tertiary">
-                                  {formatTime(file.modifiedAt)} · {formatSize(file.size)}
+                                <span className="block truncate text-[14px] font-semibold tracking-[0] text-text-primary">{file.name}</span>
+                                <span className="mt-0.5 block truncate text-[12px] font-medium text-text-tertiary">
+                                  {formatDateGroup(file.modifiedAt)}, {formatTime(file.modifiedAt)}
                                 </span>
                               </span>
                             </button>
@@ -669,7 +673,7 @@ export function ProjectFiles({ conversationId }: ProjectFilesProps) {
                               type="button"
                               onClick={() => downloadFile(file, file.content)}
                               aria-label={`Download ${file.name}`}
-                              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-text-muted opacity-100 transition-colors duration-150 hover:bg-bg-primary hover:text-text-primary sm:opacity-0 sm:group-hover:opacity-100"
+                              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md text-text-muted opacity-100 transition-all duration-150 hover:bg-bg-primary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
                             >
                               <Download size={14} strokeWidth={2.35} />
                             </button>

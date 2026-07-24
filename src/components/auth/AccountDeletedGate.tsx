@@ -1,13 +1,16 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { usePathname } from 'next/navigation'
 import { signOut, useSession } from 'next-auth/react'
 import { AlertTriangle, LogOut } from '@/components/icons'
 import { ACCOUNT_DELETED_EVENT, dispatchAccountDeletedEvent } from '@/lib/accountDeletedEvent'
 
 const AUTH_ROUTES = new Set(['/sign-in', '/sign-up'])
-const ACCOUNT_STATUS_POLL_MS = 3_000
+// Account deletion is not latency-sensitive enough to justify continuously
+// competing with task persistence for the remote database. Focus/pageshow
+// still refresh immediately; this timer is only a quiet safety net.
+const ACCOUNT_STATUS_POLL_MS = 60_000
 
 function isAuthRoute(pathname: string | null): boolean {
   return !!pathname && AUTH_ROUTES.has(pathname)
@@ -22,6 +25,7 @@ export function AccountDeletedGate({
   const { data: session, status: sessionStatus } = useSession()
   const [accountDeleted, setAccountDeleted] = useState(initialAccountDeleted)
   const [loggingOut, setLoggingOut] = useState(false)
+  const accountCheckInFlightRef = useRef(false)
   const authRoute = isAuthRoute(pathname)
   const deletedFromSession = session?.user?.accountDeleted === true
 
@@ -31,6 +35,8 @@ export function AccountDeletedGate({
 
   const checkAccount = useCallback(async () => {
     if (authRoute || sessionStatus !== 'authenticated' || accountDeleted || deletedFromSession) return
+    if (document.visibilityState !== 'visible' || accountCheckInFlightRef.current) return
+    accountCheckInFlightRef.current = true
     try {
       const response = await fetch('/api/access/status', { cache: 'no-store' })
       if (response.status !== 404) return
@@ -41,6 +47,8 @@ export function AccountDeletedGate({
       }
     } catch {
       // A transient network failure should not force a user out.
+    } finally {
+      accountCheckInFlightRef.current = false
     }
   }, [accountDeleted, authRoute, deletedFromSession, markAccountDeleted, sessionStatus])
 
@@ -126,7 +134,7 @@ export function AccountDeletedGate({
             type="button"
             onClick={handleLogout}
             disabled={loggingOut}
-            className="mt-6 flex h-11 w-full items-center justify-center gap-2 rounded-xl border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 text-[13.5px] font-semibold text-[var(--danger-text)] transition-colors duration-150 hover:bg-[var(--danger-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-red/30 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
+            className="mt-6 flex h-11 w-full items-center justify-center gap-2 rounded-lg border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 text-[13.5px] font-semibold text-[var(--danger-text)] transition-colors duration-150 hover:bg-[var(--danger-bg-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-red/30 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-65"
           >
             <LogOut size={15} strokeWidth={2.25} />
             {loggingOut ? 'Logging out...' : 'Log out'}

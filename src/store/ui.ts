@@ -118,6 +118,14 @@ const MAX_TOASTS = 3
 const DEDUP_WINDOW_MS = 5000
 const UI_PREFERENCES_KEY = 'agent-ui-preferences'
 const SIDEBAR_COOKIE = 'agent-sidebar-collapsed'
+const DEFAULT_COMPUTER_PANEL_WIDTH = 30
+const MIN_COMPUTER_PANEL_WIDTH = 20
+const MAX_COMPUTER_PANEL_WIDTH = 70
+
+function normalizeComputerPanelWidth(width: unknown, fallback = DEFAULT_COMPUTER_PANEL_WIDTH): number {
+  if (typeof width !== 'number' || !Number.isFinite(width)) return fallback
+  return Math.min(MAX_COMPUTER_PANEL_WIDTH, Math.max(MIN_COMPUTER_PANEL_WIDTH, width))
+}
 
 function writeSidebarCookie(collapsed: boolean) {
   if (typeof document === 'undefined') return
@@ -134,7 +142,7 @@ export const useUIStore = create<UIStore>()(
       computerActiveTab: 'activity',
       computerPanelActiveItemId: null,
       computerPanelFullWidth: false,
-      computerPanelWidth: 30,
+      computerPanelWidth: DEFAULT_COMPUTER_PANEL_WIDTH,
       _prevPanelWidth: null,
       settingsOpen: false,
       settingsTab: 'general',
@@ -180,6 +188,9 @@ export const useUIStore = create<UIStore>()(
       toggleSidebar: () => set((s) => {
         const sidebarExpanded = !s.sidebarExpanded
         writeSidebarCookie(sidebarExpanded)
+        if (typeof document !== 'undefined') {
+          document.documentElement.setAttribute('data-sidebar-state', sidebarExpanded ? 'collapsed' : 'expanded')
+        }
         return { sidebarExpanded }
       }),
       setMobileSidebarOpen: (open) => set({ mobileSidebarOpen: open }),
@@ -206,11 +217,21 @@ export const useUIStore = create<UIStore>()(
       }),
       toggleComputerPanelFullWidth: () => set((s) => {
         if (s.computerPanelFullWidth) {
-          return { computerPanelFullWidth: false, computerPanelWidth: s._prevPanelWidth ?? 30 }
+          return {
+            computerPanelFullWidth: false,
+            computerPanelWidth: normalizeComputerPanelWidth(s._prevPanelWidth),
+          }
         }
-        return { computerPanelFullWidth: true, _prevPanelWidth: s.computerPanelWidth, computerPanelWidth: 55 }
+        return {
+          computerPanelFullWidth: true,
+          _prevPanelWidth: normalizeComputerPanelWidth(s.computerPanelWidth),
+          computerPanelWidth: 55,
+        }
       }),
-      setComputerPanelWidth: (width) => set({ computerPanelWidth: width, computerPanelFullWidth: false }),
+      setComputerPanelWidth: (width) => set({
+        computerPanelWidth: normalizeComputerPanelWidth(width),
+        computerPanelFullWidth: false,
+      }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setSettingsTab: (tab) => set({ settingsTab: tab }),
       setStreaming: (streaming) => set((s) => ({
@@ -338,8 +359,10 @@ export const useUIStore = create<UIStore>()(
           ...currentState,
           sidebarExpanded: saved?.sidebarExpanded ?? currentState.sidebarExpanded,
           computerPanelFullWidth: saved?.computerPanelFullWidth ?? currentState.computerPanelFullWidth,
-          computerPanelWidth: saved?.computerPanelWidth ?? currentState.computerPanelWidth,
-          _prevPanelWidth: saved?._prevPanelWidth ?? currentState._prevPanelWidth,
+          computerPanelWidth: normalizeComputerPanelWidth(saved?.computerPanelWidth, currentState.computerPanelWidth),
+          _prevPanelWidth: saved?._prevPanelWidth == null
+            ? currentState._prevPanelWidth
+            : normalizeComputerPanelWidth(saved._prevPanelWidth),
           webIdeViewport: saved?.webIdeViewport ?? currentState.webIdeViewport,
           isStreaming: currentState.isStreaming,
           streamingStatus: currentState.streamingStatus,

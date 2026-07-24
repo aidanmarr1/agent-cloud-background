@@ -1,7 +1,12 @@
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
 import { runChatTaskJob, type BackgroundProbeTaskPayload, type TaskJobPayload } from '@/lib/agent/chatTaskRunner'
-import { claimNextTaskJob, runClaimedTaskJob } from '@/lib/agent/taskJobs'
+import {
+  claimNextTaskJob,
+  runClaimedTaskJob,
+  TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS,
+  TASK_WORKER_CANCEL_PROOF_JITTER_MS,
+} from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
 import { isLikelyLocalWorkerHostname, markTaskWorkerStopped, recordTaskWorkerHeartbeat } from '@/lib/agent/taskWorkerHeartbeat'
 import { getTursoSetupStatus } from '@/lib/db/turso'
@@ -14,6 +19,7 @@ import {
   prewarmE2BSandbox,
 } from '@/lib/e2bSandbox'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
+import { AGENT_WORKER_RUN_MAX_DURATION_MS } from '@/lib/agent/config'
 
 interface TaskWorkerOptions {
   once?: boolean
@@ -21,6 +27,10 @@ interface TaskWorkerOptions {
 
 const DEFAULT_WORKER_POLL_MS = 100
 const DEFAULT_WORKER_HEARTBEAT_MS = 15_000
+const DEFAULT_WORKER_MAX_IDLE_POLL_MS = 500
+const DEFAULT_WORKER_HARD_EXIT_GRACE_MS = 30_000
+const DEFAULT_WORKER_CANCEL_HARD_EXIT_MS = 5_000
+const DEFAULT_WORKER_STALE_MS = 60_000
 
 function finitePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value || '', 10)
@@ -105,8 +115,18 @@ async function preloadAgentRuntime(): Promise<void> {
   await import('@/lib/agent/AgentLoop')
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function sleepUntilAbort(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(cleanup, ms)
+    const onAbort = () => cleanup()
+    function cleanup() {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function isBackgroundProbeTaskPayload(payload: TaskJobPayload): payload is BackgroundProbeTaskPayload {
@@ -116,11 +136,18 @@ function isBackgroundProbeTaskPayload(payload: TaskJobPayload): payload is Backg
 function sleepWithAbort(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.reject(new Error('Probe aborted'))
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms)
-    signal.addEventListener('abort', () => {
+    let settled = false
+    const finish = (error?: Error) => {
+      if (settled) return
+      settled = true
       clearTimeout(timer)
-      reject(new Error('Probe aborted'))
-    }, { once: true })
+      signal.removeEventListener('abort', onAbort)
+      if (error) reject(error)
+      else resolve()
+    }
+    const timer = setTimeout(() => finish(), ms)
+    const onAbort = () => finish(new Error('Probe aborted'))
+    signal.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -146,10 +173,38 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     throw new Error(`Task worker requires Turso. Missing: ${turso.missing.join(', ')}`)
   }
 
-  const workerId = process.env.AGENT_TASK_WORKER_ID?.trim() || `worker-${randomUUID()}`
+  const workerIdPrefix = process.env.AGENT_TASK_WORKER_ID?.trim() || 'worker'
+  // The configured ID is a logical label, not a process identity. A boot UUID
+  // prevents an old process from refreshing or releasing a replacement's claim.
+  const workerId = `${workerIdPrefix}-${randomUUID()}`
   const queueName = taskQueueName()
   const pollMs = finitePositiveInt(process.env.AGENT_TASK_WORKER_POLL_MS, DEFAULT_WORKER_POLL_MS)
   const heartbeatMs = finitePositiveInt(process.env.AGENT_TASK_WORKER_HEARTBEAT_MS, DEFAULT_WORKER_HEARTBEAT_MS)
+  const maxIdlePollMs = Math.max(
+    pollMs,
+    finitePositiveInt(process.env.AGENT_TASK_WORKER_MAX_IDLE_POLL_MS, DEFAULT_WORKER_MAX_IDLE_POLL_MS),
+  )
+  const hardTaskExitMs = finitePositiveInt(
+    process.env.AGENT_WORKER_HARD_TASK_EXIT_MS,
+    AGENT_WORKER_RUN_MAX_DURATION_MS + DEFAULT_WORKER_HARD_EXIT_GRACE_MS,
+  )
+  const cancelHardExitMs = finitePositiveInt(
+    process.env.AGENT_WORKER_CANCEL_HARD_EXIT_MS,
+    DEFAULT_WORKER_CANCEL_HARD_EXIT_MS,
+  )
+  const workerStaleMs = finitePositiveInt(
+    process.env.AGENT_TASK_WORKER_STALE_MS,
+    DEFAULT_WORKER_STALE_MS,
+  )
+  if (cancelHardExitMs > TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS) {
+    throw new Error(`AGENT_WORKER_CANCEL_HARD_EXIT_MS must be at most ${TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS}ms.`)
+  }
+  const minimumCancellationProofWindowMs = heartbeatMs + cancelHardExitMs + TASK_WORKER_CANCEL_PROOF_JITTER_MS
+  if (workerStaleMs <= minimumCancellationProofWindowMs) {
+    throw new Error(
+      `AGENT_TASK_WORKER_STALE_MS must exceed heartbeat + cancellation hard-exit + jitter (${minimumCancellationProofWindowMs}ms).`,
+    )
+  }
   const workerCapabilities = {
     taskWorkerMode: env('AGENT_TASK_WORKER_MODE') || null,
     sandboxProvider: env('AGENT_SANDBOX_PROVIDER') || null,
@@ -181,23 +236,33 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     if (runtimePreloadFailure) throw runtimePreloadFailure
   }
 
-  const sendHeartbeat = (status: 'starting' | 'idle' | 'running' | 'stopping' | 'stopped') =>
-    recordTaskWorkerHeartbeat({
+  type WorkerStatus = 'starting' | 'idle' | 'running' | 'stopping' | 'stopped'
+  let desiredHeartbeatStatus: WorkerStatus = 'starting'
+  let heartbeatWriteChain = Promise.resolve()
+  const logHeartbeatError = (error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error('[TaskWorker] Heartbeat failed', { workerId, error: message })
+    if (/superseded by a newer process/i.test(message)) {
+      stopping = true
+      shutdownController.abort(error)
+    }
+  }
+  const sendHeartbeat = (status: WorkerStatus, required = false): Promise<void> => {
+    desiredHeartbeatStatus = status
+    const attempt = heartbeatWriteChain.then(() => recordTaskWorkerHeartbeat({
       workerId,
       queueName,
       startedAtMs,
       pollMs,
       heartbeatMs,
-      status,
+      status: desiredHeartbeatStatus,
       currentRunId,
       completedTasks,
       ...workerCapabilities,
-    }).catch((error) => {
-      console.error('[TaskWorker] Heartbeat failed', {
-        workerId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    })
+    }))
+    heartbeatWriteChain = attempt.catch(logHeartbeatError)
+    return required ? attempt : heartbeatWriteChain
+  }
 
   const stop = () => {
     stopping = true
@@ -209,38 +274,42 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   process.once('SIGTERM', stop)
 
   const heartbeatTimer = setInterval(() => {
-    void sendHeartbeat(currentRunId ? 'running' : 'idle')
+    void sendHeartbeat(desiredHeartbeatStatus)
   }, heartbeatMs)
   heartbeatTimer.unref?.()
 
-  await sendHeartbeat('starting')
+  try {
+    await sendHeartbeat('starting', true)
+    console.log('[TaskWorker] Starting', { workerId, queueName, pollMs, heartbeatMs, once: options.once === true })
 
-  console.log('[TaskWorker] Started', { workerId, queueName, pollMs, heartbeatMs, once: options.once === true })
-  void ensureAgentRuntimePreloaded().catch(() => undefined)
-
-  const warmPoolEnabled = e2bWarmPoolEnabled()
-  const startupWarmupPromise = warmPoolEnabled
-    ? startE2BWorkerWarmup()
-    : verifyE2BWorkerStartup()
-  void startupWarmupPromise
-    .then(() => {
-      if (warmPoolEnabled) console.log('[TaskWorker] Background E2B warmup ready')
-    })
-    .catch((error) => {
-      console.error('[TaskWorker] Background E2B startup check failed; stopping worker', {
+    const warmPoolEnabled = e2bWarmPoolEnabled()
+    const startupWarmupPromise = warmPoolEnabled
+      ? startE2BWorkerWarmup()
+      : verifyE2BWorkerStartup()
+    try {
+      await Promise.all([startupWarmupPromise, ensureAgentRuntimePreloaded()])
+    } catch (error) {
+      console.error('[TaskWorker] Startup readiness check failed', {
         error: workerErrorMessage(error),
       })
-      stop()
-    })
+      throw error
+    }
+    if (warmPoolEnabled) console.log('[TaskWorker] Background E2B warmup ready')
+    if (stopping) return
+    await sendHeartbeat('idle', true)
+    if (stopping) return
+    console.log('[TaskWorker] Ready', { workerId, queueName })
 
-  try {
+    let idlePollMs = pollMs
     while (!stopping) {
       const claim = await claimNextTaskJob(workerId)
       if (!claim) {
         if (options.once) break
-        await sleep(pollMs)
+        await sleepUntilAbort(idlePollMs, shutdownController.signal)
+        idlePollMs = Math.min(maxIdlePollMs, idlePollMs * 2)
         continue
       }
+      idlePollMs = pollMs
 
       console.log('[TaskWorker] Claimed task', {
         runId: claim.runId,
@@ -251,23 +320,67 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
       currentRunId = claim.runId
       await sendHeartbeat('running')
 
-      const taskResult = await runClaimedTaskJob(claim, (emitter, signal) => {
-        if (isBackgroundProbeTaskPayload(claim.payload)) {
-          return runBackgroundProbeTaskJob(claim.payload, emitter, signal)
-        }
-
-        const chatPayload = claim.payload
-        return ensureAgentRuntimePreloaded().then(() =>
-          runChatTaskJob({
-            ...chatPayload,
-            emitter,
-            signal,
+      // Abort signals are cooperative; a provider SDK or tool handler can
+      // ignore them forever. A claimed worker must eventually stop refreshing
+      // its lease so another isolated process can recover the run.
+      const hardExitTimer = setTimeout(() => {
+        console.error('[TaskWorker] Hard task deadline exceeded; terminating process for fenced recovery', {
+          runId: claim.runId,
+          conversationId: claim.conversationId,
+          attempts: claim.attempts,
+          hardTaskExitMs,
+        })
+        process.exit(1)
+      }, hardTaskExitMs)
+      let cancellationHardExitTimer: ReturnType<typeof setTimeout> | null = null
+      const armCancellationHardExit = () => {
+        if (cancellationHardExitTimer) return
+        // Publish observation before arming the dedicated-process kill. Remote
+        // finalizers treat this exact boot/run heartbeat as live until it goes
+        // stale, so a DB terminal can never race ahead of the worker hard stop.
+        void sendHeartbeat('stopping')
+        cancellationHardExitTimer = setTimeout(() => {
+          console.error('[TaskWorker] Cancellation deadline exceeded; terminating process to stop late side effects', {
+            runId: claim.runId,
             conversationId: claim.conversationId,
-            userId: claim.userId,
-            creditRunId: claim.runId,
-          }),
-        )
-      }, { shutdownSignal: shutdownController.signal })
+            attempts: claim.attempts,
+            cancelHardExitMs,
+          })
+          process.exit(1)
+        }, cancelHardExitMs)
+      }
+
+      let taskResult: Awaited<ReturnType<typeof runClaimedTaskJob>>
+      try {
+        taskResult = await runClaimedTaskJob(claim, (emitter, signal, runContext) => {
+          if (isBackgroundProbeTaskPayload(claim.payload)) {
+            return runBackgroundProbeTaskJob(claim.payload, emitter, signal)
+          }
+
+          const chatPayload = claim.payload
+          return ensureAgentRuntimePreloaded().then(() =>
+            runChatTaskJob({
+              ...chatPayload,
+              emitter,
+              signal,
+              conversationId: claim.conversationId,
+              userId: claim.userId,
+              creditRunId: claim.runId,
+              workerAttempt: claim.attempts,
+              preserveSandboxOnAbort: runContext.shouldPreserveSandboxOnAbort,
+              registerPreTerminalCleanup: runContext.registerPreTerminalCleanup,
+              registerInflightToolDrain: runContext.registerInflightToolDrain,
+              markHandoffUnsafe: runContext.markHandoffUnsafe,
+            }),
+          )
+        }, {
+          shutdownSignal: shutdownController.signal,
+          onCancellationObserved: armCancellationHardExit,
+        })
+      } finally {
+        clearTimeout(hardExitTimer)
+        if (cancellationHardExitTimer) clearTimeout(cancellationHardExitTimer)
+      }
 
       if (taskResult === 'requeued') {
         currentRunId = null
@@ -275,6 +388,30 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
         console.log('[TaskWorker] Released task claim during shutdown', {
           runId: claim.runId,
           conversationId: claim.conversationId,
+        })
+        break
+      }
+
+      if (taskResult === 'lease_lost') {
+        currentRunId = null
+        await sendHeartbeat(stopping ? 'stopping' : 'idle')
+        console.warn('[TaskWorker] Stopped stale task execution after losing its fenced claim', {
+          runId: claim.runId,
+          conversationId: claim.conversationId,
+          attempts: claim.attempts,
+        })
+        if (options.once) break
+        continue
+      }
+
+
+      if (taskResult === 'unsafe_handoff') {
+        currentRunId = null
+        await sendHeartbeat('stopping')
+        console.error('[TaskWorker] Stopping after an unsafe handoff; claim will expire for isolated recovery', {
+          runId: claim.runId,
+          conversationId: claim.conversationId,
+          attempts: claim.attempts,
         })
         break
       }
@@ -293,12 +430,13 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
   } finally {
     clearInterval(heartbeatTimer)
     currentRunId = null
+    await heartbeatWriteChain
     await destroyWarmE2BSandbox().catch((error) => {
       console.warn('[TaskWorker] Warm sandbox cleanup failed', {
         error: error instanceof Error ? error.message : String(error),
       })
     })
-    await markTaskWorkerStopped(workerId).catch((error) => {
+    await markTaskWorkerStopped(workerId, startedAtMs).catch((error) => {
       console.error('[TaskWorker] Failed to mark worker stopped', {
         workerId,
         error: error instanceof Error ? error.message : String(error),

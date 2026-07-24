@@ -2,6 +2,7 @@ import {
   createClient,
   type Client,
   type InArgs,
+  type InStatement,
   type ResultSet,
   type Transaction,
   type TransactionMode,
@@ -18,6 +19,21 @@ function readEnvValue(name: 'TURSO_DATABASE_URL' | 'TURSO_AUTH_TOKEN'): string {
   return process.env[name]?.trim() || ''
 }
 
+function createTursoClient(): Client {
+  const databaseUrl = readEnvValue('TURSO_DATABASE_URL')
+  const authToken = readEnvValue('TURSO_AUTH_TOKEN')
+
+  if (!databaseUrl || !authToken) {
+    const missing = getTursoSetupStatus().missing.join(', ')
+    throw new Error(`Turso is not configured. Missing: ${missing}`)
+  }
+
+  return createClient({
+    url: databaseUrl,
+    authToken,
+  })
+}
+
 export function getTursoSetupStatus(): TursoSetupStatus {
   const missing: TursoSetupStatus['missing'] = []
 
@@ -31,19 +47,8 @@ export function getTursoSetupStatus(): TursoSetupStatus {
 }
 
 export function getTursoClient(): Client {
-  const databaseUrl = readEnvValue('TURSO_DATABASE_URL')
-  const authToken = readEnvValue('TURSO_AUTH_TOKEN')
-
-  if (!databaseUrl || !authToken) {
-    const missing = getTursoSetupStatus().missing.join(', ')
-    throw new Error(`Turso is not configured. Missing: ${missing}`)
-  }
-
   if (!cachedClient) {
-    cachedClient = createClient({
-      url: databaseUrl,
-      authToken,
-    })
+    cachedClient = createTursoClient()
   }
 
   return cachedClient
@@ -53,26 +58,49 @@ export async function tursoExecute(sql: string, args?: InArgs): Promise<ResultSe
   return getTursoClient().execute(sql, args)
 }
 
+/**
+ * Execute one statement on its own connection.
+ *
+ * The serverless compatibility client's process-wide connection is
+ * single-stream. Latency-sensitive writes such as task-event persistence must
+ * not queue lease refreshes and cancellation reads behind an unrelated write.
+ */
+export async function tursoExecuteIsolated(statement: InStatement): Promise<ResultSet> {
+  const client = createTursoClient()
+  try {
+    return await client.execute(statement)
+  } finally {
+    client.close()
+  }
+}
+
 export async function tursoTransaction<T>(
   mode: TransactionMode,
   fn: (transaction: Transaction) => Promise<T>,
 ): Promise<T> {
-  const transaction = await getTursoClient().transaction(mode)
+  // An interactive transaction holds a compatibility client's execution lock
+  // until commit/rollback. Never open one on the cached read client: a delayed
+  // BEGIN or long transaction would otherwise queue every unrelated read (and
+  // worker lease renewal) behind it.
+  const client = createTursoClient()
+  let transaction: Transaction | null = null
 
   try {
+    transaction = await client.transaction(mode)
     const result = await fn(transaction)
     await transaction.commit()
     return result
   } catch (error) {
     try {
-      if (!transaction.closed) await transaction.rollback()
+      if (transaction && !transaction.closed) await transaction.rollback()
     } catch {
       // Preserve the original failure.
     }
     throw error
   } finally {
-    if (!transaction.closed) {
+    if (transaction && !transaction.closed) {
       transaction.close()
     }
+    client.close()
   }
 }

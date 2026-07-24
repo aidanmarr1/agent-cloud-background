@@ -1,6 +1,6 @@
 'use client'
 
-import { Archive, BookOpen, CheckCircle2, FileCode, FileText, FolderOpen, X } from '@/components/icons'
+import { Archive, BookOpen, FileCode, FileText, FolderOpen, X } from '@/components/icons'
 import type { FileAttachment } from '@/types'
 import { ARCHIVE_ATTACHMENT_TYPE, formatBytes, SKILL_ATTACHMENT_TYPE } from '@/lib/fileHandling'
 
@@ -30,13 +30,13 @@ function getAttachmentKind(attachment: FileAttachment): string {
   return 'File'
 }
 
-function AttachmentIcon({ attachment }: { attachment: FileAttachment }) {
+function AttachmentIcon({ attachment, size = 17 }: { attachment: FileAttachment; size?: number }) {
   const className = 'text-text-muted'
-  if (attachment.type === SKILL_ATTACHMENT_TYPE) return <BookOpen size={15} className={className} strokeWidth={2.2} />
-  if (isFolderAttachment(attachment)) return <FolderOpen size={15} className={className} strokeWidth={2.2} />
-  if (attachment.type === ARCHIVE_ATTACHMENT_TYPE) return <Archive size={15} className={className} strokeWidth={2.2} />
-  if (CODE_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(attachment.name))) return <FileCode size={15} className={className} strokeWidth={2.2} />
-  return <FileText size={15} className={className} strokeWidth={2.2} />
+  if (attachment.type === SKILL_ATTACHMENT_TYPE) return <BookOpen size={size} className={className} strokeWidth={2.2} />
+  if (isFolderAttachment(attachment)) return <FolderOpen size={size} className={className} strokeWidth={2.2} />
+  if (attachment.type === ARCHIVE_ATTACHMENT_TYPE) return <Archive size={size} className={className} strokeWidth={2.2} />
+  if (CODE_ATTACHMENT_EXTENSIONS.has(getAttachmentExtension(attachment.name))) return <FileCode size={size} className={className} strokeWidth={2.2} />
+  return <FileText size={size} className={className} strokeWidth={2.2} />
 }
 
 interface AttachmentPreviewRowProps {
@@ -53,38 +53,42 @@ export function AttachmentPreviewRow({
   density = 'input',
 }: AttachmentPreviewRowProps) {
   const compact = density === 'message'
+  const previewSource = attachment.type.startsWith('image/')
+    ? attachment.preview || attachment.url || (attachment.contentEncoding === 'data-url' ? attachment.content : undefined)
+    : undefined
 
   return (
     <div
-      className={`group flex items-center gap-2 rounded-lg border border-transparent bg-bg-primary px-2 text-[12px] text-text-secondary transition-colors duration-150 hover:border-border-secondary hover:bg-bg-secondary ${
-        compact ? 'min-h-10' : 'min-h-11 animate-scale-in'
+      aria-label={showReady ? `${attachment.name}, ready` : attachment.name}
+      className={`group relative flex flex-shrink-0 items-center gap-3 overflow-hidden rounded-xl border border-border-primary bg-bg-primary text-text-secondary transition-colors duration-150 hover:border-border-tertiary ${
+        compact
+          ? 'h-14 min-w-[210px] max-w-[270px] px-2.5'
+          : 'h-[66px] w-[278px] flex-none px-3 pr-9 animate-scale-in'
       }`}
     >
       <div className={`flex flex-shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border-primary bg-bg-secondary ${
-        compact ? 'h-7 w-7' : 'h-8 w-8'
+        compact ? 'h-9 w-9' : 'h-10 w-10'
       }`}>
-        <AttachmentIcon attachment={attachment} />
+        {previewSource ? (
+          <img src={previewSource} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <AttachmentIcon attachment={attachment} size={compact ? 16 : 18} />
+        )}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[12.5px] font-semibold text-text-secondary">{attachment.name}</div>
-        <div className="flex items-center gap-1.5 text-[10.5px] text-text-muted">
+        <div className={`${compact ? 'text-[12px]' : 'text-[13px]'} truncate font-semibold text-text-primary`}>{attachment.name}</div>
+        <div className={`${compact ? 'text-[10px]' : 'text-[11px]'} mt-0.5 flex items-center gap-1.5 text-text-muted`}>
           <span>{getAttachmentKind(attachment)}</span>
           <span className="h-0.5 w-0.5 rounded-full bg-text-muted/70" />
           <span>{formatBytes(attachment.size)}</span>
         </div>
       </div>
-      {showReady && (
-        <div className="hidden items-center gap-1 text-[10.5px] font-medium text-text-secondary sm:flex">
-          <CheckCircle2 size={11} strokeWidth={2.2} />
-          Ready
-        </div>
-      )}
       {onRemove && (
         <button
           type="button"
           onClick={onRemove}
           aria-label={`Remove ${attachment.name}`}
-          className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-text-muted transition-all duration-150 hover:bg-bg-secondary hover:text-text-primary"
+          className="absolute right-2 top-2 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-bg-primary text-text-muted opacity-100 transition-[background-color,color,opacity] duration-150 hover:bg-bg-secondary hover:text-text-primary sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100"
         >
           <X size={12} />
         </button>

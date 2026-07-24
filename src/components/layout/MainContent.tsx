@@ -31,8 +31,8 @@ export function MainContent({ children, initialCollapsed = false }: { children: 
   return (
     <main
       id="main-content"
-      className={`app-main-content ${authRoute ? 'auth-main-content' : ''} flex-1 min-w-0 w-full min-h-screen ml-0 transition-[margin] duration-200 ${
-        authRoute ? 'md:ml-0' : collapsed ? 'md:ml-14' : 'md:ml-64'
+      className={`${authRoute ? 'auth-main-content' : 'app-main-content'} flex-1 min-w-0 w-full min-h-screen ml-0 transition-[margin] duration-200 ease-out ${
+        authRoute ? 'md:ml-0' : collapsed ? 'md:ml-[64px]' : 'md:ml-[260px]'
       }`}
     >
       {!authRoute && routeHandoffPending && (

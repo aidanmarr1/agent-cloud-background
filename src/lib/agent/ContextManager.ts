@@ -16,6 +16,7 @@ import {
   MAX_CONTEXT_MESSAGES,
   CONTEXT_TRIM_SUMMARY_MAX_CHARS,
 } from './config'
+import { compactToolMessageContent, unicodeSafeSlice } from './ToolMessageSerialization'
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -65,9 +66,16 @@ function compactToolArguments(raw: string, toolName?: string, maxChars = 220): s
       if (parsed.content !== undefined) compact.content = '[compacted]'
     }
     const encoded = JSON.stringify(compact)
-    return encoded.length <= maxChars ? encoded : encoded.slice(0, maxChars) + '...'
+    if (encoded.length <= maxChars) return encoded
+    for (const [key, value] of Object.entries(compact)) {
+      if (typeof value === 'string' && value.length > 24) {
+        compact[key] = `${unicodeSafeSlice(value, 20)}…`
+      }
+    }
+    const shortened = JSON.stringify(compact)
+    return shortened.length <= maxChars ? shortened : '{}'
   } catch {
-    return raw.slice(0, maxChars) + '...'
+    return '{}'
   }
 }
 
@@ -165,7 +173,7 @@ export class ContextManager {
 
       // Compress old tool results
       if (msg.role === 'tool' && contentText.length > MAX_OLD_RESULT) {
-        msg.content = textPreview(contentText, MAX_OLD_RESULT, '...[compressed]')
+        msg.content = compactToolMessageContent(contentText, MAX_OLD_RESULT, 'Older tool result compressed.')
         this.metadata[i].importance = Math.min(this.metadata[i].importance, 3)
       }
 
@@ -225,7 +233,7 @@ export class ContextManager {
         recentToolResultsSeen++
         const max = recentToolResultsSeen <= keepRecentToolResults ? 520 : 220
         if (contentText.length > max) {
-          msg.content = textPreview(contentText, max, '...[step-transition compacted]')
+          msg.content = compactToolMessageContent(contentText, max, 'Tool result compacted at step transition.')
           meta.importance = Math.min(meta.importance, recentToolResultsSeen <= keepRecentToolResults ? 4 : 3)
           compacted++
         }
@@ -292,7 +300,7 @@ export class ContextManager {
       }
 
       if (msg.role === 'tool' && contentText.length > 900) {
-        msg.content = textPreview(contentText, 900, '...[model-call compacted]')
+        msg.content = compactToolMessageContent(contentText, 900, 'Tool result compacted before model call.')
         meta.importance = Math.min(meta.importance, 4)
         compacted++
       }

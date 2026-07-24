@@ -18,7 +18,8 @@ export async function makeHttpRequest(
   method: string,
   url: string,
   headers?: Record<string, string>,
-  body?: string
+  body?: string,
+  signal?: AbortSignal,
 ): Promise<HttpRequestResult> {
   const startTime = Date.now()
 
@@ -35,6 +36,7 @@ export async function makeHttpRequest(
 
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), TIMEOUT_MS)
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
 
   try {
     let currentUrl = url
@@ -62,7 +64,7 @@ export async function makeHttpRequest(
       const fetchOptions: GuardedFetchInit = {
         method: currentMethod,
         headers: headers || {},
-        signal: controller.signal,
+        signal: requestSignal,
         redirect: 'manual',
         maxBytes: MAX_RESPONSE_BYTES,
       }
@@ -125,6 +127,11 @@ export async function makeHttpRequest(
       durationMs: Date.now() - startTime,
     }
   } catch (err) {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new DOMException('HTTP request aborted.', 'AbortError')
+    }
     return {
       status: 0,
       statusText: `Error: ${(err as Error).message}`,

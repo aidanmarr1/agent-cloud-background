@@ -32,7 +32,7 @@ export function SlashCommandMenu({ commands, selectedIndex, onSelect, visible }:
     <div
       ref={listRef}
       className="absolute bottom-full left-0 right-0 mb-2 menu-surface border border-border-primary rounded-2xl overflow-hidden z-50 max-h-[300px] overflow-y-auto px-1.5 pb-1.5 pt-1 animate-scale-in"
-      style={{ boxShadow: 'var(--shadow-lg)' }}
+      style={{ boxShadow: 'var(--shadow-menu)' }}
     >
       <div className="px-2.5 pb-1">
         <span className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">Saved skills</span>
@@ -47,7 +47,7 @@ export function SlashCommandMenu({ commands, selectedIndex, onSelect, visible }:
             onClick={() => onSelect(cmd)}
             onMouseDown={(e) => e.preventDefault()}
             className={`w-full flex items-center gap-3 px-2.5 py-2 text-left rounded-lg transition-all duration-100 ${
-              isActive ? 'bg-bg-secondary' : 'hover:bg-bg-secondary'
+              isActive ? 'bg-bg-hover' : 'hover:bg-bg-hover focus-visible:bg-bg-hover'
             }`}
           >
             <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 border ${

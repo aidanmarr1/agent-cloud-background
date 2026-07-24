@@ -112,7 +112,6 @@ const PANEL_TITLES: Record<string, string> = {
   edit_file: 'File Edited',
   append_file: 'File Appended',
   export_pdf: 'PDF Exported',
-  youtube_transcript: 'YouTube Transcript',
   read_document: 'Document Content',
   http_request: 'HTTP Response',
   run_code: 'Code Output',
@@ -149,16 +148,6 @@ function transformPanelData(
         sourceUrl: image?.sourceUrl || '',
       }
     }) as ImageSearchPanelItem[]
-  }
-
-  if (name === 'youtube_transcript') {
-    const ytResult = asRecord(result)
-    const videoId = stringField(ytResult, 'videoId')
-    return {
-      title: stringField(ytResult, 'title') || 'YouTube Transcript',
-      content: stringField(ytResult, 'transcript'),
-      url: videoId ? `https://youtube.com/watch?v=${videoId}` : '',
-    } as BrowseResult
   }
 
   if (name === 'read_document') {

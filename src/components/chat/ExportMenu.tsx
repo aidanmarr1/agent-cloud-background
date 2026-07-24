@@ -54,7 +54,7 @@ export function ExportMenu({ conversation }: ExportMenuProps) {
       {open && (
         <div
           className="absolute top-full right-0 mt-2 menu-surface border border-border-primary rounded-2xl overflow-hidden z-50 w-[220px] p-1.5 animate-scale-in"
-          style={{ boxShadow: 'var(--shadow-lg)' }}
+          style={{ boxShadow: 'var(--shadow-menu)' }}
         >
           <div className="px-2.5 pt-1.5 pb-1">
             <span className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">Export as</span>
@@ -62,7 +62,7 @@ export function ExportMenu({ conversation }: ExportMenuProps) {
           <button
             type="button"
             onClick={handleExportMarkdown}
-            className="w-full flex items-center gap-3 px-2.5 py-2 text-left rounded-lg hover:bg-bg-secondary transition-all duration-150 group/item"
+            className="w-full flex items-center gap-3 px-2.5 py-2 text-left rounded-lg hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150 group/item"
           >
             <div className="w-7 h-7 rounded-md bg-bg-secondary border border-border-primary flex items-center justify-center flex-shrink-0">
               <FileText size={13} className="text-text-tertiary group-hover/item:text-text-primary transition-colors" strokeWidth={2.25} />
@@ -75,7 +75,7 @@ export function ExportMenu({ conversation }: ExportMenuProps) {
           <button
             type="button"
             onClick={handleExportJSON}
-            className="w-full flex items-center gap-3 px-2.5 py-2 text-left rounded-lg hover:bg-bg-secondary transition-all duration-150 group/item"
+            className="w-full flex items-center gap-3 px-2.5 py-2 text-left rounded-lg hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150 group/item"
           >
             <div className="w-7 h-7 rounded-md bg-bg-secondary border border-border-primary flex items-center justify-center flex-shrink-0">
               <Code size={13} className="text-text-tertiary group-hover/item:text-text-primary transition-colors" strokeWidth={2.25} />

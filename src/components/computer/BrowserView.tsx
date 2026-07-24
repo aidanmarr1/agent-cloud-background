@@ -149,7 +149,7 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
         {!isLatest && conversationId && onJumpToLive && (
           <button
             onClick={onJumpToLive}
-            className="absolute bottom-3 right-3 menu-surface border border-border-primary rounded-xl px-3 h-8 flex items-center gap-1.5 hover:bg-bg-secondary transition-all duration-150"
+            className="absolute bottom-3 right-3 menu-surface border border-border-primary rounded-lg px-3 h-8 flex items-center gap-1.5 hover:bg-bg-secondary transition-all duration-150"
             style={{ boxShadow: 'var(--shadow-md)' }}
           >
             <Play size={11} className="text-text-secondary" strokeWidth={2.5} />

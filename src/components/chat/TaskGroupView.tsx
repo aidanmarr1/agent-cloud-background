@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, memo } from 'react'
-import { ChevronRight, Check, Search, Globe, Terminal, FilePlus, FileText, Trash2, FolderOpen, Loader2, Code, FileCode, Link, MonitorPlay, Edit3, BookOpen, AlertTriangle } from '@/components/icons'
+import { ChevronRight, Check, Search, ImageSearch, Compass, Globe, Terminal, FilePlus, FileText, Trash2, FolderOpen, Loader2, Code, FileCode, Link, Edit3, BookOpen, AlertTriangle } from '@/components/icons'
 import { TaskGroup, Subtask, GroupNarration } from '@/types'
 import { useUIStore } from '@/store/ui'
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
@@ -11,14 +11,16 @@ import { MarkdownLite } from './MarkdownLite'
 
 interface TaskGroupViewProps {
   group: TaskGroup
+  isCurrentGroup?: boolean
 }
 
 const INLINE_THINKING_DELAY_MS = 1200
 
 const iconMap: Record<string, React.ReactNode> = {
   search: <Search size={13} className="flex-shrink-0" />,
+  image_search: <ImageSearch size={14} className="flex-shrink-0" />,
   terminal: <Terminal size={13} className="flex-shrink-0" />,
-  browse: <Globe size={13} className="flex-shrink-0" />,
+  browse: <Compass size={12} className="flex-shrink-0" weight="bold" />,
   create_file: <FilePlus size={13} className="flex-shrink-0" />,
   read_file: <FileText size={13} className="flex-shrink-0" />,
   read_skill: <BookOpen size={13} className="flex-shrink-0" />,
@@ -28,14 +30,14 @@ const iconMap: Record<string, React.ReactNode> = {
   append_file: <Edit3 size={13} className="flex-shrink-0" />,
   export_pdf: <FileText size={13} className="flex-shrink-0" />,
   run_code: <Code size={13} className="flex-shrink-0" />,
-  youtube_transcript: <MonitorPlay size={13} className="flex-shrink-0" />,
   read_document: <FileCode size={13} className="flex-shrink-0" />,
   http_request: <Link size={13} className="flex-shrink-0" />,
-  browser: <Globe size={13} className="flex-shrink-0" />,
+  browser: <Compass size={12} className="flex-shrink-0" weight="bold" />,
 }
 
 const colorMap: Record<string, string> = {
   search: 'text-text-tertiary',
+  image_search: 'text-text-tertiary',
   browse: 'text-text-secondary',
   terminal: 'text-text-secondary',
   create_file: 'text-text-secondary',
@@ -48,7 +50,6 @@ const colorMap: Record<string, string> = {
   run_code: 'text-text-secondary',
   browser: 'text-text-secondary',
   list_files: 'text-text-tertiary',
-  youtube_transcript: 'text-accent-red',
   read_document: 'text-text-secondary',
   http_request: 'text-text-tertiary',
 }
@@ -56,14 +57,14 @@ const colorMap: Record<string, string> = {
 function InlineThinkingIndicator() {
   return (
     <div
-      className="mb-2 flex items-center gap-3 py-1.5 text-text-secondary animate-fade-in"
+      className="task-activity-row mb-1.5 flex items-center gap-1 py-1 text-text-secondary animate-fade-in"
       role="status"
       aria-live="polite"
     >
-      <span className="relative flex h-4 w-4 flex-shrink-0 items-center justify-center">
-        <span className="h-2.5 w-2.5 rounded-full bg-status-live" style={{ animation: 'pulse-dot 1.8s ease-in-out infinite' }} />
+      <span className="task-activity-marker relative flex h-5 w-5 flex-shrink-0 items-center justify-start">
+        <span className="h-2 w-2 rounded-full bg-status-live" style={{ animation: 'pulse-dot 1.8s ease-in-out infinite' }} />
       </span>
-      <span className="chat-task-body text-[15px] font-medium tracking-[0]">Thinking</span>
+      <span className="text-[14px] font-normal leading-5 tracking-[0]">Thinking</span>
     </div>
   )
 }
@@ -72,25 +73,42 @@ const ActionPill = memo(function ActionPill({ subtask }: { subtask: Subtask }) {
   const setComputerPanelOpen = useUIStore((s) => s.setComputerPanelOpen)
   const isDone = subtask.status === 'done'
   const isRunning = subtask.status === 'running'
+  const isError = subtask.status === 'error'
+  const canOpen = isDone && Boolean(subtask.result)
   const icon = iconMap[subtask.type] || <Globe size={13} className="flex-shrink-0" />
   const label = formatVisibleActionLabel(subtask.label || '')
+  const isCompassAction = subtask.type === 'browse' || subtask.type === 'browser'
   if (!label) return null
 
   return (
     <button
       type="button"
-      onClick={() => { if (isDone && subtask.result) setComputerPanelOpen(true, { source: 'user' }) }}
-      aria-label={isDone && subtask.result ? `Open ${label}` : label}
-      className={`inline-flex h-7 max-w-full items-center gap-1.5 overflow-hidden rounded-[11px] border pl-2 pr-2.5 transition-colors duration-150 ${
-        isDone
-          ? 'border-border-primary bg-bg-primary cursor-pointer hover:bg-bg-secondary hover:border-border-tertiary'
-        : isRunning
-            ? 'border-border-tertiary bg-bg-secondary cursor-default'
-            : 'border-border-primary bg-bg-primary cursor-default'
+      onClick={() => { if (canOpen) setComputerPanelOpen(true, { source: 'user' }) }}
+      aria-label={canOpen ? `Open ${label}` : label}
+      className={`group/action flex min-h-7 max-w-full items-center gap-1 py-1 text-left transition-colors duration-150 ${
+        isError
+          ? 'cursor-default text-danger-text'
+          : isRunning
+            ? 'cursor-default'
+            : canOpen
+              ? 'cursor-pointer'
+              : isDone
+                ? 'cursor-default'
+                : 'cursor-default'
       }`}
     >
-      <span className={isRunning ? 'text-text-secondary' : (colorMap[subtask.type] || 'text-text-tertiary')}>{icon}</span>
-      <span className={`chat-action-pill truncate ${isRunning ? 'text-text-primary font-semibold' : 'text-text-secondary font-medium'}`}>
+      <span className={`flex h-5 w-5 flex-shrink-0 items-center justify-center border border-border-tertiary bg-bg-secondary ${
+        isCompassAction ? 'rounded-full' : 'rounded-[5px]'
+      } ${
+        isError
+          ? 'text-danger-icon'
+          : isRunning
+            ? 'text-accent-blue'
+            : colorMap[subtask.type] || 'text-text-tertiary'
+      }`}>
+        {icon}
+      </span>
+      <span className={`min-w-0 truncate text-[14px] leading-5 transition-colors duration-150 ${isError ? 'font-medium text-danger-text' : isRunning ? 'font-medium text-text-primary' : 'text-text-secondary group-hover/action:text-text-primary'}`}>
         {label}
       </span>
       {isRunning && (
@@ -104,28 +122,28 @@ const ActionPill = memo(function ActionPill({ subtask }: { subtask: Subtask }) {
   )
 })
 
-export function TaskGroupView({ group }: TaskGroupViewProps) {
+export function TaskGroupView({ group, isCurrentGroup = false }: TaskGroupViewProps) {
   const isAppStreaming = useUIStore((s) => s.isStreaming)
   const streamingStatus = useUIStore((s) => s.streamingStatus)
   const isRunning = group.status === 'running'
   const isDone = group.status === 'done'
   const isIncomplete = group.status === 'incomplete'
   const isError = group.status === 'error'
-  const [expanded, setExpanded] = useState(group.status !== 'pending')
+  const [expanded, setExpanded] = useState(isRunning || isDone)
   const [inlineThinkingReady, setInlineThinkingReady] = useState(false)
 
   useEffect(() => {
-    if (isRunning) setExpanded(true)
-  }, [isRunning])
+    if (isRunning || isDone) setExpanded(true)
+  }, [isRunning, isDone])
 
   const subtasks = Array.isArray(group.subtasks) ? group.subtasks : []
   const narrationsList = Array.isArray(group.narrations) ? group.narrations : []
   const visibleSubtasks = subtasks.filter((s) => !isHiddenSubtaskActivity(s))
-  const doneCount = visibleSubtasks.filter((s) => s.status === 'done').length
   const totalCount = visibleSubtasks.length
   const hasRunningVisibleSubtask = visibleSubtasks.some((s) => s.status === 'running')
-  const inlineThinkingEligible = isAppStreaming && isRunning && !hasRunningVisibleSubtask && streamingStatus === 'thinking'
+  const inlineThinkingEligible = isCurrentGroup && isAppStreaming && isRunning && !hasRunningVisibleSubtask && streamingStatus === 'thinking'
   const showInlineThinking = inlineThinkingEligible && inlineThinkingReady
+  const detailsId = `task-group-${group.id}`
 
   useEffect(() => {
     if (!inlineThinkingEligible) {
@@ -138,66 +156,60 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
   }, [inlineThinkingEligible, group.id, totalCount])
 
   return (
-    <div>
+    <div className="animate-fade-in">
       {/* Group header */}
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
-        className="w-full flex items-center gap-2.5 py-1.5 hover:bg-bg-secondary rounded-xl px-2.5 -mx-2 transition-colors duration-150"
+        className="task-activity-row group/header flex h-7 w-full items-center gap-1 text-left text-text-secondary transition-colors duration-150 hover:text-text-primary"
         aria-expanded={expanded}
+        aria-controls={detailsId}
       >
         {isRunning ? (
-          <div className="w-[18px] h-[18px] rounded-full bg-bg-primary border border-border-primary flex items-center justify-center flex-shrink-0">
+          <div className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start">
             <Loader2
-              size={11}
-              className="text-text-secondary flex-shrink-0"
+              size={13}
+              className="flex-shrink-0 text-accent-blue"
               style={{ animation: 'spin 1.2s linear infinite' }}
             />
           </div>
         ) : isDone ? (
-          <div className="w-[18px] h-[18px] rounded-full bg-bg-primary border border-border-primary flex items-center justify-center flex-shrink-0">
-            <Check size={10} className="text-text-tertiary" strokeWidth={3} />
+          <div className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start">
+            <span className="flex h-[17px] w-[17px] items-center justify-center rounded-full bg-bg-secondary">
+              <Check size={10} className="text-text-tertiary" strokeWidth={3} />
+            </span>
           </div>
         ) : isIncomplete ? (
-          <div className="w-[18px] h-[18px] rounded-full bg-bg-primary border border-border-primary flex items-center justify-center flex-shrink-0">
-            <AlertTriangle size={10} className="text-text-tertiary" strokeWidth={2.5} />
+          <div className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start">
+            <AlertTriangle size={13} className="text-text-tertiary" strokeWidth={2.5} />
           </div>
         ) : isError ? (
-          <div className="w-[18px] h-[18px] rounded-full bg-danger-bg border border-danger-border flex items-center justify-center flex-shrink-0">
-            <AlertTriangle size={10} className="text-danger-icon" strokeWidth={2.5} />
+          <div className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start">
+            <AlertTriangle size={13} className="text-danger-icon" strokeWidth={2.5} />
           </div>
         ) : (
-          <div className="w-[18px] h-[18px] rounded-full border border-border-tertiary flex-shrink-0" />
+          <div className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start">
+            <span className="h-[17px] w-[17px] rounded-full border border-border-tertiary" />
+          </div>
         )}
 
-        <span className="chat-task-title flex-1 text-left truncate font-semibold text-text-primary tracking-[0]">
+        <span className={`min-w-0 flex-1 truncate text-[14px] font-normal leading-5 tracking-[0] ${
+          isRunning ? 'text-text-primary' : isError ? 'text-danger-text' : isDone ? 'text-text-secondary' : 'text-text-tertiary'
+        }`}>
           {group.title}
         </span>
 
-        {totalCount > 0 && (
-          <span className={`text-[10px] tabular-nums font-semibold px-1.5 py-0.5 rounded-full border ${
-            doneCount === totalCount && isDone
-              ? 'bg-bg-primary text-text-secondary border-border-primary'
-              : isIncomplete
-                ? 'bg-bg-primary text-text-secondary border-border-primary'
-              : isError
-                ? 'bg-danger-bg text-danger-text border-danger-border'
-              : 'bg-bg-primary text-text-muted border-border-primary'
-          }`}>
-            {isIncomplete ? 'Incomplete' : `${doneCount}/${totalCount}`}
-          </span>
-        )}
-
         <ChevronRight
-          size={14}
-          className={`text-text-muted transition-transform duration-200 ${expanded ? 'rotate-90' : ''}`}
+          size={13}
+          className={`flex-shrink-0 text-text-muted opacity-0 transition-all duration-150 group-hover/header:opacity-100 group-focus-visible/header:opacity-100 ${expanded ? 'rotate-90' : ''}`}
           strokeWidth={2.25}
         />
       </button>
 
       {/* Expanded body */}
       {expanded && (
-        <>
-          <div className="task-thread-body relative ml-[9px] pl-6 pb-2 pt-0.5">
+        <div id={detailsId}>
+          <div className="task-thread-body relative pb-2.5 pl-6 pr-2 pt-0.5">
             {(() => {
               const items: Array<{ kind: 'subtask'; data: Subtask } | { kind: 'narration'; data: GroupNarration }> = []
               const narrations = [...narrationsList].sort((a, b) => a.position - b.position)
@@ -233,7 +245,7 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
               return clusters.map((cluster, idx) => {
                 if (cluster.kind === 'pills') {
                   return (
-                    <div key={idx} className="flex flex-col items-start gap-1.5 mb-1.5">
+                    <div key={idx} className="mb-1.5 flex flex-col items-start gap-0.5">
                       {cluster.items.map((subtask) => (
                         <ActionPill key={subtask.id} subtask={subtask} />
                       ))}
@@ -245,7 +257,7 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
                 if (!narrationText) return null
 
                 return (
-                  <div key={cluster.data.id} className="task-narration-note chat-task-body text-text-secondary mb-2 animate-narration-in markdown-content">
+                  <div key={cluster.data.id} className="task-narration-note chat-task-body mb-2 animate-narration-in text-text-secondary markdown-content [&_p]:my-0">
                     <MarkdownLite>{narrationText}</MarkdownLite>
                   </div>
                 )
@@ -253,18 +265,18 @@ export function TaskGroupView({ group }: TaskGroupViewProps) {
             })()}
 
             {group.synthesis && (
-              <div className="task-narration-note chat-task-body text-text-secondary markdown-content">
+              <div className="task-narration-note chat-task-body text-text-secondary markdown-content [&_p]:my-0">
                 <MarkdownLite>{group.synthesis}</MarkdownLite>
               </div>
             )}
           </div>
 
           {showInlineThinking && (
-            <div className="task-inline-thinking-row ml-[9px] pl-6 pb-2 pt-0.5">
+            <div className="task-inline-thinking-row pb-2.5 pt-0.5">
               <InlineThinkingIndicator />
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   )

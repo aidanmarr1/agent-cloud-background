@@ -2,7 +2,7 @@ import type { SubtaskType } from '@/types'
 
 export const toolNameToSubtaskType: Record<string, SubtaskType> = {
   web_search: 'search',
-  image_search: 'search',
+  image_search: 'image_search',
   execute_command: 'terminal',
   create_file: 'create_file',
   read_file: 'read_file',
@@ -13,7 +13,6 @@ export const toolNameToSubtaskType: Record<string, SubtaskType> = {
   edit_file: 'edit_file',
   append_file: 'append_file',
   export_pdf: 'export_pdf',
-  youtube_transcript: 'youtube_transcript',
   read_document: 'read_document',
   http_request: 'http_request',
   run_code: 'run_code',
@@ -102,4 +101,4 @@ export function isHiddenSubtaskActivity(subtask: { toolName?: string; label?: st
 }
 
 export const FILE_TOOLS = ['create_file', 'read_file', 'read_attachment', 'read_skill', 'delete_file', 'list_files', 'edit_file', 'append_file', 'export_pdf']
-export const BROWSE_TOOLS = ['youtube_transcript', 'read_document', 'http_request']
+export const BROWSE_TOOLS = ['read_document', 'http_request']

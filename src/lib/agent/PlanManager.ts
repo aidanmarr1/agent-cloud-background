@@ -20,11 +20,18 @@ import {
 import { buildStepMessage } from './guards'
 import { computeTimeouts, getStrategy, type TaskType } from './TaskStrategy'
 import { PLAN_STARTUP_DELAY_MS, PLAN_MAX_RETRIES, PLAN_RETRY_BASE_MS, MIN_STEP_BUDGET, MIN_DELIVERABLE_BUDGET, RESEARCH_STEP_BUDGET_MULTIPLIER, DELIVERABLE_BUDGET_FRACTION, COMPLEXITY_BUDGET_MULTIPLIERS, MIN_RESEARCH_CALLS_BY_COMPLEXITY, MAX_ITERATIONS, REPLAN_MAX_TIMES as REPLAN_MAX_RETRIES, INFO_REPLAN_MIN_ITERATIONS, INFO_REPLAN_COOLDOWN_ITERATIONS } from './config'
-import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit } from './taskConstraints'
+import {
+  currentStepHasSingleWebSearchLimit,
+  currentStepWebSearchLimit,
+  explicitTaskToolTargetLabel,
+  explicitTaskToolConstraintFromText,
+  taskDefaultsToMarkdownDeliverable,
+} from './taskConstraints'
 import { humanTopicLabel, requestSubject } from './taskText'
 import { analyzeTaskIntent } from './TaskIntent'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 import { researchDepthProfileForState } from './ResearchDepth'
+import { compactAdjacentSourceEvidencePhases } from './PlanNormalization'
 
 export interface RequiredPlanStep {
   title: string
@@ -62,7 +69,7 @@ const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 const PLANNER_ACK_MAX_TOKENS = 96
 const PLANNER_ACK_STREAM_TIMEOUT_MS = 5_500
 const PLANNER_ACK_DISPLAY_WAIT_MS = 150
-const PLANNER_FAST_JSON_MAX_TOKENS = 360
+const PLANNER_FAST_JSON_MAX_TOKENS = 520
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 420
 const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
 const PLANNER_JSON_MAX_TOKENS = 640
@@ -72,8 +79,7 @@ const PLANNER_JSON_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 6_500
 const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 7_500
-const PLANNER_OVERALL_DEADLINE_MS = 10_000
-const PLANNER_START_AFTER_ACK_WAIT_MS = 2_500
+const PLANNER_OVERALL_DEADLINE_MS = 16_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_REASONING = { enabled: false as const, exclude: true }
@@ -82,6 +88,13 @@ const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
+
+class PlannerUsageRecordingError extends Error {
+  constructor(readonly originalError: unknown) {
+    super('Planner usage could not be recorded.')
+    this.name = 'PlannerUsageRecordingError'
+  }
+}
 
 function redactPlannerErrorText(text: string): string {
   return text
@@ -412,6 +425,21 @@ function nonDeliverableStepGuidance(
   taskComplexity: number,
 ): string {
   const strategyGuidance = state.strategyConfig?.stepGuidance
+  const explicitToolConstraint = explicitTaskToolConstraintFromText(state.originalUserRequest)
+  if (explicitToolConstraint) {
+    const required = explicitToolConstraint.required.map(explicitTaskToolTargetLabel).join(', ')
+    const exclusive = explicitToolConstraint.exclusive.map(explicitTaskToolTargetLabel).join(', ')
+    const forbidden = explicitToolConstraint.forbidden.map(explicitTaskToolTargetLabel).join(', ')
+    return [
+      'RULES:',
+      '- Preserve the user’s stated step order and explicit named-tool instructions.',
+      required ? `- Required at least once before normal tool freedom resumes: ${required}.` : '',
+      exclusive ? `- Exclusive allowed tool scope for every action: ${exclusive}.` : '',
+      forbidden ? `- Forbidden tool scope: ${forbidden}.` : '',
+      '- Safety, permissions, and actual tool availability still override these instructions.',
+      '- If a required/allowed named tool is unavailable, report that concrete blocker instead of silently substituting another tool.',
+    ].filter(Boolean).join('\n')
+  }
   const fixedSearchLimit = currentStepWebSearchLimit(state) ?? (currentStepHasSingleWebSearchLimit(state) ? 1 : null)
   if (fixedSearchLimit !== null) {
     return `RULES:\n- User limited this phase to exactly ${fixedSearchLimit} web_search call${fixedSearchLimit === 1 ? '' : 's'}; this overrides normal depth.\n- Call web_search exactly ${fixedSearchLimit} time${fixedSearchLimit === 1 ? '' : 's'}, then advance. Do NOT browse, scroll, read pages/documents, or run extra searches.\n- Answer/create from those snippets plus existing context only.`
@@ -503,8 +531,11 @@ export class PlanManager {
   private resolveAcknowledgementFirstVisible: ((emitted: boolean) => void) | null = null
   private acknowledgementFirstVisibleResolved = false
   private suppressFurtherAcknowledgementDeltas = false
+  private acknowledgementUsageError: unknown = null
   private plannerDeadlineAtMs = 0
   private plannerAbortController: AbortController | null = null
+  private externalSignal?: AbortSignal
+  private removeExternalAbortListener: (() => void) | null = null
   constructor(
     emitter: AgentEventEmitter,
     messages: Array<{ role: string; content: string }>,
@@ -514,6 +545,7 @@ export class PlanManager {
     recordUsage?: PlanUsageRecorder,
     preflightCredit?: PlanCreditPreflight,
     skipAcknowledgement = false,
+    externalSignal?: AbortSignal,
   ) {
     this.emitter = emitter
     this.messages = messages
@@ -523,6 +555,24 @@ export class PlanManager {
     this.recordUsage = recordUsage
     this.preflightCredit = preflightCredit
     this.skipAcknowledgement = skipAcknowledgement
+    this.externalSignal = externalSignal
+    this.resetPlannerAbortController()
+  }
+
+  private resetPlannerAbortController(): AbortController {
+    this.removeExternalAbortListener?.()
+    this.removeExternalAbortListener = null
+    this.plannerAbortController?.abort()
+    const plannerAbortController = new AbortController()
+    this.plannerAbortController = plannerAbortController
+    if (this.externalSignal?.aborted) {
+      plannerAbortController.abort(this.externalSignal.reason)
+    } else if (this.externalSignal) {
+      const abortPlanner = () => plannerAbortController.abort(this.externalSignal?.reason)
+      this.externalSignal.addEventListener('abort', abortPlanner, { once: true })
+      this.removeExternalAbortListener = () => this.externalSignal?.removeEventListener('abort', abortPlanner)
+    }
+    return plannerAbortController
   }
 
   startPlanCall(): void {
@@ -531,6 +581,7 @@ export class PlanManager {
       messages: this.messages.length,
       hasCustomInstructions: !!this.customInstructions,
     })
+    const plannerAbortController = this.resetPlannerAbortController()
     if (!this.skipAcknowledgement && !this.acknowledgementPromise) {
       this.acknowledgementDisplayResolved = false
       this.acknowledgementDisplayPromise = new Promise<boolean>((resolve) => {
@@ -547,6 +598,13 @@ export class PlanManager {
           return emitted
         })
         .catch((error) => {
+          if (this.plannerWasAborted()) {
+            this.acknowledgementUsageError = error
+          } else if (error instanceof PlannerUsageRecordingError) {
+            this.acknowledgementUsageError = error.originalError
+          } else if (isBillableUsageError(error)) {
+            this.acknowledgementUsageError = error
+          }
           console.warn('[AgentDiagnostics] Startup acknowledgement call failed', {
             error: sanitizePlannerError(error),
           })
@@ -557,28 +615,38 @@ export class PlanManager {
     }
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
-        await new Promise(r => setTimeout(r, PLAN_STARTUP_DELAY_MS))
-      }
-      if (this.acknowledgementDisplayPromise) {
-        await Promise.race([
-          this.acknowledgementDisplayPromise,
-          new Promise(resolve => setTimeout(resolve, PLANNER_START_AFTER_ACK_WAIT_MS)),
-        ])
+        await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
       }
       this.plannerDeadlineAtMs = Date.now() + PLANNER_OVERALL_DEADLINE_MS
       return null
     }
-    this.plannerAbortController?.abort()
-    this.plannerAbortController = new AbortController()
     let deadlineTimer: ReturnType<typeof setTimeout> | null = null
     this.planPromise = start()
       .then(() => {
-        deadlineTimer = setTimeout(() => this.plannerAbortController?.abort(), PLANNER_OVERALL_DEADLINE_MS)
+        deadlineTimer = setTimeout(() => plannerAbortController.abort(), PLANNER_OVERALL_DEADLINE_MS)
         return this.attemptPlanCall(0, true)
+      })
+      .then(async (result) => {
+        await this.acknowledgementPromise
+        if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
+        return result
       })
       .finally(() => {
         if (deadlineTimer) clearTimeout(deadlineTimer)
       })
+    // The loop attaches its authoritative await a little later. Observe early
+    // rejection now so an immediate abort/provider failure is never reported as
+    // an unhandled promise while preserving the rejection on planPromise.
+    void this.planPromise.catch(() => undefined)
+  }
+
+  dispose(): void {
+    this.removeExternalAbortListener?.()
+    this.removeExternalAbortListener = null
+    this.plannerAbortController?.abort()
+    this.plannerAbortController = null
+    this.settleAcknowledgementFirstVisible(false)
+    this.settleAcknowledgementDisplay(false)
   }
 
   usePrecomputedPlan(
@@ -597,7 +665,8 @@ export class PlanManager {
       return typeof scope === 'string' && scope.trim() ? scope.trim() : null
     })
     const alignedScopes = this.alignScopesToTitles(titles, scopes)
-    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
+    const compacted = this.compactSourceEvidencePhasesForTask(titles, alignedScopes, state.taskStrategy)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
 
     if (options.emitPlan !== false) this.emitter.plan(withRequired.titles)
@@ -650,12 +719,11 @@ export class PlanManager {
 
     this.usageSequence += 1
     console.log(`[COST:PLAN] ${label} in=${normalized.promptTokens} out=${normalized.completionTokens} cost=$${(normalized.cost || 0).toFixed(6)}`)
-    void this.recordUsage?.(normalized, `plan:${label}:${this.usageSequence}`).catch((error) => {
-      console.error('[AgentDiagnostics] Planner usage recording failed', {
-        label,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    })
+    try {
+      await this.recordUsage?.(normalized, `plan:${label}:${this.usageSequence}`)
+    } catch (error) {
+      throw new PlannerUsageRecordingError(error)
+    }
   }
 
   private async assertCreditRunway(label: string): Promise<void> {
@@ -669,6 +737,39 @@ export class PlanManager {
       throw new Error(`Assistant request timed out after ${Math.round(PLANNER_OVERALL_DEADLINE_MS / 1000)} seconds.`)
     }
     return Math.max(250, Math.min(preferredMs, remainingMs - 150))
+  }
+
+  private waitForPlannerDelay(delayMs: number): Promise<void> {
+    const signal = this.plannerAbortController?.signal
+    if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs))
+    if (signal.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
+
+    return new Promise<void>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout>
+      const cleanup = () => {
+        clearTimeout(timer)
+        signal.removeEventListener('abort', onAbort)
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(new DOMException('The operation was aborted.', 'AbortError'))
+      }
+      timer = setTimeout(() => {
+        cleanup()
+        resolve()
+      }, delayMs)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+  }
+
+  private plannerWasAborted(): boolean {
+    return this.externalSignal?.aborted === true || this.plannerAbortController?.signal.aborted === true
+  }
+
+  private throwIfPlannerAborted(): void {
+    if (this.plannerWasAborted()) {
+      throw new DOMException('The planner was aborted.', 'AbortError')
+    }
   }
 
   private async emitModelGeneratedAcknowledgement(taskShape: string, priorInvalidAck?: string): Promise<boolean> {
@@ -713,6 +814,7 @@ Requirements:
       stream_options: { include_usage: true },
       requestTimeoutMs: PLANNER_ACK_STREAM_TIMEOUT_MS,
       retryMaxAttempts: 0,
+      abortSignal: this.plannerAbortController?.signal,
     })
     console.log('[AgentDiagnostics] Startup acknowledgement stream opened', {
       elapsedMs: Date.now() - ackStartedAt,
@@ -797,13 +899,8 @@ Requirements:
     }
 
     const sanitizedAck = sanitizePlannerAck(ack.trim())
-    if (usage) {
-      await this.recordCompletionUsage(usage, 'ack')
-    } else if (!emittedAny) {
-      this.settleAcknowledgementFirstVisible(false)
-      this.settleAcknowledgementDisplay(false)
-      return false
-    }
+    await this.recordCompletionUsage(usage, 'ack')
+    this.throwIfPlannerAborted()
 
     if (emittedAny) {
       if (!isUsablePlannerAck(sanitizedAck)) {
@@ -866,8 +963,20 @@ Requirements:
     const resolvedPlan = state.planItems as string[] | null
     const resolvedScopes = state.planScopes as (string | null)[] | null
     if (resolvedPlan && resolvedPlan.length > 0) {
-      const isFirstStepDeliverable = resolvedPlan.length === 1
-      const imageOnlyStep = isFirstStepDeliverable && isImageRetrievalStep(resolvedPlan[0], resolvedScopes?.[0])
+      const taskIntent = analyzeTaskIntent(this.messages)
+      const quickInlineAnswer = taskIntent.wantsQuick &&
+        !taskIntent.explicitSavedArtifact &&
+        !taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages))
+      const singleStepNeedsSavedArtifact = !quickInlineAnswer && (
+        taskIntent.explicitSavedArtifact ||
+        taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages)) ||
+        state.buildTask ||
+        state.taskStrategy === 'build' ||
+        state.taskStrategy === 'creative'
+      )
+      const isFirstStepDeliverable = resolvedPlan.length === 1 && singleStepNeedsSavedArtifact
+      const imageOnlyStep = resolvedPlan.length === 1 &&
+        isImageRetrievalStep(resolvedPlan[0], resolvedScopes?.[0])
       // Use strategy-specific step guidance when available
       const strategyGuidance = state.strategyConfig?.stepGuidance
       const stepGuidance = imageOnlyStep
@@ -944,7 +1053,6 @@ Requirements:
         this.emitter.toolStart(id, 'read_attachment', {
           name: attachmentName,
           path: attachmentName,
-          action_label: step.visualInput ? 'Load uploaded image visual input' : 'Load uploaded attachment content',
           plan_step_index: state.currentStepIdx + 1,
         })
         this.emitter.toolResult(id, 'read_attachment', {
@@ -1012,8 +1120,17 @@ Requirements:
     }
     const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
     const sg = state.strategyConfig?.stepGuidance
+    const taskIntent = analyzeTaskIntent(this.messages)
+    const lastStepNeedsSavedArtifact =
+      taskIntent.explicitSavedArtifact ||
+      taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages)) ||
+      state.buildTask ||
+      state.taskStrategy === 'build' ||
+      state.taskStrategy === 'creative'
     const stepHint = isLastStep
-      ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file and append_file for large output. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
+      ? lastStepNeedsSavedArtifact
+        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file and append_file for large output. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
+        : 'This is the final answer step. Deliver the requested answer directly in chat from completed work. Do not create a file unless the user explicitly requested one.'
       : nonDeliverableStepGuidance(state, state.currentPlanItems[state.currentStepIdx], this.taskComplexity)
     return {
       role: 'system',
@@ -1105,12 +1222,15 @@ Schema:
 Rules:
 - Return only JSON. No markdown, prose, or code fence.
 - First extract the user's actual target/topic/artifact and requested output. Treat command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", "produce a concise report", and "answer whether" as instructions, not as the topic.
+- Preserve explicit user-authored steps in their stated order. Carry required, exclusive, and forbidden named-tool instructions into every relevant scope and do not insert substitute phases that violate them.
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one very brief direct paragraph, one or two short sentences and 12-38 words, using plain words and saying what Agent will do for the exact task and what it will deliver.
 - Step count is flexible: do not default to 3 or 4 steps, do not use fixed ranges, and do not shrink substantive work into a tiny plan.
 - Scopes must be compact, usually 10-22 words. Preserve depth through the phase goal, not long scope prose.
 - Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.
+- "code" means the user asked to write, modify, debug, run, or deploy code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact.
+- A request for current, external, citation-backed, credible, official, or primary-source evidence must put evidence gathering before final synthesis. Never combine evidence gathering and delivery into its only step; choose task-specific phase wording.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
 - If saved custom instructions require todo.md or another tracking file, preserve that support step; otherwise do not invent tracking files.
 - If the broken response contains useful task details, preserve them. If it does not, derive a specific plan from the user request.
@@ -1144,10 +1264,13 @@ Rules:
         res = await createCompletion(params)
       }
       await this.recordCompletionUsage(res.usage, 'repair')
+      this.throwIfPlannerAborted()
       const repaired = res.choices[0]?.message?.content?.trim() || ''
       console.log(`[Plan] Planner repair response received (${repaired.length} chars)`)
       return parsePlannerResponse(repaired)
     } catch (e) {
+      if (this.plannerWasAborted()) throw e
+      if (e instanceof PlannerUsageRecordingError) throw e.originalError
       if (isBillableUsageError(e)) throw e
       console.error('[Plan] Planner repair failed:', e)
       return null
@@ -1176,6 +1299,7 @@ Rules:
         return false
       }
       await this.emitAcknowledgement(obj.ack, mappedTaskType)
+      this.throwIfPlannerAborted()
       state.planItems = null
       state.planScopes = null
       state.currentPlanItems = null
@@ -1189,11 +1313,13 @@ Rules:
       ? arrays.scopes
       : enforcedTitles.map((_, index) => arrays.scopes[index] ?? null)
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
-    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
+    const compacted = this.compactSourceEvidencePhasesForTask(enforcedTitles, alignedScopes, mappedTaskType)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     assertPlannerVisibleTextQuality(obj.ack, withRequired.titles, withRequired.scopes)
 
     await this.emitAcknowledgement(obj.ack, mappedTaskType)
+    this.throwIfPlannerAborted()
     this.emitter.plan(withRequired.titles)
     state.planItems = withRequired.titles
     state.planScopes = withRequired.scopes
@@ -1279,12 +1405,10 @@ Rules:
       let res
       try {
         await this.assertCreditRunway('initial')
-        res = relaxedJsonMode
-          ? await createCompletion(params)
-          : await createCompletion({
-              ...params,
-              response_format: { type: 'json_object' },
-            })
+        res = await createCompletion({
+          ...params,
+          response_format: { type: 'json_object' },
+        })
       } catch (e) {
         const status = (e as { status?: number })?.status
         console.error('[AgentDiagnostics] Planner JSON-mode call failed', {
@@ -1304,6 +1428,7 @@ Rules:
         emitterClosed: this.emitter.isClosed,
       })
       await this.recordCompletionUsage(res.usage, 'initial')
+      this.throwIfPlannerAborted()
       const raw = res.choices[0]?.message?.content?.trim() || ''
       console.log(`[Plan] Planner response received (${raw.length} chars)`)
       if (state && !state.planEmitted && !this.emitter.isClosed) {
@@ -1316,17 +1441,18 @@ Rules:
       }
       return null
     } catch (e) {
+      if (e instanceof PlannerUsageRecordingError) throw e.originalError
       const status = (e as { status?: number })?.status
       if (status === 429 && attempt < PLAN_MAX_RETRIES) {
         const backoff = PLAN_RETRY_BASE_MS * (attempt + 1) + Math.random() * 500
         console.log(`[Plan] 429 on attempt ${attempt + 1}, retrying in ${Math.round(backoff)}ms`)
-        await new Promise(r => setTimeout(r, backoff))
+        await this.waitForPlannerDelay(backoff)
         return this.attemptPlanCall(attempt + 1)
       }
       if (e instanceof Error && e.message === PLANNER_REPAIR_EXHAUSTED_ERROR && attempt < PLAN_MAX_RETRIES) {
         const backoff = PLAN_RETRY_BASE_MS * (attempt + 1)
         console.log(`[Plan] Planner quality repair exhausted on attempt ${attempt + 1}, retrying fresh planner call in ${Math.round(backoff)}ms`)
-        await new Promise(r => setTimeout(r, backoff))
+        await this.waitForPlannerDelay(backoff)
         return this.attemptPlanCall(attempt + 1)
       }
       if (e instanceof Error && e.message === PLANNER_FAST_PARSE_MISS) {
@@ -1336,7 +1462,7 @@ Rules:
       if (isPlannerRequestTimeout(e) && attempt < PLANNER_TIMEOUT_RECOVERY_RETRIES) {
         const backoff = fastPlannerMode ? 25 : 100
         console.log(`[Plan] Planner start timed out on attempt ${attempt + 1}, retrying strict planner mode in ${backoff}ms`)
-        await new Promise(r => setTimeout(r, backoff))
+        await this.waitForPlannerDelay(backoff)
         return this.attemptPlanCall(attempt + 1, false)
       }
       if (isBillableUsageError(e)) throw e
@@ -1389,9 +1515,11 @@ Generate an updated list of remaining steps (including a revised current step if
         includeTemporalContext: false,
         requestTimeoutMs: PLANNER_REPLAN_REQUEST_TIMEOUT_MS,
         retryMaxAttempts: 0,
+        abortSignal: this.plannerAbortController?.signal,
       })
 
       await this.recordCompletionUsage(res.usage, 'replan')
+      this.throwIfPlannerAborted()
       const raw = res.choices[0]?.message?.content?.trim() || ''
       const jsonMatch = raw.match(/\[[\s\S]*\]/)
       if (jsonMatch) {
@@ -1427,6 +1555,8 @@ Generate an updated list of remaining steps (including a revised current step if
         }
       }
     } catch (e) {
+      if (this.plannerWasAborted()) throw e
+      if (e instanceof PlannerUsageRecordingError) throw e.originalError
       if (isBillableUsageError(e)) throw e
       console.error('[Plan] Replan failed:', e)
     }
@@ -1449,6 +1579,23 @@ Generate an updated list of remaining steps (including a revised current step if
 
   private customInstructionVisibleStepCount(): number | null {
     return parseVisibleStepCountInstruction(this.customInstructions)
+  }
+
+  private compactSourceEvidencePhasesForTask(
+    titles: string[],
+    scopes: Array<string | null>,
+    taskType: string | undefined,
+  ): { titles: string[]; scopes: Array<string | null> } {
+    const eligibleResearchTask = taskType === 'research' || taskType === 'analysis'
+    if (!eligibleResearchTask) return { titles, scopes }
+
+    const request = effectiveTaskRequest(this.messages)
+    const fixedVisibleCount = this.customInstructionVisibleStepCount() ?? parseVisibleStepCountInstruction(request)
+    const explicitlySeparateSourcePhases = /\b(?:separate|distinct|individual)\s+(?:(?:source|research|evidence)[-\s]*)?(?:steps|phases)\b/i.test(request)
+
+    return compactAdjacentSourceEvidencePhases(titles, scopes, {
+      preserveVisibleStepCount: fixedVisibleCount !== null || explicitlySeparateSourcePhases,
+    })
   }
 
   private applyCustomInstructionPlanRequirements(
@@ -1635,9 +1782,11 @@ Generate an updated list of remaining steps (starting from a revised current ste
         includeTemporalContext: false,
         requestTimeoutMs: PLANNER_REPLAN_REQUEST_TIMEOUT_MS,
         retryMaxAttempts: 0,
+        abortSignal: this.plannerAbortController?.signal,
       })
 
       await this.recordCompletionUsage(res.usage, 'info-replan')
+      this.throwIfPlannerAborted()
       const raw = res.choices[0]?.message?.content?.trim() || ''
       const jsonMatch = raw.match(/\[[\s\S]*\]/)
       if (jsonMatch) {
@@ -1672,6 +1821,8 @@ Generate an updated list of remaining steps (starting from a revised current ste
         }
       }
     } catch (e) {
+      if (this.plannerWasAborted()) throw e
+      if (e instanceof PlannerUsageRecordingError) throw e.originalError
       if (isBillableUsageError(e)) throw e
       console.error('[Plan] Info-replan failed:', e)
     }

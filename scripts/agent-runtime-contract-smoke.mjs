@@ -248,21 +248,22 @@ async function assertSourceContracts() {
   assert.match(planManager, /PLANNER_ACK_STREAM_TIMEOUT_MS = 5_500/, 'startup acknowledgement must use no-thinking generation with a realistic provider-start window')
   assert.doesNotMatch(planManager, /PLANNER_ACK_THOUGHTFUL_MIN_MS|waitForThoughtfulAcknowledgementWindow/, 'startup acknowledgement must show as soon as usable model text is available')
   assert.match(prompts, /getFastPlanningPrompt/, 'planner must expose a compact first-pass planning prompt')
-  assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 360/, 'fast planner should use a small output cap')
+  assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 520/, 'fast planner should have enough output room to finish structured multi-step JSON')
   assert.match(planManager, /PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 6_500/, 'fast planner must use one realistic provider-start window instead of stacked short retries')
   assert.match(planManager, /PLANNER_JSON_REQUEST_TIMEOUT_MS = 7_500/, 'strict planner JSON calls must use one realistic provider-start window')
   assert.match(planManager, /PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 6_500/, 'planner relaxed calls must use one realistic provider-start window')
   assert.match(planManager, /PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 7_500/, 'planner repair calls must use one realistic provider-start window')
-  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 10_000/, 'planner startup must stay bounded around 10s without local fallback plans')
-  assert.match(planManager, /PLANNER_START_AFTER_ACK_WAIT_MS = 2_500/, 'planner startup must wait briefly for the ack so model calls do not race under one collapsed deadline')
+  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 16_000/, 'planner startup must preserve a full bounded strict-model window after a fast JSON parse miss without local fallback plans')
+  assert.doesNotMatch(planManager, /PLANNER_START_AFTER_ACK_WAIT_MS/, 'planner startup must not carry a fixed acknowledgement display delay')
   assert.match(planManager, /PLANNER_TIMEOUT_RECOVERY_RETRIES = 0/, 'planner startup timeouts must not stack short retries into long invisible waits')
   assert.doesNotMatch(planManager, /continueAfterPlannerTimeout|timeoutFallbackPlan|Planner timed out inside startup deadline|state\.planEmitted = true[\s\S]{0,240}fallback\.titles/, 'planner startup timeout exhaustion must not fabricate visible local fallback plans')
   assert.match(planManager, /function plannerTaskMessages[\s\S]*effectiveTaskRequest\(messages\)\.slice\(0,\s*6000\)/, 'planner must use the compact effective task request instead of replaying full chat history')
   assert.match(planManager, /fastPlannerMode[\s\S]*getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*getPlanningPrompt\(this\.customInstructions\)/, 'initial planner call must use the compact prompt before the full strict prompt')
+  assert.match(planManager, /res = await createCompletion\(\{[\s\S]*response_format:\s*\{\s*type:\s*'json_object'\s*\}/, 'fast and strict planner calls must request structured JSON on the first provider attempt')
   assert.match(planManager, /requestTimeoutMs:\s*this\.plannerRequestTimeoutMs\(fastPlannerMode[\s\S]*PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_JSON_REQUEST_TIMEOUT_MS/, 'initial planner calls must pass the fast bounded planner timeout and lean fallback timeouts')
-  assert.match(planManager, /acknowledgementDisplayPromise[\s\S]*PLANNER_START_AFTER_ACK_WAIT_MS[\s\S]*plannerDeadlineAtMs = Date\.now\(\) \+ PLANNER_OVERALL_DEADLINE_MS[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/, 'planner startup must briefly wait for the ack, then begin the faster model-owned planning path under its own startup deadline')
+  assert.match(planManager, /plannerDeadlineAtMs = Date\.now\(\) \+ PLANNER_OVERALL_DEADLINE_MS[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)[\s\S]*await this\.acknowledgementPromise/, 'planner and acknowledgement must run concurrently while plan completion remains fenced on acknowledgement accounting')
   assert.match(planManager, /isPlannerRequestTimeout[\s\S]*attempt < PLANNER_TIMEOUT_RECOVERY_RETRIES/, 'planner startup timeout recovery must be centrally bounded')
-  assert.match(planManager, /void this\.recordUsage\?\.\(normalized,[\s\S]*?\.catch/, 'planner usage recording must not block acknowledgement, plan emission, or first tool startup')
+  assert.match(planManager, /await this\.recordUsage\?\.\(normalized,/, 'planner usage recording must complete before acknowledgement, plan emission, or first tool startup can become durable')
   assert.match(prompts, /Research starts with normal targeted web_search calls/, 'planner prompt must direct research startup toward targeted web_search, not broad sweep actions')
   assert.doesNotMatch(prompts, /initialAction[\s\S]*source_sweep/, 'planner prompt must not request a source_sweep initial action')
   assert.doesNotMatch(planManager, /initialToolCallFromPlannerAction|consumeInitialToolCall/, 'PlanManager must not inject planner-authored source_sweep actions ahead of normal agent turns')
@@ -292,13 +293,15 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /emitFastStartPlan|fastStartPlannerSteps|fastStartAck/, 'planner must not emit local canned acknowledgement or plan fallbacks')
   assert.match(planManager, /repairPlannerResponse/, 'invalid planner output must be repaired by the planner model instead of local visible fallback steps')
   assert.doesNotMatch(agentLoop, /function shouldRunStartupResearchSearch|runStartupResearchSearch|STARTUP SEARCH COMPLETE|IMMEDIATE SOURCE SEARCH COMPLETE|firstReadableSearchResultUrl/, 'research startup must not use local bootstrap/source-search shortcuts')
-  assert.match(agentLoop, /const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction\(state\)[\s\S]*const requiredToolIntent = shouldRequireToolCall && !narrationWindowOpen/, 'research phases must keep a model-selected tool-action intent instead of local source actions')
+  assert.match(agentLoop, /const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction\(state\)[\s\S]*const requiredToolIntent = shouldRequireToolCall/, 'research and cadence phases must keep a model-selected tool-action intent instead of opening a prose-only window')
   assert.match(agentLoop, /function supportsProviderRequiredToolChoice\(\): boolean \{[\s\S]*ASSISTANT_PROVIDER !== 'openrouter'[\s\S]*\}/, 'OpenRouter routes must avoid provider-forced tool choice because Gemini Flash Lite can timeout invisibly on required tool starts')
   assert.match(agentLoop, /const useRequiredToolCall = requiredToolIntent[\s\S]*supportsProviderRequiredToolChoice\(\)/, 'provider-forced tool choice must be gated separately from the agent tool-action intent')
   assert.match(agentLoop, /compactResearchToolRequiredMessage[\s\S]*Choose the most useful source\/search\/browser\/document action/, 'research repairs must nudge the model to choose the evidence tool itself')
   assert.match(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS[\s\S]*web_search[\s\S]*read_document/, 'compact research recovery must narrow to source-focused model-selected tools after a miss')
   assert.doesNotMatch(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS[\s\S]*source_sweep/, 'compact research recovery must not reintroduce broad source_sweep actions')
   assert.match(agentLoop, /needsAlternateSourceRoute[\s\S]*state\.stepLoopDetections > 0[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)/, 'compact research opened-source recovery must reopen search/browser routes after repeated read loops')
+  assert.match(agentLoop, /compactResearchRemainingCandidates[\s\S]*state\.workLedger\.searchResults[\s\S]*visited\.has\(normalized\)[\s\S]*failed\.has\(normalized\)/, 'compact research turns must preserve actionable unvisited candidate URLs after old tool results are compacted')
+  assert.match(agentLoop, /read_document is temporarily suppressed[\s\S]*If no remaining candidate is visible[\s\S]*one targeted web_search for a new authoritative domain/, 'cached source-loop recovery guidance must allow alternate discovery when the retained candidates are unavailable or unusable')
   assert.match(agentLoop, /COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS[\s\S]*web_search[\s\S]*read_document[\s\S]*browser_navigate/, 'compact research must define primary source routes separately from contextual scroll-only browser controls')
   assert.match(agentLoop, /compactResearchSourceRecoveryToolsForState[\s\S]*hasPrimarySourceRoute[\s\S]*sourceRecoveryPool[\s\S]*Restored compact research source tools/, 'compact research recovery must restore source tools from the full registry when active tools collapse to scroll-only controls')
   assert.match(taskStrategy, /toolPriority:\s*\['web_search', 'read_document', 'browser_navigate', 'create_file'\]/, 'research tools must prioritize document extraction before full browser navigation')
@@ -313,7 +316,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /lastCreditRunwayCheckAt = Date\.now\(\)/, 'newly accepted tasks should treat the route-level credit check as fresh for startup control calls')
   assert.match(agentLoop, /assertServerCreditRunwayCached/, 'agent loop must use cached credit runway checks before model calls')
   assert.match(agentLoop, /const assertPlannerCreditRunway = async \(\) => this\.assertServerCreditRunwayCached\(\)/, 'planner control calls must share the cached credit runway instead of rechecking credits before acknowledgement')
-  assert.match(agentLoop, /new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*effectiveCustomInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire effective custom instructions, credit usage, credit preflight, and startup acknowledgement control into PlanManager')
+  assert.match(agentLoop, /new PlanManager\([\s\S]{0,500}this\.options\.skipStartupAcknowledgement === true,[\s\S]{0,80}\bsignal\b/, 'AgentLoop must wire effective custom instructions, credit usage, credit preflight, startup acknowledgement control, and cancellation into PlanManager')
   assert.match(agentLoop, /shouldHydrateResearchActivity[\s\S]*this\.options\.startFreshSandbox !== true[\s\S]*loadResearchActivityEntries/, 'fresh tasks must not block startup acknowledgement on an already-cleared research activity read')
   assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*void clearResearchActivityForTask\(userId,\s*conversationId,\s*staleResearchCutoff\)[\s\S]*resetLocalSandboxDir[\s\S]*taskStartCreditPromise = chargeServerTaskStart[\s\S]*await Promise\.all\(startupTasks\)/, 'background task startup must keep sandbox reset parallel and move stale research cleanup plus task-start billing off the acknowledgement critical path')
   assert.doesNotMatch(chatTaskRunner, /startupTasks\.push\(\s*chargeServerTaskStart/, 'task-start credit charging must not block first acknowledgement startup')
@@ -357,7 +360,11 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /const currentAck = this\.cleanAcknowledgmentCandidate\(currentContent\)/, 'completion must compare against the current full message acknowledgement')
   assert.match(useAgentStream, /dispatcher\.getTerminalStatus\(\) === 'error'[\s\S]*?dispatcher\.getTerminalErrorMessage\(\)/, 'empty error streams must preserve the backend error instead of showing a generic no-response message')
   assert.match(eventDispatcher, /isHiddenInternalToolResult/, 'internal skipped tool results must be hidden by the stream dispatcher')
-  assert.match(eventDispatcher, /removeComputerPanelItem\(this\.conversationId,\s*panelFocusIdForTool\(event\.name,\s*event\.id\)\)/, 'hidden skipped tools must remove their streaming computer-panel placeholder')
+  assert.match(
+    eventDispatcher,
+    /settleHiddenComputerPanelItem[\s\S]*if \(!isBrowserTool\(event\.name\)\)[\s\S]*removeComputerPanelItem\(this\.conversationId,\s*panelId\)/,
+    'hidden skipped non-browser tools must remove their streaming computer-panel placeholder',
+  )
   assert.match(artifactSlice, /removeComputerPanelItem/, 'chat store must support removing stale computer panel placeholders')
   assert.match(useAgentStream, /removeComputerPanelItem/, 'stream dispatcher must receive the remove-computer-panel action')
   assert.doesNotMatch(searchResults, /choosing another route/, 'search panel must not show a skipped-search fallback message')
@@ -366,7 +373,7 @@ async function assertSourceContracts() {
   assert.match(inputLimits, /MAX_TASK_INPUT_CHARS\s*=\s*1000/, 'task input must be capped at exactly 1000 characters')
   assert.match(inputLimits, /clampTaskInput/, 'shared task input limit helper must expose deterministic clamping')
   assert.match(chatInput, /maxLength=\{MAX_TASK_INPUT_CHARS\}/, 'main composer textarea must set a native 1000-character maxLength')
-  assert.match(chatInput, /clampTaskInput/, 'main composer must clamp programmatic inserts, drafts, paste, and voice input')
+  assert.match(chatInput, /clampTaskInput/, 'main composer must clamp programmatic inserts, drafts, and paste')
   assert.match(chatInput, /taskInputLimitMessage/, 'main composer must show a consistent limit message when overflow is attempted')
   assert.match(chatInput, /\{value\.length\.toLocaleString\(\)\} \/ \{MAX_TASK_INPUT_CHARS\.toLocaleString\(\)\}/, 'main composer must show the 1000-character cap in its counter')
   assert.match(chatInput, /optimisticTaskStarting = submitPending && !isStreaming && !isProcessingFiles/, 'composer must show a running state immediately after task submit before global stream state flushes')
@@ -385,7 +392,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /drainLiveDirectives/, 'agent loop must consume live user directives')
   assert.match(agentLoop, /superseded pending tool calls/, 'live directives must stop stale queued tool calls before execution')
   assert.match(messageSlice, /addLiveDirectiveExchange/, 'chat store must support inserting live user directives into an active task')
-  assert.match(messageSlice, /messages\.splice\(i \+ 1,\s*0,\s*boundedUserMessage,\s*continuation\)/, 'live directive messages must keep the continuing assistant turn after the clamped user redirect')
+  assert.match(
+    messageSlice,
+    /const lastIndex = messages\.length - 1[\s\S]*if \(current\?\.role === 'assistant'\)[\s\S]*messages\.push\(boundedUserMessage, continuation\)/,
+    'live directive messages must split only the final assistant and keep the continuing turn after the clamped user redirect',
+  )
   assert.match(chatInput, /Send live instruction/, 'composer copy must describe live task redirection instead of interruption')
   assert.match(chatRoute, /export const maxDuration = 300/, 'agent chat route must stay within the deployed Hobby plan duration cap')
   assert.match(agentConfig, /AGENT_RUN_MAX_DURATION_MS\s*=\s*270_000/, 'agent runtime must stay below the production route wall-clock budget')
@@ -395,8 +406,8 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /AGENT_WORKER_RUN_MAX_DURATION_MS\s*=\s*900_000/, 'background workers must have a longer quality window than serverless routes')
   assert.match(agentConfig, /AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS\s*=\s*120_000/, 'background workers must not enter deadline synthesis after only a short research window')
   assert.match(agentConfig, /AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS\s*=\s*12_000/, 'background workers must fail forward quickly instead of waiting near 30 seconds on stalled model turns')
-  assert.match(chatTaskRunner, /runMaxDurationMs:\s*AGENT_WORKER_RUN_MAX_DURATION_MS/, 'background workers must pass their longer runtime window into AgentLoop')
-  assert.match(chatTaskRunner, /deadlineFinalizationBufferMs:\s*AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS/, 'background workers must pass their deadline buffer into AgentLoop')
+  assert.match(chatTaskRunner, /const runMaxDurationMs = claimedWorkerAttempt === null[\s\S]*AGENT_WORKER_RUN_MAX_DURATION_MS[\s\S]*runMaxDurationMs,/, 'background workers must pass their longer runtime window into AgentLoop')
+  assert.match(chatTaskRunner, /const deadlineFinalizationBufferMs = claimedWorkerAttempt === null[\s\S]*AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS[\s\S]*deadlineFinalizationBufferMs,/, 'background workers must pass their deadline buffer into AgentLoop')
   assert.match(agentState, /runStartedAtMs/, 'agent state must track wall-clock start time for long task deadline handling')
   assert.match(agentState, /deadlineFinalizationStarted/, 'agent state must ensure deadline finalization is entered only once')
   assert.match(agentLoop, /maybeStartDeadlineFinalization/, 'agent loop must force final synthesis before a platform timeout can kill the stream')
@@ -411,7 +422,8 @@ async function assertSourceContracts() {
   assert.match(messageList, /shouldFollowStream = !userScrolledUp\.current/, 'agent stream updates must only autoscroll while the user remains pinned to bottom')
   assert.doesNotMatch(messageList, /scrollingUp && distanceFromBottom/, 'chat autoscroll must not depend on brittle upward-motion detection')
   assert.match(agentMessage, /allPlannedGroupsDone = hasGroups && taskGroups\.every\(\(g\) => g\.status === 'done'\)/, 'completion banner must require every planned task group to be done')
-  assert.match(agentMessage, /completedSteps=\{taskGroups\.filter\(\(g\) => g\.status === 'done'\)\.length\}/, 'completion details must count all planned groups, not just started groups')
+  assert.match(agentMessage, /const completedGroupCount = taskGroups\.filter\(\(g\) => g\.status === 'done'\)\.length/, 'completion details must derive their count from all planned groups')
+  assert.match(agentMessage, /completedSteps=\{completedGroupCount\}/, 'completion details must use the all-planned-groups completion count')
   assert.doesNotMatch(agentMessage, /const allGroupsDone = hasGroups && activeGroups\.every/, 'completion must not ignore pending unstarted plan groups')
   assert.match(chatPage, /setStreamingStatus\('thinking'\)/, 'route restore for active streams must not re-show fresh sandbox setup')
   assert.match(appLayout, /const session = await auth\(\)\.catch\(\(\) => null\)/, 'root layout must resolve the server session before hydrating the client provider')
@@ -440,9 +452,9 @@ async function assertSourceContracts() {
   assert.match(authGate, /if \(status === 'loading'\) \{\s*return <>\{children\}<\/>\s*\}/, 'auth gate loading state must keep routed children visible instead of blanking the app shell')
   assert.match(authGate, /status === 'unauthenticated' && !hasSession/, 'auth gate must not hide children when the status flag is stale but session data exists')
   assert.match(appLayout, /<ChatStoreSync \/>/, 'root layout must mount authenticated DB task-history sync')
-  assert.match(globalsCss, /--accent-blue:\s*var\(--text-secondary\)/, 'general accent-blue must preserve the existing muted app accent')
-  assert.match(globalsCss, /--status-live:\s*#0081f2/, 'light theme must expose a dedicated blue live-status token')
-  assert.match(globalsCss, /--status-live:\s*#2f8cff/, 'dark theme must expose a dedicated blue live-status token')
+  assert.match(globalsCss, /--accent-blue:\s*#0068b8/, 'light theme must expose the consumer-facing blue app accent')
+  assert.match(globalsCss, /--status-live:\s*#0068b8/, 'light theme must expose a dedicated blue live-status token')
+  assert.match(globalsCss, /--status-live:\s*#4c9cff/, 'dark theme must expose a dedicated blue live-status token')
   assert.match(globalsCss, /--color-status-live:\s*var\(--status-live\)/, 'Tailwind must expose the dedicated live-status token')
   assert.doesNotMatch(agentMessage, /Agent<\/span>[\s\S]{0,180}animate-live-pulse/, 'agent message header must not show a blinking live dot next to the Agent label')
   assert.doesNotMatch(chatPage, /conversation\.title[\s\S]{0,220}animate-live-pulse/, 'chat top bar must not show a blue live dot next to the task title')
@@ -455,22 +467,23 @@ async function assertSourceContracts() {
   assert.doesNotMatch(typingIndicator, /animate-live-pulse/, 'startup indicator must not use the ring-style live pulse animation')
   assert.doesNotMatch(typingIndicator, /rounded-2xl border border-border-primary bg-bg-secondary px-3 py-2\.5/, 'startup indicator must not render the old large boxed card')
   assert.doesNotMatch(typingIndicator, /Planning the next action|Computer ready|Task context/, 'startup indicator must not show the old card detail rows')
-  assert.match(useAgentStream, /setStreaming\(true\)[\s\S]*?fetch\('\/api\/chat'/, 'new tasks must enter visible running state and reach the server without waiting on cached client credit preflight')
+  assert.match(useAgentStream, /setConversationStreaming\(conversationId, true\)[\s\S]*?postTaskStartWithStableRunId\(/, 'new tasks must enter visible running state and reach the stable-run task-start helper without waiting on cached client credit preflight')
+  assert.match(useAgentStream, /async function postTaskStartWithStableRunId\([\s\S]*?fetch\('\/api\/chat'/, 'the stable-run task-start helper must post new tasks to the chat API')
   assert.doesNotMatch(useAgentStream, /await useCreditStore\.getState\(\)\.syncFromServer\(\)[\s\S]*?fetch\('\/api\/chat'/, 'cached client credit sync must not block new task startup before the authoritative server check')
   assert.match(useAgentStream, /let existingController = activeControllers\.get\(conversationId\) \?\? abortRef\.current/, 'follow-up sends must treat controllers as mutable so stale aborted streams can be cleared')
   assert.match(useAgentStream, /if \(existingController\?\.signal\.aborted\) \{[\s\S]*activeControllers\.delete\(conversationId\)[\s\S]*existingController = null[\s\S]*\}/, 'follow-up sends must clear stale aborted controllers before deciding between directive and fresh-task routing')
-  assert.match(useAgentStream, /if \(!existingController && storedActiveRun && !isAutoSend\) \{[\s\S]*fetchServerActiveRun\(conversationId\)[\s\S]*clearStoredActiveRun\(conversationId, storedActiveRun\.runId\)[\s\S]*storedActiveRun = null[\s\S]*\}/, 'follow-up sends must verify stored active runs with the server before routing text to live directives')
+  assert.match(useAgentStream, /if \(!existingController && storedActiveRun && !isAutoSend\) \{[\s\S]*const serverActiveRun = await fetchServerActiveRun\(conversationId, \{[\s\S]*runId: storedActiveRun\.runId,[\s\S]*\}\)[\s\S]*else if \(serverActiveRun === null\) \{[\s\S]*TASK_START_CONFIRMATION_GRACE_MS[\s\S]*rollbackRejectedTaskStart\(conversationId, storedActiveRun\.runId\)[\s\S]*storedActiveRun = null/, 'follow-up sends must verify the stored run id, preserve ambiguous starts through the confirmation grace, and roll back only a definitive miss before routing text')
   assert.match(activeChatRoute, /if \(shouldUseExternalTaskWorker\(\)\) \{[\s\S]*return Response\.json\(\{ active: false \}\)[\s\S]*\}/, 'external-worker active-run discovery must not expose orphan active-task leases as live jobs')
   assert.match(chatDirectiveRoute, /const activeJob = await findActiveTaskJobForConversation\(userId,\s*conversationId\)[\s\S]*if \(!activeJob\) \{[\s\S]*NO_ACTIVE_TASK_FOR_DIRECTIVE/, 'live directives must be rejected when no queued or running job can consume them')
   assert.doesNotMatch(rootOverlays, /MobileUnsupportedGate|Desktop required|not mobile optimized/, 'root overlays must not block authenticated mobile app routes')
   assert.match(appFrame, /flex-1 min-w-0 w-full min-h-screen/, 'app frame must let mobile route content shrink to the viewport width')
   assert.match(mainContent, /flex-1 min-w-0 w-full min-h-screen/, 'main content must prevent protected app routes from causing horizontal mobile overflow')
   assert.match(chatPage, /h-\[100dvh\] min-h-\[100dvh\]/, 'chat route must use dynamic viewport height on mobile')
-  assert.match(chatPage, /overflow-visible pl-14 pr-2/, 'chat top bar must keep dropdown menus visible while preserving small mobile padding')
+  assert.match(chatPage, /overflow-visible[^"]*pl-14 pr-2/, 'chat top bar must keep dropdown menus visible while preserving small mobile padding')
   assert.match(computerPanel, /z-\[130\][\s\S]*h-\[100dvh\]/, 'computer panel must render as a full-screen mobile sheet above the chat')
   assert.match(computerPanel, /overflow-x-auto scrollbar-none/, 'computer panel tabs must be horizontally scrollable on mobile')
   assert.match(chatInput, /bottom-\[calc\(5\.25rem\+env\(safe-area-inset-bottom\)\)\]/, 'attachment menu must stay inside the mobile viewport above the composer')
-  assert.match(userMessage, /max-w-\[calc\(100vw-2rem\)\][\s\S]*break-words/, 'user message bubbles must wrap safely on narrow mobile screens')
+  assert.match(userMessage, /max-w-\[94%\][\s\S]*break-words/, 'user message bubbles must remain viewport-bounded and wrap safely on narrow mobile screens')
   assert.match(chatStoreSync, /useSession/, 'chat history sync must wait for the authenticated account')
   assert.match(chatStoreSync, /initializeChatStoreSync\(userId\)/, 'chat history sync must start with the authenticated user id')
   assert.doesNotMatch(chatStoreIndex, /persist\(/, 'chat/task history must not use browser-local Zustand persistence as the source of truth')
@@ -486,11 +499,13 @@ async function assertSourceContracts() {
   assert.match(chatServerSync, /getDeletedIds/, 'client task sync must send explicit deletes for account task rows')
   assert.match(chatServerSync, /REFRESH_INTERVAL_MS/, 'client task sync must refresh open browsers from server state')
   assert.match(chatServerSync, /SAVE_DEBOUNCE_MS\s*=\s*250/, 'new and changed tasks must be queued for DB save almost immediately')
-  assert.match(chatServerSync, /REFRESH_INTERVAL_MS\s*=\s*5_000/, 'other browser sessions must refresh account tasks within seconds')
+  assert.match(chatServerSync, /REFRESH_INTERVAL_MS\s*=\s*30_000/, 'background account-task polling must stay slow enough not to contend with active task persistence')
   assert.match(chatServerSync, /REFRESH_THROTTLE_MS\s*=\s*1_500/, 'manual focus refreshes must not be throttled for multiple seconds')
   assert.match(chatServerSync, /SYNC_MANAGER_READY_WAIT_MS\s*=\s*4_000[\s\S]*waitForSyncManagerReady[\s\S]*flushChatServerSync\(\): Promise<void> \{[\s\S]*await waitForSyncManagerReady\(\)/, 'first-task history flush must wait briefly for account sync to mount before deciding it has nothing to save')
   assert.match(chatServerSync, /serverSummary/, 'client sync must mark account task index rows as metadata-only summaries')
-  assert.match(chatServerSync, /if \(isServerSummaryConversation\(existing\)\) \{[\s\S]*byId\.set\(conversation\.id, conversation\)[\s\S]*const \{ serverSummary: _serverSummary, \.\.\.existingBody \} = existing/, 'metadata-only refreshes must not turn an already loaded task body back into a loading-only server summary')
+  assert.match(chatServerSync, /function mergeNewerSummaryMetadata[\s\S]*serverSummary: true,[\s\S]*serverBodyStale: true[\s\S]*mergeNewerSummaryMetadata\(existing, conversation, true\)/, 'a newer metadata summary must fence an older loaded body until the newer server body is fetched')
+  assert.match(chatServerSync, /!isServerSummaryConversation\(conversation\)/, 'a stale summary-fenced body must never be uploaded')
+  assert.match(chatServerSync, /conversation\.serverBodyStale !== true/, 'the stale-body upload fence must survive an accidentally removed summary marker')
   assert.match(chatServerSync, /!isServerSummaryConversation\(conversation\)[\s\S]*lastSavedUpdatedAt/, 'metadata-only task summaries must never be posted back as full task bodies')
   assert.match(chatServerSync, /loadConversationFromServer/, 'client sync must expose lazy full-body task loading')
   assert.match(chatStoreIndex, /loadConversationFromServer/, 'chat store must export lazy full-body task loading for opened DB tasks')
@@ -503,9 +518,9 @@ async function assertSourceContracts() {
   assert.match(conversationsLib, /select id, title, starred, folder, created_at_ms, updated_at_ms/, 'task index queries must not pull every body_json during initial hydration')
   assert.match(conversationsLib, /export async function getUserConversationById/, 'server must expose one-task full body loading')
   assert.match(conversationsLib, /tursoTransaction\('write'/, 'conversation sync writes must be DB transactions')
-  assert.match(conversationsLib, /on conflict\(user_id, id\) do update/, 'conversation sync must upsert individual task rows')
-  assert.match(conversationsLib, /excluded\.updated_at_ms >= conversations\.updated_at_ms/, 'older browser saves must not overwrite newer task rows')
-  assert.match(conversationsLib, /excluded\.updated_at_ms >= coalesce\(conversations\.deleted_at_ms, 0\)/, 'older browser saves must not resurrect later-deleted task rows')
+  assert.match(conversationsLib, /if \(!currentRow\) \{[\s\S]*insert into conversations[\s\S]*on conflict\(user_id, id\) do nothing[\s\S]*\} else \{[\s\S]*update conversations[\s\S]*where user_id = \? and id = \? and revision = \?/, 'conversation sync must insert or revision-CAS-update individual task rows')
+  assert.match(conversationsLib, /const incomingCanReplaceCurrent = !currentRow \|\| \([\s\S]*currentIsActive[\s\S]*baseRevisionMatches \|\| currentIsPlaceholder \|\| \([\s\S]*requestedUpdatedAtMs >= \(Number\.isFinite\(currentUpdatedAtMs\)/, 'older browser saves must not overwrite newer active task rows')
+  assert.match(conversationsLib, /:\s*baseRevisionMatches && \([\s\S]*requestedUpdatedAtMs >= \(Number\.isFinite\(currentDeletedAtMs\)/, 'browser saves must match the current revision and be newer than the tombstone before resurrecting a deleted task row')
   assert.match(conversationsLib, /deleted_at_ms/, 'conversation deletes must be persisted as server tombstones')
   assert.match(conversationsRoute, /auth\(\)/, 'conversation API must require the authenticated account')
   assert.match(conversationsRoute, /assertSameOriginRequest/, 'conversation write API must enforce same-origin requests')
@@ -593,7 +608,7 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /purpose:\s*'deliverable'/, 'recovered artifacts must carry deliverable purpose')
   assert.match(artifacts, /ArtifactPurpose = 'deliverable' \| 'support' \| 'internal'/, 'artifacts must have purpose metadata')
   assert.doesNotMatch(chatInput, /IMAGE_ACCEPT|imageInputRef|Add images|Screenshots, photos/, 'chat input must not expose image upload entry points')
-  assert.match(chatInput, /DOCX, PPTX, and readable text files/, 'chat input must describe the supported attachment types')
+  assert.match(chatInput, /Add from local files/, 'chat input must expose the supported local-file attachment entry point')
   assert.match(fileHandling, /FILE_ACCEPT = `\$\{TEXT_ACCEPT\},\$\{DOCUMENT_ACCEPT\}`/, 'context uploads must accept only text and supported documents')
   assert.match(fileHandling, /Unsupported upload[\s\S]*Use \.docx, \.pptx, or text files only/, 'client-side attachment processing must reject image and binary uploads')
   assert.match(attachmentsRoute, /isAllowedUserUpload[\s\S]*Images are not supported/, 'server attachment uploads must reject unsupported image/binary uploads')
@@ -671,11 +686,13 @@ async function assertSourceContracts() {
   assert.match(tools, /properties:\s*\{[\s\S]*?action_label:\s*TOOL_ACTION_LABEL_PARAMETER,[\s\S]*?plan_step_index:\s*TOOL_PLAN_STEP_INDEX_PARAMETER,[\s\S]*?\.\.\.\(schema\.properties \|\| \{\}\)/, 'display contract fields must be ordered before large tool payload fields for live action pills')
   assert.match(tools, /required:\s*\[\.\.\.new Set\(\['action_label',\s*'plan_step_index',\s*\.\.\.required\]\)\]/, 'display contract fields must be required before regular payload fields')
   assert.doesNotMatch(tools, /Include action_label and plan_step_index/, 'tool descriptions must not repeat display-contract text on every schema')
+  assert.doesNotMatch(tools, /youtube_transcript|YouTube Transcript/, 'removed YouTube transcript tooling must not be exposed to the model')
+  assert.doesNotMatch(toolRegistry, /youtube_transcript|getYouTubeTranscript/, 'removed YouTube transcript tooling must not have an executor')
   assert.match(agentLoop, /compactToolDefinitionsForModel/, 'model-call tool schemas should trim repeated display-only descriptions')
   assert.match(agentLoop, /description: _description/, 'tool schema compaction should remove display-only descriptions while preserving required fields')
   assert.match(toolPipeline, /planStepIndexBlockReason/, 'tool pipeline must block calls declared for the wrong plan step')
-  assert.match(activityDescriber, /runtimeVisibleActionLabel/, 'runtime must provide deterministic visible labels when the model omits display-only metadata')
-  assert.match(toolPipeline, /runtimeDisplayActionLabel/, 'tool pipeline must repair missing visible labels instead of burning model turns on display-only retries')
+  assert.doesNotMatch(activityDescriber, /runtimeVisibleActionLabel/, 'runtime must not invent deterministic visible action labels')
+  assert.doesNotMatch(toolPipeline, /runtimeDisplayActionLabel|args\.action_label\s*=\s*runtimeVisibleActionLabel/, 'tool execution must preserve LLM-authored action labels and reject invalid ones through model repair')
   assert.match(toolPipeline, /phaseSemanticBlockReason/, 'tool pipeline must block future-phase semantic drift before executing tools')
   assert.match(toolPipeline, /appears to continue previous step/, 'tool pipeline must block previous-phase semantic drift before executing tools')
   assert.match(toolPipeline, /synthesisPhaseResearchBlockReason/, 'tool pipeline must block research tools inside synthesis/write/deliverable phases')
@@ -685,8 +702,9 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch[\s\S]*completedSearches >= 1 && openedSourceReads === 0/, 'hot-path source tools must mirror the search/source balance guard')
   assert.match(agentLoop, /fastSourceActionToolsForState[\s\S]*needsOpenedSourceBeforeMoreSearch[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)/, 'hot-path source turns must remove web_search when an opened source is required next')
   assert.match(agentLoop, /hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'compact source-opening recovery must remove web_search while known result URLs are still unopened')
-  assert.match(agentLoop, /Do not call web_search again while known result URLs are still unopened/, 'source-opening recovery prompt must forbid another search when known candidate URLs need opening')
-  assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*youtube_transcript/, 'source-opening turns must expose parallel extraction tools')
+  assert.match(agentLoop, /SOURCE OPENING REQUIRED:[\s\S]*Do not call web_search again/, 'source-opening recovery prompt must forbid another search when known candidate URLs need opening')
+  assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request/, 'source-opening turns must expose the supported parallel extraction tools')
+  assert.doesNotMatch(agentLoop, /youtube_transcript/, 'removed YouTube transcript tooling must not remain in runtime prompts or tool sets')
   assert.match(prompts, /After one or two good searches, read or extract the strongest result pages before searching more/, 'runtime prompt must frame web search as source discovery before extraction')
   assert.match(stepMessages, /Use web_search to discover candidates, then read\/extract the strongest source pages before searching more/, 'per-step research prompt must require source extraction after search discovery')
   assert.match(toolPipeline, /Previous-step "next" notes are closed/, 'previous phase bleed recovery must tell the model to ignore stale prior next-notes')
@@ -702,23 +720,27 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /isTaskTrackingMarkdownPath/, 'task-tracking markdown files must be recognized centrally')
   assert.match(toolPipeline, /currentStepAllowsTaskTrackingMarkdown/, 'custom-instruction tracking files must be allowed when present in current step scope')
   assert.doesNotMatch(toolPipeline, /state\.stepResearchCallCount < 2 && !currentStepAllowsTaskTrackingMarkdown/, 'custom-instruction tracking files must not require prior research calls')
-  assert.match(eventDispatcher, /strictActionLabel \|\| runtimeVisibleActionLabel\(event\.name,\s*event\.args\)/, 'client action pills must use runtime-repaired labels instead of dropping valid tool starts')
-  assert.match(eventDispatcher, /toolStartsById[\s\S]*startedEvent[\s\S]*runtimeVisibleActionLabel\(event\.name,\s*startedEvent\.args\)/, 'tool results must still create a visible completed pill when the start was missed')
+  assert.doesNotMatch(eventDispatcher, /runtimeVisibleActionLabel/, 'client action pills must never invent deterministic labels')
+  assert.match(eventDispatcher, /const visibleActionLabel = strictActionLabelFromArgs\(event\.args\)/, 'client action pills must use the model-authored label')
   assert.match(eventDispatcher, /function shouldPreserveVisibleInternalToolResult/, 'visible recovery results must be eligible to finish existing action pills')
-  assert.match(eventDispatcher, /visibleStartedRecovery[\s\S]*isHiddenInternalToolResult\(event\.name,\s*event\.result\) && visibleStartedRecovery[\s\S]*status: 'done'[\s\S]*removeComputerPanelItem[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/, 'internal recovery results must complete already-visible action pills instead of removing them')
-  assert.match(eventDispatcher, /labelSource:\s*strictActionLabel \? 'model' : 'system'/, 'visible task pills must distinguish model labels from runtime-repaired labels')
+  assert.match(
+    eventDispatcher,
+    /visibleStartedRecovery[\s\S]*isHiddenInternalToolResult\(event\.name,\s*event\.result\) && visibleStartedRecovery[\s\S]*status: 'done'[\s\S]*settleHiddenComputerPanelItem\(event\)[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/,
+    'internal recovery results must complete already-visible action pills while settling their computer-panel state',
+  )
+  assert.match(eventDispatcher, /labelSource:\s*'model'/, 'visible task pills must retain model authorship')
   assert.doesNotMatch(eventDispatcher, /describeActivity\(event\.name,\s*event\.args\)/, 'visible task pills must not use locally generated action text')
   assert.doesNotMatch(actionFeed, /describeActivity\(/, 'rendered action pills must only show stored model-authored labels')
   assert.match(useAgentStream, /isContextualTaskUpdateText/, 'client must only preserve sandbox state for contextual task updates')
   assert.match(useAgentStream, /isFirstTaskAutoStart \|\| \(!isAutoSend && !isContextualTaskUpdateText\(latestUserContent\)\)/, 'new user tasks and first-prompt auto-starts should start with an isolated sandbox')
   assert.match(chatRoute, /startIsolatedTaskSandbox/, 'server must enforce per-task sandbox isolation')
-  assert.match(chatRoute, /resetLocalSandboxDir\(conversationId\)/, 'isolated tasks must reset local task state before visible startup acknowledgement')
-  assert.match(chatRoute, /resetE2BSandbox\(conversationId\)/, 'isolated E2B tasks must still reset the remote sandbox before tool execution')
-  assert.match(chatRoute, /isTruncatedFinishReason/, 'direct chat must detect provider length stops before displaying a response')
-  assert.match(chatRoute, /isLikelyIncompleteDirectAnswer/, 'direct chat must detect mid-sentence answers even when the provider reports success')
-  assert.match(chatRoute, /Continue exactly from the next word/, 'direct chat must request a continuation instead of showing cut-off text')
-  assert.match(chatRoute, /chargeServerTokenUsage\(userId,\s*conversationId,\s*creditRunId,\s*creditUsage,\s*`direct:\$\{attempt \+ 1\}`\)/, 'direct chat continuation calls must be charged with distinct server ledger ids')
-  assert.match(chatRoute, /DIRECT_CHAT_MAX_TOKENS = 1536/, 'direct chat should keep concise answers on a smaller completion cap')
+  assert.match(chatTaskRunner, /resetLocalSandboxDir\(conversationId\)/, 'isolated tasks must reset local task state before visible startup acknowledgement')
+  assert.match(chatTaskRunner, /resetE2BSandbox\(conversationId\)/, 'isolated E2B tasks must still reset the remote sandbox before tool execution')
+  assert.match(chatTaskRunner, /isTruncatedFinishReason/, 'direct chat must detect provider length stops before displaying a response')
+  assert.match(chatTaskRunner, /isLikelyIncompleteDirectAnswer/, 'direct chat must detect mid-sentence answers even when the provider reports success')
+  assert.match(chatTaskRunner, /Continue exactly from the next word/, 'direct chat must request a continuation instead of showing cut-off text')
+  assert.match(chatTaskRunner, /chargeServerTokenUsage\(userId,\s*conversationId,\s*creditRunId,\s*creditUsage,\s*`attempt:\$\{billingAttempt\}:direct:\$\{attempt \+ 1\}`\)/, 'direct chat continuation calls must be charged with attempt-scoped distinct server ledger ids')
+  assert.match(chatTaskRunner, /DIRECT_CHAT_MAX_TOKENS = 1536/, 'direct chat should keep concise answers on a smaller completion cap')
   assert.doesNotMatch(chatRoute, /isBareResearchOverviewRequest\(request\)[\s\S]*`Research \$\{topic\} basics`[\s\S]*`Summarize \$\{topic\} clearly`/, 'route startup plans must not collapse broad research into a canned two-step plan')
   assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'route must not fabricate deterministic visible startup plans')
   assert.doesNotMatch(chatRoute, /`Map \$\{subject\} angles`|`Read current \$\{subject\} sources`|`Synthesize the \$\{subject\} answer`|Frame the key questions|Gather current evidence|Open a few strong sources|Give the concise synthesis/, 'route startup must not emit stale generic research placeholders')
@@ -729,29 +751,31 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP[\s\S]*The final file write could not start quickly enough/, 'final saved deliverable model-start timeouts must error instead of looping when no file exists')
   assert.match(agentLoop, /maybeStartIterationCapFinalWrite[\s\S]*taskNeedsSavedFinalArtifact[\s\S]*hasSavedFinalDeliverableCandidate\(state\)\) return false[\s\S]*state\.dynamicIterationLimit = Math\.max\(state\.dynamicIterationLimit, state\.iterations \+ 8\)/, 'iteration cap must grant a bounded final-write rescue instead of erroring before saving a required artifact')
   assert.match(agentLoop, /credibleEvidencePacket[\s\S]*repeatedResearchLoop[\s\S]*state\.consecutiveNoToolCalls >= 3 \|\| repeatedResearchLoop[\s\S]*return true/, 'compact research must advance after credible direct evidence instead of looping on repeated no-tool/tool-loop replies')
-  assert.match(chatRoute, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
-  assert.match(chatRoute, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
-  assert.match(chatRoute, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
-  assert.match(chatRoute, /DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN/, 'context-dependent direct-chat follow-ups must still preserve history')
-  assert.match(chatRoute, /directChatNeedsTemporalContext/, 'direct chat should only pay for temporal context on date/time questions')
-  assert.match(chatRoute, /includeTemporalContext:\s*directChatNeedsTemporalContext\(messages\)/, 'direct chat temporal context must be gated by the latest user request')
+  assert.match(chatTaskRunner, /DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768/, 'direct chat continuations should stay compact')
+  assert.match(chatTaskRunner, /directChatNeedsConversationContext/, 'direct chat should avoid paying for history on standalone questions')
+  assert.match(chatTaskRunner, /return cleanMessages\.slice\(-1\)/, 'standalone direct chat should send only the latest user message')
+  assert.match(chatTaskRunner, /DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN/, 'context-dependent direct-chat follow-ups must still preserve history')
+  assert.match(chatTaskRunner, /directChatNeedsTemporalContext/, 'direct chat should only pay for temporal context on date/time questions')
+  assert.match(chatTaskRunner, /includeTemporalContext:\s*directChatNeedsTemporalContext\(messages\)/, 'direct chat temporal context must be gated by the latest user request')
   assert.doesNotMatch(chatRoute, /deterministic|Deterministic|DIRECT_CHAT_EXACT_|DIRECT_CHAT_GREETING_PATTERN|DIRECT_CHAT_THANKS_PATTERN|DIRECT_CHAT_ACK_PATTERN|preHydrationDeterministicReply/, 'chat route must not use deterministic no-model reply paths')
   assert.match(agentIdentity, /AGENT_IDENTITY_SYSTEM_INSTRUCTION[\s\S]*general AI agent[\s\S]*do not disclose[\s\S]*Answer naturally instead of using one fixed canned response/, 'identity disclosure must be prompt-driven, not a fixed canned response')
   assert.match(directChatRouting, /isAgentIdentityDisclosureQuestion\(content\)[\s\S]*return true/, 'identity disclosure questions must route to direct chat instead of agent tools')
-  assert.match(chatRoute, /You are Agent, a general AI agent[\s\S]*AGENT_IDENTITY_SYSTEM_INSTRUCTION/, 'direct chat must identify as a general AI agent and apply identity guidance')
+  assert.match(chatTaskRunner, /DIRECT_CHAT_IDENTITY_SYSTEM_PROMPT[\s\S]*You are Agent, a general AI agent[\s\S]*do not disclose the model\/provider/, 'direct chat must identify as a general AI agent and apply identity guidance')
   assert.match(prompts, /You are Agent, a general AI agent and autonomous task agent[\s\S]*AGENT_IDENTITY_SYSTEM_INSTRUCTION/, 'agent runtime prompt must identify as a general AI agent and apply identity guidance')
-  assert.doesNotMatch(chatRoute, /latestUserAskedAgentIdentityDisclosure\(messages\)[\s\S]*emitter\.textDelta|AGENT_IDENTITY_DISCLOSURE_RESPONSE/, 'direct chat must not bypass provider generation with a fixed identity answer')
+  assert.doesNotMatch(chatTaskRunner, /latestUserAskedAgentIdentityDisclosure\(messages\)[\s\S]*emitter\.textDelta|AGENT_IDENTITY_DISCLOSURE_RESPONSE/, 'direct chat must not bypass provider generation with a fixed identity answer')
   assert.doesNotMatch(agentLoop, /latestUserAskedAgentIdentityDisclosure|emitAgentIdentityDisclosureAnswer|isAgentIdentityDisclosureQuestion/, 'agent loop must not hard-stop identity questions before normal model handling')
   assert.doesNotMatch(directChatRouting, /EXACT_LOCAL_TEMPORAL_PATTERN|EXACT_SIMPLE_ARITHMETIC_PATTERN/, 'direct chat routing must not force exact-match temporal or arithmetic shortcut paths')
   assert.match(directChatRouting, /good\\s\+\(\?:morning\|afternoon\|evening\)/, 'router should keep common greeting variants out of the full agent path')
   assert.match(directChatRouting, /thank you\|thx/, 'router should keep compact thanks variants out of the full agent path')
   assert.match(directChatRouting, /got it\|sounds good\|sure\|alright/, 'router should keep common acknowledgement variants out of the full agent path')
-  assert.match(chatRoute, /const rawMessages = validation\.data\.messages[\s\S]*const directChat = shouldUseDirectChat\(rawMessages\)[\s\S]*const messagesPromise = directChat \|\| !hasUnhydratedAttachments\(rawMessages\)[\s\S]*hydrateMessageAttachmentsForUser\(rawMessages,\s*userId\)[\s\S]*const creditsPromise = assertServerCreditsAvailable\(userId\)[\s\S]*const accessPromise = conversationId[\s\S]*const workerAvailabilityPromise = timedRoutePromise/, 'chat route should route before attachment hydration and start access/worker checks in parallel without deterministic bypasses')
-  assert.match(chatRoute, /persistConversationAfterResponse[\s\S]*after\(\(\) => ensureUserConversationForTaskStart/, 'conversation placeholder persistence must run after the task stream is opened')
+  assert.match(chatRoute, /const rawMessages = validation\.data\.messages[\s\S]*const directChat = shouldUseDirectChat\(rawMessages\)[\s\S]*const scopedTaskMessages = scopeAgentTaskMessages\(safeRawMessages\)[\s\S]*const messagesPromise = useExternalWorker \|\| directChat \|\| !hasUnhydratedAttachments\(scopedTaskMessages\)/, 'chat route should scope payloads and decide routing before attachment hydration')
+  assert.match(chatRoute, /await timedRoutePromise\('taskAccessReadyMs', assertTaskAccess\([\s\S]*if \(access && !access\.ok\) return access\.response/, 'chat route must finish task access authorization before task-start preflights')
+  assert.match(chatRoute, /const creditsPromise = assertServerCreditsAvailable\(userId\)[\s\S]*const workerAvailabilityPromise = timedRoutePromise[\s\S]*const attachmentAccessPromise = timedRoutePromise[\s\S]*Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*workerAvailabilityPromise,[\s\S]*attachmentAccessPromise,/, 'credit, hydration, worker, and attachment-access preflights should settle in parallel after authorization')
+  assert.match(chatRoute, /const conversationInsertPromise = timedRoutePromise\([\s\S]*prepareConversationForTaskStartInsert\([\s\S]*conversationInsertPromise,[\s\S]*await enqueueTaskJob\(\{[\s\S]*conversationInsert,[\s\S]*await startTaskJob\(\{[\s\S]*conversationInsert,/, 'conversation placeholder persistence must be reserved atomically with either external or in-process task creation')
   assert.doesNotMatch(chatRoute, /await ensureUserConversationForTaskStart\(userId,\s*\{[\s\S]*await enqueueTaskJob/, 'chat route must not block task stream opening on conversation placeholder persistence')
   assert.doesNotMatch(chatRoute, /findActiveTaskJobForUser\(userId\)/, 'chat route must not block new tasks because another task is active for the same account')
-  assert.match(chatRoute, /if \(conversationId\) \{[\s\S]*chargeServerTaskStart/, 'chat route should use one metering path without deterministic task-start bypasses')
-  assert.match(chatRoute, /meteredTaskStarted[\s\S]*chargeActiveCredit/, 'active-time credit charging should only finalize for metered task starts')
+  assert.match(chatTaskRunner, /if \(conversationId\) \{[\s\S]*chargeServerTaskStart/, 'shared task runner should use one metering path without deterministic task-start bypasses')
+  assert.match(chatTaskRunner, /meteredTaskStarted[\s\S]*chargeActiveCredit/, 'active-time credit charging should only finalize for metered task starts')
   assert.match(titleRoute, /includeTemporalContext:\s*false/, 'title generation should not pay for temporal context')
   assert.doesNotMatch(titleRoute, /heuristicTitleFromMessage|deterministicDirectTitleFromMessage|TITLE_HEURISTIC|TITLE_EXACT|TITLE_GREETING|TITLE_DOMAIN|Quick Calculation|Exact Reply|Help Request|Agent Identity/, 'title route must not use local deterministic title paths')
   assert.match(titleRoute, /await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'title route should always use provider title generation after credit check')
@@ -762,8 +786,9 @@ async function assertSourceContracts() {
   assert.match(llm, /'xhigh'/, 'runtime must preserve xhigh reasoning instead of normalizing it down when explicitly configured')
   assert.match(llm, /DEFAULT_REASONING_EXCLUDE = booleanEnv\(process\.env\.OPENROUTER_REASONING_EXCLUDE,\s*true\)/, 'reasoning exclude flag must tolerate whitespace-padded Vercel env values')
   assert.match(llm, /getAssistantApiKey[\s\S]*trimmedEnv\(process\.env\.DEEPSEEK_API_KEY\)[\s\S]*trimmedEnv\(process\.env\.OPENROUTER_API_KEY\)/, 'provider credentials must be trimmed before request headers are built')
-  assert.match(llm, /DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv\(process\.env\.DEEPSEEK_THINKING_ENABLED,\s*false\)/, 'DeepSeek thinking must be disabled by default')
-  assert.match(llm, /thinking:\s*\{\s*type:\s*'disabled'\s*\}/, 'DeepSeek calls must support explicit no-thinking payloads')
+  assert.doesNotMatch(llm, /DEFAULT_DEEPSEEK_THINKING_ENABLED/, 'DeepSeek non-thinking mode must not be vulnerable to environment drift')
+  assert.match(llm, /return \{\s*thinking:\s*\{\s*type:\s*'disabled'\s*\}\s*\}/, 'every direct DeepSeek call must be hard-pinned to non-thinking mode')
+  assert.match(llm, /withoutDeepSeekReasoningHistory/, 'non-thinking DeepSeek requests must strip stale reasoning traces from provider history')
   assert.match(llm, /effort: DEFAULT_REASONING_EFFORT/, 'OpenRouter calls must include the configured reasoning effort by default')
   assert.match(llm, /exclude: DEFAULT_REASONING_EXCLUDE/, 'internal reasoning should be excluded from user-visible responses by default')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
@@ -809,7 +834,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(eventDispatcher, /IMMEDIATE_SOURCE_NARRATION_TOOLS/, 'source-result narration must not bypass the 3-4 action cadence')
   assert.doesNotMatch(eventDispatcher, /shouldFlushModelNarrationImmediately/, 'source-result model narration must not flush early')
   assert.doesNotMatch(eventDispatcher, /generateAutoNarration/, 'client must not invent narration from tool results')
-  assert.match(eventDispatcher, /narration\.position === currentPosition/, 'client must reject multiple narration blocks in the same action gap')
+  assert.match(eventDispatcher, /targetNarrations\.some\(narration => narration\.position === safePosition\)/, 'client must reject multiple narration blocks in the same action gap')
   assert.match(eventDispatcher, /if \(this\.toolsSinceLastNarration >= TOOLS_BETWEEN_NARRATION_FLUSHES\)/, 'client narration flushes must be driven by the global visible-action count')
   assert.doesNotMatch(eventDispatcher, /handleStepAdvance[\s\S]{0,180}this\.toolsSinceLastNarration = 0/, 'normal step transitions must not reset the global narration cadence')
   assert.match(eventDispatcher, /panelFocusIdForTool/, 'tool starts must resolve the active computer panel item id')
@@ -821,13 +846,15 @@ async function assertSourceContracts() {
   assert.match(searchResults, /SearchContextHeader/, 'search results must render a query context header when available')
   assert.match(searchResults, /title\?: string/, 'search results must accept the active panel title for query context')
   assert.match(uiStore, /setComputerPanelActiveItemId/, 'UI store must expose active computer item focus')
-  assert.match(policyEngine, /rewriteInvalidForcedNarrationAction/, 'invalid forced narration must be repaired before no-tool handling')
+  assert.match(policyEngine, /acceptProgressNarration/, 'backend policy must use centralized narration acceptance')
+  assert.match(policyEngine, /Narration is observational UI feedback, never a phase transition gate/, 'narration must not block useful agent work')
+  assert.doesNotMatch(policyEngine, /rewriteInvalidForcedNarrationAction|forcedNarrationBeforeToolAction/, 'invalid or duplicate narration must not enter repair loops')
   assert.match(eventDispatcher, /applyServerCreditEvent\(entry\)/, 'client store must apply server credit events for visible balance updates')
-  assert.match(agentLoop, /`tokens:\$\{state\.iterations\}`/, 'agent sessions must charge tokens per iteration for immediate credit cutoff')
+  assert.match(agentLoop, /`attempt:\$\{creditAttempt\}:tokens:\$\{state\.iterations\}`/, 'agent sessions must charge tokens per worker attempt and iteration for immediate credit cutoff')
   assert.match(serverCredits, /did not return billable usage/, 'agent sessions must fail closed when provider billing cost is missing')
   assert.match(agentLoop, /recordPlannerUsage/, 'planner LLM calls must be charged through the server ledger')
-  assert.match(agentLoop, /Failed to record planner token usage; continuing task/, 'planner token ledger write failures must not fail the task')
-  assert.match(agentLoop, /Failed to record iteration token usage; continuing task/, 'iteration token ledger write failures must not fail a completed model turn')
+  assert.doesNotMatch(agentLoop, /Failed to record planner token usage; continuing task/, 'planner token ledger failures must fail closed instead of continuing unbilled')
+  assert.doesNotMatch(agentLoop, /Failed to record iteration token usage; continuing task/, 'iteration token ledger failures must fail closed instead of continuing unbilled')
   assert.match(agentLoop, /function isTransientAssistantStreamError[\s\S]*fetch failed/, 'transient assistant stream fetch failures must be classified for recovery')
   assert.match(agentLoop, /MODEL STREAM NETWORK RECOVERY[\s\S]*return 'STREAMING'/, 'transient assistant stream failures must retry the active turn instead of terminating')
   assert.match(planManager, /recordCompletionUsage\(res\.usage/, 'planner completion responses must record provider billing cost')
@@ -907,7 +934,7 @@ async function assertSourceContracts() {
   assert.match(taskJobs, /status in \('queued', 'running'\)/, 'active job discovery must include queued jobs that have not been claimed yet')
   assert.match(taskJobs, /cancel_requested = 0/, 'active job discovery must exclude cancelled jobs')
   assert.match(taskJobs, /TASK_JOB_DB_POLL_MS = 100/, 'persisted task event replay must poll fast enough for early acknowledgement')
-  assert.match(taskJobs, /let pollInFlight = false[\s\S]*if \(closed \|\| pollInFlight\) return[\s\S]*pollInFlight = true[\s\S]*finally\(\(\) => \{[\s\S]*pollInFlight = false/, 'persisted task event replay must not overlap Turso polls and duplicate the same seq events')
+  assert.match(taskJobs, /let pollInFlight = false[\s\S]*if \(streamClosed \|\| pollInFlight\) return[\s\S]*pollInFlight = true[\s\S]*finally\(\(\) => \{[\s\S]*pollInFlight = false/, 'persisted task event replay must not overlap Turso polls and duplicate the same seq events')
   assert.match(taskJobs, /loadPersistedTaskEvents\(input\.runId, lastSeq\)/, 'persisted task event replay hot loop must avoid a job-row read on every poll')
   assert.match(taskJobs, /TASK_JOB_STATUS_POLL_MS = 2_000/, 'persisted task event replay must keep slower status polling as a terminal fallback')
   assert.match(taskJobs, /TASK_JOB_STARTUP_PLAN_READ_TIMEOUT_MS = 250/, 'worker startup plan handoff must not block first tool work behind a slow Turso read')
@@ -919,15 +946,15 @@ async function assertSourceContracts() {
   assert.match(taskJobs, /agent_task_workers\.current_run_id = agent_task_jobs\.run_id[\s\S]*agent_task_workers\.last_seen_at_ms >= \?/, 'stale worker-lease recovery must not steal a job from a heartbeat-live worker running that exact task')
   assert.match(taskJobs, /job\.conversationId !== input\.conversationId/, 'in-memory task event replay must reject run ids from a different conversation')
   assert.match(taskJobs, /snapshot\.conversationId !== input\.conversationId/, 'persisted task event replay must reject run ids from a different conversation')
-  assert.match(useAgentStream, /let highestDispatchedSeq = 0[\s\S]*if \(seq <= highestDispatchedSeq\) continue[\s\S]*highestDispatchedSeq = seq/, 'client stream consumer must ignore duplicate persisted seq events before dispatch')
+  assert.match(useAgentStream, /classifyStreamSequence\(event, runId, highestDispatchedSeq\)[\s\S]*highestDispatchedSeq = seq/, 'client stream consumer must advance only a contiguous persisted seq after dispatch')
   assert.match(taskWorker, /DEFAULT_WORKER_POLL_MS = 100/, 'cloud worker must poll the queue quickly enough for sub-second claim latency')
-  assert.match(taskWorker, /console\.log\('\[TaskWorker\] Started'[\s\S]*void ensureAgentRuntimePreloaded\(\)\.catch/, 'worker must preload the agent runtime at startup instead of making the first task pay import latency')
+  assert.match(taskWorker, /await Promise\.all\(\[startupWarmupPromise, ensureAgentRuntimePreloaded\(\)\]\)[\s\S]*sendHeartbeat\('idle', true\)/, 'worker must finish runtime preload and sandbox readiness before advertising itself idle')
   assert.match(taskWorker, /envBoolDefault\('AGENT_E2B_WARM_POOL_ENABLED', false\)/, 'worker must not prewarm unowned E2B runtime unless explicitly enabled')
   assert.match(taskWorker, /prewarmE2BSandbox\('worker-startup'\)/, 'worker must still support explicit prewarmed E2B sandbox startup')
   assert.match(e2bSandbox, /warmSandboxPromise/, 'E2B runtime must track an in-process warm sandbox promise')
   assert.match(e2bSandbox, /adoptWarmE2BSandbox/, 'E2B runtime must adopt a prewarmed sandbox for the next task')
   assert.match(e2bSandbox, /billingStartedAtMs/, 'E2B runtime must preserve the actual sandbox billing start time for credit charging')
-  assert.match(chatTaskRunner, /getE2BSandboxBillingStartedAtMs\(conversationId\) \?\? billing\.startedAtMs/, 'E2B runtime charge must use the actual sandbox billing start when available')
+  assert.match(chatTaskRunner, /getE2BSandboxBillingDescriptor\(conversationId\)[\s\S]*activateServerE2BRuntimeBilling\([\s\S]*startedAtMs: descriptor\.startedAtMs/, 'E2B runtime charge must durably bind the actual sandbox billing start and ownership generation')
   assert.match(e2bSandbox, /DEFAULT_E2B_WARM_POOL_MAX_AGE_MS[\s\S]*warmPoolMaxAgeMs[\s\S]*Discarded stale warm sandbox/, 'E2B warm pool must discard stale sandboxes instead of adopting broken old browser state')
   assert.match(e2bSandbox, /ensureE2BRemoteBrowser\(warmId\)/, 'E2B warm pool must start Chromium before warm sandbox adoption')
   assert.match(e2bSandbox, /cat \$\{shellQuote\(tempPath\)\} >> \$\{shellQuote\(target\.absolutePath\)\}/, 'E2B append_file must append inside the VM instead of reading and rewriting the whole remote file')
@@ -936,7 +963,8 @@ async function assertSourceContracts() {
   assert.match(chatTaskRunner, /resetLocalSandboxDir\(conversationId\)[\s\S]*resetE2BSandbox\(conversationId\)/, 'worker must split fast local reset from slower remote E2B reset')
   assert.doesNotMatch(taskText, /Cloud sandbox and browser are ready/, 'startup acknowledgement must keep cloud readiness internal')
   assert.doesNotMatch(taskText, /sandboxReadyAcknowledgementForTask|I'll research \$\{subject\}|diverse source mix/, 'startup acknowledgement must be model-generated instead of canned taskText copy')
-  assert.match(planManager, /this\.acknowledgementPromise = this\.emitModelGeneratedAcknowledgement\('task'\)[\s\S]*acknowledgementDisplayPromise[\s\S]*PLANNER_START_AFTER_ACK_WAIT_MS[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/, 'model acknowledgement must get first display priority before the planner starts its own bounded deadline')
+  assert.match(planManager, /this\.acknowledgementPromise = this\.emitModelGeneratedAcknowledgement\('task'\)[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)[\s\S]*await this\.acknowledgementPromise/, 'model acknowledgement and planner must start concurrently while completion still waits for acknowledgement accounting')
+  assert.doesNotMatch(planManager, /PLANNER_START_AFTER_ACK_WAIT_MS/, 'planner startup must not wait behind acknowledgement display')
   assert.doesNotMatch(planManager, /ackPriority|PLANNER_ACK_PRIORITY_WINDOW_MS/, 'planner startup must not use an unbounded acknowledgement priority gate')
   assert.match(taskText, /cleaned\.length > maxLength/, 'topic cleanup must not drop the final word from short subjects like "new iPhones"')
   assert.match(taskText, /iPhones/, 'topic cleanup should preserve iPhone casing without title-casing the whole phrase')
@@ -948,17 +976,17 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /Map \$\{compact\} foundations and source angles|Gather authoritative \$\{compact\} sources|Write the sourced \$\{compact\} deep summary/, 'planner must not keep local canned fast research plan templates')
   assert.doesNotMatch(chatRoute, /createRouteStartupAcknowledgement|routeStartupAcknowledgementPromise|routeAckReadyMs|routeStartupAcknowledgementAbort/, 'external-worker startup acknowledgement must be owned by the worker, not a route-side best-effort request that can time out')
   assert.match(chatRoute, /const useExternalWorker = shouldUseExternalTaskWorker\(\)/, 'chat route must compute the external-worker branch once for startup ordering')
-  assert.match(chatRoute, /if \(useExternalWorker\) \{[\s\S]*;\[, messages\] = await Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*\]\)[\s\S]*access = null[\s\S]*\} else \{[\s\S]*accessPromise/, 'external task streams must open after credits and messages, without waiting on task access or worker heartbeat')
-  assert.doesNotMatch(chatRoute, /;\[, messages, access, unavailableWorker\] = await Promise\.all/, 'worker readiness must stay off the first-paint Promise.all')
-  assert.match(chatRoute, /void accessPromise\.then\(async \(accessResult\)[\s\S]*taskAccessDenied = true[\s\S]*cancelTaskJob\(userId, creditRunId\)/, 'task access must still cancel the prefaced task if ownership validation fails')
+  assert.match(chatRoute, /;\[, messages, unavailableWorker,[^\]]*\] = await Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*workerAvailabilityPromise,[\s\S]*attachmentAccessPromise,/, 'credits, attachment hydration, worker readiness, and attachment ownership must run concurrently and all settle before task acceptance')
+  assert.ok(chatRoute.indexOf('if (access && !access.ok)') < chatRoute.indexOf('enqueueTaskJob({'), 'ownership validation must complete before durable enqueue')
+  assert.ok(chatRoute.indexOf('if (unavailableWorker)') < chatRoute.indexOf('enqueueTaskJob({'), 'worker unavailability must return before durable enqueue')
   assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker route must not use the old post-queue startup-plan patch race')
   assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker route must not create deterministic local plans')
   assert.match(chatRoute, /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[heartbeatEvent\]/, 'external-worker route must persist only heartbeat before the worker-owned plan')
-  assert.match(chatRoute, /taskStartPromise = Promise\.resolve\(\)\.then\(\(\) => \{[\s\S]*startupPlanExpected: false[\s\S]*payload: queuedTaskPayload/, 'external-worker route must enqueue immediately and let the worker planner own visible steps')
+  assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload/, 'external-worker route must durably enqueue before returning while the worker owns visible planning')
   assert.doesNotMatch(chatRoute, /startupPlanExpected:\s*!directChat && useExternalWorker/, 'worker must not wait behind route-owned startup planning after claiming a queued job')
-  assert.doesNotMatch(chatRoute, /taskStartPromise = (?:accessPromise|Promise\.all\()[\s\S]*enqueueTaskJob/, 'access and worker readiness checks must not hold the durable job out of the worker queue after first paint')
-  assert.match(chatRoute, /ackPrefaceSettled[\s\S]*ackPrefaceExpired[\s\S]*ROUTE_STARTUP_ACK_PREFACE_WAIT_MS[\s\S]*await input\.taskStartPromise/, 'task replay may wait briefly for ack-first ordering, but not for the slower startup plan')
-  assert.match(chatRoute, /if \(raced\.index === 0\)[\s\S]*if \(!ackPrefaceExpired\) emitEvents\(raced\.events\)[\s\S]*await input\.taskStartPromise/, 'chat route must emit acknowledgement first, then release persisted job events without waiting for plan generation')
+  assert.ok(chatRoute.indexOf('findActiveTaskJobForConversation(userId, conversationId)') < chatRoute.indexOf('enqueueTaskJob({'), 'same-conversation queued or running work must be detected before enqueue')
+  assert.doesNotMatch(chatRoute, /createPrefacedTaskJobEventStream|taskStartPromise/, 'task acceptance must not be deferred into an already-open response stream')
+  assert.match(chatRoute, /error instanceof TaskConversationConflictError[\s\S]*CONVERSATION_TASK_ALREADY_RUNNING[\s\S]*status: 409/, 'atomic conversation conflicts must be returned before opening SSE')
   assert.match(chatTaskRunner, /waitForTaskJobStartupPlan\(creditRunId/, 'worker task runner must briefly wait for the route-owned plan before starting a duplicate planner')
   assert.match(agentLoop, /usePrecomputedPlan\(state,\s*this\.options\.startupPlan,\s*\{ emitPlan: false \}\)/, 'agent loop must use the persisted startup plan without emitting a duplicate plan event')
   assert.match(chatRoute, /skipStartupAcknowledgement:\s*false/, 'external workers must keep their own startup acknowledgement enabled so every task shows an ack before visible plan/action work')
@@ -971,7 +999,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /if \(this\.skipAcknowledgement\) return[\s\S]*if \(this\.acknowledgementEmitted\) \{[\s\S]*suppressFurtherAcknowledgementDeltas = true[\s\S]*if \(this\.acknowledgementDisplayPromise\)/, 'planner must avoid duplicate acknowledgement text while still letting the planner acknowledgement win the startup race')
   assert.doesNotMatch(chatRoute, /acquireActiveTaskLease\(userId,\s*conversationId,\s*creditRunId\)/, 'chat route must not acquire an account-wide active-task lease before starting a new task')
   assert.doesNotMatch(chatRoute, /if \(!activeTask\.acquired\)|ACTIVE_TASK_CONFLICT_MESSAGE|ACTIVE_TASK_CONFLICT_CODE/, 'chat route must not reject new starts through the removed account-wide active-task conflict path')
-  assert.doesNotMatch(chatRoute, /status:\s*409/, 'second concurrent task starts must not return a start-conflict response')
+  assert.match(chatRoute, /CONVERSATION_TASK_ALREADY_RUNNING[\s\S]*status:\s*409/, 'same-conversation concurrent starts must return a scoped conflict without restoring an account-wide task limit')
   assert.doesNotMatch(chatRoute, /refreshActiveTaskLease\(userId,\s*creditRunId\)|releaseActiveTaskLease\(userId,\s*creditRunId\)/, 'chat route must not maintain the removed account-wide start lease during task execution')
   assert.match(chatRoute, /conversationId:\s*authenticated\.conversationId/, 'resume stream requests must bind run replay to the requested conversation')
   assert.match(chatRoute, /conversationId,\s*\n\s*afterSeq: 0/, 'initial stream requests must bind run replay to the created conversation')
@@ -983,23 +1011,27 @@ async function assertSourceContracts() {
   assert.match(activeChatRoute, /lease\.conversationId !== conversationId/, 'active-run discovery route must not return another task run id')
   assert.doesNotMatch(useAgentStream, /ACTIVE_TASK_CONFLICT_CODE|showActiveTaskConflict|pendingIds/, 'client stream must not intercept starts through the removed active-task conflict modal path')
   assert.match(useAgentStream, /fetchServerActiveRun/, 'client stream must query the server for active run ids when localStorage has no resume record')
-  assert.match(useAgentStream, /getStoredActiveRun\(conversationId\) \|\| await fetchServerActiveRun\(conversationId,\s*options\)/, 'resume must query server active-run discovery before giving up')
+  assert.match(useAgentStream, /const storedRecord = persistedCursorRecord \|\| getStoredActiveRun\(conversationId\)[\s\S]*const serverRecord = await fetchServerActiveRun\(conversationId, \{[\s\S]*\.\.\.options,[\s\S]*runId: storedRecord\?\.runId,[\s\S]*\}\)[\s\S]*serverRecord === undefined \? storedRecord : serverRecord/, 'resume must prefer authoritative server discovery for the persisted run id while retaining local cursor state on transient lookup failure')
   assert.doesNotMatch(uiStore, /A task is already running|Finish or stop|Only one task can run/i, 'UI store must not preserve the removed one-task-per-account message')
   assert.doesNotMatch(rootOverlays, /Task already running|Only one task can run/i, 'root overlays must not expose removed one-task-per-account copy')
+  assert.match(modal, /role="dialog"[\s\S]*aria-modal="true"/, 'modal dialogs must expose dialog semantics')
+  assert.match(modal, /getFocusableElements[\s\S]*event\.key !== 'Tab'[\s\S]*initialFocus\?\.focus/, 'modal dialogs must trap keyboard focus and establish an accessible initial focus target')
+  assert.match(modal, /previouslyFocused[\s\S]*previouslyFocused\.focus/, 'modal dialogs must restore focus when they close')
+  const conversationSearchSource = await readFile(join(root, 'src/components/chat/ConversationSearch.tsx'), 'utf8')
+  const commandPaletteSource = await readFile(join(root, 'src/components/ui/CommandPalette.tsx'), 'utf8')
+  assert.match(conversationSearchSource, /inputRef\.current\?\.focus[\s\S]*previouslyFocused\.focus[\s\S]*role="search"/, 'task search must focus its query field, restore the prior focus on close, and expose search semantics')
+  assert.match(commandPaletteSource, /inputRef\.current\?\.focus[\s\S]*previouslyFocused\.focus[\s\S]*role="dialog"/, 'command palette must focus search, restore the prior focus on close, and expose dialog semantics')
   for (const [name, source] of Object.entries({
-    modal,
     chatInput,
     userMessage,
     imagePreview: await readFile(join(root, 'src/components/chat/ImagePreview.tsx'), 'utf8'),
-    conversationSearch: await readFile(join(root, 'src/components/chat/ConversationSearch.tsx'), 'utf8'),
     shortcutsPanel: await readFile(join(root, 'src/components/modals/ShortcutsPanel.tsx'), 'utf8'),
-    commandPalette: await readFile(join(root, 'src/components/ui/CommandPalette.tsx'), 'utf8'),
     customSelect: await readFile(join(root, 'src/components/ui/CustomSelect.tsx'), 'utf8'),
   })) {
     assert.doesNotMatch(source, /\bautoFocus\b|\bautofocus\b|\.focus\s*\(/, `${name} must not move browser focus automatically`)
   }
   assert.doesNotMatch(activeTaskConflictModal, /Task already running|Only one task can run per account/i, 'active-task modal must not expose the removed one-task-per-account rule')
-  assert.match(chatRoute, /for \(let attempt = 0; attempt <= DIRECT_CHAT_MAX_CONTINUATIONS; attempt\+\+\) \{[\s\S]*await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'direct chat must preflight credit runway before every provider call')
+  assert.match(chatTaskRunner, /for \(let attempt = 0; attempt <= DIRECT_CHAT_MAX_CONTINUATIONS; attempt\+\+\) \{[\s\S]*await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'direct chat must preflight credit runway before every provider call')
   assert.match(agentLoop, /await assertServerCreditsAvailable\(this\.options\.userId\)[\s\S]*createStreamingCompletion/, 'agent loop must preflight credit runway before every streaming provider call')
   assert.match(planManager, /preflightCredit/, 'planner must support credit preflight before provider calls')
   assert.match(planManager, /await this\.assertCreditRunway\('ack'\)[\s\S]*createCompletion/, 'planner acknowledgements must preflight before provider calls')
@@ -1056,10 +1088,10 @@ async function assertSourceContracts() {
   assert.match(outputVerifier, /Content appears cut off or unfinished at the end/, 'research verifier must reject visibly truncated markdown reports')
   assert.match(outputVerifier, /savedResearchReport[\s\S]*taskDefaultsToMarkdownDeliverable\(originalRequest\)/, 'brief saved markdown reports must not use tiny inline-answer word floors')
   assert.match(outputVerifier, /brief\|quick\|short\|concise/, 'research verifier must respect explicitly concise report requests')
-  assert.match(agentLoop, /recoveringFinalSavedDeliverable[\s\S]*state\.forceTextNextIteration = !recoveringFinalSavedDeliverable && state\.taskStrategy !== 'browse'/, 'tool-call recovery must keep browser tools enabled and keep final deliverables out of narration-only mode')
+  assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*finalSavedDeliverableTurn[\s\S]*return true/, 'final deliverable work must remain eligible for non-blocking cadence narration without entering narration-only recovery')
   assert.match(toolPipeline, /internalRecovery\?: 'malformed_tool_arguments'/, 'malformed tool-call JSON must be represented as internal recovery metadata')
   assert.match(toolPipeline, /INTERNAL_RECOVERY: malformed tool arguments/, 'malformed tool-call JSON must not surface as a normal failed tool result')
-  assert.match(agentLoop, /lastToolResults\.some\(isMalformedToolArgumentsRecovery\)[\s\S]*TOOL JSON RECOVERY/, 'malformed streamed tool args must trigger an immediate retry nudge before provider tool history is written')
+  assert.match(agentLoop, /const malformedToolResults = lastToolResults\.filter\(isMalformedToolArgumentsRecovery\)[\s\S]*TOOL JSON RECOVERY/, 'malformed streamed tool args must trigger an immediate retry nudge after preserving any valid sibling results')
   assert.match(goalTracker, /state\.taskStrategy === 'browse'[\s\S]*?state\.browserTaskCompleted/, 'browser goals must not complete from generic tool evidence')
   assert.match(goalTracker, /MAX_RENDERED_GOALS = 8/, 'goal context should be bounded for long plans')
   assert.match(goalTracker, /visibleGoalsForContext/, 'goal tracker must compact long goal lists around the active goal')
@@ -1076,8 +1108,8 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /useFreshSnapshotForCompletion/, 'fresh snapshots from preflight blocks must still be able to prove browser task completion')
   assert.match(toolPipeline, /sameSourceDomain\(visitedUrl,\s*userUrl\)/, 'explicit URL search guard must treat www/naked-domain navigation as an attempted direct navigation')
   assert.match(toolPipeline, /directNavigationBeforeSearchTarget/, 'explicit URL tasks must detect the direct navigation target before allowing search')
-  assert.match(toolPipeline, /Rerouted web_search to direct navigation/, 'explicit URL web_search attempts must be auto-rerouted to browser navigation without another model turn')
-  assert.match(toolPipeline, /plan_step_index:\s*state\.currentStepIdx \+ 1/, 'auto-rerouted direct navigation must keep the one-based visible plan step index')
+  assert.match(toolPipeline, /web_search was skipped because the user supplied the exact target[\s\S]*Call browser_navigate with that exact URL now and author a fresh action_label/, 'explicit URL web_search attempts must return to the model for a semantically correct direct-navigation action and label')
+  assert.doesNotMatch(toolPipeline, /Rerouted web_search to direct navigation/, 'the runtime must not silently change a tool while retaining wording authored for another action')
   assert.doesNotMatch(toolPipeline, /maybeAutoOpenSearchResult|Source evidence details|chooseSearchResultToAutoOpen|explicitQuickInlineScope|bareResearchRenderedBrowserBlockReason|AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS/, 'research speed must not come from backend-forced source-opening or canned source-detail pills')
   assert.match(agentLoop, /function savedDeliverableChunkEndsCleanly/, 'saved markdown deliverables must check clean chunk boundaries before accepting completion')
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600/, 'initial markdown deliverable writes need enough budget to avoid clipped reports')
@@ -1094,17 +1126,15 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /function isFastActionToolTurn/, 'agent loop must classify fast between-tool action turns centrally')
   assert.match(agentLoop, /const fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast minimal-thinking lane by default')
   assert.match(agentLoop, /HOT PATH ACTION TURN:[\s\S]*make exactly one native tool call[\s\S]*speed comes from choosing the next action quickly, not from doing less work/, 'fast action turns must explicitly ask lightweight models for immediate tool selection without reducing depth')
-  assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*up to 4 parallel source extraction calls[\s\S]*read_document, http_request, or youtube_transcript/, 'source-action turns must allow small parallel stateless source extraction batches')
-  assert.match(agentLoop, /parallel_tool_calls:\s*fastSourceActionTurn/, 'model parallel tool calls must be enabled only for source-action turns')
-  assert.match(toolPipeline, /MAX_PARALLEL_SOURCE_EXTRACTIONS = 4/, 'source extraction parallelism must be capped at four calls')
-  assert.match(toolPipeline, /PARALLEL_SOURCE_EXTRACTION_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*youtube_transcript/, 'only stateless source extraction tools should be eligible for parallel execution')
+  assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*parallel batch of up to 3 source extraction calls[\s\S]*read_document or http_request/, 'source-action turns must allow one batch of three independent supported stateless source extractions')
+  assert.match(agentLoop, /parallel_tool_calls:\s*allowParallelSourceToolCalls/, 'model parallel tool calls must be enabled only for source-action turns')
+  assert.match(agentLoop, /allowParallelSourceToolCalls[\s\S]*!sourceExtractionBatchConsumedForLatestSearch\(state\)/, 'only one model-selected parallel source batch may be taken from the latest search set')
+  assert.match(toolPipeline, /MAX_PARALLEL_SOURCE_EXTRACTIONS = 3/, 'one model-selected source batch must stay within three actions')
+  assert.match(toolPipeline, /PARALLEL_SOURCE_EXTRACTION_TOOLS[\s\S]*read_document[\s\S]*http_request/, 'only stateless source extraction tools should be eligible for parallel execution')
   assert.match(toolPipeline, /parallelSourceExtractionBatch[\s\S]*allCalls\.every\(tc => PARALLEL_SOURCE_EXTRACTION_TOOLS\.has\(tc\.name\)\)[\s\S]*MAX_PARALLEL_SOURCE_EXTRACTIONS/, 'parallel execution must be restricted to source extraction batches')
   assert.match(toolPipeline, /Promise\.all\(executionBatch\.map[\s\S]*executeSingle\(tc,\s*state,\s*assistantContent\)/, 'parallel source extraction batches must execute concurrently')
-  assert.match(toolPipeline, /autoSourceExtractionBatchFromSearch[\s\S]*currentStepWebSearchLimit\(state\) !== null \|\| hasSingleWebSearchLimit\(state\)[\s\S]*MAX_PARALLEL_SOURCE_EXTRACTIONS/, 'successful research searches must auto-build a bounded source extraction batch without violating fixed-search limits')
-  assert.match(toolPipeline, /executeAutoSourceExtractionBatch[\s\S]*Auto-extracting \$\{batch\.length\} source result\(s\) immediately after web_search[\s\S]*Promise\.all\(batch\.map/, 'post-search source extraction must run immediately in the tool pipeline instead of waiting for another model turn')
-  assert.match(toolPipeline, /this\.autoGeneratedToolCallIds\.has\(tc\.id\)[\s\S]*narrationCadenceBlockReason/, 'auto-generated parallel source pills must be allowed to fill the current action cluster before narration gates the next turn')
-  assert.match(toolPipeline, /AUTO SOURCE EXTRACTION RESULTS[\s\S]*Do not call web_search again just because the visible action was a search[\s\S]*All automatic source extractions were blocked[\s\S]*Do not repeat the same web_search/, 'auto-extracted source results must be summarized for the next model turn without causing follow-up search loops')
-  assert.doesNotMatch(toolPipeline, /blocked: \$\{String\(resultObj\.error\)\.slice/, 'auto-source summaries must not feed long internal extraction recovery text back into the model')
+  assert.doesNotMatch(toolPipeline, /autoSourceExtractionBatchFromSearch|executeAutoSourceExtractionBatch|AUTO SOURCE EXTRACTION RESULTS/, 'the runtime must leave source selection to the agent instead of automatically mining a search result set')
+  assert.match(toolPipeline, /Selecting a source batch is the decision boundary[\s\S]*stepLastSourceExtractionSearchCount = state\.stepSearchQueries\.size[\s\S]*Promise\.all\(executionBatch\.map/, 'a model-selected search-result batch must be consumed before reads execute so blocked or cached calls cannot reopen it')
   assert.match(agentLoop, /state\.iterations <= 2 && lastStreamResult\.toolCalls\.size === 0[\s\S]*await planManager\.awaitPlan\(state\)/, 'early planner waits must not block already-streamed tool calls')
   assert.match(agentLoop, /fastSourceActionTurn[\s\S]*FAST_SOURCE_ACTION_MAX_TOKENS/, 'source-action turns must use a compact max-token budget instead of a full synthesis budget')
   assert.match(agentLoop, /fastActionTurn[\s\S]*MINIMAL_THINKING_REASONING/, 'between-tool action turns must use the shared minimal-thinking fast lane')
@@ -1165,7 +1195,7 @@ async function assertSourceContracts() {
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'runtime prompt must enforce the exact 3-4 action narration window')
   assert.match(prompts, /never fewer than 15 words/, 'runtime prompt must forbid too-short progress paragraphs')
   assert.match(prompts, /<=34 words and <=240 characters/, 'runtime prompt must keep progress paragraphs concise')
-  assert.match(prompts, /vary the opening verb and sentence shape/, 'runtime prompt must require varied progress narration openings')
+  assert.match(prompts, /Vary the grammatical subject, voice, rhythm, and sentence count/, 'runtime prompt must require structural progress narration variation')
   assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'runtime prompt must make narration appear before the next action at the 3-action point')
   assert.match(prompts, /standing cadence for every phase/, 'runtime prompt must keep narration active across every phase')
   assert.match(prompts, /narration is the default first visible text/, 'runtime prompt must make narration the preferred first visible text when cadence is open')
@@ -1181,24 +1211,23 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /return toolName !== 'browser_screenshot' && toolName !== 'browser_resize'/, 'all visible tool actions must participate in model narration flush cadence')
   assert.match(agentState, /visibleToolActionsSinceLastNarration/, 'agent state must track visible action-pill count for narration cadence')
   assert.match(toolPipeline, /countVisibleToolActionForNarration/, 'tool execution must increment narration cadence from accepted visible tool starts')
-  assert.match(policyEngine, /state\.visibleToolActionsSinceLastNarration >= threshold/, 'forced narration must be based on visible action pills, not raw iterations')
-  assert.match(policyEngine, /visibleActionsAfterAcceptedNarration/, 'valid progress narration must preserve overflow action-pill cadence after late narration')
+  assert.match(agentLoop, /state\.visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt/, 'forced narration must be based on visible action pills, not raw iterations')
+  assert.match(agentLoop, /remainingVisibleActions = Math\.max\([\s\S]*state\.visibleToolActionsSinceLastNarration - visibleActionFrontier[\s\S]*acceptProgressNarration\(state,\s*content,\s*\{[\s\S]*remainingVisibleActions/, 'valid progress narration must preserve overflow action-pill cadence after late narration')
   assert.match(activityDescriber, /searching\|researching\|reviewing\|reading\|navigating\|scrolling\|clicking/, 'strict action labels must reject generic gerund tool wrappers')
   assert.match(activityDescriber, /reviewed\|completed\|found\|gathered\|confirmed/, 'strict action labels must reject past-tense progress narration as action pill text')
   assert.doesNotMatch(activityDescriber, /isTemplateShapedActionLabel|rawActionTarget/, 'strict action labels must not over-block safe model-authored labels just because they overlap the target')
-  assert.match(activityDescriber, /runtimeVisibleActionLabel[\s\S]*Search \$\{queryTarget\}/, 'runtime search label repair must be grounded in the actual query')
-  assert.match(toolPipeline, /runtimeVisibleActionLabel\(\s*'browser_navigate'/, 'search-to-navigation reroutes must repair the visible label to the real browser action')
+  assert.doesNotMatch(toolPipeline, /args\.action_label\s*=\s*runtimeDisplayActionLabel|runtimeVisibleActionLabel\(\s*'browser_navigate'/, 'runtime execution must not replace model-authored action labels with deterministic labels')
   assert.doesNotMatch(activityDescriber, /Search for information on/, 'search pills must not use the old repeated generic wording')
   assert.doesNotMatch(toolPipeline, /Gather evidence on/, 'repaired search pills must not use the old repeated generic wording')
   assert.match(streamProcessor, /addDisplayContractArgs\(args,\s*parsed,\s*rawArgs\)/, 'stream parser must extract action labels before a tool call finishes streaming')
   assert.match(streamProcessor, /toolName === 'create_file' \|\| toolName === 'append_file'[\s\S]*?typeof args\.path === 'string'/, 'file writes must be eligible for provisional action starts once path exists')
   assert.match(streamProcessor, /toolName === 'edit_file'[\s\S]*?typeof args\.path === 'string'/, 'file edits must be eligible for provisional action starts once path exists')
-  assert.match(streamProcessor, /function addProvisionalFileActionLabel[\s\S]*fileActionLabelFallback[\s\S]*args\.action_label/, 'file tools must show an early visible pill when path streams before action_label')
+  assert.doesNotMatch(streamProcessor, /fileActionLabelFallback|args\.action_label\s*=\s*runtimeVisibleActionLabel/, 'provisional streaming must wait for the model-authored action label instead of inventing one')
   assert.match(streamProcessor, /addStringMetrics\(args,\s*rawArgs,\s*'new_string'\)/, 'edit_file replacement text must expose live size metrics while streaming')
   assert.match(streamProcessor, /delete stableArgs\.new_stringCharCount[\s\S]*delete stableArgs\.new_stringLineCount/, 'edit_file metric changes must not recreate the live action pill while replacement text streams')
-  assert.match(streamProcessor, /addProvisionalRuntimeDisplayContract\(earlyArgs,\s*toolCall\.name,\s*state\)/, 'live tool previews must repair display-only metadata before deciding whether to show the action pill')
+  assert.match(streamProcessor, /addProvisionalRuntimeDisplayContract\(earlyArgs,\s*state\)/, 'live tool previews may align runtime-owned plan metadata before deciding whether to show the action pill')
   assert.match(streamProcessor, /this\.emitter\.fileContentStart\(toolCall\.id,\s*path,\s*toolCall\.name\)/, 'file write previews must initialize during tool argument streaming')
-  assert.match(streamProcessor, /this\.emitter\.fileContentDelta\(toolCall\.id,\s*content\.slice\(preview\.emittedChars\)\)/, 'file write previews must stream incremental content deltas')
+  assert.match(streamProcessor, /const deltaContent = content\.slice\(preview\.emittedChars\)[\s\S]*this\.emitter\.fileContentDelta\(toolCall\.id, deltaContent\)[\s\S]*\{ immediate: true \}/, 'file write previews must emit incremental content deltas immediately while the paid turn is still streaming')
   assert.match(streamProcessor, /FILE_PREVIEW_MIN_DELTA_CHARS/, 'file write previews must batch tiny streamed deltas for cloud event persistence')
   assert.match(streamProcessor, /for \(const \[index, preview\] of filePreviewState\)/, 'file write preview batching must flush the final pending content before tool execution')
   assert.doesNotMatch(sandbox, /content:\s*'Error: old_string not found in file'/, 'edit_file old_string misses must not render raw errors as file contents')
@@ -1213,15 +1242,15 @@ async function assertSourceContracts() {
   assert.match(toolCache, /DISPLAY_ONLY_ARG_KEYS = new Set\(\['action_label', 'plan_step_index'\]\)/, 'tool cache keys must ignore display-only metadata')
   assert.match(toolCache, /DISPLAY_ONLY_ARG_KEYS\.has\(key\)/, 'tool cache must strip action labels and plan indexes before keying results')
   assert.match(toolCache, /function normalizeCacheUrl/, 'tool cache should normalize read-only document/media URLs')
-  assert.match(toolCache, /toolName === 'read_document'[\s\S]*normalizeCacheUrl\(sortedArgs\.source\)/, 'read_document cache keys should ignore URL tracking noise')
-  assert.match(toolCache, /toolName === 'youtube_transcript'[\s\S]*normalizeCacheUrl\(sortedArgs\.url\)/, 'youtube transcript cache keys should ignore URL tracking noise')
+  assert.match(toolCache, /toolName === 'read_document'[\s\S]*const target = typeof sortedArgs\.url[\s\S]*delete sortedArgs\.source/, 'read_document cache keys must canonicalize legacy source targets into url')
+  assert.doesNotMatch(toolCache, /youtube_transcript/, 'removed YouTube transcript tooling must not retain a cache policy')
   assert.match(toolCache, /function isCacheableHttpRequest/, 'ToolCache should cache only safe idempotent http_request calls')
   assert.match(toolCache, /function isCacheableHttpResponse/, 'ToolCache must avoid caching failed or explicitly uncacheable HTTP responses')
   assert.match(toolCache, /method !== 'GET' && method !== 'HEAD'/, 'http_request cache must be limited to GET/HEAD')
   assert.match(toolCache, /args\.body !== undefined && typeof args\.body !== 'string'/, 'non-string http_request bodies must not be cached')
   assert.match(toolCache, /status < 200 \|\| status >= 300/, 'failed http_request statuses must not be cached')
   assert.match(toolCache, /no-store\|no-cache\|private/, 'HTTP cache-control opt-outs must be honored')
-  assert.match(toolCache, /key === 'authorization' \|\| key === 'cookie' \|\| key === 'proxy-authorization'/, 'credentialed http_request calls must not be cached')
+  assert.match(toolCache, /SENSITIVE_HTTP_HEADER_NAME = \/\(\?:authorization[\s\S]*cookie[\s\S]*credential[\s\S]*if \(SENSITIVE_HTTP_HEADER_NAME\.test\(key\)\) return null/, 'credentialed http_request calls must not be cached')
   assert.match(toolCache, /toolName === 'http_request'\) return isCacheableHttpRequest\(args\)/, 'http_request cacheability must be argument-aware')
   assert.match(toolCache, /toolName === 'http_request'[\s\S]*normalizeCacheUrl\(sortedArgs\.url\)[\s\S]*delete sortedArgs\.body/, 'http_request cache keys should normalize URLs and omit empty bodies')
   assert.doesNotMatch(toolCache, /const UNCACHEABLE_TOOLS = new Set\(\[[\s\S]*'http_request'[\s\S]*\]\)/, 'http_request must not be globally uncached')
@@ -1259,7 +1288,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /function duplicateSourceOpenBlockReason[\s\S]*browser_navigate[\s\S]*already \$\{verb\} in this phase[\s\S]*failedRoutes[\s\S]*already attempted with \$\{toolName\}[\s\S]*duplicateSourceOpenBlockReason\(tc\.name, args, state\)/, 'same-step duplicate source URLs and failed same-URL retries must be blocked before visible tool_start')
   assert.match(toolPipeline, /function browserEvidenceLooksUsable[\s\S]*about:blank[\s\S]*404[\s\S]*browser_get_content[\s\S]*length >= 120/, 'blank, 404, and empty rendered pages must not satisfy opened-source research evidence')
   assert.match(toolPipeline, /usableBrowserEvidence[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*!BROWSER_RESULT_TOOLS\.has\(tc\.name\) \|\| usableBrowserEvidence/, 'fresh browser reads must only count as research calls when the rendered page is usable')
-  assert.match(toolPipeline, /usableCachedBrowserEvidence[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*!BROWSER_RESULT_TOOLS\.has\(tc\.name\) \|\| usableCachedBrowserEvidence/, 'cached browser reads must only count as research calls when the rendered page is usable')
+  assert.match(toolPipeline, /A cache hit replays evidence already counted[\s\S]*if \(RESEARCH_TOOLS\.has\(tc\.name\)\) \{[\s\S]*state\.suppressedResearchToolName = tc\.name/, 'cached browser reads must not inflate research-call depth or hide duplicate-source loops')
   assert.match(toolPipeline, /Used cached document[\s\S]*this\.memory\?\.extractFromBrowse\(url, content/, 'cached read_document hits must preserve document evidence in working memory')
   assert.match(agentState, /CIRCUIT_BREAKER_EXEMPT_TOOLS[\s\S]*'read_document'/, 'read_document source extraction misses must not disable the document reader globally')
   assert.match(agentState, /canTripCircuitBreaker = !CIRCUIT_BREAKER_EXEMPT_TOOLS\.has\(toolName\)[\s\S]*if \(canTripCircuitBreaker && health\.consecutiveFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD/, 'circuit breaker must ignore exempt per-source extraction tools')
@@ -1296,7 +1325,7 @@ async function assertSourceContracts() {
   assert.match(agentState, /state\.stepFailureCount = 0/, 'step advancement must reset per-phase failure counts so blocked sources do not poison later phases')
   assert.doesNotMatch(policyEngine, /state\.stepLoopDetections = 1/, 'research loop recovery must not reset the per-step loop escalation and spin indefinitely')
   assert.match(agentLoop, /loopRecoveryToolForState[\s\S]*suppressed === 'web_search'[\s\S]*read_document[\s\S]*browser_navigate[\s\S]*return narrowed/, 'research loop recovery must expose alternate source-opening routes instead of boxing the agent into the same slow pattern')
-  assert.match(policyEngine, /narrationOnlyResearchTurn[\s\S]*state\.visibleToolActionsSinceLastNarration = 0[\s\S]*return \[\]/, 'valid progress narration in research must clear the narration backlog so repeated text cannot spin forever')
+  assert.match(policyEngine, /Narration is observational UI feedback, never a phase transition gate[\s\S]*return false/, 'progress narration must not become a blocking research-loop transition')
   assert.match(policyEngine, /repeatedIncompleteResearchNoTool[\s\S]*shouldAdvanceResearchAtBudgetBoundary\(state,\s*researchDepth\)[\s\S]*Advanced from repeated text-only research/, 'repeated text-only research must advance with recorded evidence gaps once the phase has enough evidence')
   assert.match(agentConfig, /MIN_RESEARCH_CALLS_BY_COMPLEXITY = \{ 1: 4, 2: 10, 3: 18 \}/, 'research evidence thresholds must stay above shallow three-action phases while keeping quick tasks light')
   assert.match(agentConfig, /MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = \{ 1: 2, 2: 6, 3: 8 \}/, 'substantive research phases must require source diversity without overcharging quick tasks')
@@ -1308,7 +1337,7 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /MIN_ITERATION_DELAY_MS = 0/, 'agent loop should not add a sluggish fixed inter-iteration delay')
   assert.match(agentConfig, /PLAN_STARTUP_DELAY_MS = 0/, 'planner startup should not wait before requesting the task plan')
   assert.match(agentConfig, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 12_000/, 'normal model turns should not create minute-scale frozen UI gaps')
-  assert.match(agentConfig, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 1_500/, 'invisible model stalls should recover quickly instead of making the UI look frozen')
+  assert.match(agentConfig, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 3_000/, 'invisible model stalls should recover quickly without converting ordinary provider jitter into false failures')
   assert.match(agentConfig, /checkIntervalMs:\s*150/, 'stream stall checks should poll quickly enough for live UI feedback')
   assert.match(agentConfig, /TOOL_RETRY_MAX = 0/, 'transient tool failures should fail forward instead of spending another turn on retry delay')
   assert.match(agentConfig, /TOOL_RETRY_BASE_MS = 120/, 'transient tool retries should be fast by default')
@@ -1354,46 +1383,30 @@ async function assertSourceContracts() {
   assert.doesNotMatch(eventDispatcher, /liveFrame:\s*!!screenshotBase64/, 'static browser result screenshots must not be mislabeled as live frames')
   assert.match(eventDispatcher, /success:\s*true,[\s\S]*recoverable:\s*undefined,[\s\S]*error:\s*undefined,[\s\S]*screenshotBase64:\s*frame/, 'fresh browser frames must clear stale navigation errors from the live browser panel')
   assert.match(eventDispatcher, /isBrowserPreflightBlockResult/, 'client dispatcher must classify browser preflight blocks before opening the computer panel')
-  assert.match(eventDispatcher, /if \(!isBrowserPreflightBlock\)[\s\S]*setComputerPanelOpen\(true,\s*\{\s*source:\s*'auto'\s*\}\)/, 'browser preflight blocks must not force-open the computer panel')
-  assert.match(policyEngine, /After enough completed visible action pills/, 'narration cadence must be based on visible user-facing action progress')
-  assert.match(policyEngine, /const threshold = NARRATION_THRESHOLD_DEFAULT/, 'narration cadence must use the central visible-action threshold')
+  assert.match(eventDispatcher, /private openComputerPanel\(\)[\s\S]*setComputerPanelOpen\(true,\s*\{\s*source:\s*'auto'\s*\}\)[\s\S]*if \(!isBrowserPreflightBlock\)[\s\S]*this\.openComputerPanel\(\)/, 'browser preflight blocks must not force-open the computer panel')
+  assert.match(prompts, /Progress narration is required every 3-4 completed visible action pills/, 'narration cadence must be based on visible user-facing action progress')
+  assert.match(agentLoop, /shouldUseNaturalCadenceNarration[\s\S]*state\.visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt/, 'narration cadence must use the central visible-action frontier')
   assert.match(agentConfig, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(agentConfig, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
   assert.match(agentConfig, /NARRATION_MAX_VISIBLE_ACTION_GAP\s*=\s*4/, 'accepted late narration must preserve overflow from the 3-4 action window')
-  assert.match(policyEngine, /NARRATION CADENCE RECOVERY/, 'backend cadence should recover missing narration with explicit progress copy')
-  assert.match(policyEngine, /18-30 words preferred/, 'forced narration repair must keep updates in the desired short range')
-  assert.match(policyEngine, /Default to one strong past-tense result sentence; add a short Next\/Will sentence only when it is specific and useful/, 'forced narration repair must not force every update to include a next sentence')
-  assert.match(policyEngine, /hard cap 34 words/, 'forced narration repair must keep progress paragraphs concise')
-  assert.match(policyEngine, /result-first Manus-style paragraph/, 'forced narration repair must request result-first finding narration')
-  assert.match(policyEngine, /Vary the opening verb and sentence shape/, 'forced narration repair must discourage repetitive starters')
-  assert.match(policyEngine, /forcedNarrationBeforeToolAction/, 'overdue narration must block tool-call turns until a progress paragraph is written')
+  assert.match(agentLoop, /FAST PROGRESS NARRATION ONLY[\s\S]*18-30 words preferred[\s\S]*hard cap 34 words/, 'the narration sidecar must keep updates in the desired short range')
+  assert.match(agentLoop, /asynchronous narration-only request has no selected next action[\s\S]*keep it result-only/, 'the narration sidecar must not invent an immediate action it did not select')
+  assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'the narration sidecar must not turn the next plan phase into a Next sentence')
+  assert.match(agentLoop, /Treat it as a progressive evidence trace[\s\S]*Vary grammatical subject, voice, rhythm, and sentence count/, 'the narration sidecar must request varied, progressive finding narration')
+  assert.match(agentLoop, /Cadence narration has its own tiny LLM request so action selection never[\s\S]*waits for prose/, 'overdue narration must run independently without blocking tool-call turns')
   assert.match(policyEngine, /!isLastStep && state\.browserTaskCompleted[\s\S]*?advanceStep\(state,\s*finding\)/, 'browser completion evidence must advance before no-tool browser blocking')
-  assert.match(policyEngine, /state\.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT[\s\S]*?isValidProgressNarration/, 'valid narration at the cadence point must be accepted without being treated as no-tool laziness')
-  assert.match(policyEngine, /if \(!stepAdvancedThisIteration\) return \[\]/, 'valid narration plus next_step must continue into step advancement instead of being swallowed')
-  assert.match(policyEngine, /PHASE-END NARRATION REQUIRED/, 'legacy pending phase-end narration recovery should remain readable for old in-flight state')
+  assert.match(policyEngine, /checkNarrationNudge[\s\S]*acceptProgressNarration[\s\S]*Policy never emits a narration-only recovery turn[\s\S]*return null/, 'valid narration must be accepted without turning into a text-only recovery loop')
   assert.match(agentState, /phaseEndNarrationPending/, 'state must remember when a forced narration turn is specifically a phase-end transition')
-  assert.match(policyEngine, /function shouldRequestPhaseEndNarration\(state: AgentStateData, assistantContent = ''\)[\s\S]*?visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT/, 'phase transitions should request narration by cadence without blocking every phase boundary')
-  assert.match(agentLoop, /function shouldPauseForPhaseEndNarrationBeforeAutoAdvance/, 'agent auto-advance paths must share a phase-end narration gate')
-  assert.match(agentLoop, /pauseForPhaseEndNarrationBeforeAutoAdvance\([\s\S]*?state\.phaseEndNarrationPending = true[\s\S]*?state\.forceTextNextIteration = true/, 'phase-end auto-advance may request a compact LLM narration turn when the cadence window is open')
-  assert.match(agentLoop, /goalCheck\.allMet[\s\S]*?pauseForPhaseEndNarrationBeforeAutoAdvance[\s\S]*?planManager\.handleStepAdvance\(state\)/, 'goal-complete auto-advance should keep the required phase narration gate in the path')
-  assert.match(agentLoop, /nonNoteFileCreated[\s\S]*?pauseForPhaseEndNarrationBeforeAutoAdvance[\s\S]*?planManager\.handleStepAdvance\(state\)/, 'file-created auto-advance should keep the required phase narration gate in the path')
-  assert.match(agentLoop, /shouldAutoAdvanceBriefInlineResearchAfterTools[\s\S]*?pauseForPhaseEndNarrationBeforeAutoAdvance[\s\S]*?planManager\.handleStepAdvance\(state\)/, 'quick research auto-advance should keep the required phase narration gate in the path')
-  assert.match(agentLoop, /compactResearchEvidenceComplete\(state\)[\s\S]*?pauseForPhaseEndNarrationBeforeAutoAdvance\([\s\S]*?The compact research phase has enough evidence[\s\S]*?planManager\.handleStepAdvance\(state\)/, 'compact research evidence completion must pause for visible narration before advancing')
+  assert.match(agentLoop, /Narration is opportunistic cadence, never a phase transition gate[\s\S]*return false/, 'phase auto-advance must never wait on narration')
   assert.match(agentLoop, /Skipped narration-only turn after model-start timeout; continuing task work/, 'narration model-start timeouts must not trap the task in another narration-only turn')
   assert.doesNotMatch(agentLoop, /if \(state\.phaseEndNarrationPending\) \{\s*markPhaseNarrationEmitted\(state\)/, 'phase-end narration timeouts must not fake an emitted narration')
-  assert.match(policyEngine, /state\.phaseEndNarrationPending[\s\S]*?!stepAdvancedThisIteration[\s\S]*?advanceStep\(state,\s*narrationFinding\)/, 'valid phase-end narration must advance even when the model forgets the next_step marker')
-  assert.match(policyEngine, /const narrationFinding = sanitizeNarrationText[\s\S]*if \(!narrationFinding\) \{[\s\S]*rewriteInvalidForcedNarrationAction/, 'invalid phase-end text must be rewritten instead of advancing invisibly')
-  assert.match(agentLoop, /FAST PROGRESS NARRATION ONLY/, 'cadence narration must use the compact narration-only lane so it appears quickly after tool actions')
-  assert.match(agentLoop, /This applies to the current phase regardless of task type/, 'cadence state must explicitly apply to all phases and task types')
-  assert.match(agentLoop, /Write one natural Manus-style progress paragraph from the compact context only/, 'cadence state must make model-authored narration the first visible text')
-  assert.match(agentLoop, /visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT/, 'cadence prompt overhead should start inside the allowed 3-4 action window')
-  assert.match(toolPipeline, /visibleActionsBeforeTool >= NARRATION_THRESHOLD_DEFAULT[\s\S]*3 visible actions have completed without a valid progress narration/, 'visible action cadence must hard-gate tools at 3 actions, not wait for a fourth action')
-  assert.doesNotMatch(agentLoop, /Then continue naturally in the same response:[\s\S]*call exactly one useful next tool[\s\S]*emit <next_step\/>/, 'ordinary cadence must not wait on same-turn tool selection before showing narration')
-  assert.match(agentLoop, /compactForcedNarrationMessages/, 'forced narration turns must use a compact status-only prompt instead of the full task context')
-  assert.match(agentLoop, /useCompactForcedNarration[\s\S]*\?\s*compactForcedNarrationMessages\(state, allMessages\)/, 'forced narration helper must be used as the actual model-call message set')
+  assert.match(agentLoop, /launchNarrationSidecarIfDue[\s\S]*compactForcedNarrationMessages\([\s\S]*max_tokens: NARRATION_SIDECAR_MAX_TOKENS[\s\S]*reasoning: NO_THINKING_REASONING[\s\S]*retryMaxAttempts: 0/, 'cadence narration must use a compact, minimal-thinking, no-retry sidecar')
+  assert.match(agentLoop, /this\.emitter\.progressUpdate\(review\.text,\s*\{[\s\S]*stepIndex: recordStepIdx,[\s\S]*afterToolId,[\s\S]*remainingVisibleActions/, 'accepted narration must be placed exactly after its completed action cluster')
+  assert.match(agentLoop, /LLM narration sidecar failed without blocking task actions/, 'narration failures must never block task progress')
+  assert.match(agentLoop, /never make tool selection wait for narration[\s\S]*const cadenceNarrationInMainTurn = false/, 'ordinary action selection must remain independent of narration generation')
   assert.match(agentState, /function isSynthesisStepText[\s\S]*SYNTHESIS_STEP_PATTERN[\s\S]*!SOURCE_GATHERING_STEP_PATTERN/, 'synthesis-only plan steps must be distinguishable from research/source-gathering steps')
-  assert.match(agentState, /isLastStep \|\| isSynthesisStepText\(stepText\)[\s\S]*state\.currentPhase = 'deliver'/, 'non-final synthesis/write steps must switch to deliver phase instead of compact research')
-  assert.match(agentLoop, /shouldUseCompactResearchTurn[\s\S]*isSynthesisStepText\(currentStepText\(state\)\)[\s\S]*return false/, 'compact research turns must not run on synthesis-only steps')
+  assert.match(agentState, /isLastStep \|\| isCurrentSynthesisStep\(state\)[\s\S]*state\.currentPhase = 'deliver'/, 'non-final synthesis/write steps must switch to deliver phase instead of compact research')
+  assert.match(agentLoop, /shouldUseCompactResearchTurn[\s\S]*isCurrentSynthesisStep\(state\)[\s\S]*return false/, 'compact research turns must not run on synthesis-only steps')
   assert.match(agentLoop, /compactResearchTurnMessages[\s\S]*COMPACT RESEARCH TURN[\s\S]*shouldUseCompactResearchTurn[\s\S]*return true[\s\S]*useCompactResearchTurn/, 'non-final research turns should use compact task state instead of replaying raw tool history')
   assert.match(agentLoop, /compactResearchNeedsToolAction[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*compactResearchNeedsTool[\s\S]*shouldRequireToolCall/, 'compact research turns must keep using tools until the fast evidence floor is met')
   assert.match(agentLoop, /compactResearchPhaseCanAdvance[\s\S]*compactResearchEvidenceComplete\(state\)[\s\S]*PHASE EVIDENCE READY[\s\S]*Do not output only <next_step\/>/, 'compact research must close a phase with visible narration once the evidence floor is met instead of offering extra research tools')
@@ -1405,15 +1418,19 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /state\.suppressedResearchToolName = loopCheck\.rawTool \|\| loopCheck\.tool/, 'research loop detection must suppress the canonical internal tool name, including same-source read_document loops')
   assert.match(agentLoop, /state\.suppressedResearchToolName[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*activeTools = loopRecoveryToolForState\(state,\s*filtered\)/, 'compact research recovery must remove the repeated tool and keep the model on a different evidence route while the evidence floor is still incomplete')
   assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*state\.suppressedResearchToolName === 'read_document'[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)[\s\S]*allowed\.delete\(state\.suppressedResearchToolName\)/, 'opened-source narrowing must widen to alternate source routes when read_document is the looped tool')
+  assert.match(agentLoop, /!needsAlternateSourceRoute[\s\S]*hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'known candidate URLs must not hide web_search after a cached or failed source route needs alternate discovery')
   assert.match(agentLoop, /SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD\s*=\s*6/, 'source-opening loops must have a bounded escape threshold instead of alternating forever')
   assert.match(agentLoop, /state\.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD[\s\S]*allowed\.clear\(\)[\s\S]*allowed\.add\('web_search'\)/, 'deep source-opening loops must force a materially different search route')
   assert.match(agentLoop, /state\.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD[\s\S]*searchOnly = tools\.filter/, 'loop recovery must stop offering alternate open/read routes after repeated source cycling')
-  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*read_document is temporarily suppressed[\s\S]*Do not call web_search again while known result URLs are still unopened/, 'opened-source recovery must avoid search loops while known result URLs are still unopened')
-  assert.match(toolPipeline, /state\.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT[\s\S]*state\.forceTextNextIteration = true/, 'auto-extracted source clusters must arm the next compact narration turn once they cross the visible-action cadence window')
+  assert.doesNotMatch(agentLoop, /read_document is temporarily suppressed[\s\S]*Do not call web_search again while known result URLs are still unopened/, 'cached source recovery must not forbid alternate discovery after the retained candidates become unusable')
+  assert.match(toolPipeline, /countVisibleToolActionForNarration[\s\S]*state\.visibleToolActionsSinceLastNarration\+\+/, 'auto-extracted source clusters must advance the visible-action narration frontier')
+  assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll\([\s\S]*launchNarrationSidecarIfDue\(\)/, 'completed tool clusters must immediately arm the independent narration sidecar')
   assert.match(toolPipeline, /synthesisPhaseResearchReason[\s\S]*state\.stepFailureCount\+\+[\s\S]*state\.lastLoopSignal = \{ type: 'tool_rate_limit'/, 'synthesis-step research blocks must count as real failures instead of resetting compact research forever')
   assert.match(toolPipeline, /isFinalDeliverableStep[\s\S]*!DELIVERABLE_STEP_TOOLS\.has[\s\S]*trackToolCall\(state, tc\.name, JSON\.stringify\(args\)\)[\s\S]*state\.stepFailureCount\+\+/, 'final-step blocked external tools must enter loop history and failure accounting')
   assert.match(toolPipeline, /failure\.tool === toolName[\s\S]*state\.stepLoopDetections >= 2[\s\S]*Do not alternate source-opening tools on the same URL/, 'same-source failures must not alternate between read and browser-open routes indefinitely')
   assert.match(toolPipeline, /const usefulResearchProgress =[\s\S]*usableBrowserEvidence[\s\S]*if \(usefulResearchProgress\)[\s\S]*state\.stepResearchCallCount\+\+[\s\S]*usefulResearchProgress[\s\S]*state\.suppressedResearchToolName/, 'loop suppression must clear only after useful evidence, not a bare source-open attempt')
+  assert.match(toolPipeline, /A cache hit replays evidence already counted[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = tc\.name[\s\S]*state\.stepLoopDetections \+= 1/, 'a cached research replay must immediately suppress the repeated route so the next paid turn can select alternate evidence')
+  assert.match(toolPipeline, /if \(isError\) \{\s*\/\/ This counter is the shared escape hatch[\s\S]*?state\.stepFailureCount\+\+[\s\S]*?trackFailure\(state, tc\.name/, 'real tool failures must feed the existing per-step alternate-route escape instead of leaving research source-locked')
   assert.match(toolPipeline, /tc\.name !== state\.suppressedResearchToolName[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = null/, 'successful different research tools must clear temporary loop suppression')
   assert.match(agentLoop, /NO_THINKING_REASONING = \{ enabled: false as const, exclude: true \}/, 'forced narration turns must disable thinking entirely')
   assert.match(agentLoop, /MINIMAL_THINKING_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'non-narration agent turns must stay on minimal thinking')
@@ -1421,13 +1438,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /if \(state\.forceTextNextIteration\) return false/, 'forced narration-only turns should not pay for temporal context')
   assert.match(agentLoop, /includeTemporalContext:\s*shouldIncludeTemporalContextForTurn\(state\)/, 'streaming model calls should not include temporal context by default')
   assert.doesNotMatch(agentLoop, /if \(state\.forceTextNextIteration\) return 96/, 'forced narration turns must not truncate status or direct-answer recovery with a tiny output cap')
-  assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*visibleToolActionsSinceLastNarration < NARRATION_THRESHOLD_DEFAULT[\s\S]*finalSavedDeliverableTurn[\s\S]*return true/, '3-action cadence narration should open immediately after the visible action window')
-  assert.match(agentLoop, /const useCompactCadenceNarration = !useCompactForcedNarration[\s\S]*shouldUseNaturalCadenceNarration/, 'ordinary cadence narration must enter the compact narration lane')
-  assert.match(agentLoop, /const useCompactNarration = useCompactForcedNarration \|\| useCompactCadenceNarration/, 'ordinary cadence narration must use compact output caps and no tools')
-  assert.match(agentLoop, /FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000[\s\S]*FORCED_NARRATION_MAX_TOKENS = 48/, 'tiny progress narration turns must stay compact while allowing provider startup variance')
-  assert.match(agentLoop, /processedCompactNarrationTurn[\s\S]*lastStreamResult\.toolCalls\.size === 0[\s\S]*lastStreamResult\.assistantContent\.trim\(\)[\s\S]*sanitizeNarrationText\(lastStreamResult\.assistantContent[\s\S]*visibleToolActionsSinceLastNarration = 0/, 'accepted compact narration turns must be sanitized before resetting cadence so invisible future-only text cannot pass')
+  assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt[\s\S]*finalInlineAnswerTurn[\s\S]*return true/, '3-action cadence narration should open immediately after the visible action frontier, including saved deliverable work')
+  assert.match(agentLoop, /NARRATION_SIDECAR_REQUEST_TIMEOUT_MS = 4_000[\s\S]*NARRATION_SIDECAR_MAX_TOKENS = 64/, 'tiny progress narration sidecar calls must stay compact while allowing provider startup variance')
+  assert.match(agentLoop, /launchNarrationSidecarIfDue[\s\S]*acceptProgressNarration\(state,\s*content,[\s\S]*review\.status !== 'accepted'[\s\S]*retryNarrationCadenceAttemptWithoutNewAction/, 'sidecar narration must be validated before resetting cadence so unusable or repetitive text cannot pass')
   assert.doesNotMatch(agentLoop, /firstReadableSearchResultUrl|source_read_document[\s\S]*IMMEDIATE SOURCE SEARCH COMPLETE/, 'research source gathering must not be driven by local immediate-search shortcuts')
-  assert.match(agentLoop, /MODEL START RECOVERY[\s\S]*Switching to compact progress recovery after empty stream/, 'a timed-out full model start must switch to compact narration recovery instead of retrying the same heavy turn')
+  assert.match(agentLoop, /MODEL START RECOVERY:[\s\S]*Continue the active phase immediately with one concrete native tool call[\s\S]*Do not detour into progress narration[\s\S]*Continuing with a concrete action after empty stream/, 'a timed-out model start must recover with a concrete action instead of blocking on narration or repeating the same heavy turn')
   assert.match(agentLoop, /Compact research evidence complete; advanced immediately after text-only turn[\s\S]*Compact research no-tool response reissued model-selected tool requirement/, 'compact research prose loops must auto-advance or require a model-selected tool without local source actions')
   assert.match(agentLoop, /function compactResearchStalledSearchPacketComplete[\s\S]*state\.consecutiveNoToolCalls < 3[\s\S]*state\.stepSourceDomainCounts\.size[\s\S]*calls >= usefulCalls/, 'compact research must stop burning recovery turns once repeated prose follows a useful search-result packet')
   assert.match(agentLoop, /function compactResearchEvidenceComplete[\s\S]*compactResearchStalledSearchPacketComplete\(state, depth\)/, 'compact research completion must accept a stalled-but-useful search-result packet before demanding more opened pages')
@@ -1440,8 +1455,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /EXACT EXTRACTION REQUIRED BEFORE NARRATION/, 'exact wording/date extraction risk must be handled before progress narration')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*state\.exactExtractionGuardPending\) return false/, 'exact extraction guard must be evaluated before compact cadence narration')
   assert.match(agentLoop, /EXACT_EXTRACTION_TOOLS[\s\S]*?browser_find_text[\s\S]*?browser_screenshot[\s\S]*?browser_get_content/, 'exact extraction guard must restrict the model to visual/text extraction tools')
-  assert.match(agentLoop, /state\.exactExtractionGuardPending[\s\S]*const requiredToolIntent = shouldRequireToolCall && !narrationWindowOpen/, 'exact extraction guard must keep a concrete extraction tool intent')
-  assert.match(agentLoop, /visibleToolActionsSinceLastNarration\s*=\s*0/, 'arming exact extraction must suppress the narration window for the next turn')
+  assert.match(agentLoop, /state\.exactExtractionGuardPending[\s\S]*const requiredToolIntent = shouldRequireToolCall/, 'exact extraction and cadence turns must keep a concrete extraction tool intent')
+  assert.match(agentLoop, /state\.exactExtractionGuardPending = true[\s\S]*state\.exactExtractionGuardPrompt =/, 'arming exact extraction must retain a concrete guard that suppresses narration until evidence is extracted')
   assert.match(agentLoop, /tool_choice:\s*'required'/, 'provider-forced tool choice should remain available only when the active provider supports it')
   assert.match(agentLoop, /isLeanFinalSynthesisStep/, 'final research synthesis must use a lean deliverable-only tool set')
   assert.match(agentLoop, /allowedFinalTools/, 'lean final synthesis should reduce tool schema overhead without reducing deliverable quality')
@@ -1457,8 +1472,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /function compactResearchBreadthSaturated[\s\S]*stepOpenedSourceDomains\(state\)\.size[\s\S]*distinctDomains >= depth\.requiredSourceBreadth/, 'compact research phases must require opened/read source breadth before saturation')
   assert.match(agentLoop, /function compactResearchNeedsOpenedSource[\s\S]*uniqueSearches >= 1[\s\S]*openedPages < usefulOpenedPages/, 'compact research must force a source read after one useful search packet')
   assert.match(agentLoop, /deep\|deeper\|deepest[\s\S]*return false[\s\S]*const brief = /, 'deep research with a concise final answer must not use the shallow brief-inline shortcut')
-  assert.match(policyEngine, /deep\|deeper\|deepest[\s\S]*return false[\s\S]*const brief = /, 'policy brief-inline detection must not downgrade deep research because the final answer should be concise')
-  assert.match(agentLoop, /SOURCE OPENING REQUIRED[\s\S]*Do not call web_search again[\s\S]*up to 4 parallel read_document\/http_request\/youtube_transcript calls/, 'source-saturated compact research turns must tell the model to extract existing source URLs instead of searching or browsing again')
+  assert.match(policyEngine, /function isBriefInlineResearchRequest[\s\S]*analyzeTaskIntent[\s\S]*!intent\.wantsDeep[\s\S]*intent\.wantsQuick \|\| intent\.wantsInlineAnswer[\s\S]*!intent\.requiresSavedArtifact/, 'policy brief-inline detection must use shared user intent and must not downgrade deep research because the final answer should be concise')
+  assert.match(agentLoop, /SOURCE OPENING REQUIRED[\s\S]*Do not call web_search again[\s\S]*parallel batch of up to 3 read_document\/http_request calls/, 'source-saturated compact research turns must allow up to three independent supported URLs instead of searching again')
   assert.match(agentLoop, /function hasRenderedBrowserContext[\s\S]*lastBrowserStateHash[\s\S]*signature !== '\|\|0'/, 'extracted/read source URLs must not count as an open rendered browser page')
   assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)[\s\S]*!hasRenderedBrowserContext\(state\)[\s\S]*allowed\.delete\('browser_get_content'\)/, 'source-saturated compact research turns must prefer extraction tools and only expose browser content after a real browser page exists')
   assert.doesNotMatch(agentLoop, /function researchStepAllowsSourceSweep/, 'research phases should not use the broad source_sweep path')
@@ -1489,7 +1504,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 4_500/, 'saved final deliverables must have a bounded startup window that still tolerates provider variance')
   assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 6_500/, 'saved final deliverables must fail forward quickly while giving file-tool arguments room to finish clean chunks')
   assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'saved final deliverables must not spend an extra non-stream fallback wait before the next native tool attempt')
-  assert.match(streamProcessor, /FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 14_000[\s\S]*isStreamingToolArgs[\s\S]*effectiveIterationMs[\s\S]*FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS/, 'file tool arguments must get a protected post-start window so reports do not break mid-write')
+  assert.match(streamProcessor, /FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000[\s\S]*isStreamingToolArgs[\s\S]*effectiveIterationMs[\s\S]*FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS/, 'file tool arguments must get a protected post-start window so reports do not break mid-write')
   assert.match(agentLoop, /End cleanly at a sentence or section boundary/, 'saved report chunks must be instructed to stop at clean section boundaries')
   assert.match(agentLoop, /FINAL SAVED DELIVERABLE TOOL CALL ONLY[\s\S]*Write the complete deliverable when it fits/, 'saved final deliverables must push a complete first file write')
   assert.match(agentLoop, /function existingFinalDeliverablePath[\s\S]*pendingFinalDeliverableRevisionPath\(state\) \|\| latestSavedFinalDeliverablePath\(state\)/, 'final deliverable revisions must target the already-saved file path')
@@ -1498,7 +1513,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const allowedRevisionTools = finalDeliverableRevisionToolNames\(state, this\.options\.messages\)[\s\S]*Narrowed tools for final saved deliverable revision/, 'final saved deliverable revisions must narrow tools before the model can choose create_file again')
   assert.match(agentLoop, /const allowedFinalTools = existingFinalPath[\s\S]*finalDeliverableRevisionToolNames\(state, this\.options\.messages\)[\s\S]*'create_file'/, 'existing final deliverables must remove create_file from the active final-step tool set')
   assert.match(agentLoop, /function finalSavedDeliverableToolCallInstruction[\s\S]*Make exactly one native file tool call now/, 'saved final deliverable recovery must stay in the file-tool lane')
-  assert.match(agentLoop, /recoveringFinalSavedDeliverable[\s\S]*state\.forceTextNextIteration = !recoveringFinalSavedDeliverable && state\.taskStrategy !== 'browse'/, 'final saved deliverable tool repair must not accidentally enter narration-only mode')
+  assert.match(agentLoop, /if \(finalSavedDeliverableTurn\(state,\s*this\.options\.messages\)\) \{[\s\S]*state\.forceTextNextIteration = false[\s\S]*finalSavedDeliverableToolCallInstruction/, 'final saved deliverable tool repair must not accidentally enter narration-only mode')
   assert.match(agentLoop, /Reissued final saved deliverable file-tool instruction after model-start timeout/, 'final saved deliverables must not route model-start timeouts through generic progress narration')
   assert.match(agentLoop, /FINAL SAVED DELIVERABLE TIME CHECK[\s\S]*final output turn stalled before saving the deliverable/, 'mid-stream final saved deliverable stalls must reissue a file-tool instruction')
   assert.match(agentLoop, /activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'create_file'\)[\s\S]*Narrowed tools for initial final saved deliverable/, 'initial final saved deliverables must expose only create_file when no final file exists yet')
@@ -1513,13 +1528,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const finalWantsPdf = taskWantsPdfArtifact/, 'lean final synthesis should expose export_pdf only when PDF/export is requested')
   assert.match(agentLoop, /\.\.\.\(finalWantsPdf \? \['export_pdf'\] : \[\]\)/, 'export_pdf should be conditional in lean final synthesis')
   assert.doesNotMatch(agentLoop, /state\.visibleToolActionsSinceLastNarration >= 3[\s\S]{0,120}state\.forceTextNextIteration = true/, 'the loop must not use the old forced-narration repair flag for ordinary cadence turns')
-  assert.match(toolPipeline, /validSameTurnNarration/, 'visible tool preflight must recognize same-turn narration')
-  assert.match(toolPipeline, /The 3-action window is a hard gate/, 'visible tool preflight must hard-gate the fourth visible action until narration is accepted')
-  assert.match(toolPipeline, /this visible tool call was skipped because 3 visible actions/, 'visible tool preflight must block the fourth visible action when narration is overdue')
+  assert.doesNotMatch(toolPipeline, /validSameTurnNarration|The 3-action window is a hard gate|this visible tool call was skipped because 3 visible actions/, 'visible tool preflight must not block actions on narration generation')
   assert.match(toolPipeline, /function isRequiredSavedDeliverableWrite[\s\S]*pendingDeliverableRevision[\s\S]*partialFileWriteRecoveryPending[\s\S]*isRequiredSavedDeliverableWrite\(tc\.name,\s*args,\s*state\)/, 'required final report repair writes must bypass narration cadence instead of stalling after verification failure')
-  assert.match(agentLoop, /else if \(useCompactNarration\) \{\s*activeTools = \[\]\s*\}/, 'compact narration turns must not offer tools to the model')
-  assert.match(toolPipeline, /visibleActionsBeforeTool/, 'visible tool preflight must distinguish the already-rendered current tool from prior actions')
-  assert.match(toolPipeline, /directNavigationBeforeSearchTarget[\s\S]*?return this\.executeSingle\(reroutedToolCall, state\)[\s\S]*?this\.emitter\.toolStart/, 'explicit URL search reroutes must happen before any misleading visible search pill is emitted')
+  assert.match(agentLoop, /const response = await createCompletion\(\{[\s\S]*messages: requestMessages,[\s\S]*reasoning: NO_THINKING_REASONING/, 'compact narration sidecar calls must not share the action tool-selection request')
+  assert.match(toolPipeline, /countVisibleToolActionForNarration[\s\S]*state\.visibleToolActionsSinceLastNarration\+\+/, 'visible tool starts must advance narration cadence without gating later actions')
+  assert.match(toolPipeline, /directNavigationBeforeSearchTarget[\s\S]*?return preflightResult\(errorMessage\)[\s\S]*?this\.emitter\.toolStart/, 'explicit URL search corrections must happen before any misleading visible search pill is emitted')
   assert.match(eventDispatcher, /Never insert it between completed/, 'client must attach late narration recovery at the current frontier instead of inserting it between completed tools')
   assert.match(eventDispatcher, /discardNarrationBuffer/, 'client must drop early narration buffers instead of carrying them into later tool gaps')
   assert.match(streamProcessor, /recordVisibleToolStartForNarration/, 'provisional visible tool starts must count toward backend narration cadence')
@@ -1536,7 +1549,7 @@ async function assertSourceContracts() {
   assert.match(agentState, /Only exempt screenshots[\s\S]*tool === 'browser_screenshot'/, 'repeated browser_get_content must count as a loop because same-page rereads cause slow research stalls')
   assert.doesNotMatch(agentState, /tool === 'browser_screenshot' \|\| tool === 'browser_get_content'/, 'browser_get_content must not remain exempt from loop detection')
   assert.match(agentState, /ordered list of tool\/target signatures/, 'cross-tool cycle state must store target-aware signatures, not only tool names')
-  assert.match(agentState, /call\.name === 'read_document'[\s\S]*read_document:\$\{String\(parsed\.source\)\.toLowerCase\(\)\.trim\(\)\}/, 'read_document loop detection must distinguish different source URLs')
+  assert.match(agentState, /call\.name === 'read_document'[\s\S]*const target = parsed\.url \|\| parsed\.source[\s\S]*read_document:\$\{String\(target\)\.toLowerCase\(\)\.trim\(\)\}/, 'read_document loop detection must use canonical url targets while preserving legacy source compatibility')
   assert.match(toolPipeline, /function toolCycleEntry\(toolName: string, args: Record<string, unknown>\)/, 'tool cycle detection must use a target-aware signature helper')
   assert.match(toolPipeline, /toolName === 'read_document'[\s\S]*researchUrlFromToolCall\('read_document', args\)/, 'read_document cycle detection must distinguish different source URLs')
   assert.match(toolPipeline, /state\.recentToolSequence\.push\(toolCycleEntry\(tc\.name, args\)\)/, 'tool cycle detection must record tool-target signatures instead of raw tool names')
@@ -1931,7 +1944,7 @@ export async function runLedgerSmoke() {
   assert.equal(isBareResearchOverviewRequest('Research about AI'), true)
   assert.equal(bareResearchOverviewTopic('Research about AI'), 'AI')
   assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17'), true)
-  assert.equal(taskDefaultsToMarkdownDeliverable('Quickly research about iPhone 17'), true)
+  assert.equal(taskDefaultsToMarkdownDeliverable('Quickly research about iPhone 17'), false)
   assert.equal(taskDefaultsToMarkdownDeliverable('Research report about iPhone 17'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('actually make a report in .md file'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17 but answer here, no file'), false)
@@ -2039,7 +2052,7 @@ export async function runLedgerSmoke() {
     null,
   )
   assert.equal(
-    sanitizeNarrationText("gather more details from the page to confirm the movie she plays in.The YouTube video at the link appears to be a short clip featuring a woman, but I couldn't extract the video content, title, or description from the page.", { requireSignal: true }),
+    sanitizeNarrationText("gather more details from the page to confirm the movie she plays in.The embedded media page appears to be a short clip featuring a woman, but I couldn't extract its title or description.", { requireSignal: true }),
     null,
   )
   assert.equal(
@@ -2051,8 +2064,8 @@ export async function runLedgerSmoke() {
     'I found two relevant AGI timeline sources from the latest search results, including expert survey pages and forecast summaries.',
   )
   assert.equal(
-    sanitizeNarrationText('Found the YouTube page did not expose a title, description, or transcript from that URL.The source still confirms it was a video page.', { requireSignal: true }),
-    'Found the YouTube page did not expose a title, description, or transcript from that URL.',
+    sanitizeNarrationText('Found the embedded media page did not expose a title or description from that URL.The source still confirms it was a media page.', { requireSignal: true }),
+    'Found the embedded media page did not expose a title or description from that URL.',
   )
   assert.equal(
     sanitizeNarrationText('Since the last narration, I completed 4 targeted searches covering AI alignment challenges, hallucination mitigation I now have a solid evidence base across all sub-topics in this phase.', { requireSignal: true }),
@@ -2224,127 +2237,35 @@ export async function runLedgerSmoke() {
     false,
     30,
   )
-  assert.deepEqual(cadenceActions, [], 'valid narration after 3 visible actions should be accepted as narration, not no-tool laziness')
-  assert.equal(cadenceState.visibleToolActionsSinceLastNarration, 0)
-  assert.equal(cadenceState.consecutiveNoToolCalls, 0)
-
-  const invalidCadenceState = createInitialState(false, timeouts)
-  invalidCadenceState.currentPlanItems = ['Gather source evidence', 'Write final answer']
-  invalidCadenceState.currentStepIdx = 0
-  invalidCadenceState.visibleToolActionsSinceLastNarration = 3
-  const invalidCadenceFirstActions = policy.evaluate(
-    invalidCadenceState,
-    new Map(),
-    'Working on this now.',
-    false,
-    30,
-  )
   assert.ok(
-    invalidCadenceFirstActions.some((action) => action.message?.content?.includes('previous progress update was not valid')),
-    'first invalid cadence narration should get one rewrite attempt',
+    !cadenceActions.some((action) =>
+      action.type === 'terminate' ||
+      action.message?.content?.includes('NARRATION CADENCE') ||
+      action.message?.content?.includes('previous progress update was not valid'),
+    ),
+    'policy evaluation must never block ordinary task work on narration generation or repair',
   )
-  assert.equal(invalidCadenceState.visibleToolActionsSinceLastNarration, 3)
-  const invalidCadenceSecondActions = policy.evaluate(
-    invalidCadenceState,
-    new Map(),
-    'Still looking into it.',
-    false,
-    30,
-  )
-  assert.ok(
-    invalidCadenceSecondActions.some((action) => action.message?.content?.includes('NARRATION CADENCE MISSED')),
-    'repeated invalid cadence narration must release the next turn back to tool work',
-  )
-  assert.equal(invalidCadenceState.visibleToolActionsSinceLastNarration, 2)
 
-  const phaseEndAdvanceState = createInitialState(false, timeouts)
-  phaseEndAdvanceState.taskStrategy = 'analysis'
-  phaseEndAdvanceState.currentPhase = 'analysis'
-  phaseEndAdvanceState.currentPlanItems = ['Analyze collected evidence', 'Write final answer']
-  phaseEndAdvanceState.currentStepIdx = 0
-  phaseEndAdvanceState.visibleToolActionsSinceLastNarration = 4
-  phaseEndAdvanceState.stepToolCallCount = 4
-  phaseEndAdvanceState.stepIterationCount = 4
-  const phaseEndAdvanceActions = policy.evaluate(
-    phaseEndAdvanceState,
-    new Map(),
-    'Confirmed the official source lists the requested habitat range and elevation details for the species with matching taxonomy evidence.',
-    true,
-    30,
-  )
-  assert.equal(phaseEndAdvanceState.currentStepIdx, 1, 'valid phase-end narration plus next_step should advance in the same turn')
-  assert.equal(phaseEndAdvanceState.visibleToolActionsSinceLastNarration, 0)
-  assert.ok(phaseEndAdvanceActions.some((action) => action.type === 'step_advance'), 'phase-end narration should not swallow the next_step transition')
-
-  const phaseEndMissingNarrationState = createInitialState(false, timeouts)
-  phaseEndMissingNarrationState.taskStrategy = 'analysis'
-  phaseEndMissingNarrationState.currentPhase = 'analysis'
-  phaseEndMissingNarrationState.currentPlanItems = ['Analyze collected evidence', 'Write final answer']
-  phaseEndMissingNarrationState.currentStepIdx = 0
-  phaseEndMissingNarrationState.visibleToolActionsSinceLastNarration = 4
-  phaseEndMissingNarrationState.stepToolCallCount = 4
-  phaseEndMissingNarrationState.stepIterationCount = 4
-  const phaseEndMissingNarrationActions = policy.evaluate(
-    phaseEndMissingNarrationState,
+  const phaseAdvanceWithoutNarrationState = createInitialState(false, timeouts)
+  phaseAdvanceWithoutNarrationState.taskStrategy = 'analysis'
+  phaseAdvanceWithoutNarrationState.currentPhase = 'analysis'
+  phaseAdvanceWithoutNarrationState.currentPlanItems = ['Analyze collected evidence', 'Write final answer']
+  phaseAdvanceWithoutNarrationState.currentStepIdx = 0
+  phaseAdvanceWithoutNarrationState.visibleToolActionsSinceLastNarration = 4
+  phaseAdvanceWithoutNarrationState.stepToolCallCount = 4
+  phaseAdvanceWithoutNarrationState.stepIterationCount = 4
+  const phaseAdvanceWithoutNarrationActions = policy.evaluate(
+    phaseAdvanceWithoutNarrationState,
     new Map(),
     '',
     true,
     30,
   )
-  assert.equal(phaseEndMissingNarrationState.currentStepIdx, 0, 'phase advance without narration should pause on the active phase')
+  assert.equal(phaseAdvanceWithoutNarrationState.currentStepIdx, 1, 'phase advancement must not wait for narration')
+  assert.equal(phaseAdvanceWithoutNarrationState.forceTextNextIteration, false, 'phase advancement must not enter a narration-only mode')
   assert.ok(
-    phaseEndMissingNarrationActions.some((action) => action.message?.content?.includes('PHASE-END NARRATION REQUIRED')),
-    'phase advance without narration should request the required phase-end LLM narration turn',
-  )
-  assert.equal(phaseEndMissingNarrationState.forceTextNextIteration, true, 'missing phase narration should force a compact narration-only turn before advancing')
-
-  const phaseEndPendingNoMarkerState = createInitialState(false, timeouts)
-  phaseEndPendingNoMarkerState.taskStrategy = 'analysis'
-  phaseEndPendingNoMarkerState.currentPhase = 'analysis'
-  phaseEndPendingNoMarkerState.currentPlanItems = ['Analyze collected evidence', 'Write final answer']
-  phaseEndPendingNoMarkerState.currentStepIdx = 0
-  phaseEndPendingNoMarkerState.visibleToolActionsSinceLastNarration = 4
-  phaseEndPendingNoMarkerState.forceTextNextIteration = true
-  phaseEndPendingNoMarkerState.phaseEndNarrationPending = true
-  phaseEndPendingNoMarkerState.stepToolCallCount = 4
-  phaseEndPendingNoMarkerState.stepIterationCount = 4
-  const phaseEndPendingNoMarkerActions = policy.evaluate(
-    phaseEndPendingNoMarkerState,
-    new Map(),
-    'Confirmed the core source evidence and comparison points needed for the final answer.',
-    false,
-    30,
-  )
-  assert.equal(phaseEndPendingNoMarkerState.currentStepIdx, 1, 'valid phase-end narration should advance even without the transition marker')
-  assert.equal(phaseEndPendingNoMarkerState.forceTextNextIteration, false, 'accepted phase-end narration should release narration-only mode')
-  assert.equal(phaseEndPendingNoMarkerState.phaseEndNarrationPending, false, 'accepted phase-end narration should clear the pending flag')
-  assert.ok(
-    phaseEndPendingNoMarkerActions.some((action) => action.type === 'step_advance'),
-    'valid phase-end narration without next_step should emit a step advance',
-  )
-
-  const phaseEndPendingAdvanceState = createInitialState(false, timeouts)
-  phaseEndPendingAdvanceState.taskStrategy = 'analysis'
-  phaseEndPendingAdvanceState.currentPhase = 'analysis'
-  phaseEndPendingAdvanceState.currentPlanItems = ['Analyze collected evidence', 'Write final answer']
-  phaseEndPendingAdvanceState.currentStepIdx = 0
-  phaseEndPendingAdvanceState.visibleToolActionsSinceLastNarration = 4
-  phaseEndPendingAdvanceState.forceTextNextIteration = true
-  phaseEndPendingAdvanceState.phaseEndNarrationPending = true
-  phaseEndPendingAdvanceState.stepToolCallCount = 4
-  phaseEndPendingAdvanceState.stepIterationCount = 4
-  const phaseEndPendingAdvanceActions = policy.evaluate(
-    phaseEndPendingAdvanceState,
-    new Map(),
-    'Confirmed the core source evidence and comparison points needed for the final answer.',
-    true,
-    30,
-  )
-  assert.equal(phaseEndPendingAdvanceState.currentStepIdx, 1, 'phase-end forced narration with next_step should advance')
-  assert.equal(phaseEndPendingAdvanceState.phaseEndNarrationPending, false, 'advancing should clear the phase-end narration flag')
-  assert.ok(
-    phaseEndPendingAdvanceActions.some((action) => action.type === 'step_advance'),
-    'phase-end forced narration with next_step should emit a step advance',
+    phaseAdvanceWithoutNarrationActions.some((action) => action.type === 'step_advance'),
+    'phase advancement should continue while narration is handled asynchronously',
   )
 
   const stalledResearchLoopState = createInitialState(false, timeouts)
@@ -2467,23 +2388,22 @@ export async function runLedgerSmoke() {
     'internal repeated-tool recovery should require a materially different evidence action',
   )
 
-  const forcedNarrationState = createInitialState(false, timeouts)
-  forcedNarrationState.currentPlanItems = ['Gather source evidence', 'Write final answer']
-  forcedNarrationState.currentStepIdx = 0
-  forcedNarrationState.visibleToolActionsSinceLastNarration = 4
-  forcedNarrationState.forceTextNextIteration = true
-  const forcedNarrationActions = policy.evaluate(
-    forcedNarrationState,
+  const overdueNarrationState = createInitialState(false, timeouts)
+  overdueNarrationState.currentPlanItems = ['Gather source evidence', 'Write final answer']
+  overdueNarrationState.currentStepIdx = 0
+  overdueNarrationState.visibleToolActionsSinceLastNarration = 4
+  const overdueNarrationActions = policy.evaluate(
+    overdueNarrationState,
     new Map([[0, { id: 'call_forced', name: 'web_search', arguments: '{"query":"habitat evidence"}' }]]),
     '',
     false,
     30,
   )
   assert.ok(
-    forcedNarrationActions.some((action) => action.message?.content?.includes('NARRATION REQUIRED BEFORE NEXT ACTION')),
-    'a tool call during an overdue narration state should be blocked until narration is written',
+    !overdueNarrationActions.some((action) => action.message?.content?.includes('NARRATION REQUIRED BEFORE NEXT ACTION')),
+    'overdue narration must not block a useful tool call while the async narration sidecar is pending',
   )
-  assert.equal(forcedNarrationState.forceTextNextIteration, true)
+  assert.equal(overdueNarrationState.forceTextNextIteration, false, 'cadence narration must not turn into a blocking model retry')
 
   const inlineFinalNoToolState = createInitialState(false, timeouts)
   inlineFinalNoToolState.taskStrategy = 'research'

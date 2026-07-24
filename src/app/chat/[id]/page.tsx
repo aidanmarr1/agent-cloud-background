@@ -2,7 +2,7 @@
 
 import dynamic from 'next/dynamic'
 import { useParams, useRouter } from 'next/navigation'
-import { useEffect, useCallback, useRef, useState } from 'react'
+import { useEffect, useCallback, useRef, useState, type CSSProperties } from 'react'
 import { loadConversationFromServer, useChatStore } from '@/store/chat'
 import { useUIStore } from '@/store/ui'
 import { getTotalCredits, useCreditStore } from '@/store/credits'
@@ -12,11 +12,12 @@ import { ModelSelector } from '@/components/ui/ModelSelector'
 import { CreditPill } from '@/components/ui/CreditPill'
 import { UserMenu } from '@/components/ui/UserMenu'
 import { ProjectFiles } from '@/components/ui/ProjectFiles'
+import { ControlTooltip } from '@/components/ui/ControlTooltip'
 import { MessageList } from '@/components/chat/MessageList'
 import { ChatInput } from '@/components/chat/ChatInput'
 import { StepTrackerBar } from '@/components/chat/StepTrackerBar'
 import { exportAsMarkdown, exportAsJSON, downloadFile } from '@/lib/exportConversation'
-import { AlertCircle, RefreshCw, Home, Bot, Monitor, Sliders, LayoutGrid, MoreHorizontal, Download, Code, BarChart3 } from '@/components/icons'
+import { AlertCircle, RefreshCw, Home, Bot, Monitor, Sliders, LayoutGrid, MoreHorizontal, Download, Code, BarChart3, Search } from '@/components/icons'
 import { ChatSkeleton } from '@/components/chat/ChatSkeleton'
 import { OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
 import { userErrorMessage } from '@/lib/errorMessages'
@@ -99,6 +100,9 @@ export default function ChatPage() {
     useChatStore.setState((state) => ({
       conversations: state.conversations.map((item) => {
         if (item.id !== id) return item
+        // A newer server summary deliberately fences an older local body from
+        // upload. Only placeholder summaries may be revealed for live replay.
+        if (item.serverBodyStale) return item
         const { serverSummary, ...materialized } = item
         void serverSummary
         return { ...materialized, updatedAt: Date.now() }
@@ -181,6 +185,7 @@ export default function ChatPage() {
     handleRegenerate()
   }, [addToast, clearError, handleRegenerate])
 
+  const resumeAttemptedConversationRef = useRef<string | null>(null)
   useEffect(() => {
     if (!hydrated || !conversation || conversation.serverSummary) return
     if (
@@ -189,14 +194,38 @@ export default function ChatPage() {
     ) {
       return
     }
-    void resumeActiveTask().catch((error) => {
+    if (resumeAttemptedConversationRef.current === id) return
+    resumeAttemptedConversationRef.current = id
+    const latestMessage = conversation.messages[conversation.messages.length - 1]
+    const latestAssistantLooksUnresolved = latestMessage?.role === 'assistant' && (
+      (
+        !latestMessage.content.trim() &&
+        !(latestMessage.artifacts?.length) &&
+        !(latestMessage.computerPanelData?.length)
+      ) ||
+      latestMessage.steps?.some((step) => step.status === 'running') ||
+      latestMessage.taskGroups?.some((group) => (
+        group.status === 'running' || group.subtasks?.some((subtask) => subtask.status === 'running')
+      ))
+    )
+    const includeTerminalReplay = latestMessage?.role === 'user' || latestAssistantLooksUnresolved || (
+      latestMessage?.role === 'assistant' &&
+      !!latestMessage.streamRunId &&
+      !latestMessage.streamTerminalStatus
+    )
+    void resumeActiveTask({ includeTerminalReplay }).catch((error) => {
       console.error('Task resume failed:', error)
     })
-  }, [hydrated, conversation, resumeActiveTask])
+  }, [hydrated, id, conversation, resumeActiveTask])
 
   // Auto-send on first load
   const hasSentRef = useRef(false)
+  const autoSendConversationRef = useRef(id)
   useEffect(() => {
+    if (autoSendConversationRef.current !== id) {
+      autoSendConversationRef.current = id
+      hasSentRef.current = false
+    }
     if (!hydrated || !conversation || hasSentRef.current) return
     if (
       conversation.messages.length === 1 &&
@@ -249,6 +278,10 @@ export default function ChatPage() {
   // closing and reopening around every tool event.
   const assistantMessages = conversation?.messages.filter((m) => m.role === 'assistant') || []
   const lastAssistantMsg = assistantMessages[assistantMessages.length - 1]
+  const latestConversationMessage = conversation?.messages[conversation.messages.length - 1]
+  const trackerAssistantMsg = latestConversationMessage?.role === 'assistant'
+    ? latestConversationMessage
+    : undefined
   const panelAssistantMsg = [...assistantMessages]
     .reverse()
     .find((m) => (m.computerPanelData?.length || 0) > 0) || lastAssistantMsg
@@ -262,7 +295,8 @@ export default function ChatPage() {
     const hadItems = prevPanelDataLen.current > 0
     const hasItems = computerPanelData.length > 0
     prevPanelDataLen.current = computerPanelData.length
-    if (!hadItems && hasItems && isStreaming && !computerPanelOpen) {
+    const desktopViewport = typeof window !== 'undefined' && window.matchMedia('(min-width: 768px)').matches
+    if (!hadItems && hasItems && isStreaming && !computerPanelOpen && desktopViewport) {
       useUIStore.getState().setComputerPanelOpen(true, { source: 'auto' })
     }
   }, [computerPanelData.length, isStreaming, computerPanelOpen])
@@ -290,7 +324,7 @@ export default function ChatPage() {
           <p className="text-[13px] text-text-tertiary mb-7 leading-relaxed">This task is no longer available.</p>
           <button
             onClick={() => router.push('/')}
-            className="inline-flex items-center gap-2 px-5 h-10 bg-text-primary text-primary-foreground hover:opacity-90 rounded-xl text-[12.5px] font-semibold transition-all duration-200 active:scale-95"
+            className="inline-flex items-center gap-2 px-5 h-10 bg-text-primary text-primary-foreground hover:opacity-90 rounded-lg text-[12.5px] font-semibold transition-all duration-200 active:scale-95"
           >
             <Home size={13} strokeWidth={2.25} />
             Back to home
@@ -301,29 +335,31 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-[100dvh] min-h-[100dvh] overflow-hidden">
+    <div
+      data-chat-layout=""
+      className="chat-split-layout flex h-[100dvh] min-h-[100dvh] overflow-hidden"
+      style={{ '--computer-panel-width': `${computerPanelWidth}%` } as CSSProperties}
+    >
       {/* Main area */}
-      {showComputerPanel && (
-        <style>{`
-          @media (min-width: 768px) {
-            [data-chat-main] { margin-right: ${computerPanelWidth}%; }
-          }
-        `}</style>
-      )}
       <div
         data-chat-main=""
-        className="flex-1 flex flex-col h-full min-h-0 min-w-0 overflow-hidden transition-[margin] duration-300"
-        style={{ transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)' }}
+        className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
       >
         {/* Top bar */}
-        <div className="h-12 flex min-w-0 items-center gap-2 overflow-visible pl-14 pr-2 border-b border-border-primary flex-shrink-0 relative z-40 bg-bg-primary backdrop-blur-xl sm:gap-3 sm:pr-4 md:gap-4 md:px-6">
+        <div className="relative z-40 flex h-16 min-w-0 flex-shrink-0 items-center gap-2 overflow-visible border-b border-border-secondary bg-bg-primary pl-14 pr-2 sm:gap-3 sm:pr-4 md:gap-4 md:px-7">
           <ModelSelector />
-          <div className="flex-1 items-center gap-2.5 min-w-0 hidden md:flex">
-            <span className="text-[14px] text-text-secondary truncate font-medium tracking-[0]">
+          <div className="flex min-w-0 flex-1 items-center gap-2">
+            <span className="truncate text-[12.5px] font-semibold tracking-[0] text-text-secondary sm:text-[13.5px]">
               {conversation.title}
             </span>
+            {isStreaming && (
+              <span className="hidden flex-shrink-0 items-center gap-1.5 text-[11px] font-medium text-text-tertiary lg:flex" aria-label="Task is working">
+                <span className="h-1.5 w-1.5 rounded-full bg-accent-blue" aria-hidden="true" />
+                Working
+              </span>
+            )}
           </div>
-          <div className="flex min-w-0 items-center gap-0.5 flex-shrink-0 sm:gap-1">
+          <div className="flex min-w-0 flex-shrink-0 items-center gap-1.5 sm:gap-2">
             {(hasComputerPanelContent || showComputerPanel) && (
               <button
                 onClick={() => toggleComputerPanel()}
@@ -337,15 +373,15 @@ export default function ChatPage() {
               </button>
             )}
             {/* Unified overflow menu */}
-            <div className="relative">
+            <div className="group/tooltip relative">
               <button
                 onClick={() => setMenuOpen(!menuOpen)}
-                className="subtle-icon-button w-9 h-9 rounded-full flex items-center justify-center transition-all duration-150 active:scale-[0.96]"
-                title="More actions"
+                className="subtle-icon-button flex h-9 w-9 items-center justify-center rounded-lg transition-all duration-150 active:scale-[0.96]"
                 aria-label="More task actions"
               >
                 <MoreHorizontal size={16} strokeWidth={2.25} weight="regular" />
               </button>
+              {!menuOpen && <ControlTooltip label="More actions" />}
               {menuOpen && (
                 <>
                   <button
@@ -355,12 +391,19 @@ export default function ChatPage() {
                     aria-label="Close task actions"
                   />
                   <div
-                    className="absolute right-0 top-full mt-1.5 w-52 menu-surface border border-border-primary rounded-xl p-1 z-50 animate-scale-in overflow-hidden"
-                    style={{ boxShadow: 'var(--shadow-xl)' }}
+                    className="absolute right-0 top-full z-50 mt-1.5 w-60 overflow-hidden rounded-xl border border-border-primary p-1.5 menu-surface animate-scale-in"
+                    style={{ boxShadow: 'var(--shadow-menu)' }}
                   >
                     <button
+                      onClick={() => { setConversationSearchOpen(true); setMenuOpen(false) }}
+                      className="w-full flex items-center gap-2.5 px-2.5 h-9 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150"
+                    >
+                      <Search size={13} className="text-text-muted" strokeWidth={2.25} />
+                      Search in task
+                    </button>
+                    <button
                       onClick={() => { setInstructionsOpen(true); setMenuOpen(false) }}
-                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                      className="w-full flex items-center gap-2.5 px-2.5 h-9 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150"
                     >
                       <Sliders size={13} className="text-text-muted" strokeWidth={2.25} />
                       Instructions
@@ -368,7 +411,7 @@ export default function ChatPage() {
                     {(lastAssistantMsg?.artifacts?.length ?? 0) > 0 && (
                       <button
                         onClick={() => { setGalleryOpen(true); setMenuOpen(false) }}
-                        className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                        className="w-full flex items-center gap-2.5 px-2.5 h-9 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150"
                       >
                       <LayoutGrid size={13} className="text-text-muted" strokeWidth={2.25} />
                       Created files
@@ -381,7 +424,7 @@ export default function ChatPage() {
                         downloadFile(exportAsMarkdown(conversation), `${slug}.md`, 'text/markdown')
                         setMenuOpen(false)
                       }}
-                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                      className="w-full flex items-center gap-2.5 px-2.5 h-9 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150"
                     >
                       <Download size={13} className="text-text-muted" strokeWidth={2.25} />
                       Export as Markdown
@@ -392,7 +435,7 @@ export default function ChatPage() {
                         downloadFile(exportAsJSON(conversation), `${slug}.json`, 'application/json')
                         setMenuOpen(false)
                       }}
-                      className="w-full flex items-center gap-2.5 px-2.5 h-8 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-all duration-150"
+                      className="w-full flex items-center gap-2.5 px-2.5 h-9 rounded-lg text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150"
                     >
                       <Code size={13} className="text-text-muted" strokeWidth={2.25} />
                       Export as JSON
@@ -401,11 +444,15 @@ export default function ChatPage() {
                 </>
               )}
             </div>
-            <div className="hidden md:block">
+            <div>
               <ProjectFiles conversationId={id} />
             </div>
-            <CreditPill />
-            <UserMenu />
+            <div className="hidden min-[520px]:block">
+              <CreditPill />
+            </div>
+            <div className="ml-1">
+              <UserMenu />
+            </div>
           </div>
         </div>
 
@@ -431,7 +478,7 @@ export default function ChatPage() {
         {/* Credit cutoff banner */}
         {creditBlocked && (
           <div className="flex-shrink-0 px-3 pb-2 animate-fade-in-up sm:px-6">
-            <div className="max-w-[810px] mx-auto bg-bg-card border border-border-primary rounded-2xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center" style={{ boxShadow: 'var(--shadow-sm)' }}>
+            <div className="mx-auto flex max-w-[860px] flex-col gap-3 rounded-2xl border border-border-primary bg-bg-card px-4 py-3 sm:flex-row sm:items-center" style={{ boxShadow: 'var(--shadow-sm)' }}>
               <div className="flex items-center gap-3 min-w-0 flex-1">
                 <div className="w-8 h-8 rounded-lg bg-bg-secondary flex items-center justify-center flex-shrink-0">
                   <AlertCircle size={15} className="text-text-secondary" />
@@ -469,18 +516,18 @@ export default function ChatPage() {
         {/* Error banner */}
         {streamError && !creditBlocked && (
           <div className="flex-shrink-0 px-3 pb-2 animate-fade-in-up sm:px-6">
-            <div className="max-w-[768px] mx-auto bg-accent-red/5 border border-accent-red/15 rounded-2xl px-4 py-3 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <div className="w-7 h-7 rounded-lg bg-accent-red/10 flex items-center justify-center flex-shrink-0">
-                <AlertCircle size={14} className="text-accent-red" />
+            <div className="mx-auto flex max-w-[860px] flex-col gap-3 rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 py-3 sm:flex-row sm:items-center">
+              <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--danger-bg-hover)]">
+                <AlertCircle size={14} className="text-[var(--danger-icon)]" />
               </div>
-              <span className="text-[13px] text-accent-red/80 flex-1 leading-snug">{visibleTaskError(streamError)}</span>
+              <span className="flex-1 text-[13px] leading-snug text-[var(--danger-text)]">{visibleTaskError(streamError)}</span>
               <button
                 onClick={() => {
                   clearError()
                   handleRegenerate()
                 }}
                 disabled={isStreaming}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-accent-red text-text-on-accent hover:opacity-90 rounded-lg text-xs font-medium transition-all flex-shrink-0 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex flex-shrink-0 items-center gap-1.5 rounded-lg bg-[var(--danger-solid)] px-3.5 py-1.5 text-xs font-medium text-text-on-accent transition-colors hover:bg-[var(--danger-solid-hover)] active:scale-95 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <RefreshCw size={12} />
                 Retry
@@ -489,22 +536,26 @@ export default function ChatPage() {
           </div>
         )}
 
-        {/* Step tracker bar (Manus-style, above input) */}
-        {lastAssistantMsg?.taskGroups && lastAssistantMsg.taskGroups.length > 0 && (
-          <StepTrackerBar taskGroups={lastAssistantMsg.taskGroups} isStreaming={isStreaming} />
-        )}
-
-        {/* Input */}
-        <div className="flex-shrink-0 px-3 pt-2 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-5 sm:pt-3 sm:pb-5">
-          <div className="flex justify-center">
-            <ChatInput
-              onSubmit={(msg, attachments) => sendMessage(msg, attachments)}
-              onStop={handleStop}
-              onSlashAction={handleSlashAction}
-              placeholder="Send a message..."
-              conversationId={id}
-            />
+        {/* Sticky footer stack: progress and composer share the same Manus-style footprint. */}
+        <div className="flex-shrink-0 bg-bg-primary px-3 pt-2.5 pb-[calc(0.5rem+env(safe-area-inset-bottom))] sm:px-5">
+          <div className="task-composer-stack mx-auto w-full max-w-[860px]">
+            {trackerAssistantMsg?.taskGroups && trackerAssistantMsg.taskGroups.length > 0 && (
+              <StepTrackerBar taskGroups={trackerAssistantMsg.taskGroups} isStreaming={isStreaming} />
+            )}
+            <div className="relative z-[2]">
+              <ChatInput
+                onSubmit={(msg, attachments) => sendMessage(msg, attachments)}
+                onStop={handleStop}
+                onSlashAction={handleSlashAction}
+                placeholder="Message Agent"
+                conversationId={id}
+                variant="thread"
+              />
+            </div>
           </div>
+          <p className="mx-auto mt-2 max-w-[860px] text-center text-[10.5px] leading-4 text-text-muted">
+            Agent can make mistakes. Double-check important information.
+          </p>
         </div>
       </div>
 

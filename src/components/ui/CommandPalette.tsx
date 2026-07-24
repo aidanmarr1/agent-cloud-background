@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { useState, useEffect, useRef, useCallback, useId, useMemo } from 'react'
 import {
   Search, MessageSquare, PenSquare, Settings, Keyboard,
 } from '@/components/icons'
@@ -18,6 +18,22 @@ interface PaletteItem {
   onSelect: () => void
 }
 
+const FOCUSABLE_SELECTOR = [
+  'button:not([disabled])',
+  'input:not([disabled]):not([type="hidden"])',
+  'select:not([disabled])',
+  'textarea:not([disabled])',
+  'a[href]',
+  '[tabindex]:not([tabindex="-1"])',
+].join(',')
+
+function getFocusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter((element) => {
+    if (element.closest('[aria-hidden="true"], [inert]')) return false
+    return element.getClientRects().length > 0
+  })
+}
+
 function getPreview(conv: Conversation): string {
   const userMsg = conv.messages.find((m) => m.role === 'user')
   return userMsg?.content.slice(0, 60) || 'New task'
@@ -27,7 +43,13 @@ export function CommandPalette() {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const dialogRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLDivElement>(null)
+  const resultsId = useId()
+  const optionIdPrefix = useId()
+  const tasksGroupLabelId = useId()
+  const actionsGroupLabelId = useId()
   const router = useRouter()
 
   // Register Cmd+K listener
@@ -43,11 +65,24 @@ export function CommandPalette() {
     return () => document.removeEventListener('keydown', handler)
   }, [])
 
-  // Reset palette state when opening without moving browser focus.
+  // Reset the palette, move focus into it, and return focus to its opener.
   useEffect(() => {
     if (!open) return
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
     setQuery('')
     setSelectedIndex(0)
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      inputRef.current?.focus({ preventScroll: true })
+    })
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      if (previouslyFocused?.isConnected) {
+        previouslyFocused.focus({ preventScroll: true })
+      }
+    }
   }, [open])
 
   const close = useCallback(() => {
@@ -142,11 +177,35 @@ export function CommandPalette() {
     }
   }, [flatItems.length, selectedIndex])
 
-  // Keyboard navigation
+  // Keyboard navigation and focus containment. Capture Escape before global
+  // shortcuts so closing the palette cannot also close an overlay behind it.
   useEffect(() => {
     if (!open) return
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'ArrowDown') {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        close()
+      } else if (e.key === 'Tab') {
+        const dialog = dialogRef.current
+        const focusableElements = dialog ? getFocusableElements(dialog) : []
+        if (!dialog || focusableElements.length === 0) {
+          e.preventDefault()
+          dialog?.focus({ preventScroll: true })
+          return
+        }
+
+        const firstElement = focusableElements[0]
+        const lastElement = focusableElements[focusableElements.length - 1]
+        const activeElement = document.activeElement
+        if (e.shiftKey && (activeElement === firstElement || !dialog.contains(activeElement))) {
+          e.preventDefault()
+          lastElement.focus({ preventScroll: true })
+        } else if (!e.shiftKey && (activeElement === lastElement || !dialog.contains(activeElement))) {
+          e.preventDefault()
+          firstElement.focus({ preventScroll: true })
+        }
+      } else if (e.key === 'ArrowDown') {
         e.preventDefault()
         setSelectedIndex((prev) => Math.min(prev + 1, flatItems.length - 1))
       } else if (e.key === 'ArrowUp') {
@@ -155,13 +214,10 @@ export function CommandPalette() {
       } else if (e.key === 'Enter') {
         e.preventDefault()
         flatItems[selectedIndex]?.onSelect()
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        close()
       }
     }
-    document.addEventListener('keydown', handler)
-    return () => document.removeEventListener('keydown', handler)
+    document.addEventListener('keydown', handler, true)
+    return () => document.removeEventListener('keydown', handler, true)
   }, [open, flatItems, selectedIndex, close])
 
   // Scroll selected item into view
@@ -183,19 +239,35 @@ export function CommandPalette() {
         className="absolute inset-0 bg-[var(--overlay-scrim-subtle)]"
         onClick={close}
         aria-label="Close command palette"
+        tabIndex={-1}
       />
 
       {/* Modal */}
-      <div className="relative w-full max-w-[560px] mx-4 menu-surface border border-border-primary rounded-2xl overflow-hidden animate-scale-in" style={{ boxShadow: 'var(--shadow-xl)' }}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
+        tabIndex={-1}
+        className="relative w-full max-w-[560px] mx-4 menu-surface border border-border-primary rounded-2xl overflow-hidden animate-scale-in"
+        style={{ boxShadow: 'var(--shadow-xl)' }}
+      >
         {/* Search input */}
         <div className="flex items-center gap-3 px-4 h-14 border-b border-border-primary">
           <Search size={15} className="text-text-muted flex-shrink-0" strokeWidth={2.25} />
           <input
+            ref={inputRef}
             type="text"
             value={query}
             onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0) }}
             placeholder="Search tasks and actions…"
-            className="bg-transparent text-[14.5px] text-text-primary placeholder:text-text-muted/80 placeholder:[font-family:var(--font-display)] outline-none flex-1"
+            role="combobox"
+            aria-label="Search tasks and actions"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls={resultsId}
+            aria-activedescendant={flatItems.length > 0 ? `${optionIdPrefix}-${selectedIndex}` : undefined}
+            className="bg-transparent text-[14.5px] text-text-primary placeholder:text-text-muted placeholder:[font-family:var(--font-display)] outline-none flex-1"
           />
           <kbd className="text-[10px] text-text-muted bg-bg-secondary border border-border-secondary rounded px-1.5 h-5 flex items-center font-mono font-medium">
             ESC
@@ -203,7 +275,13 @@ export function CommandPalette() {
         </div>
 
         {/* Results */}
-        <div ref={listRef} className="max-h-[380px] overflow-y-auto p-2">
+        <div
+          ref={listRef}
+          id={resultsId}
+          role="listbox"
+          aria-label="Command results"
+          className="max-h-[380px] overflow-y-auto p-2"
+        >
           {flatItems.length === 0 ? (
             <div className="py-12 text-center">
               <div className="w-11 h-11 rounded-2xl bg-bg-secondary border border-border-primary flex items-center justify-center mx-auto mb-3">
@@ -215,9 +293,9 @@ export function CommandPalette() {
             <>
               {/* Tasks section */}
               {conversationItems.length > 0 && (
-                <div className="mb-1">
+                <div className="mb-1" role="group" aria-labelledby={tasksGroupLabelId}>
                   <div className="px-3 pt-2 pb-1.5">
-                    <span className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">
+                    <span id={tasksGroupLabelId} className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">
                       Tasks
                     </span>
                   </div>
@@ -226,11 +304,16 @@ export function CommandPalette() {
                     return (
                       <button
                         key={item.id}
+                        id={`${optionIdPrefix}-${idx}`}
+                        type="button"
+                        role="option"
+                        aria-selected={selectedIndex === idx}
+                        tabIndex={-1}
                         data-palette-index={idx}
                         onClick={item.onSelect}
                         onMouseEnter={() => setSelectedIndex(idx)}
-                        className={`w-full px-2.5 py-2.5 flex items-center gap-3 text-left rounded-xl transition-all duration-100 ${
-                          selectedIndex === idx ? 'bg-bg-secondary' : 'hover:bg-bg-secondary'
+                        className={`w-full px-2.5 py-2.5 flex items-center gap-3 text-left rounded-lg transition-all duration-100 ${
+                          selectedIndex === idx ? 'bg-bg-hover' : 'hover:bg-bg-hover focus-visible:bg-bg-hover'
                         }`}
                       >
                         <div className="w-8 h-8 rounded-lg bg-bg-secondary border border-border-primary flex items-center justify-center flex-shrink-0">
@@ -252,12 +335,12 @@ export function CommandPalette() {
 
               {/* Actions section */}
               {actionItems.length > 0 && (
-                <div>
+                <div role="group" aria-labelledby={actionsGroupLabelId}>
                   {conversationItems.length > 0 && (
-                    <div className="h-px bg-border-secondary mx-3 my-1.5" />
+                    <div className="h-px bg-border-secondary mx-3 my-1.5" role="separator" />
                   )}
                   <div className="px-3 pt-2 pb-1.5">
-                    <span className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">
+                    <span id={actionsGroupLabelId} className="text-[11.5px] text-text-tertiary [font-family:var(--font-display)]">
                       Actions
                     </span>
                   </div>
@@ -266,11 +349,16 @@ export function CommandPalette() {
                     return (
                       <button
                         key={item.id}
+                        id={`${optionIdPrefix}-${idx}`}
+                        type="button"
+                        role="option"
+                        aria-selected={selectedIndex === idx}
+                        tabIndex={-1}
                         data-palette-index={idx}
                         onClick={item.onSelect}
                         onMouseEnter={() => setSelectedIndex(idx)}
-                        className={`w-full px-2.5 py-2.5 flex items-center gap-3 text-left rounded-xl transition-all duration-100 ${
-                          selectedIndex === idx ? 'bg-bg-secondary' : 'hover:bg-bg-secondary'
+                        className={`w-full px-2.5 py-2.5 flex items-center gap-3 text-left rounded-lg transition-all duration-100 ${
+                          selectedIndex === idx ? 'bg-bg-hover' : 'hover:bg-bg-hover focus-visible:bg-bg-hover'
                         }`}
                       >
                         <div className="w-8 h-8 rounded-lg bg-bg-secondary border border-border-primary flex items-center justify-center flex-shrink-0">

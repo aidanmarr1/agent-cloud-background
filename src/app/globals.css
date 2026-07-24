@@ -1,62 +1,78 @@
 @import "tailwindcss";
 
 :root {
-  --surface-base: #f5f5f5;
-  --surface-front: #e3e3e2;
+  --surface-base: #f8f8f7;
+  --surface-front: #f1f1ef;
   --bg-primary: var(--surface-base);
   --bg-secondary: var(--surface-front);
-  --bg-tertiary: var(--bg-secondary);
-  --bg-card: var(--bg-secondary);
-  --bg-elevated: var(--bg-secondary);
-  --bg-menu: var(--bg-primary);
-  --bg-code: var(--bg-secondary);
-  --text-primary: #191919;
-  --text-secondary: color-mix(in srgb, var(--text-primary) 62%, var(--bg-primary));
-  --text-tertiary: color-mix(in srgb, var(--text-primary) 44%, var(--bg-primary));
-  --text-muted: color-mix(in srgb, var(--text-primary) 30%, var(--bg-primary));
-  --border-primary: color-mix(in srgb, var(--text-primary) 9%, transparent);
-  --border-secondary: color-mix(in srgb, var(--text-primary) 5%, transparent);
-  --border-tertiary: color-mix(in srgb, var(--text-primary) 16%, transparent);
-  --accent-blue: var(--text-secondary);
+  --bg-tertiary: #e8e8e5;
+  --bg-card: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-menu: #ffffff;
+  --bg-code: #ececea;
+  --text-primary: #171716;
+  --text-secondary: color-mix(in srgb, var(--text-primary) 74%, var(--bg-primary));
+  --text-tertiary: color-mix(in srgb, var(--text-primary) 62%, var(--bg-primary));
+  --text-muted: color-mix(in srgb, var(--text-primary) 62%, var(--bg-primary));
+  --border-primary: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  --border-secondary: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --border-tertiary: color-mix(in srgb, var(--text-primary) 20%, transparent);
+  --accent-blue: #0068b8;
   --accent-red: #7f1d1d;
-  --success-bg: #12301f;
-  --success-bg-hover: #183b28;
-  --success-border: #24563b;
-  --success-solid: #14532d;
-  --success-solid-hover: #166534;
-  --success-text: #d7f2df;
-  --success-icon: #4d8a63;
+  --success-bg: #edf7f0;
+  --success-bg-hover: #e2f1e7;
+  --success-border: #b8dcc2;
+  --success-solid: #166534;
+  --success-solid-hover: #14532d;
+  --success-text: #14532d;
+  --success-icon: #2f7a4a;
   --accent-green: var(--success-solid);
-  --accent-active: #0081f2;
-  --status-live: #0081f2;
-  --tab-fill: var(--bg-secondary);
-  --input-active-border: var(--border-tertiary);
+  --accent-active: #0068b8;
+  --status-live: #0068b8;
+  --tab-fill: var(--bg-tertiary);
+  --input-active-border: color-mix(in srgb, var(--accent-blue) 46%, var(--border-tertiary));
   --text-on-accent: #ffffff;
+  --text-on-blue: #ffffff;
   --text-on-scrim: #ffffff;
   --toggle-thumb: #ffffff;
   --preview-canvas: #ffffff;
   --control-inset-highlight: transparent;
   --toggle-thumb-shadow: var(--shadow-sm);
-  --danger-bg: #3b1414;
-  --danger-bg-hover: #481818;
-  --danger-border: #682020;
-  --danger-solid: #7f1d1d;
-  --danger-solid-hover: #8c2424;
-  --danger-text: #f0d1d1;
-  --danger-icon: #b45a5a;
+  --danger-bg: #faeeee;
+  --danger-bg-hover: #f7e4e4;
+  --danger-border: #e7b8b8;
+  --danger-solid: #9b2c2c;
+  --danger-solid-hover: #7f1d1d;
+  --danger-text: #7f1d1d;
+  --danger-icon: #a94444;
   --overlay-scrim-subtle: rgb(0 0 0 / 0.4);
   --overlay-scrim: rgb(0 0 0 / 0.55);
   --overlay-scrim-strong: rgb(0 0 0 / 0.85);
   --overlay-caption: rgb(0 0 0 / 0.7);
   --overlay-profile: rgb(20 20 20 / 0.62);
-  --shadow-sm: 0 1px 2px #0000000a;
-  --shadow-md: 0 8px 24px -20px #00000042;
-  --shadow-lg: 0 18px 48px -34px #00000066;
-  --shadow-xl: 0 24px 68px -42px #0000007a;
-  --bg-hover: var(--bg-secondary);
-  --bg-message-user: var(--bg-secondary);
-  --font-display: var(--font-body);
-  --font-body: 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+  --tooltip-surface: #030303;
+  --tooltip-text: #ffffff;
+  --tooltip-muted: #7f7f7f;
+  --shadow-sm: 0 4px 32px rgb(24 24 23 / 0.1);
+  --shadow-md: 0 4px 32px rgb(24 24 23 / 0.1);
+  --shadow-lg: 0 4px 32px rgb(24 24 23 / 0.1);
+  --shadow-menu: 0 4px 32px rgb(24 24 23 / 0.1);
+  --shadow-xl: 0 4px 32px rgb(24 24 23 / 0.1);
+  --bg-hover: var(--sidebar-hover);
+  --bg-message-user: #ececea;
+  --sidebar-surface: #f1f1ef;
+  --sidebar-field: #e8e8e5;
+  --sidebar-hover: #e5e5e2;
+  --sidebar-selected: #deded9;
+  --sidebar-divider: rgb(23 23 22 / 0.09);
+  --consumer-panel: #eeeeeb;
+  --consumer-panel-surface: #f8f8f7;
+  --consumer-panel-hover: #e3e3df;
+  --consumer-panel-text: #171716;
+  --consumer-panel-muted: #666662;
+  --consumer-panel-border: rgb(23 23 22 / 0.11);
+  --font-display: Georgia, 'Times New Roman', Times, serif;
+  --font-body: var(--font-manrope), 'Segoe UI', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
   --shadow-ring-blue: 0 0 0 2px var(--bg-primary), 0 0 0 4px var(--border-tertiary);
   --primary-foreground: var(--bg-primary);
   --ring: var(--border-tertiary);
@@ -88,25 +104,74 @@ html[data-ui-booting] .app-main-content {
   transition: none !important;
 }
 
+.app-sidebar {
+  color-scheme: light;
+  will-change: width, transform;
+}
+
+.app-main-content {
+  will-change: margin-left;
+}
+
+/* The task and computer surfaces share one real split layout. The computer
+   becomes an overlay when the available task area is too narrow, so opening or
+   resizing it can never crush the conversation below a readable width. */
+.chat-split-layout {
+  container-name: chat-split;
+  container-type: inline-size;
+}
+
+.computer-panel-shell {
+  contain: layout paint;
+}
+
+@container chat-split (min-width: 1000px) {
+  .computer-panel-backdrop {
+    display: none;
+  }
+
+  .computer-panel-shell {
+    position: relative;
+    inset: auto;
+    z-index: 30;
+    width: clamp(380px, var(--computer-panel-width, 30%), calc(100cqw - 620px));
+    height: 100%;
+    flex: none;
+  }
+
+  .computer-panel-resize-handle {
+    display: block;
+  }
+}
+
+body[data-computer-panel-resizing='true'] .computer-panel-shell {
+  animation: none;
+  transition: none;
+}
+
+body[data-computer-panel-resizing='true'] .computer-panel-shell > *:not(.computer-panel-resize-handle) {
+  pointer-events: none;
+}
+
 html[data-ui-booting][data-sidebar-known="false"] .app-sidebar > * {
   visibility: hidden;
 }
 
 @media (min-width: 768px) {
-  html[data-sidebar-state="collapsed"] .app-sidebar {
-    width: 56px !important;
+  html[data-ui-booting][data-sidebar-state="collapsed"] .app-sidebar {
+    width: 64px !important;
   }
 
-  html[data-sidebar-state="expanded"] .app-sidebar {
-    width: 256px !important;
+  html[data-ui-booting][data-sidebar-state="expanded"] .app-sidebar {
+    width: 260px !important;
   }
 
-  html[data-sidebar-state="collapsed"] .app-main-content {
-    margin-left: 3.5rem !important;
+  html[data-ui-booting][data-sidebar-state="collapsed"] .app-main-content {
+    margin-left: 4rem !important;
   }
 
-  html[data-sidebar-state="expanded"] .app-main-content {
-    margin-left: 16rem !important;
+  html[data-ui-booting][data-sidebar-state="expanded"] .app-main-content {
+    margin-left: 16.25rem !important;
   }
 
   html .app-main-content.auth-main-content {
@@ -116,70 +181,134 @@ html[data-ui-booting][data-sidebar-known="false"] .app-sidebar > * {
 
 /* Dark theme overrides */
 html.dark {
-  --surface-base: #1a1a1a;
-  --surface-front: #262625;
+  --surface-base: #181817;
+  --surface-front: #222221;
   --bg-primary: var(--surface-base);
   --bg-secondary: var(--surface-front);
-  --bg-tertiary: var(--bg-secondary);
-  --bg-card: var(--bg-secondary);
-  --bg-elevated: var(--bg-secondary);
-  --bg-menu: var(--bg-primary);
-  --bg-code: var(--bg-secondary);
-  --text-primary: #f4f4f5;
-  --text-secondary: color-mix(in srgb, var(--text-primary) 72%, var(--bg-primary));
-  --text-tertiary: color-mix(in srgb, var(--text-primary) 50%, var(--bg-primary));
-  --text-muted: color-mix(in srgb, var(--text-primary) 34%, var(--bg-primary));
-  --border-primary: color-mix(in srgb, var(--text-primary) 8%, transparent);
-  --border-secondary: color-mix(in srgb, var(--text-primary) 4%, transparent);
-  --border-tertiary: color-mix(in srgb, var(--text-primary) 15%, transparent);
-  --accent-blue: var(--text-secondary);
-  --accent-red: #b45a5a;
+  --bg-tertiary: #292928;
+  --bg-card: #1f1f1e;
+  --bg-elevated: #1f1f1e;
+  --bg-menu: #242423;
+  --bg-code: #20201f;
+  --text-primary: #f6f6f4;
+  --text-secondary: color-mix(in srgb, var(--text-primary) 82%, var(--bg-primary));
+  --text-tertiary: color-mix(in srgb, var(--text-primary) 68%, var(--bg-primary));
+  --text-muted: color-mix(in srgb, var(--text-primary) 58%, var(--bg-primary));
+  --border-primary: color-mix(in srgb, var(--text-primary) 11%, transparent);
+  --border-secondary: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --border-tertiary: color-mix(in srgb, var(--text-primary) 20%, transparent);
+  --accent-blue: #4c9cff;
+  --accent-red: #cb6e6e;
   --accent-green: var(--success-solid);
-  --accent-active: #2f8cff;
-  --status-live: #2f8cff;
-  --tab-fill: var(--bg-secondary);
-  --input-active-border: var(--border-tertiary);
-  --bg-hover: var(--bg-secondary);
-  --bg-message-user: var(--bg-secondary);
-  --shadow-sm: 0 1px 2px #00000033;
-  --shadow-md: 0 8px 24px -18px #000000cc;
-  --shadow-lg: 0 18px 48px -30px #000000e0;
-  --shadow-xl: 0 24px 68px -36px #000000f0;
+  --accent-active: #4c9cff;
+  --status-live: #4c9cff;
+  --text-on-blue: #171716;
+  --tab-fill: var(--bg-tertiary);
+  --input-active-border: color-mix(in srgb, var(--accent-blue) 52%, var(--border-tertiary));
+  --bg-hover: var(--sidebar-hover);
+  --bg-message-user: #292928;
+  --success-bg: #12301f;
+  --success-bg-hover: #183b28;
+  --success-border: #24563b;
+  --success-solid: #14532d;
+  --success-solid-hover: #166534;
+  --success-text: #d7f2df;
+  --success-icon: #4d8a63;
+  --danger-bg: #3b1414;
+  --danger-bg-hover: #481818;
+  --danger-border: #682020;
+  --danger-solid: #7f1d1d;
+  --danger-solid-hover: #8c2424;
+  --danger-text: #f0d1d1;
+  --danger-icon: #b45a5a;
+  --sidebar-surface: #1b1b1a;
+  --sidebar-field: #242423;
+  --sidebar-hover: #2b2b29;
+  --sidebar-selected: #30302e;
+  --sidebar-divider: rgb(255 255 255 / 0.08);
+  --consumer-panel: #191918;
+  --consumer-panel-surface: #222221;
+  --consumer-panel-hover: #2b2b29;
+  --consumer-panel-text: #f7f7f5;
+  --consumer-panel-muted: #aaa9a5;
+  --consumer-panel-border: rgb(255 255 255 / 0.1);
+  --shadow-sm: 0 4px 32px rgb(0 0 0 / 0.16);
+  --shadow-md: 0 4px 32px rgb(0 0 0 / 0.16);
+  --shadow-lg: 0 4px 32px rgb(0 0 0 / 0.16);
+  --shadow-menu: 0 4px 32px rgb(0 0 0 / 0.16);
+  --shadow-xl: 0 4px 32px rgb(0 0 0 / 0.16);
   --primary-foreground: var(--bg-primary);
 }
 
 @media (prefers-color-scheme: dark) {
   html:not(.light):not(.dark) {
-    --surface-base: #1a1a1a;
-    --surface-front: #262625;
+    --surface-base: #181817;
+    --surface-front: #222221;
     --bg-primary: var(--surface-base);
     --bg-secondary: var(--surface-front);
-    --bg-tertiary: var(--bg-secondary);
-    --bg-card: var(--bg-secondary);
-    --bg-elevated: var(--bg-secondary);
-    --bg-menu: var(--bg-primary);
-    --bg-code: var(--bg-secondary);
-    --text-primary: #f4f4f5;
-    --text-secondary: color-mix(in srgb, var(--text-primary) 72%, var(--bg-primary));
-    --text-tertiary: color-mix(in srgb, var(--text-primary) 50%, var(--bg-primary));
-    --text-muted: color-mix(in srgb, var(--text-primary) 34%, var(--bg-primary));
-    --border-primary: color-mix(in srgb, var(--text-primary) 8%, transparent);
-    --border-secondary: color-mix(in srgb, var(--text-primary) 4%, transparent);
-    --border-tertiary: color-mix(in srgb, var(--text-primary) 15%, transparent);
-    --accent-blue: var(--text-secondary);
-    --accent-red: #b45a5a;
+    --bg-tertiary: #292928;
+    --bg-card: #1f1f1e;
+    --bg-elevated: #1f1f1e;
+    --bg-menu: #242423;
+    --bg-code: #20201f;
+    --text-primary: #f6f6f4;
+    --text-secondary: color-mix(in srgb, var(--text-primary) 82%, var(--bg-primary));
+    --text-tertiary: color-mix(in srgb, var(--text-primary) 68%, var(--bg-primary));
+    --text-muted: color-mix(in srgb, var(--text-primary) 58%, var(--bg-primary));
+    --border-primary: color-mix(in srgb, var(--text-primary) 11%, transparent);
+    --border-secondary: color-mix(in srgb, var(--text-primary) 7%, transparent);
+    --border-tertiary: color-mix(in srgb, var(--text-primary) 20%, transparent);
+    --accent-blue: #4c9cff;
+    --accent-red: #cb6e6e;
     --accent-green: var(--success-solid);
-    --accent-active: #2f8cff;
-    --status-live: #2f8cff;
-    --tab-fill: var(--bg-secondary);
-    --input-active-border: var(--border-tertiary);
-    --bg-hover: var(--bg-secondary);
-    --bg-message-user: var(--bg-secondary);
-    --shadow-sm: 0 1px 2px #00000033;
-    --shadow-md: 0 8px 24px -18px #000000cc;
-    --shadow-lg: 0 18px 48px -30px #000000e0;
-    --shadow-xl: 0 24px 68px -36px #000000f0;
+    --accent-active: #4c9cff;
+    --status-live: #4c9cff;
+    --text-on-blue: #171716;
+    --tab-fill: var(--bg-tertiary);
+    --input-active-border: color-mix(in srgb, var(--accent-blue) 52%, var(--border-tertiary));
+    --bg-hover: var(--sidebar-hover);
+    --bg-message-user: #292928;
+    --success-bg: #12301f;
+    --success-bg-hover: #183b28;
+    --success-border: #24563b;
+    --success-solid: #14532d;
+    --success-solid-hover: #166534;
+    --success-text: #d7f2df;
+    --success-icon: #4d8a63;
+    --danger-bg: #3b1414;
+    --danger-bg-hover: #481818;
+    --danger-border: #682020;
+    --danger-solid: #7f1d1d;
+    --danger-solid-hover: #8c2424;
+    --danger-text: #f0d1d1;
+    --danger-icon: #b45a5a;
+    --sidebar-surface: #1b1b1a;
+    --sidebar-field: #242423;
+    --sidebar-hover: #2b2b29;
+    --sidebar-selected: #30302e;
+    --sidebar-divider: rgb(255 255 255 / 0.08);
+    --consumer-panel: #191918;
+    --consumer-panel-surface: #222221;
+    --consumer-panel-hover: #2b2b29;
+    --consumer-panel-text: #f7f7f5;
+    --consumer-panel-muted: #aaa9a5;
+    --consumer-panel-border: rgb(255 255 255 / 0.1);
+    --shadow-sm: 0 4px 32px rgb(0 0 0 / 0.16);
+    --shadow-md: 0 4px 32px rgb(0 0 0 / 0.16);
+    --shadow-lg: 0 4px 32px rgb(0 0 0 / 0.16);
+    --shadow-menu: 0 4px 32px rgb(0 0 0 / 0.16);
+    --shadow-xl: 0 4px 32px rgb(0 0 0 / 0.16);
     --primary-foreground: var(--bg-primary);
+  }
+}
+
+html.dark .app-sidebar {
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not(.light):not(.dark) .app-sidebar {
+    color-scheme: dark;
   }
 }
 
@@ -210,6 +339,13 @@ html.dark {
   --color-success-solid-hover: var(--success-solid-hover);
   --color-success-text: var(--success-text);
   --color-success-icon: var(--success-icon);
+  --color-danger-bg: var(--danger-bg);
+  --color-danger-bg-hover: var(--danger-bg-hover);
+  --color-danger-border: var(--danger-border);
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
+  --color-danger-text: var(--danger-text);
+  --color-danger-icon: var(--danger-icon);
   --color-bg-hover: var(--bg-hover);
   --color-bg-message-user: var(--bg-message-user);
   --color-bg-code: var(--bg-code);
@@ -217,6 +353,7 @@ html.dark {
   --color-input-active-border: var(--input-active-border);
   --color-primary-foreground: var(--primary-foreground);
   --color-text-on-accent: var(--text-on-accent);
+  --color-text-on-blue: var(--text-on-blue);
   --color-text-on-scrim: var(--text-on-scrim);
   --color-toggle-thumb: var(--toggle-thumb);
   --color-preview-canvas: var(--preview-canvas);
@@ -261,7 +398,8 @@ html[data-reduce-motion] *, html[data-reduce-motion] *::before, html[data-reduce
 html[data-reduce-transparency] .surface-glass,
 html[data-reduce-transparency] .backdrop-blur-sm,
 html[data-reduce-transparency] .backdrop-blur-md,
-html[data-reduce-transparency] .backdrop-blur-lg {
+html[data-reduce-transparency] .backdrop-blur-lg,
+html[data-reduce-transparency] .backdrop-blur-xl {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -279,13 +417,16 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-.font-medium,
-.font-semibold {
+.font-medium {
   font-weight: 500;
 }
 
-.font-bold {
+.font-semibold {
   font-weight: 600;
+}
+
+.font-bold {
+  font-weight: 700;
 }
 
 button:not(:disabled),
@@ -530,6 +671,11 @@ textarea:focus-visible {
 /* Touch target sizes on mobile (opt-in) */
 @media (pointer: coarse) {
   .touch-target { min-height: 44px; min-width: 44px; }
+  .subtle-icon-button,
+  .message-actions button {
+    min-height: 44px;
+    min-width: 44px;
+  }
 }
 
 /* Pulsing dot for live status */
@@ -621,10 +767,10 @@ textarea:focus-visible {
 
 /* Default chat reading sizes */
 :root {
-  --chat-reading-size: 14px;
+  --chat-reading-size: 15px;
   --chat-user-size: 15px;
   --chat-task-title-size: 14px;
-  --chat-task-body-size: 13px;
+  --chat-task-body-size: 13.5px;
   --chat-action-pill-size: 12px;
   --chat-input-size: 15px;
   --chat-code-size: 13px;
@@ -666,7 +812,7 @@ textarea:focus-visible {
 .task-thread-body::before {
   content: '';
   position: absolute;
-  left: 8px;
+  left: 9.5px;
   top: 2px;
   bottom: 12px;
   border-left: 1px solid var(--border-secondary);
@@ -784,7 +930,17 @@ textarea:focus-visible {
 /* Shared dropdown/popover surface */
 .menu-surface {
   background: var(--bg-menu);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-menu) !important;
+  filter: none;
+}
+
+/* Docked task controls are part of the page plane, not floating surfaces.
+   Keep them flat in every theme, interaction state, and responsive layout. */
+.task-input-surface,
+.task-progress-surface,
+.task-composer-stack {
+  box-shadow: none !important;
+  filter: none !important;
 }
 
 /* Shared avatar-style icon control used for compact toolbar buttons */
@@ -808,6 +964,32 @@ textarea:focus-visible {
   background: transparent;
   border-color: color-mix(in srgb, var(--accent-red) 28%, var(--border-primary));
   color: var(--accent-red);
+}
+
+/* Message utilities stay quiet on pointer devices, but never disappear for
+   keyboard and touch users. */
+.message-actions {
+  opacity: 0;
+  pointer-events: none;
+}
+.group:hover > .message-actions,
+.group:focus-within > .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+@media (max-width: 767px) {
+  .app-sidebar {
+    width: min(18rem, calc(100vw - 1rem)) !important;
+    box-shadow: var(--shadow-xl);
+  }
 }
 
 /* Subtle divider */

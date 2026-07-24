@@ -1,34 +1,41 @@
-import Image from 'next/image'
+import type { ReactNode } from 'react'
+import { Bot } from '@/components/icons'
+
+function Brand() {
+  return (
+    <div className="flex items-center justify-center gap-2.5 text-text-primary">
+      <Bot size={25} weight="regular" aria-hidden="true" />
+      <span className="text-[21px] font-normal leading-none tracking-[-0.025em] [font-family:var(--font-display)]">Agent</span>
+    </div>
+  )
+}
 
 export function AuthPanel({
   title,
   subtitle,
+  dense = false,
   children,
 }: {
   title: string
   subtitle: string
-  children: React.ReactNode
+  dense?: boolean
+  children: ReactNode
 }) {
   return (
-    <div className="flex min-h-screen items-center justify-center px-5 py-12">
-      <div className="w-full max-w-[420px] rounded-2xl border border-border-primary bg-bg-card p-7 shadow-[var(--shadow-md)]">
-        <div className="mb-7 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-border-primary bg-bg-secondary">
-            <Image src="/logo.svg" alt="Agent" width={32} height={32} className="h-8 w-8 rounded-lg object-contain" />
+    <div className="min-h-dvh bg-bg-primary px-6 py-10 sm:px-8 sm:py-12">
+      <main className="mx-auto flex min-h-[calc(100dvh-5rem)] w-full max-w-[400px] flex-col justify-center sm:min-h-[calc(100dvh-6rem)]">
+        <div className={`w-full ${dense ? 'py-0' : 'py-4'}`}>
+          <Brand />
+
+          <div className={`${dense ? 'mb-6 mt-8 sm:mt-9' : 'mb-8 mt-12 sm:mt-14'} text-center`}>
+            <h1 className="text-[31px] font-normal leading-tight tracking-[-0.035em] text-text-primary [font-family:var(--font-display)] sm:text-[34px]">{title}</h1>
+            <p className="mx-auto mt-3 max-w-[360px] text-[13.5px] leading-relaxed text-text-tertiary">{subtitle}</p>
           </div>
-          <div>
-            <div className="text-[17px] font-semibold tracking-[0] text-text-primary">Agent</div>
-            <div className="text-[12.5px] text-text-muted">Secure account access</div>
-          </div>
+
+          {children}
         </div>
 
-        <div className="mb-6">
-          <h1 className="text-[23px] font-semibold tracking-[0] text-text-primary">{title}</h1>
-          <p className="mt-1.5 text-[13px] leading-relaxed text-text-secondary">{subtitle}</p>
-        </div>
-
-        {children}
-      </div>
+      </main>
     </div>
   )
 }

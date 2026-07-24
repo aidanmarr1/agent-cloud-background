@@ -7,6 +7,30 @@ import type { LookupFunction } from 'net'
 import { isIP } from 'net'
 
 const DEFAULT_MAX_RESPONSE_BYTES = 15 * 1024 * 1024
+const PUBLIC_HOST_PREFLIGHT_TTL_MS = 30_000
+const PUBLIC_HOST_PREFLIGHT_MAX_ENTRIES = 512
+
+interface PublicHostPreflight {
+  validUntil: number
+  pending?: Promise<void>
+}
+
+const publicHostPreflightKey = '__agentPublicHostPreflightCache' as const
+const publicHostPreflightCache: Map<string, PublicHostPreflight> =
+  (globalThis as unknown as Record<string, Map<string, PublicHostPreflight>>)[publicHostPreflightKey] ??
+  ((globalThis as unknown as Record<string, Map<string, PublicHostPreflight>>)[publicHostPreflightKey] = new Map())
+
+function prunePublicHostPreflights(now: number): void {
+  if (publicHostPreflightCache.size < PUBLIC_HOST_PREFLIGHT_MAX_ENTRIES) return
+  for (const [hostname, entry] of publicHostPreflightCache) {
+    if (!entry.pending && entry.validUntil <= now) publicHostPreflightCache.delete(hostname)
+  }
+  while (publicHostPreflightCache.size >= PUBLIC_HOST_PREFLIGHT_MAX_ENTRIES) {
+    const oldest = publicHostPreflightCache.keys().next().value
+    if (!oldest) break
+    publicHostPreflightCache.delete(oldest)
+  }
+}
 
 export type GuardedFetchInit = Omit<RequestInit, 'body'> & {
   body?: string | Uint8Array | null
@@ -81,21 +105,36 @@ export async function checkHost(hostname: string): Promise<void> {
   if (isIP(lower) && isPrivateIp(lower)) {
     throw new Error('Requests to private/internal IP addresses are blocked')
   }
+  if (isIP(lower)) return
 
-  try {
-    // lookup() returns a single address by default; a hostname with a mixed
-    // record set (public + private) can pass the check on one resolution and
-    // fetch the private one on the next. Validate ALL addresses.
-    const addresses = await lookup(lower, { all: true })
-    for (const { address } of addresses) {
-      if (isPrivateIp(address)) {
-        throw new Error('Requests to private/internal IP addresses are blocked')
+  const now = Date.now()
+  const cached = publicHostPreflightCache.get(lower)
+  if (cached?.validUntil && cached.validUntil > now) return
+  if (cached?.pending) return cached.pending
+  prunePublicHostPreflights(now)
+
+  const pending = (async () => {
+    try {
+      // lookup() returns a single address by default; a hostname with a mixed
+      // record set (public + private) can pass the check on one resolution and
+      // fetch the private one on the next. Validate ALL addresses.
+      const addresses = await lookup(lower, { all: true })
+      for (const { address } of addresses) {
+        if (isPrivateIp(address)) {
+          throw new Error('Requests to private/internal IP addresses are blocked')
+        }
       }
+      publicHostPreflightCache.set(lower, {
+        validUntil: Date.now() + PUBLIC_HOST_PREFLIGHT_TTL_MS,
+      })
+    } catch (err) {
+      publicHostPreflightCache.delete(lower)
+      if ((err as Error).message.includes('blocked')) throw err
+      // DNS failure — let the connection-time checked lookup handle it.
     }
-  } catch (err) {
-    if ((err as Error).message.includes('blocked')) throw err
-    // DNS failure — let fetch handle it
-  }
+  })()
+  publicHostPreflightCache.set(lower, { validUntil: 0, pending })
+  return pending
 }
 
 export function validateHttpUrl(url: string): URL {

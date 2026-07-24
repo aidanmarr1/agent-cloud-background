@@ -1,59 +1,78 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Bot, Check, ChevronDown } from '@/components/icons'
-import { useUIStore } from '@/store/ui'
-import { useClickOutside } from '@/lib/useClickOutside'
 
 export function ModelSelector() {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const isStreaming = useUIStore((s) => s.isStreaming)
+  const containerRef = useRef<HTMLDivElement>(null)
 
-  useClickOutside(ref, () => setOpen(false))
+  useEffect(() => {
+    if (!open) return
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!containerRef.current?.contains(event.target as Node)) setOpen(false)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+
+    document.addEventListener('pointerdown', handlePointerDown)
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [open])
 
   return (
-    <div className="relative z-[90]" ref={ref}>
+    <div ref={containerRef} className="relative flex-shrink-0">
       <button
-        onClick={() => !isStreaming && setOpen(!open)}
-        disabled={isStreaming}
-        aria-label="Open agent menu"
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className={`-ml-1 flex h-9 items-center gap-1.5 rounded-lg px-2 transition-colors duration-150 hover:bg-bg-secondary focus-visible:ring-2 focus-visible:ring-border-tertiary focus-visible:ring-offset-1 focus-visible:ring-offset-bg-primary sm:px-2.5 ${open ? 'bg-bg-secondary' : ''}`}
+        data-no-focus-ring=""
+        aria-label="Choose agent mode"
+        aria-haspopup="listbox"
         aria-expanded={open}
-        className={`h-9 flex items-center gap-1.5 px-2 -ml-1 rounded-xl border transition-all duration-200 sm:gap-2 sm:px-3 ${
-          open ? 'border-border-primary bg-bg-secondary' : 'border-transparent bg-transparent'
-        } ${isStreaming ? 'opacity-50 cursor-not-allowed' : 'hover:border-border-primary hover:bg-bg-secondary'}`}
       >
-        <Bot size={15} className="text-text-primary min-[390px]:hidden" strokeWidth={2.2} />
-        <span className="hidden text-[14px] font-bold text-text-primary tracking-[0] min-[390px]:inline">
+        <span className="flex h-6 w-6 items-center justify-center rounded-lg border border-border-primary bg-bg-card min-[390px]:hidden">
+          <Bot size={14} className="text-text-primary" strokeWidth={2.2} aria-hidden="true" />
+        </span>
+        <span className="hidden text-[14px] font-semibold tracking-[-0.01em] text-text-primary min-[390px]:inline sm:text-[15px]">
           Agent 1.0
         </span>
         <ChevronDown
           size={12}
-          className={`text-text-muted transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+          className={`hidden text-text-muted transition-transform duration-150 min-[390px]:block ${open ? 'rotate-180' : ''}`}
+          strokeWidth={2.2}
+          aria-hidden="true"
         />
       </button>
 
       {open && (
         <div
-          className="fixed left-3 right-3 top-12 z-[100] mt-2 w-auto overflow-hidden rounded-2xl border border-border-primary menu-surface p-1.5 animate-scale-in sm:absolute sm:left-0 sm:right-auto sm:top-full sm:w-[252px]"
-          style={{ boxShadow: 'var(--shadow-xl)' }}
+          role="listbox"
+          aria-label="Agent mode"
+          className="absolute left-0 top-[calc(100%+6px)] z-[120] w-[268px] rounded-2xl border border-border-primary bg-bg-card p-1.5 shadow-[var(--shadow-menu)] animate-fade-in"
         >
-          <div className="w-full rounded-xl bg-bg-secondary px-2.5 py-2.5 flex items-start gap-3 text-left">
-            <div className="flex h-5 w-5 items-center justify-center flex-shrink-0">
-              <Bot size={15} className="text-accent-blue" strokeWidth={2.2} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span className="text-[13.5px] font-semibold tracking-[0] text-text-primary">
-                  Agent 1.0
-                </span>
-              </div>
-              <div className="text-[11.5px] text-text-muted mt-0.5 leading-snug">
-                Tasks, research, files, and builds
-              </div>
-            </div>
-            <Check size={14} className="text-accent-blue mt-2 flex-shrink-0" strokeWidth={2.5} />
-          </div>
+          <button
+            type="button"
+            role="option"
+            aria-selected="true"
+            onClick={() => setOpen(false)}
+            className="flex min-h-[62px] w-full items-start gap-3 rounded-lg px-3 py-2.5 text-left transition-colors duration-150 hover:bg-bg-hover focus-visible:bg-bg-hover"
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13.5px] font-semibold tracking-[-0.01em] text-text-primary">
+                Agent 1.0
+              </span>
+              <span className="mt-0.5 block text-[11.5px] leading-[1.4] text-text-muted">
+                For research, websites, files, and everyday tasks.
+              </span>
+            </span>
+            <Check size={14} className="mt-0.5 flex-shrink-0 text-text-secondary" strokeWidth={2.4} aria-hidden="true" />
+          </button>
         </div>
       )}
     </div>

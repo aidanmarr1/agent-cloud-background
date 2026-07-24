@@ -111,6 +111,7 @@ function normalizeMessage(message: Message): Message {
 export function normalizeConversationForPersistence(conversation: Conversation): Conversation {
   const next = cloneJson(conversation)
   delete next.serverSummary
+  delete next.serverBodyStale
   next.title = truncateStr(String(next.title || 'New task'), 200)
   next.messages = Array.isArray(next.messages)
     ? next.messages.slice(-MAX_MESSAGES_PER_CONVERSATION).map(normalizeMessage)

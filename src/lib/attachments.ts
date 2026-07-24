@@ -66,6 +66,18 @@ type MessageWithAttachments = {
   attachments?: MessageAttachment[]
 }
 
+export class AttachmentReferenceError extends Error {
+  constructor(
+    readonly attachmentIds: string[],
+    readonly code: 'ATTACHMENT_NOT_PERSISTED' | 'ATTACHMENT_NOT_AVAILABLE' = 'ATTACHMENT_NOT_AVAILABLE',
+  ) {
+    super(code === 'ATTACHMENT_NOT_PERSISTED'
+      ? 'Every attachment must finish uploading before this task can start. Remove any failed upload and try again.'
+      : 'One or more attachments are no longer available. Remove them and upload the files again.')
+    this.name = 'AttachmentReferenceError'
+  }
+}
+
 const SAFE_SEGMENT = /[^a-zA-Z0-9._-]+/g
 const TEXT_MIME_TYPES = new Set([
   'text/plain',
@@ -174,18 +186,6 @@ function sandboxUploadPath(attachment: MessageAttachment, messageIndex: number, 
   const base = safeSegment(fileName.replace(/\.[^.]+$/, ''))
   const unique = safeSegment(attachment.id || `${messageIndex + 1}-${attachmentIndex + 1}`)
   return `uploads/${unique}-${base}${ext}`
-}
-
-function decodeDataUrlContent(content: string): Buffer | null {
-  const match = /^data:([^;,]+)?(?:;charset=[^;,]+)?(;base64)?,([\s\S]*)$/i.exec(content)
-  if (!match) return null
-  const body = match[3] || ''
-  if (match[2]) return Buffer.from(body, 'base64')
-  try {
-    return Buffer.from(decodeURIComponent(body), 'utf8')
-  } catch {
-    return Buffer.from(body, 'utf8')
-  }
 }
 
 export function getAttachmentKind(fileName: string, mimeType: string): AttachmentKind {
@@ -318,6 +318,24 @@ export async function getAttachmentForUser(userId: string, attachmentId: string)
   return rowToAttachmentRecord(result.rows[0] as AttachmentRow | undefined)
 }
 
+export async function assertMessageAttachmentAccessForUser<
+  TMessage extends { attachments?: Array<{ id?: string }> },
+>(messages: TMessage[], userId: string): Promise<void> {
+  const attachments = messages.flatMap((message) => message.attachments || [])
+  if (attachments.some((attachment) => !attachment.id?.trim())) {
+    throw new AttachmentReferenceError([], 'ATTACHMENT_NOT_PERSISTED')
+  }
+
+  const attachmentIds = [...new Set(attachments.map((attachment) => attachment.id!.trim()))]
+  if (attachmentIds.length === 0) return
+
+  const records = await Promise.all(attachmentIds.map((attachmentId) => (
+    getAttachmentForUser(userId, attachmentId)
+  )))
+  const missing = attachmentIds.filter((_, index) => !records[index])
+  if (missing.length > 0) throw new AttachmentReferenceError(missing)
+}
+
 export async function bindAttachmentsToConversation(input: {
   userId: string
   attachmentIds: string[]
@@ -390,14 +408,35 @@ export async function hydrateMessageAttachmentsForUser<
     }
 
     const nextAttachments = await Promise.all(message.attachments.map(async (attachment) => {
-      if (attachment.content || !attachment.id) return attachment
-      const record = await getAttachmentForUser(userId, attachment.id)
-      if (!record || !shouldHydrateInline(record)) return attachment
+      const attachmentId = attachment.id?.trim()
+      if (!attachmentId) throw new AttachmentReferenceError([], 'ATTACHMENT_NOT_PERSISTED')
+      const record = await getAttachmentForUser(userId, attachmentId)
+      if (!record) throw new AttachmentReferenceError([attachmentId])
+      if (!shouldHydrateInline(record)) {
+        return {
+          ...attachment,
+          id: record.id,
+          name: record.fileName,
+          type: record.mimeType,
+          size: record.size,
+          content: undefined,
+        }
+      }
       const body = await readAttachmentBody(record)
       const inline = await bodyToInlineContent(record, body)
-      if (!inline) return attachment
+      if (!inline) {
+        return {
+          ...attachment,
+          id: record.id,
+          name: record.fileName,
+          type: record.mimeType,
+          size: record.size,
+          content: undefined,
+        }
+      }
       return {
         ...attachment,
+        id: record.id,
         name: record.fileName,
         type: record.mimeType,
         size: record.size,
@@ -421,7 +460,6 @@ export function withMessageAttachmentSandboxPaths<TMessage extends MessageWithAt
 
     const attachments = message.attachments.map((attachment, attachmentIndex) => {
       if (attachment.type === 'application/x-agent-skill') return attachment
-      if (attachment.sandboxPath) return attachment
       return {
         ...attachment,
         sandboxPath: sandboxUploadPath(attachment, messageIndex, attachmentIndex),
@@ -447,17 +485,11 @@ export async function materializeMessageAttachmentsToSandbox<TMessage extends Me
       const sandboxPath = attachment.sandboxPath
       if (!sandboxPath) continue
 
-      let body: Buffer | null = null
-      if (attachment.id) {
-        const record = await getAttachmentForUser(userId, attachment.id)
-        if (record) body = await readAttachmentBody(record)
-      } else if (attachment.contentEncoding === 'data-url' && attachment.content) {
-        body = decodeDataUrlContent(attachment.content)
-      } else if (attachment.content && attachment.contentEncoding !== 'data-url') {
-        body = Buffer.from(attachment.content, 'utf8')
-      }
-
-      if (!body) continue
+      const attachmentId = attachment.id?.trim()
+      if (!attachmentId) throw new AttachmentReferenceError([], 'ATTACHMENT_NOT_PERSISTED')
+      const record = await getAttachmentForUser(userId, attachmentId)
+      if (!record) throw new AttachmentReferenceError([attachmentId])
+      const body = await readAttachmentBody(record)
       await writeSandboxFileBytes(conversationId, sandboxPath, body)
     }
   }

@@ -4,15 +4,20 @@ import { stepOpenedSourceDomains } from './AgentState'
 import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
-import { fetchGenerationUsage } from '@/lib/llm'
-import { formatVisibleActionLabel, runtimeVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
-import type { ChatCompletionUsage } from '@/lib/llm'
+import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { NARRATION_THRESHOLD_DEFAULT } from './config'
+import { sanitizeToolStartArgs } from './toolEventSanitizer'
+import {
+  extractCadenceProgressUpdate,
+  reviewProgressNarration,
+  stripCadenceProgressUpdateFromArguments,
+} from './NarrationMemory'
 
 export interface ToolCallData {
   id: string
   name: string
   arguments: string
+  provisionalStartEmitted?: boolean
 }
 
 export interface StreamUsage {
@@ -21,6 +26,16 @@ export interface StreamUsage {
   totalTokens: number
   cost: number
 }
+
+export interface MissingStreamUsageEstimateInput {
+  assistantContent: string
+  reasoningContent: string
+  toolCalls: Map<number, ToolCallData>
+}
+
+export type MissingStreamUsageEstimator = (
+  input: MissingStreamUsageEstimateInput,
+) => StreamUsage
 
 export interface StreamResult {
   assistantContent: string
@@ -31,22 +46,54 @@ export interface StreamResult {
   timedOut: boolean
   contentStreamingStartTime: number | null
   usage: StreamUsage | null
+  usageEstimated?: boolean
+  cadenceProgressUpdate?: string
+  cadenceProgressVisibleActionsAfter?: number
+  cadenceProgressViolation?: CadenceProgressViolation
 }
 
-const FILE_PREVIEW_MIN_DELTA_CHARS = 160
+export type CadenceProgressViolationCode =
+  | 'missing_tool_call'
+  | 'missing_progress_update'
+  | 'invalid_progress_update'
+  | 'duplicate_progress_update'
+
+export interface CadenceProgressViolation {
+  code: CadenceProgressViolationCode
+  reason: string
+}
+
+export interface StreamToolCallPolicy {
+  allowParallelSourceExtractionCalls: boolean
+  maxParallelSourceExtractionCalls: number
+  cadenceProgressUpdateEnabled?: boolean
+}
+
+const FILE_PREVIEW_MIN_DELTA_CHARS = 48
 const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
 const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
 const INLINE_FINAL_TEXT_STREAM_CAP = 6000
-const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 14_000
+const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000
 const FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 3_000
+const STABLE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 8_000
+const STABLE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 2_500
+const STABLE_READ_ONLY_SOURCE_TOOLS = new Set(['web_search', 'read_document'])
+const PARALLEL_STREAM_SOURCE_EXTRACTION_TOOLS = new Set([
+  'read_document',
+  'http_request',
+])
+const STREAMED_FILE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file'])
+const MAX_PARALLEL_STREAM_SOURCE_EXTRACTIONS = 3
 const DISPLAY_FUTURE_ACTION_SENTENCE_RE =
-  /(?:^|(?<=[.!?]\s))\s*(?:let\s+me|i(?:'|’)?ll|i\s+will|i(?:'|’)?m\s+going\s+to)\b[^.!?\n]*(?:research|search|look|gather|read|open|try|check|verify|move|continue|get|fetch|use|do|ground)\b[^.!?\n]*(?:[.!?]|$)/gi
+  /(?:^|(?<=[.!?]\s))\s*(?:let\s+me|i(?:'|’)?ll|i\s+(?:will|need\s+to|have\s+to)|i(?:'|’)?m\s+going\s+to)\b[^.!?\n]*(?:research|search|look|gather|read|open|try|check|verify|move|continue|get|fetch|use|do|ground)\b[^.!?\n]*(?:[.!?]|$)/gi
 const DISPLAY_FUTURE_ACTION_TAIL_RE =
-  /(?:^|(?<=[.!?]\s))\s*(?:l|le|let(?:\s+m(?:e)?)?|i(?:'|’)?(?:l(?:l)?|$)|i\s*(?:w(?:ill?)?|a(?:m)?|$)|i(?:'|’)?m(?:\s+g(?:oing?)?)?)\b[^.!?\n]*$/i
+  /(?:^|(?<=[.!?]\s))\s*(?:(?:l|le|let(?:\s+m(?:e)?)?|i(?:'|’)?(?:l(?:l)?|$)|i\s*(?:w(?:ill?)?|a(?:m)?|$)|i(?:'|’)?m(?:\s+g(?:oing?)?)?)\b|(?:extract|read|review|open|search|gather|scroll|find|get|try|check|verify|compare|continue|use|visit|fetch|inspect|navigate)\b|(?:the|this|that|an?|our|their)\b|(?:(?:the|this|that|an?|our|their)\s+)?(?:[A-Za-z0-9'’.-]+\s+){0,6}(?:source|article|blog|post|guide|paper|report|documentation|website|page)\b)[^.!?\n]*$/i
 const DISPLAY_INTERNAL_TASK_REFLECTION_RE =
   /(?:^|(?<=[.!?]\s))\s*The user (?:has asked|asked|wants|requested)\b[^.!?\n]*(?:current plan|plan step|step \d|i(?:'|’)?ll|i\s+will)[^.!?\n]*(?:[.!?]|$)/gi
 const DISPLAY_OPERATIONAL_COMMAND_SENTENCE_RE =
-  /(?:^|(?<=[.!?]\s))\s*(?:extract|read|review|open|search|gather|scroll|find|get|try|check|verify|compare|continue|use)\b[^.!?\n]*(?:content|details|page|source|sources|docs?|documentation|article|pricing|features?|query|results?|information|evidence|next|instead)\b[^.!?\n]*(?:[.!?]|$)/g
+  /(?:^|(?<=[.!?]\s))\s*(?:extract|read|review|open|search|gather|scroll|find|get|try|check|verify|compare|continue|use|visit|fetch|inspect|navigate)\b[^.!?\n]*(?:content|details|page|source|sources|docs?|documentation|article|blog|post|guide|paper|report|website|url|pricing|features?|query|results?|information|evidence|benchmarks?|next|instead)\b[^.!?\n]*(?:[.!?]|$)/gi
+const DISPLAY_SPECULATIVE_SOURCE_SENTENCE_RE =
+  /(?:^|(?<=[.!?]\s))\s*(?:(?:the|this|that|an?|our|their)\s+)?(?:[A-Za-z0-9'’.-]+\s+){0,6}(?:source|article|blog|post|guide|paper|report|documentation|website|page)\b[^.!?\n]{0,180}\b(?:likely|probably|perhaps|may|might|could|should|is expected to)\b[^.!?\n]{0,120}\b(?:contain(?:s|ed)?|provid(?:e|es|ed)|explain(?:s|ed)?|detail(?:s|ed)?|show(?:s|ed)?|cover(?:s|ed)?|offer(?:s|ed)?|include(?:s|d)?)\b[^.!?\n]*(?:[.!?]|$)/gi
 
 function normalizeUsage(raw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }): StreamUsage | null {
   if (!Number.isFinite(raw.prompt_tokens) || !Number.isFinite(raw.completion_tokens) || !Number.isFinite(raw.cost)) return null
@@ -57,11 +104,6 @@ function normalizeUsage(raw: { prompt_tokens?: number; completion_tokens?: numbe
     : promptTokens + completionTokens
   const cost = Math.max(0, Number(raw.cost || 0))
   return { promptTokens, completionTokens, totalTokens, cost }
-}
-
-function streamUsageFromCompletionUsage(usage: ChatCompletionUsage | null): StreamUsage | null {
-  if (!usage) return null
-  return normalizeUsage(usage)
 }
 
 function decodePartialJsonString(value: string): string {
@@ -108,6 +150,24 @@ function extractPartialStringArg(rawArgs: string, key: string): string | undefin
   return text
 }
 
+function hasStableToolArgumentEnvelope(
+  toolCalls: Map<number, ToolCallData>,
+  state: AgentStateData,
+): boolean {
+  return [...toolCalls.values()].some((toolCall) => {
+    // Keep this protection scoped to the recurrent read-only source-call
+    // failures. Broadly extending every malformed native tool stream would
+    // make unrelated bad calls slower to fail forward.
+    if (!STABLE_READ_ONLY_SOURCE_TOOLS.has(toolCall.name)) return false
+    const actionLabel = extractStringArg(toolCall.arguments, 'action_label')
+    const planStepIndex = extractNumberArg(toolCall.arguments, 'plan_step_index')
+    if (!strictActionLabelFromArgs({ action_label: actionLabel })) return false
+    if (!Number.isInteger(planStepIndex)) return false
+    if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return true
+    return planStepIndex === state.currentStepIdx + 1
+  })
+}
+
 function inlineFinalAnswerAllowsLongText(state: AgentStateData): boolean {
   if (state.currentPhase !== 'deliver') return false
   if (!state.currentPlanItems || state.currentStepIdx !== state.currentPlanItems.length - 1) return false
@@ -142,29 +202,8 @@ function addStringMetrics(target: Record<string, unknown>, rawArgs: string, key:
   target[`${key}LineCount`] = value.split('\n').length
 }
 
-function fileActionLabelFallback(toolName: string, path: string): string {
-  const fileName = path.split('/').pop()?.replace(/\.[^.]+$/, '') || 'file'
-  const compactName = fileName.replace(/[-_]+/g, ' ').replace(/\s+/g, ' ').trim()
-  const subject = compactName.split(' ').slice(0, 5).join(' ') || 'file'
-  const verb = toolName === 'append_file'
-    ? 'Continue'
-    : toolName === 'edit_file'
-      ? 'Edit'
-      : 'Write'
-  return formatVisibleActionLabel(`${verb} ${subject}`)
-}
-
-function addProvisionalFileActionLabel(args: Record<string, unknown>, toolName: string): void {
-  if (strictActionLabelFromArgs(args)) return
-  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return
-  const path = typeof args.path === 'string' ? args.path : ''
-  if (!path) return
-  args.action_label = fileActionLabelFallback(toolName, path)
-}
-
 function addProvisionalRuntimeDisplayContract(
   args: Record<string, unknown>,
-  toolName: string,
   state: AgentStateData,
 ): void {
   if (
@@ -173,11 +212,6 @@ function addProvisionalRuntimeDisplayContract(
     args.plan_step_index === undefined
   ) {
     args.plan_step_index = state.currentStepIdx + 1
-  }
-
-  if (!strictActionLabelFromArgs(args)) {
-    const fallback = state.currentPlanItems?.[state.currentStepIdx] || 'Continue active step'
-    args.action_label = runtimeVisibleActionLabel(toolName, args, fallback)
   }
 }
 
@@ -238,7 +272,6 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       } else if (toolName === 'edit_file') {
         addStringMetrics(args, rawArgs, 'new_string')
       }
-      addProvisionalFileActionLabel(args, toolName)
       break
     case 'list_files':
       addString('directory')
@@ -258,7 +291,6 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       break
     case 'browse_page':
     case 'browser_navigate':
-    case 'youtube_transcript':
       addString('url')
       break
     case 'read_document':
@@ -322,7 +354,7 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       }
   }
 
-  return args
+  return sanitizeToolStartArgs(toolName, args)
 }
 
 function totalOpenedSourceReads(state: AgentStateData): number {
@@ -419,16 +451,13 @@ function recordVisibleToolStartForNarration(
   toolCall: ToolCallData,
   args: Record<string, unknown>,
   state: AgentStateData,
-): void {
-  if (toolCall.name === 'browser_screenshot' || toolCall.name === 'browser_resize') return
-  if (!strictActionLabelFromArgs(args)) return
-  if (state.visibleNarrationToolStartIds.has(toolCall.id)) return
+): boolean {
+  if (toolCall.name === 'browser_screenshot' || toolCall.name === 'browser_resize') return false
+  if (!strictActionLabelFromArgs(args)) return false
+  if (state.visibleNarrationToolStartIds.has(toolCall.id)) return false
   state.visibleNarrationToolStartIds.add(toolCall.id)
   state.visibleToolActionsSinceLastNarration++
-  if (state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT) {
-    state.forceTextNextIteration = true
-    state.forcedNarrationRepairAttempts = 0
-  }
+  return true
 }
 
 function splitCleanVisibleAssistantText(text: string): { text: string; hold: string } {
@@ -441,7 +470,8 @@ function splitCleanVisibleAssistantText(text: string): { text: string; hold: str
     .replace(DISPLAY_FUTURE_ACTION_SENTENCE_RE, ' ')
     .replace(DISPLAY_INTERNAL_TASK_REFLECTION_RE, ' ')
     .replace(DISPLAY_OPERATIONAL_COMMAND_SENTENCE_RE, ' ')
-  return { text: cleaned, hold }
+    .replace(DISPLAY_SPECULATIVE_SOURCE_SENTENCE_RE, ' ')
+  return { text: cleaned.trim() ? cleaned : '', hold }
 }
 
 function containsFalseCapabilityRefusal(text: string): boolean {
@@ -451,20 +481,66 @@ function containsFalseCapabilityRefusal(text: string): boolean {
 export class StreamProcessor {
   private emitter: AgentEventEmitter
   private tierTimeouts: TierTimeouts
+  private signal?: AbortSignal
+  private bufferedEmissions: Array<() => void> | null = null
+  private exposedBufferedFileTools = new Map<string, string>()
 
-  constructor(emitter: AgentEventEmitter, tierTimeouts: TierTimeouts) {
+  constructor(emitter: AgentEventEmitter, tierTimeouts: TierTimeouts, signal?: AbortSignal) {
     this.emitter = emitter
     this.tierTimeouts = tierTimeouts
+    this.signal = signal
   }
 
   setTierTimeouts(tierTimeouts: TierTimeouts): void {
     this.tierTimeouts = tierTimeouts
   }
 
+  beginBufferedEmission(): void {
+    if (this.bufferedEmissions) throw new Error('A model-turn emission buffer is already active.')
+    this.bufferedEmissions = []
+  }
+
+  commitBufferedEmission(): void {
+    const emissions = this.bufferedEmissions
+    this.bufferedEmissions = null
+    this.exposedBufferedFileTools.clear()
+    for (const emit of emissions || []) emit()
+  }
+
+  discardBufferedEmission(): void {
+    this.bufferedEmissions = null
+    // Live file previews intentionally bypass the model-turn buffer. If the
+    // enclosing turn is rejected (provider failure, debit failure, or cadence
+    // rejection), explicitly settle every exposed action so the client cannot
+    // retain a stuck blue pill or LIVE editor.
+    const exposedFileTools = [...this.exposedBufferedFileTools]
+    this.exposedBufferedFileTools.clear()
+    for (const [id, name] of exposedFileTools) {
+      this.emitter.toolResult(id, name, {
+        error: 'INTERNAL_RECOVERY: The streamed file action was discarded before execution. Retry the current write.',
+        discarded: true,
+      } as never)
+    }
+  }
+
+  private emit(callback: () => void, options: { immediate?: boolean } = {}): void {
+    if (this.bufferedEmissions && !options.immediate) {
+      this.bufferedEmissions.push(callback)
+      return
+    }
+    callback()
+  }
+
   async processStream(
     response: AsyncIterable<{ choices: Array<{ delta?: Record<string, unknown> }> }>,
     state: AgentStateData,
+    cadenceProgressUpdateEnabled = false,
+    estimateMissingUsage?: MissingStreamUsageEstimator,
+    toolCallPolicy?: StreamToolCallPolicy,
   ): Promise<StreamResult> {
+    if (this.signal?.aborted) {
+      throw new DOMException('The operation was aborted.', 'AbortError')
+    }
     const emittedToolStarts: Map<number, string> = new Map()
     const filePreviewState: Map<number, { path: string; emittedChars: number; started: boolean }> = new Map()
     let assistantContent = ''
@@ -473,7 +549,22 @@ export class StreamProcessor {
     let visibleTextBuffer = ''
     const toolCalls: Map<number, ToolCallData> = new Map()
     let firstToolCallIndex: number | null = null
+    const requestedParallelSourceCallLimitRaw = toolCallPolicy?.maxParallelSourceExtractionCalls
+    const requestedParallelSourceCallLimit =
+      typeof requestedParallelSourceCallLimitRaw === 'number' && Number.isFinite(requestedParallelSourceCallLimitRaw)
+        ? Math.floor(requestedParallelSourceCallLimitRaw)
+        : 1
+    const maxStreamedToolCalls = toolCallPolicy?.allowParallelSourceExtractionCalls
+      ? Math.max(
+          1,
+          Math.min(
+            MAX_PARALLEL_STREAM_SOURCE_EXTRACTIONS,
+            requestedParallelSourceCallLimit,
+          ),
+        )
+      : 1
     let usage: StreamUsage | null = null
+    let usageEstimated = false
     let insideThinkBlock = false
     let insideTextModeToolCallBlock = false
     let reasoningPhaseEnded = false
@@ -481,7 +572,95 @@ export class StreamProcessor {
     let leakageDetected = false
     let stepAdvancedThisIteration = false
     let suppressTextOnlyOverflow = false
-    let generationId: string | null = null
+    let cadenceProgressUpdate: string | null = null
+    let cadenceProgressVisibleActionsAfter = 0
+    let cadenceProgressViolation: CadenceProgressViolation | null = null
+    const rejectedCadenceProgressToolCalls = new Set<number>()
+
+    const markCadenceProgressViolation = (
+      code: CadenceProgressViolationCode,
+      reason: string,
+    ): void => {
+      if (!cadenceProgressViolation) cadenceProgressViolation = { code, reason }
+    }
+
+    const emitCadenceProgressUpdate = (text: string): void => {
+      cadenceProgressUpdate = text
+      assistantContent = assistantContent.trim()
+        ? `${assistantContent.trim()}\n\n${text}`
+        : text
+      if (contentStreamingStartTime === null) contentStreamingStartTime = Date.now()
+      lastVisibleActivityTime = Date.now()
+      this.emit(() => this.emitter.progressUpdate(text))
+    }
+
+    const prepareCadenceProgressUpdate = (
+      index: number,
+      toolCall: ToolCallData,
+      allowMissing = false,
+    ): boolean => {
+      if (!cadenceProgressUpdateEnabled) return true
+      if (cadenceProgressUpdate) return true
+      if (rejectedCadenceProgressToolCalls.has(index)) return false
+
+      const rawUpdate = extractCadenceProgressUpdate(toolCall.arguments)
+      if (rawUpdate === undefined) {
+        // Keep holding the action while the required field is still streaming.
+        // At end-of-stream, fail open for the concrete action. Narration is a
+        // display lane and must never make the runtime discard useful work or
+        // buy a second model turn merely to repair prose.
+        if (allowMissing) {
+          rejectedCadenceProgressToolCalls.add(index)
+          return true
+        }
+        return false
+      }
+      const review = reviewProgressNarration(state, rawUpdate, { requireSignal: false })
+      if (review.status !== 'accepted') {
+        rejectedCadenceProgressToolCalls.add(index)
+        // Suppress invalid/duplicate display text, but preserve the valid
+        // native tool call. Cadence remains due at the next action frontier.
+        return allowMissing
+      }
+
+      emitCadenceProgressUpdate(review.text)
+      return true
+    }
+
+    const emitProvisionalToolStart = (index: number, toolCall: ToolCallData): void => {
+      const earlyArgs = buildEarlyToolArgs(toolCall.name, toolCall.arguments)
+      addProvisionalRuntimeDisplayContract(earlyArgs, state)
+      const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
+      const revisionPreviewAllowed = pendingDeliverableRevisionAllowsPreview(toolCall.name, earlyArgs, state)
+      if (!currentStepPreview || !revisionPreviewAllowed || !shouldEmitProvisionalToolStart(toolCall.name, earlyArgs, state)) return
+      const signature = provisionalToolStartSignature(toolCall, earlyArgs)
+      if (emittedToolStarts.get(index) === signature) return
+      emittedToolStarts.set(index, signature)
+      const newlyCountedVisibleAction = recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
+      toolCall.provisionalStartEmitted = true
+      // The same streamed tool can legitimately upsert its provisional pill as
+      // optional stable arguments arrive. Cadence counts accepted tool IDs, not
+      // UI revisions of the same action.
+      if (cadenceProgressUpdate && newlyCountedVisibleAction) cadenceProgressVisibleActionsAfter += 1
+      // Current-step file writes need to become visible while the model is
+      // still generating their arguments. Their provisional start args are
+      // already sanitized and the preview is reconciled with the eventual
+      // tool result, so these events may safely bypass the model-turn billing
+      // buffer. Keep prose and all other actions buffered.
+      if (this.bufferedEmissions && STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)) {
+        this.exposedBufferedFileTools.set(toolCall.id, toolCall.name)
+      }
+      this.emit(
+        () => this.emitter.toolStart(
+          toolCall.id,
+          toolCall.name,
+          earlyArgs,
+          { provisional: true },
+        ),
+        { immediate: STREAMED_FILE_WRITE_TOOLS.has(toolCall.name) },
+      )
+      lastVisibleActivityTime = Date.now()
+    }
 
     let lastChunkTime = Date.now()
     const iterationStartTime = Date.now()
@@ -509,17 +688,28 @@ export class StreamProcessor {
     const markStreamTimeoutIfExpired = (): boolean => {
       if (streamTimedOut) return true
       const now = Date.now()
-      // During active tool argument streaming (e.g., create_file), extend the inactivity window
-      // because the model may pause between large argument chunks
-      const isStreamingToolArgs = [...toolCalls.values()].some(tc => tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file')
+      // Once the model has supplied a valid display/step envelope, give the
+      // remaining native tool arguments a short bounded completion window.
+      // This prevents normal provider pauses from cutting small calls mid-JSON,
+      // while incomplete hidden prefixes still fail forward on the normal timer.
+      const isStreamingToolArgs = [...toolCalls.values()].some(tc => STREAMED_FILE_WRITE_TOOLS.has(tc.name))
+      const hasStableToolArgs = hasStableToolArgumentEnvelope(toolCalls, state)
       const effectiveInactivityMs = isStreamingToolArgs
         ? Math.max(this.tierTimeouts.inactivityTimeoutMs * 2, FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
+        : hasStableToolArgs
+          ? Math.max(this.tierTimeouts.inactivityTimeoutMs, STABLE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
         : this.tierTimeouts.inactivityTimeoutMs
       const effectiveIterationMs = isStreamingToolArgs
         ? Math.max(this.tierTimeouts.iterationTimeoutMs, FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)
+        : hasStableToolArgs
+          ? Math.max(this.tierTimeouts.iterationTimeoutMs, STABLE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)
         : this.tierTimeouts.iterationTimeoutMs
       const inactivityExpired = now - lastChunkTime > effectiveInactivityMs
-      const visibleInactivityExpired = now - lastVisibleActivityTime > effectiveInactivityMs
+      // Provider activity is authoritative while the model is assembling a
+      // hidden native-tool envelope. Do not abort a healthy stream merely
+      // because its action pill cannot be shown yet; the bounded iteration
+      // deadline still recovers genuinely invisible/malformed streams.
+      const visibleInactivityExpired = now - lastVisibleActivityTime > effectiveIterationMs
       const iterationExpired = now - iterationStartTime > effectiveIterationMs
       // Content-only timeout: only fire if the model is producing ONLY text (no tool calls
       // at all) and has stalled. Never fire if tool calls are being streamed.
@@ -553,14 +743,25 @@ export class StreamProcessor {
       nextPromise.catch(() => {})
 
       while (true) {
+        let pollTimer: ReturnType<typeof setTimeout> | null = null
         const raced = await Promise.race([
           nextPromise.then(value => ({ type: 'chunk' as const, value })),
           new Promise<{ type: 'poll' }>(resolve => {
-            setTimeout(() => resolve({ type: 'poll' }), streamPollMs)
+            pollTimer = setTimeout(() => resolve({ type: 'poll' }), streamPollMs)
           }),
         ])
+        if (pollTimer) clearTimeout(pollTimer)
 
         if (raced.type === 'chunk') return raced.value
+
+        if (this.signal?.aborted) {
+          try {
+            if (typeof iterator.return === 'function') {
+              void iterator.return().catch(() => {})
+            }
+          } catch { /* stream may already be closed */ }
+          throw new DOMException('The operation was aborted.', 'AbortError')
+        }
 
         if (markStreamTimeoutIfExpired()) {
           try {
@@ -580,13 +781,23 @@ export class StreamProcessor {
       }
     }
 
-    const resolvedUsage = async (): Promise<StreamUsage | null> => {
+    const resolvedUsage = (): StreamUsage | null => {
       if (usage) return usage
+      if (!estimateMissingUsage) return null
       try {
-        return streamUsageFromCompletionUsage(await fetchGenerationUsage(generationId || undefined))
+        const estimate = estimateMissingUsage({ assistantContent, reasoningContent, toolCalls })
+        if (
+          !Number.isFinite(estimate.promptTokens) || estimate.promptTokens <= 0 ||
+          !Number.isFinite(estimate.completionTokens) || estimate.completionTokens <= 0 ||
+          !Number.isFinite(estimate.totalTokens) || estimate.totalTokens <= 0 ||
+          !Number.isFinite(estimate.cost) || estimate.cost <= 0
+        ) {
+          throw new Error('Missing-usage estimator returned an invalid or zero estimate.')
+        }
+        usageEstimated = true
+        return estimate
       } catch (error) {
-        console.warn('[StreamProcessor] Usage metadata lookup failed; continuing without usage.', {
-          status: (error as { status?: number })?.status,
+        console.warn('[StreamProcessor] Synchronous usage estimate failed; caller fallback will be used.', {
           message: error instanceof Error ? error.message : String(error || 'Unknown error'),
         })
         return null
@@ -603,9 +814,6 @@ export class StreamProcessor {
 
         // Capture usage data from final chunk (OpenRouter sends this)
         const chunkAny = chunk as Record<string, unknown>
-        if (!generationId && typeof chunkAny.id === 'string') {
-          generationId = chunkAny.id
-        }
         if (chunkAny.usage) {
           const u = chunkAny.usage as { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }
           usage = normalizeUsage(u)
@@ -626,35 +834,46 @@ export class StreamProcessor {
 
         // Content delta
         if (delta.content) {
-          const content = delta.content as string
-          if (suppressTextOnlyOverflow) {
-            continue
-          }
-          if (reasoningContent && !reasoningPhaseEnded) {
-            reasoningPhaseEnded = true
-            this.emitter.reasoningDone()
-          }
-          contentBuffer += content
-
-          // Track <think> blocks
-          if (!insideThinkBlock && contentBuffer.includes('<think>')) {
-            insideThinkBlock = true
-          }
-          if (insideThinkBlock) {
-            if (contentBuffer.includes('</think>')) {
-              contentBuffer = contentBuffer.replace(/<think>[\s\S]*?<\/think>/g, '')
-              insideThinkBlock = contentBuffer.includes('<think>')
+          contentDelta: {
+            if (cadenceProgressUpdateEnabled) {
+              // Cadence text has exactly one model-authored lane: the required
+              // progress_update field on the accompanying native tool call.
+              // Ignore ordinary prose so a provider cannot satisfy or duplicate
+              // the cadence outside that same action contract.
+              break contentDelta
             }
-          }
-
-          if (!insideThinkBlock && contentBuffer.length > 0) {
-            const strippedToolBlocks = stripTextModeToolCallBlocks(contentBuffer, insideTextModeToolCallBlock)
-            contentBuffer = strippedToolBlocks.text
-            insideTextModeToolCallBlock = strippedToolBlocks.insideBlock
-            if (insideTextModeToolCallBlock && !contentBuffer.trim()) {
-              contentBuffer = ''
-              continue
+            const content = delta.content as string
+            if (suppressTextOnlyOverflow || cadenceProgressUpdate) {
+              // Once the schema lane has supplied the single accepted update,
+              // discard any provider prose that follows it in the same turn.
+              // The tool call still drains and executes normally.
+              break contentDelta
             }
+            if (reasoningContent && !reasoningPhaseEnded) {
+              reasoningPhaseEnded = true
+              this.emit(() => this.emitter.reasoningDone())
+            }
+            contentBuffer += content
+
+            // Track <think> blocks
+            if (!insideThinkBlock && contentBuffer.includes('<think>')) {
+              insideThinkBlock = true
+            }
+            if (insideThinkBlock) {
+              if (contentBuffer.includes('</think>')) {
+                contentBuffer = contentBuffer.replace(/<think>[\s\S]*?<\/think>/g, '')
+                insideThinkBlock = contentBuffer.includes('<think>')
+              }
+            }
+
+            if (!insideThinkBlock && contentBuffer.length > 0) {
+              const strippedToolBlocks = stripTextModeToolCallBlocks(contentBuffer, insideTextModeToolCallBlock)
+              contentBuffer = strippedToolBlocks.text
+              insideTextModeToolCallBlock = strippedToolBlocks.insideBlock
+              if (insideTextModeToolCallBlock && !contentBuffer.trim()) {
+                contentBuffer = ''
+                break contentDelta
+              }
 
             // Strip special tokens before any other processing
             contentBuffer = stripSpecialTokens(contentBuffer)
@@ -725,7 +944,7 @@ export class StreamProcessor {
                 return {
                   assistantContent, reasoningContent, toolCalls,
                   stepAdvancedThisIteration, leakageDetected: false, timedOut: false,
-                  contentStreamingStartTime, usage: await resolvedUsage(),
+                  contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
                 }
               }
 
@@ -738,11 +957,11 @@ export class StreamProcessor {
                 : inlineFinalAnswerAllowsLongText(state)
                 ? INLINE_FINAL_TEXT_STREAM_CAP
                 : DEFAULT_TEXT_ONLY_STREAM_CAP
-              if (toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
-                suppressTextOnlyOverflow = true
-                contentBuffer = ''
-                continue
-              }
+                if (toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
+                  suppressTextOnlyOverflow = true
+                  contentBuffer = ''
+                  break contentDelta
+                }
 
               // Check for leakage BEFORE emitting to prevent leaked content reaching the UI
               if (accumulatedForLeakCheck.length > 150 && checkForLeakage(accumulatedForLeakCheck)) {
@@ -753,32 +972,32 @@ export class StreamProcessor {
                   "What can I help you with today?",
                 ]
                 const deflection = deflections[Math.floor(Math.random() * deflections.length)]
-                this.emitter.textDelta(deflection)
-                this.emitter.done()
-                this.emitter.close()
+                this.emit(() => this.emitter.textDelta(deflection))
                 clearInterval(inactivityCheck)
                 return {
                   assistantContent, reasoningContent, toolCalls,
                   stepAdvancedThisIteration, leakageDetected: true, timedOut: false,
-                  contentStreamingStartTime, usage: await resolvedUsage(),
+                  contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
                 }
               }
 
               // Only emit to user AFTER leakage check passes
               if (cleaned) {
                 lastVisibleActivityTime = Date.now()
-                this.emitter.textDelta(cleaned)
+                this.emit(() => this.emitter.textDelta(cleaned))
               }
-              contentBuffer = contentBuffer.slice(safeContent.length)
+                contentBuffer = contentBuffer.slice(safeContent.length)
+              }
             }
           }
         }
 
         // Tool calls
         if (delta.tool_calls) {
-          // Tool-call argument chunks are real model progress even before a
-          // strict visible action label is complete enough to show a pill.
-          lastVisibleActivityTime = Date.now()
+          // Tool-call chunks reset provider inactivity through lastChunkTime.
+          // Only reset visible inactivity once an action pill or file preview
+          // is actually emitted, otherwise malformed/hidden arguments can keep
+          // the UI apparently frozen until the full iteration timeout.
           const tcs = delta.tool_calls as Array<{
             index: number
             id?: string
@@ -786,7 +1005,12 @@ export class StreamProcessor {
           }>
           for (const tc of tcs) {
             if (firstToolCallIndex === null) firstToolCallIndex = tc.index
-            if (tc.index !== firstToolCallIndex) continue
+            const isPrimaryToolCall = tc.index === firstToolCallIndex
+            if (
+              !isPrimaryToolCall &&
+              !toolCalls.has(tc.index) &&
+              toolCalls.size >= maxStreamedToolCalls
+            ) continue
 
             const existing = toolCalls.get(tc.index)
             if (existing) {
@@ -804,37 +1028,42 @@ export class StreamProcessor {
 
             if (toolCall.name) {
               const earlyArgs = buildEarlyToolArgs(toolCall.name, toolCall.arguments)
-              addProvisionalRuntimeDisplayContract(earlyArgs, toolCall.name, state)
+              addProvisionalRuntimeDisplayContract(earlyArgs, state)
               const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
               const revisionPreviewAllowed = pendingDeliverableRevisionAllowsPreview(toolCall.name, earlyArgs, state)
-              if (currentStepPreview && revisionPreviewAllowed && shouldEmitProvisionalToolStart(toolCall.name, earlyArgs, state)) {
-                const signature = provisionalToolStartSignature(toolCall, earlyArgs)
-                if (emittedToolStarts.get(tc.index) !== signature) {
-                  emittedToolStarts.set(tc.index, signature)
-                  recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
-                  this.emitter.toolStart(toolCall.id, toolCall.name, earlyArgs)
-                  lastVisibleActivityTime = Date.now()
-                }
+              // Secondary calls stay UI-silent until the completed stream proves
+              // that the whole requested batch is source-only. This prevents a
+              // mixed/unsafe second call from flashing a provisional action that
+              // the execution policy will subsequently reject.
+              if (isPrimaryToolCall && prepareCadenceProgressUpdate(tc.index, toolCall)) {
+                emitProvisionalToolStart(tc.index, toolCall)
               }
 
-              if (toolCall.name === 'create_file' || toolCall.name === 'append_file' || toolCall.name === 'edit_file') {
+              if (STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)) {
                 const path = typeof earlyArgs.path === 'string' ? earlyArgs.path : ''
                 const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
                 const content = extractPartialStringArg(toolCall.arguments, contentKey)
                 const hasDisplayLabel = typeof earlyArgs.action_label === 'string' && earlyArgs.action_label.length > 0
-                if (currentStepPreview && revisionPreviewAllowed && path && hasDisplayLabel) {
+                if (toolCall.provisionalStartEmitted && currentStepPreview && revisionPreviewAllowed && path && hasDisplayLabel) {
                   const preview = filePreviewState.get(tc.index) || { path, emittedChars: 0, started: false }
                   if (!preview.started || preview.path !== path) {
                     preview.path = path
                     preview.started = true
                     preview.emittedChars = 0
-                    this.emitter.fileContentStart(toolCall.id, path, toolCall.name)
+                    this.emit(
+                      () => this.emitter.fileContentStart(toolCall.id, path, toolCall.name),
+                      { immediate: true },
+                    )
                     lastVisibleActivityTime = Date.now()
                   }
                   if (typeof content === 'string' && content.length > preview.emittedChars) {
                     const pendingChars = content.length - preview.emittedChars
                     if (pendingChars >= FILE_PREVIEW_MIN_DELTA_CHARS) {
-                      this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
+                      const deltaContent = content.slice(preview.emittedChars)
+                      this.emit(
+                        () => this.emitter.fileContentDelta(toolCall.id, deltaContent),
+                        { immediate: true },
+                      )
                       lastVisibleActivityTime = Date.now()
                       preview.emittedChars = content.length
                     }
@@ -873,7 +1102,7 @@ export class StreamProcessor {
     // Emit reasoning_done if needed
     if (reasoningContent && !reasoningPhaseEnded) {
       reasoningPhaseEnded = true
-      this.emitter.reasoningDone()
+      this.emit(() => this.emitter.reasoningDone())
     }
 
     // Flush remaining buffer
@@ -891,17 +1120,15 @@ export class StreamProcessor {
             "What can I help you with today?",
           ]
           const deflection = deflections[Math.floor(Math.random() * deflections.length)]
-          this.emitter.textDelta(deflection)
-          this.emitter.done()
-          this.emitter.close()
+          this.emit(() => this.emitter.textDelta(deflection))
           return {
             assistantContent, reasoningContent, toolCalls,
             stepAdvancedThisIteration, leakageDetected: true, timedOut: false,
-            contentStreamingStartTime, usage: await resolvedUsage(),
+            contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
           }
         }
         assistantContent += flushed
-        this.emitter.textDelta(flushed)
+        this.emit(() => this.emitter.textDelta(flushed))
       }
     }
 
@@ -911,16 +1138,71 @@ export class StreamProcessor {
     assistantContent = stripStepMarkers(assistantContent)
     assistantContent = stripPlanMarkers(assistantContent)
 
+    // The model may stream multiple native calls only on an explicitly enabled,
+    // capped source-action turn. Preserve provider index order for a valid
+    // read_document/http_request batch. Any mixed, unknown, or non-source batch
+    // falls back to the first streamed call, matching the sequential safety
+    // policy without exposing ghost secondary actions.
+    if (toolCalls.size > 1) {
+      const orderedEntries = [...toolCalls.entries()].sort(([a], [b]) => a - b)
+      const sourceOnlyBatch =
+        maxStreamedToolCalls > 1 &&
+        orderedEntries.every(([, toolCall]) => PARALLEL_STREAM_SOURCE_EXTRACTION_TOOLS.has(toolCall.name))
+      if (!sourceOnlyBatch) {
+        const primaryToolCall = firstToolCallIndex === null
+          ? undefined
+          : toolCalls.get(firstToolCallIndex)
+        toolCalls.clear()
+        if (primaryToolCall && firstToolCallIndex !== null) {
+          toolCalls.set(firstToolCallIndex, primaryToolCall)
+        }
+      } else {
+        toolCalls.clear()
+        for (const [index, toolCall] of orderedEntries.slice(0, maxStreamedToolCalls)) {
+          toolCalls.set(index, toolCall)
+        }
+      }
+    }
+
+    if (cadenceProgressUpdateEnabled && toolCalls.size === 0) {
+      markCadenceProgressViolation(
+        'missing_tool_call',
+        'the cadence-enabled turn did not include a native tool call carrying progress_update',
+      )
+    }
+
+    // Valid narration is emitted immediately before its action. Missing,
+    // invalid, or duplicate narration stays invisible, while the action still
+    // proceeds and cadence is retried on the next ordinary action turn.
+    for (const [index, toolCall] of toolCalls) {
+      if (!prepareCadenceProgressUpdate(index, toolCall, true)) continue
+      emitProvisionalToolStart(index, toolCall)
+    }
+
     for (const [index, preview] of filePreviewState) {
       const toolCall = toolCalls.get(index)
       if (!toolCall) continue
       const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
       const content = extractPartialStringArg(toolCall.arguments, contentKey)
       if (typeof content === 'string' && content.length > preview.emittedChars) {
-        this.emitter.fileContentDelta(toolCall.id, content.slice(preview.emittedChars))
+        const deltaContent = content.slice(preview.emittedChars)
+        this.emit(
+          () => this.emitter.fileContentDelta(toolCall.id, deltaContent),
+          { immediate: true },
+        )
         preview.emittedChars = content.length
       }
     }
+
+    // The cadence lane is display-only. Remove it before provider history,
+    // validation, caching, persistence, signatures, or tool execution can see it.
+    for (const toolCall of toolCalls.values()) {
+      toolCall.arguments = stripCadenceProgressUpdateFromArguments(toolCall.arguments)
+    }
+    // A prose-only cadence turn still has no executable action and may use the
+    // bounded no-progress recovery. A valid native action is never cleared
+    // solely because its optional display narration was unusable.
+    if (cadenceProgressViolation && toolCalls.size === 0) toolCalls.clear()
 
     return {
       assistantContent,
@@ -930,7 +1212,11 @@ export class StreamProcessor {
       leakageDetected: false,
       timedOut: streamTimedOut,
       contentStreamingStartTime,
-      usage: await resolvedUsage(),
+      usage: resolvedUsage(),
+      usageEstimated,
+      cadenceProgressUpdate: cadenceProgressUpdate || undefined,
+      cadenceProgressVisibleActionsAfter,
+      cadenceProgressViolation: cadenceProgressViolation || undefined,
     }
   }
 }

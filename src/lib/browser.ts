@@ -14,6 +14,7 @@ import {
   type BrowserTargetHint,
 } from './browserIntelligence'
 import type { ScreenshotQuality } from './visualQuality'
+import { registerBrowserSessionFenceAcquirer } from './browserSessionLifecycle'
 
 export interface BrowserActionResult {
   success: boolean
@@ -41,6 +42,10 @@ interface BrowserSession {
   lastUsed: number
   conversationId: string
   screencastActive: boolean
+  screencastGeneration: number
+  cdpScreencastHandlerAttached: boolean
+  screencastControl: Promise<void>
+  screencastRetryTimer: ReturnType<typeof setTimeout> | null
   frameListeners: Set<(base64: string) => void>
   latestFrame: string | null
   // Per-action page diff tracking — lets the agent see what changed and what's new
@@ -290,7 +295,6 @@ async function settlePageAfterBrowserAction(
     maxMs: delayMs,
     stablePolls: 2,
   }).catch(() => {})
-  await session.page.waitForLoadState('networkidle', { timeout: 220 }).catch(() => {})
   await autoDismissPopups(session.page).catch(() => [])
 }
 
@@ -303,7 +307,6 @@ async function settlePageAfterNavigation(session: BrowserSession, url: string): 
     pollMs: 175,
     stablePolls: 2,
   }).catch(() => {})
-  await session.page.waitForLoadState('networkidle', { timeout: 280 }).catch(() => {})
 }
 
 async function getVisiblePageText(page: Page): Promise<string> {
@@ -1395,6 +1398,55 @@ const pendingSessions: Map<string, Promise<BrowserSession>> =
   (globalThis as unknown as Record<string, Map<string, Promise<BrowserSession>>>)[pendingKey] ??
   ((globalThis as unknown as Record<string, Map<string, Promise<BrowserSession>>>)[pendingKey] = new Map())
 
+const sessionEpochsKey = '__browserSessionEpochs' as const
+const sessionEpochs: Map<string, number> =
+  (globalThis as unknown as Record<string, Map<string, number>>)[sessionEpochsKey] ??
+  ((globalThis as unknown as Record<string, Map<string, number>>)[sessionEpochsKey] = new Map())
+
+const sessionFencesKey = '__browserSessionFences' as const
+const sessionFences: Map<string, Promise<void>> =
+  (globalThis as unknown as Record<string, Map<string, Promise<void>>>)[sessionFencesKey] ??
+  ((globalThis as unknown as Record<string, Map<string, Promise<void>>>)[sessionFencesKey] = new Map())
+
+class BrowserSessionSupersededError extends Error {
+  constructor(readonly conversationId: string) {
+    super(`Browser session creation was superseded for ${conversationId}.`)
+    this.name = 'BrowserSessionSupersededError'
+  }
+}
+
+function browserSessionEpoch(conversationId: string): number {
+  return sessionEpochs.get(conversationId) ?? 0
+}
+
+function bumpBrowserSessionEpoch(conversationId: string): number {
+  const next = browserSessionEpoch(conversationId) + 1
+  sessionEpochs.set(conversationId, next)
+  return next
+}
+
+function connectedSession(conversationId: string): BrowserSession | null {
+  const session = sessions.get(conversationId)
+  if (!session) return null
+  if (session.browser.isConnected()) {
+    // Sessions intentionally survive Next.js module reloads. Normalize fields
+    // added by newer code before reusing an older in-memory session.
+    if (!Number.isFinite(session.screencastGeneration)) session.screencastGeneration = 0
+    if (typeof session.cdpScreencastHandlerAttached !== 'boolean') {
+      session.cdpScreencastHandlerAttached = !!session.cdp
+    }
+    if (!session.screencastControl || typeof session.screencastControl.then !== 'function') {
+      session.screencastControl = Promise.resolve()
+    }
+    if (session.screencastRetryTimer === undefined) session.screencastRetryTimer = null
+    return session
+  }
+  if (session.screencastRetryTimer) clearTimeout(session.screencastRetryTimer)
+  sessions.delete(conversationId)
+  session.screencastActive = false
+  return null
+}
+
 function attachPendingFrameListeners(session: BrowserSession): void {
   const pending = pendingFrameListeners.get(session.conversationId)
   if (!pending || pending.size === 0) return
@@ -1434,26 +1486,45 @@ async function createBrowserRuntime(conversationId: string): Promise<{
 }
 
 async function getOrCreateSession(conversationId: string): Promise<BrowserSession> {
-  const existing = sessions.get(conversationId)
-  if (existing) {
-    existing.lastUsed = Date.now()
-    return existing
-  }
+  while (true) {
+    const activeFence = sessionFences.get(conversationId)
+    if (activeFence) {
+      await activeFence
+      continue
+    }
+    const existing = connectedSession(conversationId)
+    if (existing) {
+      existing.lastUsed = Date.now()
+      return existing
+    }
 
-  // If another caller is already creating this session, await the same promise
-  const pending = pendingSessions.get(conversationId)
-  if (pending) return pending
+    // If another caller is already creating this session, await the same promise.
+    const pending = pendingSessions.get(conversationId)
+    if (pending) {
+      try {
+        return await pending
+      } catch (error) {
+        if (error instanceof BrowserSessionSupersededError) continue
+        throw error
+      }
+    }
 
-  const creation = createSessionImpl(conversationId)
-  pendingSessions.set(conversationId, creation)
-  try {
-    return await creation
-  } finally {
-    pendingSessions.delete(conversationId)
+    const expectedEpoch = browserSessionEpoch(conversationId)
+    const creation = createSessionImpl(conversationId, expectedEpoch)
+    pendingSessions.set(conversationId, creation)
+    try {
+      return await creation
+    } catch (error) {
+      if (!(error instanceof BrowserSessionSupersededError)) throw error
+    } finally {
+      if (pendingSessions.get(conversationId) === creation) {
+        pendingSessions.delete(conversationId)
+      }
+    }
   }
 }
 
-async function createSessionImpl(conversationId: string): Promise<BrowserSession> {
+async function createSessionImpl(conversationId: string, expectedEpoch: number): Promise<BrowserSession> {
   let browser: Browser | undefined
   let context: BrowserContext | undefined
   let initialPage: Page | null = null
@@ -1479,13 +1550,14 @@ async function createSessionImpl(conversationId: string): Promise<BrowserSession
       return
     }
 
-    const validation = await validateBrowserNavigationUrl(requestUrl)
-    if (!validation.ok) {
+    let parsed: URL
+    try {
+      parsed = validateHttpUrl(requestUrl)
+    } catch {
       await route.abort('blockedbyclient')
       return
     }
 
-    const parsed = new URL(validation.url)
     if (isSandboxPreviewUrl(parsed) || isManagedWebsiteServerUrl(parsed) || isManagedWebsitePreviewUrl(parsed)) {
       await route.continue()
       return
@@ -1503,7 +1575,10 @@ async function createSessionImpl(conversationId: string): Promise<BrowserSession
       const body = method === 'GET' || method === 'HEAD'
         ? undefined
         : request.postDataBuffer() ?? undefined
-      const response = await guardedFetch(validation.url, {
+      // guardedFetch performs both the all-address host preflight and a
+      // connection-time checked DNS lookup. Do not repeat the same DNS
+      // preflight in this route for every document, script, image, and font.
+      const response = await guardedFetch(parsed, {
         method,
         headers,
         body,
@@ -1698,6 +1773,10 @@ async function createSessionImpl(conversationId: string): Promise<BrowserSession
       lastUsed: Date.now(),
       conversationId,
       screencastActive: false,
+      screencastGeneration: 0,
+      cdpScreencastHandlerAttached: false,
+      screencastControl: Promise.resolve(),
+      screencastRetryTimer: null,
       frameListeners: new Set(),
       latestFrame: null,
       lastElementSelectors: null,
@@ -1714,10 +1793,14 @@ async function createSessionImpl(conversationId: string): Promise<BrowserSession
       void saveBrowserDownload(session, download)
     })
 
+    if (browserSessionEpoch(conversationId) !== expectedEpoch) {
+      throw new BrowserSessionSupersededError(conversationId)
+    }
     sessions.set(conversationId, session)
     attachPendingFrameListeners(session)
-    // Start screencast immediately so latestFrame is always available
-    startScreencast(session)
+    // Browser frames are only useful while the current task has a live
+    // subscriber. E2B uses a push-based CDP screencast for that task lifetime.
+    if (session.frameListeners.size > 0) startScreencast(session)
     return session
   } catch (sessionError) {
     // Clean up partially created resources on failure
@@ -5039,45 +5122,154 @@ export async function browserGetContent(
   }
 }
 
-function startScreencast(session: BrowserSession) {
-  if (session.screencastActive) return
+function stopScreencast(session: BrowserSession): void {
+  if (!session.screencastActive) return
+  session.screencastActive = false
+  session.screencastGeneration++
+  if (session.screencastRetryTimer) {
+    clearTimeout(session.screencastRetryTimer)
+    session.screencastRetryTimer = null
+  }
+  // A frame cached across tool boundaries can belong to the previous page.
+  // The client keeps its last valid image visible until this stream produces a
+  // genuinely fresh frame, so there is no need to replay stale server state.
+  session.latestFrame = null
+  const cdp = session.cdp
+  if (!cdp) return
+
+  // Serialize CDP start/stop commands. A fire-and-forget stop racing the next
+  // task's start could otherwise stop the newly-started stream and leave the
+  // Computer panel frozen until another browser action happened.
+  session.screencastControl = session.screencastControl
+    .catch(() => undefined)
+    .then(async () => {
+      await cdp.send('Page.stopScreencast').catch(() => undefined)
+    })
+}
+
+function scheduleE2BScreencastRetry(session: BrowserSession, generation: number): void {
+  if (
+    session.remoteProvider !== 'e2b' ||
+    !session.screencastActive ||
+    session.screencastGeneration !== generation ||
+    session.frameListeners.size === 0 ||
+    session.screencastRetryTimer
+  ) return
+
+  session.screencastRetryTimer = setTimeout(() => {
+    session.screencastRetryTimer = null
+    if (
+      !session.screencastActive ||
+      session.screencastGeneration !== generation ||
+      session.frameListeners.size === 0
+    ) return
+
+    void (async () => {
+      if (!session.cdp) {
+        try {
+          session.cdp = await session.context.newCDPSession(session.page)
+          session.cdpScreencastHandlerAttached = false
+        } catch (error) {
+          debugBrowserStream('[screencast-cdp] failed to recreate E2B CDP session', error)
+          scheduleE2BScreencastRetry(session, generation)
+          return
+        }
+      }
+
+      // Restart through the normal push-stream path. E2B intentionally never
+      // falls back to periodic page.screenshot polling.
+      session.screencastActive = false
+      startScreencast(session)
+    })()
+  }, 200)
+  session.screencastRetryTimer.unref?.()
+}
+
+function startScreencast(session: BrowserSession): void {
+  if (session.screencastActive || session.frameListeners.size === 0) return
   session.screencastActive = true
+  const generation = ++session.screencastGeneration
   debugBrowserStream(`[screencast] starting for ${session.conversationId}, cdp=${!!session.cdp}`)
 
   if (session.cdp) {
     // Use CDP Page.screencastFrame for high-FPS push-based streaming
-    let frameNum = 0
-    session.cdp.on('Page.screencastFrame', async (params: { data: string; sessionId: number }) => {
-      if (!session.screencastActive) return
-      session.latestFrame = params.data
-      frameNum++
-      if (frameNum <= 3) debugBrowserStream(`[screencast-cdp] ${session.conversationId}: frame #${frameNum}, listeners=${session.frameListeners.size}`)
-      for (const fn of session.frameListeners) {
-        fn(params.data)
-      }
-      // Acknowledge frame so Chrome sends the next one
-      try {
-        await session.cdp!.send('Page.screencastFrameAck', { sessionId: params.sessionId })
-      } catch { /* session may be closed */ }
-    })
+    const cdp = session.cdp
+    if (!session.cdpScreencastHandlerAttached) {
+      session.cdpScreencastHandlerAttached = true
+      let frameNum = 0
+      cdp.on('Page.screencastFrame', async (params: { data: string; sessionId: number }) => {
+        if (session.screencastActive && session.frameListeners.size > 0) {
+          session.latestFrame = params.data
+          frameNum++
+          if (frameNum <= 3) debugBrowserStream(`[screencast-cdp] ${session.conversationId}: frame #${frameNum}, listeners=${session.frameListeners.size}`)
+          for (const fn of session.frameListeners) {
+            try { fn(params.data) } catch { /* one listener must not stall CDP */ }
+          }
+        }
+        // Always acknowledge an in-flight frame, including one that arrives
+        // just after stopScreencast, so a later restart cannot deadlock.
+        try {
+          await cdp.send('Page.screencastFrameAck', { sessionId: params.sessionId })
+        } catch { /* session may be closed */ }
+      })
+    }
 
-    session.cdp.send('Page.startScreencast', {
-      format: 'jpeg',
-      quality: 80,
-      maxWidth: 1280,
-      maxHeight: 720,
-      everyNthFrame: 1,
-    }).catch((e: unknown) => {
-      debugBrowserStream('[screencast-cdp] failed to start, falling back to polling', e)
-      session.cdp = null
-      session.screencastActive = false
-      startScreencast(session) // retry with polling fallback
-    })
+    session.screencastControl = session.screencastControl
+      .catch(() => undefined)
+      .then(async () => {
+        if (
+          !session.screencastActive ||
+          session.screencastGeneration !== generation ||
+          session.frameListeners.size === 0
+        ) return
+        // Headless Chromium can treat its only tab as backgrounded. Activate
+        // the target before starting the screencast so compositor changes from
+        // navigation, typing, scrolling, and animation produce live frames.
+        await cdp.send('Page.enable').catch(() => undefined)
+        await cdp.send('Page.bringToFront').catch(() => undefined)
+        await cdp.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => undefined)
+        await cdp.send('Emulation.setFocusEmulationEnabled', { enabled: true }).catch(() => undefined)
+        await cdp.send('Page.startScreencast', {
+          format: 'jpeg',
+          quality: 80,
+          maxWidth: 1280,
+          maxHeight: 720,
+          everyNthFrame: 1,
+        })
+      })
+      .catch(async (e: unknown) => {
+        if (!session.screencastActive || session.screencastGeneration !== generation) return
+        if (session.remoteProvider === 'e2b') {
+          debugBrowserStream('[screencast-cdp] E2B push stream failed to start; retrying CDP', e)
+          if (session.cdp === cdp) {
+            session.cdp = null
+            session.cdpScreencastHandlerAttached = false
+            await cdp.detach().catch(() => undefined)
+          }
+          scheduleE2BScreencastRetry(session, generation)
+          return
+        }
+        debugBrowserStream('[screencast-cdp] failed to start, falling back to local polling', e)
+        session.cdp = null
+        session.screencastActive = false
+        startScreencast(session)
+      })
   } else {
+    if (session.remoteProvider === 'e2b') {
+      scheduleE2BScreencastRetry(session, generation)
+      return
+    }
     // Fallback: poll screenshots
     let frameNum = 0
     const captureFrame = async () => {
-      if (!session.screencastActive) return
+      if (
+        !session.screencastActive ||
+        session.screencastGeneration !== generation ||
+        session.frameListeners.size === 0
+      ) {
+        if (session.screencastGeneration === generation) session.screencastActive = false
+        return
+      }
       try {
         const buffer = await session.page.screenshot({ type: 'jpeg', quality: 80 })
         const base64 = buffer.toString('base64')
@@ -5085,28 +5277,32 @@ function startScreencast(session: BrowserSession) {
         frameNum++
         if (frameNum <= 3) debugBrowserStream(`[screencast-poll] ${session.conversationId}: frame #${frameNum}, listeners=${session.frameListeners.size}`)
         for (const fn of session.frameListeners) {
-          fn(base64)
+          try { fn(base64) } catch { /* keep the polling loop alive */ }
         }
       } catch {
         // page might be mid-navigation — skip this frame
       }
-      if (session.screencastActive) {
+      if (
+        session.screencastActive &&
+        session.screencastGeneration === generation &&
+        session.frameListeners.size > 0
+      ) {
         setTimeout(captureFrame, 100)
       }
     }
-    captureFrame()
+    void captureFrame()
   }
 }
 
 export function hasBrowserSession(conversationId: string): boolean {
-  return sessions.has(conversationId)
+  return connectedSession(conversationId) !== null
 }
 
 export async function browserActionPreflight(
   conversationId: string,
   opts?: { includeFrame?: boolean; preferCached?: boolean },
 ): Promise<BrowserActionPreflightSnapshot> {
-  const session = sessions.get(conversationId)
+  const session = connectedSession(conversationId)
   if (!session) {
     return {
       hasSession: false,
@@ -5197,7 +5393,7 @@ export function subscribeToBrowserFrames(
   conversationId: string,
   listener: BrowserFrameListener
 ): (() => void) | null {
-  const session = sessions.get(conversationId)
+  const session = connectedSession(conversationId)
   if (!session) {
     let listeners = pendingFrameListeners.get(conversationId)
     if (!listeners) {
@@ -5209,7 +5405,11 @@ export function subscribeToBrowserFrames(
       const pending = pendingFrameListeners.get(conversationId)
       pending?.delete(listener)
       if (pending && pending.size === 0) pendingFrameListeners.delete(conversationId)
-      sessions.get(conversationId)?.frameListeners.delete(listener)
+      const createdSession = sessions.get(conversationId)
+      createdSession?.frameListeners.delete(listener)
+      if (createdSession && createdSession.frameListeners.size === 0) {
+        stopScreencast(createdSession)
+      }
     }
   }
 
@@ -5220,7 +5420,7 @@ export function subscribeToBrowserFrames(
     listener(session.latestFrame)
   }
 
-  // Start polling screenshots if not already active
+  // Start the browser's live frame stream if it is not already active.
   startScreencast(session)
 
   return () => {
@@ -5228,26 +5428,90 @@ export function subscribeToBrowserFrames(
     const pending = pendingFrameListeners.get(conversationId)
     pending?.delete(listener)
     if (pending && pending.size === 0) pendingFrameListeners.delete(conversationId)
-    // Polling stops on its own when frameListeners is empty
+    if (session.frameListeners.size === 0) stopScreencast(session)
   }
 }
 
 export async function destroyBrowserSession(conversationId: string): Promise<void> {
-  const session = sessions.get(conversationId)
-  if (!session) return
-  sessions.delete(conversationId)
-  session.screencastActive = false
+  const release = await acquireBrowserSessionFence(conversationId)
+  release()
+}
+
+export async function acquireBrowserSessionFence(conversationId: string): Promise<() => void> {
+  const previousFence = sessionFences.get(conversationId)
+  let releaseHold!: () => void
+  const hold = new Promise<void>((resolve) => {
+    releaseHold = resolve
+  })
+  sessionFences.set(conversationId, hold)
+  bumpBrowserSessionEpoch(conversationId)
   try {
-    if (session.cdp) {
-      await session.cdp.send('Page.stopScreencast').catch(() => {})
-      await session.cdp.detach().catch(() => {})
+    await previousFence
+    const pending = pendingSessions.get(conversationId)
+    const session = sessions.get(conversationId)
+    pendingFrameListeners.delete(conversationId)
+    if (session) {
+      session.screencastActive = false
+      if (session.screencastRetryTimer) {
+        clearTimeout(session.screencastRetryTimer)
+        session.screencastRetryTimer = null
+      }
+      if (session.cdp) {
+        await session.screencastControl.catch(() => undefined)
+        await session.cdp.send('Page.stopScreencast').catch(() => undefined)
+        await session.cdp.detach().catch(() => undefined)
+      }
+      await session.context.close().catch(() => undefined)
+      await session.browser.close().catch(() => undefined)
+      if (session.browser.isConnected()) {
+        throw new Error(`Browser session ${conversationId} could not be closed safely.`)
+      }
+      sessions.delete(conversationId)
     }
-    await session.context.close()
-    await session.browser.close()
-  } catch {
-    // Best effort cleanup
+
+    if (pending) {
+      try {
+        await pending
+      } catch (error) {
+        if (!(error instanceof BrowserSessionSupersededError)) throw error
+      }
+    }
+
+    const lateSession = sessions.get(conversationId)
+    if (lateSession) {
+      lateSession.screencastActive = false
+      if (lateSession.screencastRetryTimer) {
+        clearTimeout(lateSession.screencastRetryTimer)
+        lateSession.screencastRetryTimer = null
+      }
+      if (lateSession.cdp) {
+        await lateSession.screencastControl.catch(() => undefined)
+        await lateSession.cdp.send('Page.stopScreencast').catch(() => undefined)
+        await lateSession.cdp.detach().catch(() => undefined)
+      }
+      await lateSession.context.close().catch(() => undefined)
+      await lateSession.browser.close().catch(() => undefined)
+      if (lateSession.browser.isConnected()) {
+        throw new Error(`Late browser session ${conversationId} could not be closed safely.`)
+      }
+      sessions.delete(conversationId)
+    }
+  } catch (error) {
+    if (sessionFences.get(conversationId) === hold) sessionFences.delete(conversationId)
+    releaseHold()
+    throw error
+  }
+
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    if (sessionFences.get(conversationId) === hold) sessionFences.delete(conversationId)
+    releaseHold()
   }
 }
+
+registerBrowserSessionFenceAcquirer(acquireBrowserSessionFence)
 
 // Idle cleanup
 const cleanupInterval = setInterval(async () => {

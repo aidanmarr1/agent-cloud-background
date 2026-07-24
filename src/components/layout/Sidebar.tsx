@@ -9,45 +9,60 @@ import {
   Star,
   PanelLeftClose,
   PanelLeftOpen,
-  MessageSquare,
-  FileText,
+  Bot,
 } from '@/components/icons'
-import Image from 'next/image'
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef, useCallback, type ReactNode } from 'react'
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useRouter, usePathname } from 'next/navigation'
-import type { Message } from '@/types'
+import type { Conversation } from '@/types'
 
-function relativeTime(ts: number): string {
-  const diff = Date.now() - ts
-  const m = Math.floor(diff / 60000)
-  if (m < 1) return 'now'
-  if (m < 60) return `${m}m`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h`
-  const d = Math.floor(h / 24)
-  if (d < 7) return `${d}d`
-  return `${Math.floor(d / 7)}w`
+interface ConversationGroup {
+  label: 'Starred' | 'Today' | 'Earlier' | 'Results'
+  conversations: Conversation[]
 }
 
-function getPreview(messages: Message[]): string {
-  if (!messages.length) return ''
-  const last = messages[messages.length - 1]
-  const raw = last.content || ''
-  return raw
-    .replace(/```[\s\S]*?```/g, '[code]')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')
-    .replace(/[*_~#>]/g, '')
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/\s+/g, ' ')
-    .trim()
+function groupConversations(conversations: Conversation[], searching: boolean): ConversationGroup[] {
+  if (searching) {
+    return [{ label: 'Results', conversations }]
+  }
+
+  const today = new Date()
+  today.setHours(0, 0, 0, 0)
+
+  const groups: ConversationGroup[] = [
+    { label: 'Starred', conversations: [] },
+    { label: 'Today', conversations: [] },
+    { label: 'Earlier', conversations: [] },
+  ]
+
+  for (const conversation of conversations) {
+    if (conversation.starred) {
+      groups[0].conversations.push(conversation)
+    } else if (conversation.updatedAt >= today.getTime()) {
+      groups[1].conversations.push(conversation)
+    } else {
+      groups[2].conversations.push(conversation)
+    }
+  }
+
+  return groups.filter((group) => group.conversations.length > 0)
 }
 
 interface SidebarProps {
   initialCollapsed?: boolean
   initialStateKnown?: boolean
+}
+
+function CollapsedSidebarLabel({ children }: { children: ReactNode }) {
+  return (
+    <span
+      role="tooltip"
+      className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-[140] -translate-y-1/2 translate-x-1 whitespace-nowrap rounded-[10px] bg-[var(--tooltip-surface)] px-3 py-2 text-[12.5px] font-medium text-[var(--tooltip-text)] opacity-0 shadow-lg transition-[opacity,transform] duration-75 group-hover/sidebar-label:translate-x-0 group-hover/sidebar-label:opacity-100 group-focus-within/sidebar-label:translate-x-0 group-focus-within/sidebar-label:opacity-100"
+    >
+      {children}
+    </span>
+  )
 }
 
 function writeSidebarCookie(collapsed: boolean) {
@@ -57,19 +72,27 @@ function writeSidebarCookie(collapsed: boolean) {
 export function Sidebar({ initialCollapsed = false, initialStateKnown = false }: SidebarProps) {
   const router = useRouter()
   const pathname = usePathname()
-  const setSettingsOpen = useUIStore((s) => s.setSettingsOpen)
-  const setSettingsTab = useUIStore((s) => s.setSettingsTab)
-  const mobileSidebarOpen = useUIStore((s) => s.mobileSidebarOpen)
-  const setMobileSidebarOpen = useUIStore((s) => s.setMobileSidebarOpen)
-  const sidebarExpanded = useUIStore((s) => s.sidebarExpanded)
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
-  const setRouteHandoffPending = useUIStore((s) => s.setRouteHandoffPending)
-  const conversations = useChatStore((s) => s.conversations)
-  const activeId = useChatStore((s) => s.activeId)
-  const setActiveId = useChatStore((s) => s.setActiveId)
-  const toggleStar = useChatStore((s) => s.toggleStar)
+  const setSettingsOpen = useUIStore((state) => state.setSettingsOpen)
+  const setSettingsTab = useUIStore((state) => state.setSettingsTab)
+  const mobileSidebarOpen = useUIStore((state) => state.mobileSidebarOpen)
+  const setMobileSidebarOpen = useUIStore((state) => state.setMobileSidebarOpen)
+  const sidebarExpanded = useUIStore((state) => state.sidebarExpanded)
+  const toggleSidebar = useUIStore((state) => state.toggleSidebar)
+  const isStreaming = useUIStore((state) => state.isStreaming)
+  const setRouteHandoffPending = useUIStore((state) => state.setRouteHandoffPending)
+  const conversations = useChatStore((state) => state.conversations)
+  const activeId = useChatStore((state) => state.activeId)
+  const setActiveId = useChatStore((state) => state.setActiveId)
+  const toggleStar = useChatStore((state) => state.toggleStar)
   const [uiHydrated, setUiHydrated] = useState(false)
   const [taskQuery, setTaskQuery] = useState('')
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [isMobileViewport, setIsMobileViewport] = useState(false)
+  const [focusSearchAfterExpand, setFocusSearchAfterExpand] = useState(false)
+  const sidebarRef = useRef<HTMLElement>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const mobileMenuButtonRef = useRef<HTMLButtonElement>(null)
+  const mobileCloseButtonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     const persistApi = useUIStore.persist
@@ -87,7 +110,97 @@ export function Sidebar({ initialCollapsed = false, initialStateKnown = false }:
 
   // Historical name: sidebarExpanded=true means the sidebar is collapsed.
   const collapsed = uiHydrated ? sidebarExpanded : initialCollapsed
+  const renderCollapsed = collapsed && !mobileSidebarOpen
   const showSidebarContent = uiHydrated || initialStateKnown
+
+  const closeMobileSidebar = useCallback((restoreFocus = true) => {
+    setMobileSidebarOpen(false)
+    if (restoreFocus) {
+      window.requestAnimationFrame(() => mobileMenuButtonRef.current?.focus())
+    }
+  }, [setMobileSidebarOpen])
+
+  useEffect(() => {
+    const desktopQuery = window.matchMedia('(min-width: 768px)')
+
+    const handleViewportChange = () => {
+      setIsMobileViewport(!desktopQuery.matches)
+      if (desktopQuery.matches) setMobileSidebarOpen(false)
+    }
+
+    handleViewportChange()
+    desktopQuery.addEventListener('change', handleViewportChange)
+    return () => desktopQuery.removeEventListener('change', handleViewportChange)
+  }, [setMobileSidebarOpen])
+
+  useEffect(() => {
+    if (!mobileSidebarOpen || !isMobileViewport) return
+
+    const sidebar = sidebarRef.current
+    const mainContent = document.getElementById('main-content')
+    const mainWasInert = mainContent?.hasAttribute('inert') ?? false
+    const previousAriaHidden = mainContent?.getAttribute('aria-hidden')
+    const previousBodyOverflow = document.body.style.overflow
+
+    mainContent?.setAttribute('inert', '')
+    mainContent?.setAttribute('aria-hidden', 'true')
+    document.body.style.overflow = 'hidden'
+
+    const focusFrame = window.requestAnimationFrame(() => mobileCloseButtonRef.current?.focus())
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeMobileSidebar()
+        return
+      }
+
+      if (event.key !== 'Tab' || !sidebar) return
+
+      const focusable = Array.from(
+        sidebar.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((element) => !element.hasAttribute('inert'))
+
+      if (focusable.length === 0) return
+
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('keydown', handleKeyDown)
+      document.body.style.overflow = previousBodyOverflow
+
+      if (!mainWasInert) mainContent?.removeAttribute('inert')
+      if (previousAriaHidden === null || previousAriaHidden === undefined) {
+        mainContent?.removeAttribute('aria-hidden')
+      } else {
+        mainContent?.setAttribute('aria-hidden', previousAriaHidden)
+      }
+    }
+  }, [closeMobileSidebar, isMobileViewport, mobileSidebarOpen])
+
+  useEffect(() => {
+    if (!focusSearchAfterExpand || renderCollapsed) return
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus()
+      setFocusSearchAfterExpand(false)
+    })
+
+    return () => window.cancelAnimationFrame(focusFrame)
+  }, [focusSearchAfterExpand, renderCollapsed])
 
   useEffect(() => {
     if (!uiHydrated) return
@@ -105,11 +218,18 @@ export function Sidebar({ initialCollapsed = false, initialStateKnown = false }:
   const filteredTasks = useMemo(() => {
     const query = taskQuery.trim().toLowerCase()
     if (!query) return sorted
+
     return sorted.filter((conversation) =>
       conversation.title.toLowerCase().includes(query) ||
       conversation.messages.some((message) => message.content.toLowerCase().includes(query))
     )
   }, [sorted, taskQuery])
+
+  const searching = taskQuery.trim().length > 0
+  const groupedTasks = useMemo(
+    () => groupConversations(filteredTasks, searching),
+    [filteredTasks, searching]
+  )
 
   const openTask = (id: string) => {
     setActiveId(id)
@@ -118,268 +238,376 @@ export function Sidebar({ initialCollapsed = false, initialStateKnown = false }:
     setMobileSidebarOpen(false)
   }
 
-  if (pathname === '/sign-in' || pathname === '/sign-up') {
-    return null
-  }
-
   const startNewTask = () => {
     setRouteHandoffPending(false)
     router.push('/')
     setMobileSidebarOpen(false)
   }
 
+  const openSettings = () => {
+    setSettingsTab('general')
+    setSettingsOpen(true)
+    setMobileSidebarOpen(false)
+  }
+
+  const expandAndSearch = () => {
+    setSearchOpen(true)
+    setFocusSearchAfterExpand(true)
+    toggleSidebar()
+  }
+
+  const collapseSidebar = () => {
+    setSearchOpen(false)
+    setTaskQuery('')
+    toggleSidebar()
+  }
+
+  if (pathname === '/sign-in' || pathname === '/sign-up') {
+    return null
+  }
+
   return (
     <>
-      {/* Mobile hamburger */}
       <button
+        ref={mobileMenuButtonRef}
+        type="button"
         onClick={() => setMobileSidebarOpen(true)}
-        className="fixed left-3 top-1.5 z-[95] flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-bg-tertiary md:hidden"
+        className={`fixed left-2.5 top-2.5 z-[95] flex h-10 w-10 items-center justify-center rounded-lg border border-border-primary bg-bg-elevated text-text-secondary shadow-sm transition-colors hover:bg-bg-card hover:text-text-primary md:hidden ${
+          mobileSidebarOpen ? 'pointer-events-none opacity-0' : ''
+        }`}
         aria-label="Open menu"
+        aria-controls="app-sidebar"
+        aria-expanded={mobileSidebarOpen}
+        aria-hidden={mobileSidebarOpen ? true : undefined}
+        tabIndex={mobileSidebarOpen ? -1 : 0}
       >
-        <Menu size={18} className="text-text-tertiary" />
+        <Menu size={19} />
       </button>
 
-      {/* Mobile overlay */}
       {mobileSidebarOpen && (
-        <button
-          type="button"
-          className="fixed inset-0 bg-[var(--overlay-scrim-subtle)] z-[100] md:hidden"
-          onClick={() => setMobileSidebarOpen(false)}
-          aria-label="Close sidebar"
+        <div
+          className="fixed inset-0 z-[100] bg-[var(--overlay-scrim-subtle)] md:hidden"
+          onClick={() => closeMobileSidebar()}
+          aria-hidden="true"
         />
       )}
 
-      {/* Sidebar */}
-      <div
-        className={`app-sidebar fixed left-0 top-0 bottom-0 overflow-hidden bg-bg-secondary border-r border-border-primary flex flex-col z-[110] transition-all duration-200 ${
+      <aside
+        ref={sidebarRef}
+        id="app-sidebar"
+        role={isMobileViewport ? 'dialog' : 'navigation'}
+        aria-label="Task navigation"
+        aria-modal={isMobileViewport && mobileSidebarOpen ? true : undefined}
+        aria-hidden={isMobileViewport && !mobileSidebarOpen ? true : undefined}
+        inert={isMobileViewport && !mobileSidebarOpen ? true : undefined}
+        className={`app-sidebar fixed inset-y-0 left-0 z-[110] flex flex-col overflow-visible border-r border-[var(--sidebar-divider)] bg-[var(--sidebar-surface)] transition-[width,transform] duration-200 ease-out ${
           mobileSidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0'
         }`}
-        style={{ width: collapsed ? 56 : 256 }}
+        style={{ width: renderCollapsed ? 64 : 260 }}
       >
         {showSidebarContent && (
           <>
-            {/* Header */}
-            <div className={`flex items-center ${collapsed ? 'justify-center px-0 pt-3 pb-2.5' : 'gap-2.5 px-2.5 pt-3 pb-2.5'}`}>
-              <button
-                className="group relative h-10 w-10 rounded-xl flex items-center justify-center border border-transparent bg-transparent flex-shrink-0 transition-colors hover:border-border-primary hover:bg-bg-secondary"
-                onClick={collapsed ? toggleSidebar : startNewTask}
-                aria-label={collapsed ? 'Expand sidebar' : 'Home'}
-              >
-                <Image
-                  src="/logo.svg"
-                  alt="Agent"
-                  width={32}
-                  height={32}
-                  className={`h-8 w-8 rounded-lg object-contain transition-opacity duration-150 ${collapsed ? 'group-hover:opacity-0' : ''}`}
-                />
-                {collapsed && (
-                  <PanelLeftOpen
-                    size={16}
-                    weight="regular"
-                    className="absolute text-text-secondary opacity-0 transition-opacity duration-150 group-hover:opacity-100"
-                  />
-                )}
-              </button>
-              {!collapsed && (
-                <span className="text-[15px] font-semibold text-text-primary tracking-[0]">Agent</span>
-              )}
-              {!collapsed && (
-                <button
-                  onClick={toggleSidebar}
-                  className="ml-auto hidden h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-bg-secondary hover:text-text-primary md:flex"
-                  aria-label="Collapse sidebar"
-                >
-                  <PanelLeftClose size={15} weight="regular" />
-                </button>
-              )}
-
-              {/* Mobile close */}
-              <button
-                onClick={() => setMobileSidebarOpen(false)}
-                className={`w-8 h-8 rounded-lg flex items-center justify-center hover:bg-bg-tertiary transition-colors md:hidden ${collapsed ? '' : 'ml-auto'}`}
-                aria-label="Close"
-              >
-                <X size={16} className="text-text-tertiary" />
-              </button>
-            </div>
-
-            {/* New task */}
-            <div className={collapsed ? 'px-2 mb-3' : 'px-2.5 mb-3'}>
-              {collapsed ? (
-                <button
-                  onClick={startNewTask}
-                  className="w-full h-9 rounded-xl border border-transparent bg-transparent text-text-secondary flex items-center justify-center transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary active:scale-[0.98]"
-                  aria-label="New task"
-                >
-                  <PenSquare size={15} strokeWidth={2.2} className="text-accent-blue" />
-                </button>
+            <header className="flex h-14 flex-shrink-0 items-center px-3">
+              {renderCollapsed ? (
+                <div className="group/sidebar-toggle relative flex h-10 w-10 flex-shrink-0 items-center justify-center">
+                  <button
+                    type="button"
+                    onClick={toggleSidebar}
+                    className="flex h-10 w-10 items-center justify-center rounded-lg text-text-primary transition-colors duration-100 hover:bg-[var(--sidebar-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-muted/35"
+                    aria-label="Open sidebar"
+                    aria-expanded={false}
+                    aria-describedby="sidebar-toggle-tooltip"
+                    data-no-focus-ring=""
+                  >
+                    <span className="relative flex h-6 w-6 flex-shrink-0 items-center justify-center text-text-primary">
+                      <Bot
+                        size={24}
+                        weight="regular"
+                        aria-hidden="true"
+                        className="absolute transition-[opacity,transform] duration-75 ease-out group-hover/sidebar-toggle:scale-90 group-hover/sidebar-toggle:opacity-0"
+                      />
+                      <PanelLeftOpen
+                        size={19}
+                        weight="regular"
+                        aria-hidden="true"
+                        className="absolute scale-90 opacity-0 transition-[opacity,transform] duration-75 ease-out group-hover/sidebar-toggle:scale-100 group-hover/sidebar-toggle:opacity-100"
+                      />
+                    </span>
+                  </button>
+                  <span
+                    id="sidebar-toggle-tooltip"
+                    role="tooltip"
+                    className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-[140] flex -translate-y-1/2 translate-x-1 items-center gap-2 whitespace-nowrap rounded-[10px] bg-[var(--tooltip-surface)] px-3 py-2 text-[12.5px] font-medium text-[var(--tooltip-text)] opacity-0 shadow-lg transition-[opacity,transform] duration-75 group-hover/sidebar-toggle:translate-x-0 group-hover/sidebar-toggle:opacity-100 group-focus-within/sidebar-toggle:translate-x-0 group-focus-within/sidebar-toggle:opacity-100"
+                  >
+                    Open sidebar
+                    <kbd className="font-mono text-[10.5px] font-medium text-[var(--tooltip-muted)]">⌘⇧E</kbd>
+                  </span>
+                </div>
               ) : (
-                <button
-                  onClick={startNewTask}
-                  className="w-full h-9 rounded-xl border border-transparent bg-transparent text-text-secondary flex items-center justify-start gap-2.5 px-3 text-[12.5px] font-semibold transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary active:scale-[0.98]"
-                >
-                  <PenSquare size={14} strokeWidth={2.2} className="text-accent-blue" />
-                  New task
-                </button>
+                <>
+                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center text-text-primary" aria-hidden="true">
+                    <Bot size={24} weight="regular" />
+                  </div>
+                  <span className="ml-2 min-w-0 max-w-[92px] truncate text-[18px] font-normal tracking-[-0.02em] [font-family:var(--font-display)]">
+                    Agent
+                  </span>
+
+                  <div className="ml-auto hidden items-center gap-0.5 md:flex">
+                    <div className="group/header-search relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchOpen(true)
+                          setFocusSearchAfterExpand(true)
+                        }}
+                        className="flex h-9 w-9 items-center justify-center rounded-lg text-text-muted transition-colors duration-100 hover:bg-[var(--sidebar-hover)] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-muted/35"
+                        aria-label="Search tasks"
+                      >
+                        <Search size={18} strokeWidth={2} />
+                      </button>
+                      <span
+                        role="tooltip"
+                        className="pointer-events-none absolute right-0 top-[calc(100%+7px)] z-[140] translate-y-1 whitespace-nowrap rounded-[10px] bg-[var(--tooltip-surface)] px-3 py-2 text-[12.5px] font-medium text-[var(--tooltip-text)] opacity-0 shadow-lg transition-[opacity,transform] duration-75 group-hover/header-search:translate-y-0 group-hover/header-search:opacity-100 group-focus-within/header-search:translate-y-0 group-focus-within/header-search:opacity-100"
+                      >
+                        Search
+                      </span>
+                    </div>
+                    <div className="group/header-toggle relative">
+                      <button
+                        type="button"
+                        onClick={collapseSidebar}
+                        className="flex h-9 w-9 items-center justify-center rounded-lg text-text-muted transition-colors duration-100 hover:bg-[var(--sidebar-hover)] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-muted/35"
+                        aria-label="Close sidebar"
+                        aria-expanded={true}
+                      >
+                        <PanelLeftClose size={19} weight="regular" />
+                      </button>
+                      <span
+                        role="tooltip"
+                        className="pointer-events-none absolute right-0 top-[calc(100%+7px)] z-[140] translate-y-1 whitespace-nowrap rounded-[10px] bg-[var(--tooltip-surface)] px-3 py-2 text-[12.5px] font-medium text-[var(--tooltip-text)] opacity-0 shadow-lg transition-[opacity,transform] duration-75 group-hover/header-toggle:translate-y-0 group-hover/header-toggle:opacity-100 group-focus-within/header-toggle:translate-y-0 group-focus-within/header-toggle:opacity-100"
+                      >
+                        Close sidebar
+                      </span>
+                    </div>
+                  </div>
+                </>
               )}
+
+              <button
+                ref={mobileCloseButtonRef}
+                type="button"
+                onClick={() => closeMobileSidebar()}
+                className="ml-auto flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-[var(--sidebar-hover)] hover:text-text-primary md:hidden"
+                aria-label="Close menu"
+              >
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className={renderCollapsed ? 'group/sidebar-label relative mx-3' : 'px-3'}>
+              <button
+                type="button"
+                onClick={startNewTask}
+                className="flex h-10 w-full items-center overflow-hidden rounded-lg font-medium text-text-secondary transition-colors duration-150 hover:bg-[var(--sidebar-hover)] hover:text-text-primary"
+                aria-label="New task"
+              >
+                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center">
+                  <PenSquare size={16} strokeWidth={2.1} />
+                </span>
+                <span
+                  aria-hidden={renderCollapsed ? true : undefined}
+                  className={`whitespace-nowrap text-[12.5px] transition-[opacity,transform] duration-200 ease-out ${
+                    renderCollapsed
+                      ? '-translate-x-1 opacity-0'
+                      : 'translate-x-0 opacity-100'
+                  }`}
+                >
+                  New task
+                </span>
+              </button>
+              {renderCollapsed && <CollapsedSidebarLabel>New task</CollapsedSidebarLabel>}
             </div>
 
-            {/* Task search and list — hidden when collapsed */}
-            {!collapsed && (
-              <div className="flex min-h-0 flex-1 flex-col gap-4 px-2">
-                <div className="px-1">
-                  <div className="flex h-9 items-center gap-2 rounded-xl border border-border-primary bg-bg-secondary px-2.5 transition-colors focus-within:border-border-tertiary">
-                    <Search size={13} className="flex-shrink-0 text-text-muted" strokeWidth={2.25} />
-                    <input
-                      value={taskQuery}
-                      onChange={(event) => setTaskQuery(event.target.value)}
-                      placeholder="Search tasks..."
-                      className="min-w-0 flex-1 bg-transparent text-[12.5px] text-text-primary outline-none placeholder:text-text-muted"
-                    />
-                    {taskQuery && (
+            {renderCollapsed ? (
+              <div className="mt-2 flex flex-col items-center gap-1 px-3.5">
+                <div className="group/sidebar-label relative">
+                  <button
+                    type="button"
+                    onClick={expandAndSearch}
+                    className="flex h-9 w-9 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-[var(--sidebar-hover)] hover:text-text-primary"
+                    aria-label="Expand sidebar and search tasks"
+                  >
+                    <Search size={16} strokeWidth={2} />
+                  </button>
+                  <CollapsedSidebarLabel>Search</CollapsedSidebarLabel>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-2.5 flex min-h-0 flex-1 flex-col">
+                {searchOpen && (
+                  <div className="px-3 animate-fade-in">
+                    <div className="flex h-9 items-center gap-2.5 rounded-lg border border-transparent bg-[var(--sidebar-field)] px-3 text-text-muted transition-[border-color,color] focus-within:border-border-tertiary focus-within:text-text-secondary">
+                      <Search size={15} className="flex-shrink-0" strokeWidth={2} />
+                      <input
+                        ref={searchInputRef}
+                        value={taskQuery}
+                        onChange={(event) => setTaskQuery(event.target.value)}
+                        placeholder="Search tasks"
+                        aria-label="Search tasks"
+                        className="min-w-0 flex-1 bg-transparent text-[12.5px] text-text-primary outline-none placeholder:text-text-muted"
+                      />
                       <button
-                        onClick={() => setTaskQuery('')}
-                        className="flex h-5 w-5 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-bg-tertiary hover:text-text-primary"
-                        aria-label="Clear search"
+                        type="button"
+                        onClick={() => {
+                          setTaskQuery('')
+                          setSearchOpen(false)
+                        }}
+                        className="-mr-1 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-[var(--sidebar-hover)] hover:text-text-primary"
+                        aria-label="Close search"
                       >
-                        <X size={11} strokeWidth={2.25} />
+                        <X size={13} strokeWidth={2.25} />
                       </button>
-                    )}
+                    </div>
+                    <p className="sr-only" aria-live="polite">
+                      {searching ? `${filteredTasks.length} tasks found` : `${filteredTasks.length} tasks`}
+                    </p>
                   </div>
-                </div>
+                )}
 
-                <div className="flex items-center justify-between px-2">
-                  <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-text-muted">
-                    {taskQuery ? 'Results' : 'Tasks'}
-                  </span>
-                  <span className="text-[10px] text-text-muted tabular-nums">
-                    {filteredTasks.length}
-                  </span>
-                </div>
-
-                <div className="min-h-0 flex-1 overflow-y-auto pb-3 [scrollbar-width:thin]">
+                <div className={`${searchOpen ? 'mt-4' : 'mt-1.5'} min-h-0 flex-1 overflow-y-auto px-2.5 pb-4 [scrollbar-width:thin]`}>
                   {filteredTasks.length === 0 ? (
-                    <div className="mx-1 px-3 py-4 text-center">
-                      <div className="mx-auto mb-2 flex h-7 w-7 items-center justify-center rounded-lg text-text-muted">
-                        <MessageSquare size={14} strokeWidth={2.2} />
-                      </div>
-                      <p className="text-[12.5px] font-semibold text-text-secondary">
-                        {taskQuery ? 'No matches' : 'No tasks yet'}
+                    <div className="mx-1.5 mt-4 px-4 py-6 text-center">
+                      <span className="mx-auto flex h-9 w-9 items-center justify-center text-text-muted">
+                        {searching ? <Search size={17} /> : <PenSquare size={17} />}
+                      </span>
+                      <p className="mt-3 text-[13px] font-semibold text-text-primary">
+                        {searching ? 'No tasks found' : 'Your tasks will live here'}
                       </p>
-                      <p className="mt-1 text-[11px] leading-snug text-text-tertiary">
-                        {taskQuery ? 'Try a different search.' : 'Start a task and it will appear here.'}
+                      <p className="mt-1 text-[11.5px] leading-relaxed text-text-muted">
+                        {searching
+                          ? 'Try a different word or search.'
+                          : 'Start something new and come back to it anytime.'}
                       </p>
+                      {searching && (
+                        <button
+                          type="button"
+                          onClick={() => setTaskQuery('')}
+                          className="mt-3 rounded-lg px-2.5 py-1.5 text-[12px] font-semibold text-text-secondary transition-colors hover:bg-[var(--sidebar-hover)] hover:text-text-primary"
+                        >
+                          Clear search
+                        </button>
+                      )}
                     </div>
                   ) : (
-                    filteredTasks.map((conv) => {
-                      const active = conv.id === activeId && pathname?.startsWith('/chat/')
-                      const preview = getPreview(conv.messages)
-                      return (
-                        <div
-                          key={conv.id}
-                          role="button"
-                          tabIndex={0}
-                          onKeyDown={(event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault()
-                              openTask(conv.id)
-                            }
-                          }}
-                          className={`group mb-0.5 flex cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 transition-colors ${
-                            active ? 'bg-bg-secondary text-text-primary' : 'text-text-secondary hover:bg-bg-secondary'
-                          }`}
-                          onClick={() => openTask(conv.id)}
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-[13px] font-medium">{conv.title}</div>
-                            {preview && (
-                              <div className="mt-0.5 truncate text-[11px] text-text-muted">{preview}</div>
-                            )}
-                          </div>
-                          <div className="flex flex-shrink-0 items-center gap-1">
-                            <button
-                              onClick={(event) => { event.stopPropagation(); toggleStar(conv.id) }}
-                              className={`flex h-6 w-6 items-center justify-center rounded text-text-muted transition-all hover:text-text-primary ${
-                                conv.starred ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
-                              }`}
-                              aria-label={conv.starred ? 'Unstar' : 'Star'}
+                    <div className="space-y-4">
+                      {groupedTasks.map((group) => {
+                        const headingId = `sidebar-${group.label.toLowerCase()}`
+
+                        return (
+                          <section key={group.label} aria-labelledby={headingId}>
+                            <h2
+                              id={headingId}
+                              className="mb-1.5 px-2.5 text-[11.5px] font-semibold text-text-tertiary"
                             >
-                              <Star size={12} fill={conv.starred ? 'currentColor' : 'none'} className={conv.starred ? 'text-text-secondary' : ''} />
-                            </button>
-                            <span className="w-6 text-right font-mono text-[10px] tabular-nums text-text-muted">
-                              {relativeTime(conv.updatedAt)}
-                            </span>
-                          </div>
-                        </div>
-                      )
-                    })
+                              {group.label}
+                            </h2>
+                            <div role="list" aria-labelledby={headingId} className="space-y-1">
+                              {group.conversations.map((conversation) => {
+                                const active = conversation.id === activeId && pathname?.startsWith('/chat/')
+                                const running = conversation.id === activeId && isStreaming
+
+                                return (
+                                  <div
+                                    key={conversation.id}
+                                    role="listitem"
+                                    className={`group flex min-h-[42px] items-stretch overflow-hidden rounded-lg transition-colors ${
+                                      active
+                                        ? 'bg-[var(--sidebar-selected)]'
+                                        : 'hover:bg-[var(--sidebar-hover)]'
+                                    }`}
+                                  >
+                                    <button
+                                      type="button"
+                                      onClick={() => openTask(conversation.id)}
+                                      className="min-w-0 flex-1 px-3 py-2.5 text-left"
+                                      aria-current={active ? 'page' : undefined}
+                                      aria-label={`${running ? 'Working on' : 'Open task'}: ${conversation.title}`}
+                                    >
+                                      <span
+                                        className={`block truncate text-[13px] leading-5 text-text-primary ${
+                                          active ? 'font-semibold' : 'font-medium'
+                                        }`}
+                                      >
+                                        {conversation.title}
+                                      </span>
+                                      {running && (
+                                        <span className="mt-0.5 flex items-center gap-1.5 text-[10.5px] font-medium text-status-live">
+                                          <span
+                                            className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-status-live animate-live-pulse"
+                                            aria-hidden="true"
+                                          />
+                                          Working
+                                        </span>
+                                      )}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleStar(conversation.id)}
+                                      className={`my-1.5 mr-1.5 flex w-8 flex-shrink-0 items-center justify-center rounded-lg transition-[background-color,color,opacity] hover:bg-[var(--sidebar-field)] hover:text-text-primary focus-visible:pointer-events-auto focus-visible:opacity-100 ${
+                                        conversation.starred
+                                          ? 'text-text-secondary opacity-100'
+                                          : 'text-text-muted opacity-100 md:pointer-events-none md:opacity-0 md:group-hover:pointer-events-auto md:group-hover:opacity-100 md:group-focus-within:pointer-events-auto md:group-focus-within:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100'
+                                      }`}
+                                      aria-label={`${conversation.starred ? 'Remove from starred' : 'Add to starred'}: ${conversation.title}`}
+                                      aria-pressed={conversation.starred}
+                                      title={conversation.starred ? 'Remove from starred' : 'Add to starred'}
+                                    >
+                                      <Star
+                                        size={15}
+                                        fill={conversation.starred ? 'currentColor' : 'none'}
+                                      />
+                                    </button>
+                                  </div>
+                                )
+                              })}
+                            </div>
+                          </section>
+                        )
+                      })}
+                    </div>
                   )}
                 </div>
               </div>
             )}
 
-            {/* Spacer when collapsed */}
-            {collapsed && <div className="flex-1" />}
+            {renderCollapsed && <div className="flex-1" />}
 
-            {/* Bottom actions */}
-            <div className={`border-t border-border-primary py-3 flex ${collapsed ? 'flex-col items-center justify-center gap-1 px-2' : 'items-center gap-1.5 px-2.5'}`}>
-              {collapsed ? (
-                <button
-                  onClick={() => {
-                    setSettingsTab('instructions')
-                    setSettingsOpen(true)
-                    setMobileSidebarOpen(false)
-                  }}
-                  className="flex h-9 w-9 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
-                  aria-label="Personalisation"
-                  title="Personalisation"
+            <footer className={renderCollapsed ? 'group/sidebar-label relative mx-3 mb-3 mt-3 flex-shrink-0' : 'flex-shrink-0 p-3'}>
+              <button
+                type="button"
+                onClick={openSettings}
+                className="flex h-10 w-full items-center overflow-hidden rounded-lg text-text-secondary transition-colors hover:bg-[var(--sidebar-hover)] hover:text-text-primary"
+                aria-label="Settings"
+              >
+                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center">
+                  <Settings size={16} weight="regular" className="text-text-muted" />
+                </span>
+                <span
+                  aria-hidden={renderCollapsed ? true : undefined}
+                  className={`whitespace-nowrap text-[12.5px] font-medium transition-[opacity,transform] duration-200 ease-out ${
+                    renderCollapsed
+                      ? '-translate-x-1 opacity-0'
+                      : 'translate-x-0 opacity-100'
+                  }`}
                 >
-                  <FileText size={16} weight="regular" />
-                </button>
-              ) : (
-                <button
-                  onClick={() => {
-                    setSettingsTab('instructions')
-                    setSettingsOpen(true)
-                    setMobileSidebarOpen(false)
-                  }}
-                  className="flex h-9 flex-1 items-center justify-center gap-2 rounded-xl px-2 text-[12px] font-semibold text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
-                  aria-label="Personalisation"
-                >
-                  <FileText size={15} weight="regular" className="text-text-muted" />
-                  <span className="truncate">Personalise</span>
-                </button>
-              )}
-              {collapsed ? (
-                <button
-                  onClick={() => {
-                    setSettingsTab('general')
-                    setSettingsOpen(true)
-                    setMobileSidebarOpen(false)
-                  }}
-                  className="flex h-9 w-9 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
-                  aria-label="Settings"
-                >
-                  <Settings size={16} weight="regular" />
-                </button>
-              ) : (
-                <button
-                  onClick={() => {
-                    setSettingsTab('general')
-                    setSettingsOpen(true)
-                    setMobileSidebarOpen(false)
-                  }}
-                  className="flex h-9 flex-1 items-center justify-center gap-2 rounded-xl px-2 text-[12px] font-semibold text-text-secondary transition-colors hover:bg-bg-secondary hover:text-text-primary"
-                  aria-label="Settings"
-                >
-                  <Settings size={15} weight="regular" className="text-text-muted" />
-                  <span>Settings</span>
-                </button>
-              )}
-            </div>
+                  Settings
+                </span>
+              </button>
+              {renderCollapsed && <CollapsedSidebarLabel>Settings</CollapsedSidebarLabel>}
+            </footer>
           </>
         )}
-      </div>
+      </aside>
     </>
   )
 }

@@ -6,6 +6,7 @@ import type { AgentStateData } from './AgentState'
 import { isToolDisabled } from './AgentState'
 import type { TaskType } from './TaskStrategy'
 import { PHASE_TOOL_FILTER } from './config'
+import { inferToolRiskLevel, toolHasSideEffects } from './toolSafety'
 
 const BROWSE_STRATEGY_TOOLS = new Set([
   'browser_navigate', 'browser_click_at', 'browser_type',
@@ -76,8 +77,8 @@ export class ToolRegistry {
       if (!fn) continue
 
       const capabilities = inferCapabilities(fn.name)
-      const riskLevel = inferRiskLevel(fn.name)
-      const sideEffects = hasSideEffects(fn.name)
+      const riskLevel = inferToolRiskLevel(fn.name)
+      const sideEffects = toolHasSideEffects(fn.name)
 
       this.register({
         name: fn.name,
@@ -234,7 +235,6 @@ function inferCapabilities(name: string): ToolCapability[] {
   if (name === 'image_search') caps.push('search', 'media')
   if (name === 'browse_page') caps.push('browse')
   if (name === 'read_document') caps.push('document')
-  if (name === 'youtube_transcript') caps.push('document', 'media')
 
   if (name.startsWith('browser_')) {
     if (name === 'browser_navigate' || name === 'browser_go_back') {
@@ -252,14 +252,4 @@ function inferCapabilities(name: string): ToolCapability[] {
   if (name === 'http_request') caps.push('network')
 
   return caps
-}
-
-function inferRiskLevel(name: string): 'low' | 'medium' | 'high' {
-  if (['delete_file', 'execute_command'].includes(name)) return 'high'
-  if (['create_file', 'edit_file', 'append_file', 'export_pdf', 'run_code', 'http_request'].includes(name)) return 'medium'
-  return 'low'
-}
-
-function hasSideEffects(name: string): boolean {
-  return ['create_file', 'edit_file', 'append_file', 'export_pdf', 'delete_file', 'execute_command', 'run_code', 'http_request'].includes(name)
 }

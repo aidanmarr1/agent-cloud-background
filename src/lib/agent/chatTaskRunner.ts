@@ -1,25 +1,33 @@
-import { createCompletion, DEFAULT_MODEL, type ChatMessageParam } from '@/lib/llm'
+import { createCompletion, type ChatMessageParam } from '@/lib/llm'
 import { destroySandbox, getOrCreateLocalSandboxDir, resetLocalSandboxDir } from '@/lib/sandbox'
+import { acquireBrowserSessionFence } from '@/lib/browser'
 import {
   ensureE2BRemoteBrowser,
-  getE2BSandboxBillingStartedAtMs,
+  getOrCreateE2BSandbox,
+  getE2BSandboxBillingDescriptor,
   resetE2BSandbox,
   shouldUseE2BSandbox,
 } from '@/lib/e2bSandbox'
 import { restoreTaskFilesToActiveSandbox } from '@/lib/taskFiles'
 import {
+  hydrateMessageAttachmentsForUser,
   materializeMessageAttachmentsToSandbox,
   withMessageAttachmentSandboxPaths,
 } from '@/lib/attachments'
 import { isContextualTaskUpdate } from '@/lib/conversationContext'
-import { clearLiveDirectives } from '@/lib/liveDirectives'
+import {
+  clearLiveDirectives,
+  openLiveDirectiveRun,
+  sealLiveDirectiveRun,
+} from '@/lib/liveDirectives'
 import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
 import {
   assertServerCreditsAvailable,
+  activateServerE2BRuntimeBilling,
   chargeServerActiveTime,
-  chargeServerE2BRuntime,
   chargeServerTaskStart,
   chargeServerTokenUsage,
+  checkpointServerE2BRuntimeBilling,
   isOutOfCreditsError,
   type ServerCreditRecord,
 } from '@/lib/serverCredits'
@@ -27,13 +35,23 @@ import { ACTIVE_CREDITS_PER_MINUTE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditP
 import { userErrorMessage } from '@/lib/errorMessages'
 import type { AgentEventEmitter } from '@/lib/agent/SSEEmitter'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
+import type { InflightToolDrain } from '@/lib/agent/toolSafety'
 import {
+  AGENT_RUN_MAX_DURATION_MS,
+  AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
+  AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS,
+  AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
   AGENT_WORKER_RUN_MAX_DURATION_MS,
   AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS,
   AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS,
 } from '@/lib/agent/config'
 import { waitForTaskJobStartupPlan } from '@/lib/agent/taskJobs'
+import {
+  explicitTaskToolConstraintFromText,
+  latestUserContent,
+  toolAllowedByExplicitTaskConstraint,
+} from '@/lib/agent/taskConstraints'
 
 const DIRECT_CHAT_IDENTITY_SYSTEM_PROMPT = `You are Agent, a general AI agent. If asked what model you use, who made the model, or for private runtime/provider details, do not disclose the model/provider. Say you cannot disclose that, then continue helpfully by describing Agent's capabilities: research, browsing, file and document work, task automation, code/artifact creation, and analysis.`
 
@@ -48,6 +66,12 @@ const DIRECT_CHAT_MAX_CONTEXT_CHARS = 10_000
 const DIRECT_CHAT_MAX_TOKENS = 1536
 const DIRECT_CHAT_CONTINUATION_MAX_TOKENS = 768
 const DIRECT_CHAT_MAX_CONTINUATIONS = 2
+const USAGE_ACCOUNTING_FAILURE_MESSAGE = 'The task stopped because usage could not be recorded. Please try again.'
+// Runtime billing is reconciled to the exact provider lifetime during the
+// pre-terminal sandbox cleanup. A slower live checkpoint keeps the balance UI
+// useful without turning a high-frequency, non-authoritative write into a
+// source of task latency or transaction contention.
+const E2B_BILLING_CHECKPOINT_INTERVAL_MS = 30_000
 const DIRECT_CHAT_TEMPORAL_PATTERN = /\b(?:what(?:'s| is)?\s+(?:the\s+)?(?:date|time|day)|current\s+(?:date|time|day)|today(?:'s)?\s+(?:date|day)|date\s+today|time\s+now)\b/i
 const DIRECT_CHAT_CONTEXT_REFERENCE_PATTERN = /\b(?:that|this|it|they|them|those|above|previous|earlier|same|also|too|again|more|continue|expand|elaborate|what about|how about|why(?:\?|$)|which one)\b/i
 
@@ -63,6 +87,9 @@ export interface ChatTaskPayload {
   startupPlan?: AgentLoopOptions['startupPlan']
   startupPlanExpected?: boolean
   startupPlanDeadlineMs?: number
+  recoveryMode?: 'graceful_handoff' | 'stale_lease'
+  recoverySourceAttempt?: number
+  recoveryContext?: string
 }
 
 export interface BackgroundProbeTaskPayload {
@@ -79,6 +106,11 @@ export interface ChatTaskRunInput extends ChatTaskPayload {
   conversationId: string
   userId: string
   creditRunId: string
+  workerAttempt?: number
+  preserveSandboxOnAbort?: () => boolean
+  registerPreTerminalCleanup?: (cleanup: () => Promise<void>) => void
+  registerInflightToolDrain?: (drain: InflightToolDrain) => void
+  markHandoffUnsafe?: (reason: string) => void
 }
 
 function directChatNeedsConversationContext(messages: Array<{ role: string; content: string }>): boolean {
@@ -146,54 +178,25 @@ function publicErrorMessage(error: unknown): string {
   return message
 }
 
-function destroyCloudSandboxAfterTask(
+function isTransientUsageAccountingError(error: unknown): boolean {
+  if (isOutOfCreditsError(error)) return false
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /(?:fetch|network|socket|timeout|timed out|temporar|transaction|concurrent|busy|locked|closed|turso|libsql|database|429|502|503|504|econn|etimedout|connection)/i.test(message)
+}
+
+async function destroyCloudSandboxAfterTask(
   conversationId: string,
-  remoteSandboxReadyPromise: Promise<void> | null,
-  billing?: {
-    userId: string
-    creditRunId: string
-    startedAtMs: number
-    emitCreditRecord: (recorded: ServerCreditRecord | null | undefined) => void
-  },
-): void {
+  startupReadyPromise: Promise<unknown> | null,
+  preserveSandbox = false,
+): Promise<void> {
   const destroy = async () => {
-    if (billing) {
-      try {
-        const billingStartedAtMs = getE2BSandboxBillingStartedAtMs(conversationId) ?? billing.startedAtMs
-        billing.emitCreditRecord(await chargeServerE2BRuntime(
-          billing.userId,
-          conversationId,
-          billing.creditRunId,
-          billingStartedAtMs,
-        ))
-      } catch (error) {
-        if (isOutOfCreditsError(error)) billing.emitCreditRecord(error.record)
-        console.error('[AgentDiagnostics] E2B runtime credit charge failed', {
-          conversationId,
-          error: error instanceof Error ? error.message : String(error),
-        })
-      }
-    }
-
-    await destroySandbox(conversationId).catch((error) => {
-      console.error('[AgentDiagnostics] E2B task sandbox cleanup failed', {
-        conversationId,
-        error: error instanceof Error ? error.message : String(error),
-      })
-    })
+    if (preserveSandbox) return
+    await destroySandbox(conversationId)
   }
 
-  if (remoteSandboxReadyPromise) {
-    void remoteSandboxReadyPromise.then(destroy, destroy)
-    return
-  }
-
-  void destroy().catch((error) => {
-    console.error('[AgentDiagnostics] Task workspace cleanup failed', {
-      conversationId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  })
+  await (startupReadyPromise
+    ? startupReadyPromise.then(destroy, destroy)
+    : destroy())
 }
 
 function normalizeProviderUsage(usage: {
@@ -271,11 +274,14 @@ function appendContinuation(base: string, continuation: string): string {
 async function runDirectChat(
   emitter: AgentEventEmitter,
   messages: Array<{ role: string; content: string }>,
+  model: string,
   customInstructions?: string,
   signal?: AbortSignal,
   userId?: string,
   conversationId?: string,
   creditRunId?: string,
+  billingAttempt = 1,
+  beforeDone?: () => Promise<void>,
 ): Promise<void> {
   const systemContent = customInstructions?.trim()
     ? `${DIRECT_CHAT_SYSTEM_PROMPT}\n\nCustom instructions:\n${customInstructions.trim()}`
@@ -295,7 +301,7 @@ async function runDirectChat(
       await assertServerCreditsAvailable(userId)
     }
     const response = await createCompletion({
-      model: DEFAULT_MODEL,
+      model,
       messages: nextMessages,
       temperature: 0.3,
       max_tokens: attempt === 0 ? DIRECT_CHAT_MAX_TOKENS : DIRECT_CHAT_CONTINUATION_MAX_TOKENS,
@@ -311,7 +317,7 @@ async function runDirectChat(
     usageRecords.push(creditUsage)
 
     if (userId && conversationId && creditRunId) {
-      const recorded = await chargeServerTokenUsage(userId, conversationId, creditRunId, creditUsage, `direct:${attempt + 1}`)
+      const recorded = await chargeServerTokenUsage(userId, conversationId, creditRunId, creditUsage, `attempt:${billingAttempt}:direct:${attempt + 1}`)
       if (recorded?.created) emitter.creditEvent(recorded.entry)
     }
 
@@ -346,6 +352,7 @@ async function runDirectChat(
     throw new Error('The assistant stopped before completing the answer.')
   }
 
+  await beforeDone?.()
   emitter.textDelta(content)
   emitter.done(combineTokenUsage(usageRecords))
 }
@@ -365,24 +372,90 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     startupPlan,
     startupPlanExpected,
     startupPlanDeadlineMs,
+    recoveryMode,
+    recoveryContext,
     userId,
     creditRunId,
+    workerAttempt,
+    preserveSandboxOnAbort,
+    registerPreTerminalCleanup,
+    registerInflightToolDrain,
+    markHandoffUnsafe,
   } = input
+  const staleLeaseRecovery = recoveryMode === 'stale_lease'
+  const claimedWorkerAttempt = Number.isFinite(Number(workerAttempt)) && Number(workerAttempt) >= 1
+    ? Math.floor(Number(workerAttempt))
+    : null
+  const directiveWorkerAttempt = claimedWorkerAttempt ?? 1
+  const runMaxDurationMs = claimedWorkerAttempt === null
+    ? AGENT_RUN_MAX_DURATION_MS
+    : AGENT_WORKER_RUN_MAX_DURATION_MS
+  const deadlineFinalizationBufferMs = claimedWorkerAttempt === null
+    ? AGENT_DEADLINE_FINALIZATION_BUFFER_MS
+    : AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS
+  const deadlineModelTurnTimeoutMs = claimedWorkerAttempt === null
+    ? AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS
+    : AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS
+  const deadlineHardStopBufferMs = claimedWorkerAttempt === null
+    ? AGENT_DEADLINE_HARD_STOP_BUFFER_MS
+    : AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS
+  const billingAbortController = new AbortController()
+  const runtimeDeadlineAbortController = new AbortController()
+  const runtimeDeadlineMs = Math.max(1_000, runMaxDurationMs - deadlineHardStopBufferMs)
+  const runtimeDeadlineTimer = setTimeout(() => {
+    runtimeDeadlineAbortController.abort(new DOMException('Task runtime deadline reached.', 'TimeoutError'))
+  }, runtimeDeadlineMs)
+  ;(runtimeDeadlineTimer as unknown as { unref?: () => void }).unref?.()
+  const runSignal = AbortSignal.any([
+    signal,
+    billingAbortController.signal,
+    runtimeDeadlineAbortController.signal,
+  ])
 
   let activeCreditTimer: ReturnType<typeof setInterval> | null = null
   let activeCreditTick = 0
-  let activeCreditInFlight = false
+  let activeCreditPromise: Promise<void> | null = null
+  let activeCreditFailure: unknown = null
+  let activeCreditFinalized = false
+  let remoteSandboxCreditPromise: Promise<void> | null = null
+  // Only a definitive out-of-credit result poisons the run. Transient live
+  // checkpoint failures are retried by the next checkpoint and, ultimately,
+  // by the exact pre-terminal sandbox reconciliation barrier.
+  let remoteSandboxCreditFailure: unknown = null
+  let remoteSandboxCreditFinalized = false
+  let remoteSandboxCreditTimer: ReturnType<typeof setInterval> | null = null
   let lastActiveCreditAt = Date.now()
-  let jobAborted = signal.aborted
+  let jobAborted = runSignal.aborted
   let meteredTaskStarted = false
   let restorePersistedFiles = false
+  let restorePersistedFilesAfterRemoteReset = false
   let remoteSandboxReadyPromise: Promise<void> | null = null
-  let remoteSandboxStartedAtMs: number | null = null
+  let remoteSandboxBillingSegmentId: string | null = null
   let taskStartCreditPromise: Promise<void> | null = null
   let startupReadyPromise: Promise<unknown> | null = null
+  let releaseStartupBrowserFence: (() => void) | null = null
   let agentMessages = messages
 
-  const isJobAbort = () => jobAborted || signal.aborted
+  const restorePersistedTaskFiles = async () => {
+    const restored = await restoreTaskFilesToActiveSandbox({ userId, conversationId }).catch((error) => {
+      console.warn('[AgentDiagnostics] Persisted task file restore failed', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return null
+    })
+    if (restored?.total) {
+      console.log('[AgentDiagnostics] Restored persisted task files to sandbox', {
+        conversationId,
+        restored: restored.restored,
+        failed: restored.failed,
+        total: restored.total,
+      })
+    }
+  }
+
+  const isJobAbort = () => jobAborted || runSignal.aborted
+  const isHandoffAbort = () => isJobAbort() && preserveSandboxOnAbort?.() === true
 
   const emitCreditRecord = (recorded: ServerCreditRecord | null | undefined) => {
     if (recorded?.created && !emitter.isClosed) {
@@ -399,18 +472,139 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     return true
   }
 
-  const chargeActiveCredit = async () => {
-    if (!conversationId || emitter.isClosed || activeCreditInFlight) return
-    activeCreditInFlight = true
+  const chargeActiveCredit = (): Promise<void> => {
+    if (!conversationId) return Promise.resolve()
+    if (activeCreditFailure) return Promise.reject(activeCreditFailure)
+    if (activeCreditPromise) return activeCreditPromise
     const now = Date.now()
     const elapsedMs = Math.max(0, now - lastActiveCreditAt)
     lastActiveCreditAt = now
     activeCreditTick += 1
-    try {
-      emitCreditRecord(await chargeServerActiveTime(userId, conversationId, creditRunId, activeCreditTick, elapsedMs))
-    } finally {
-      activeCreditInFlight = false
+    const charge = chargeServerActiveTime(
+      userId,
+      conversationId,
+      creditRunId,
+      activeCreditTick,
+      elapsedMs,
+      directiveWorkerAttempt,
+    )
+      .then((record) => {
+        emitCreditRecord(record)
+      })
+      .catch((error) => {
+        activeCreditFailure ??= error
+        console.error('[AgentDiagnostics] Active task credit charge failed', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        if (!emitOutOfCreditsStop(error) && !emitter.isClosed && !emitter.terminalStatus) {
+          emitter.error(USAGE_ACCOUNTING_FAILURE_MESSAGE)
+        }
+        billingAbortController.abort(error)
+        throw error
+      })
+      .finally(() => {
+        if (activeCreditPromise === charge) activeCreditPromise = null
+      })
+    activeCreditPromise = charge
+    return charge
+  }
+
+  const finalizeActiveCredit = async (): Promise<void> => {
+    if (activeCreditFinalized) {
+      if (activeCreditFailure) throw activeCreditFailure
+      return
     }
+    activeCreditFinalized = true
+    if (activeCreditTimer) {
+      clearInterval(activeCreditTimer)
+      activeCreditTimer = null
+    }
+    await activeCreditPromise
+    if (activeCreditFailure) throw activeCreditFailure
+    if (ACTIVE_CREDITS_PER_MINUTE > 0 && meteredTaskStarted) {
+      await chargeActiveCredit()
+    }
+  }
+
+  const checkpointRemoteSandboxCredit = (finalize = false): Promise<void> => {
+    if (remoteSandboxCreditFinalized) {
+      return remoteSandboxCreditFailure
+        ? Promise.reject(remoteSandboxCreditFailure)
+        : Promise.resolve()
+    }
+    if (remoteSandboxCreditFailure) return Promise.reject(remoteSandboxCreditFailure)
+    if (!finalize && remoteSandboxCreditPromise) return remoteSandboxCreditPromise
+    if (finalize && remoteSandboxCreditTimer) {
+      clearInterval(remoteSandboxCreditTimer)
+      remoteSandboxCreditTimer = null
+    }
+
+    const previous = remoteSandboxCreditPromise
+    const charge = (async () => {
+      await previous
+      if (remoteSandboxCreditFailure) throw remoteSandboxCreditFailure
+      if (!remoteSandboxBillingSegmentId) {
+        if (finalize) remoteSandboxCreditFinalized = true
+        return
+      }
+      const checkpoint = await checkpointServerE2BRuntimeBilling(
+        remoteSandboxBillingSegmentId,
+        Date.now(),
+        { requirePaid: true },
+      )
+      emitCreditRecord(checkpoint.record)
+      if (finalize) remoteSandboxCreditFinalized = true
+    })()
+      .catch((error) => {
+        const transient = isTransientUsageAccountingError(error)
+        console[transient ? 'warn' : 'error']('[AgentDiagnostics] E2B runtime credit checkpoint failed', {
+          conversationId,
+          transient,
+          deferredToCleanup: transient,
+          finalize,
+          error: error instanceof Error ? error.message : String(error),
+        })
+        if (emitOutOfCreditsStop(error)) {
+          remoteSandboxCreditFailure ??= error
+          billingAbortController.abort(error)
+          throw error
+        }
+        if (!transient) {
+          remoteSandboxCreditFailure ??= error
+        }
+        if (!transient && !emitter.isClosed && !emitter.terminalStatus) {
+          emitter.error(USAGE_ACCOUNTING_FAILURE_MESSAGE)
+          billingAbortController.abort(error)
+        }
+        // A periodic checkpoint is advisory. The task's pre-terminal cleanup
+        // kills the exact provider sandbox and durably reconciles its full
+        // lifetime before the terminal event is committed, so a transient
+        // checkpoint outage must never discard otherwise valid agent work.
+        if (finalize || !transient) throw error
+      })
+      .finally(() => {
+        if (remoteSandboxCreditPromise === charge) remoteSandboxCreditPromise = null
+      })
+    remoteSandboxCreditPromise = charge
+    return charge
+  }
+
+  const finalizeRemoteSandboxCredit = (): Promise<void> => checkpointRemoteSandboxCredit(true)
+
+  const finalizeUsageBilling = async (): Promise<void> => {
+    let firstError: unknown = null
+    try {
+      await finalizeActiveCredit()
+    } catch (error) {
+      firstError = error
+    }
+    try {
+      await finalizeRemoteSandboxCredit()
+    } catch (error) {
+      firstError ??= error
+    }
+    if (firstError) throw firstError
   }
 
   const onAbort = () => {
@@ -421,55 +615,55 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       meteredTaskStarted,
     })
   }
-  signal.addEventListener('abort', onAbort)
+  runSignal.addEventListener('abort', onAbort)
 
   try {
     if (conversationId) {
-      const startupTasks: Array<Promise<unknown>> = []
-      if (startIsolatedTaskSandbox) {
-        const staleResearchCutoff = Date.now()
-        clearLiveDirectives(conversationId)
-        void clearResearchActivityForTask(userId, conversationId, staleResearchCutoff).catch((error) => {
-          console.warn('[AgentDiagnostics] Fresh task research activity cleanup failed', {
-            conversationId,
-            error: error instanceof Error ? error.message : String(error),
-          })
-        })
-        startupTasks.push(resetLocalSandboxDir(conversationId))
-      } else {
-        startupTasks.push(getOrCreateLocalSandboxDir(conversationId))
-        restorePersistedFiles = true
+      if (!directChat) {
+        // A worker retry reopens a run that may have been sealed by the prior
+        // attempt immediately before it lost its lease. In-process runs use
+        // attempt 1 so durable directive claims work when Turso is enabled.
+        await openLiveDirectiveRun(conversationId, userId, creditRunId, directiveWorkerAttempt)
       }
-      meteredTaskStarted = true
+      const startupTasks: Array<Promise<unknown>> = []
+      if (!directChat) {
+        if (startIsolatedTaskSandbox || staleLeaseRecovery) {
+          releaseStartupBrowserFence = await acquireBrowserSessionFence(conversationId)
+          await clearLiveDirectives(conversationId, { userId, exceptRunId: creditRunId })
+          if (startIsolatedTaskSandbox) {
+            const staleResearchCutoff = Date.now()
+            void clearResearchActivityForTask(userId, conversationId, staleResearchCutoff).catch((error) => {
+              console.warn('[AgentDiagnostics] Fresh task research activity cleanup failed', {
+                conversationId,
+                error: error instanceof Error ? error.message : String(error),
+              })
+            })
+          }
+          startupTasks.push(resetLocalSandboxDir(conversationId))
+          restorePersistedFiles = staleLeaseRecovery && !shouldUseE2BSandbox()
+          restorePersistedFilesAfterRemoteReset = staleLeaseRecovery && shouldUseE2BSandbox()
+        } else {
+          startupTasks.push(getOrCreateLocalSandboxDir(conversationId))
+          restorePersistedFiles = true
+        }
+      }
       taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
         .then((record) => {
           emitCreditRecord(record)
+          meteredTaskStarted = true
         })
         .catch((error) => {
           console.error('[AgentDiagnostics] Task-start credit charge failed', {
             conversationId,
             error: error instanceof Error ? error.message : String(error),
           })
-          emitOutOfCreditsStop(error)
+          throw error
         })
+      void taskStartCreditPromise.catch(() => undefined)
       startupReadyPromise = (async () => {
         await Promise.all(startupTasks)
         if (restorePersistedFiles) {
-          const restored = await restoreTaskFilesToActiveSandbox({ userId, conversationId }).catch((error) => {
-            console.warn('[AgentDiagnostics] Persisted task file restore failed', {
-              conversationId,
-              error: error instanceof Error ? error.message : String(error),
-            })
-            return null
-          })
-          if (restored?.total) {
-            console.log('[AgentDiagnostics] Restored persisted task files to sandbox', {
-              conversationId,
-              restored: restored.restored,
-              failed: restored.failed,
-              total: restored.total,
-            })
-          }
+          await restorePersistedTaskFiles()
         }
       })().catch((error) => {
         console.error('[AgentDiagnostics] Background task startup preparation failed', {
@@ -479,14 +673,74 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         throw error
       })
       void startupReadyPromise.catch(() => undefined)
+      await taskStartCreditPromise
+      if (!directChat) {
+        agentMessages = await hydrateMessageAttachmentsForUser(agentMessages, userId)
+      }
       if (!directChat && shouldUseE2BSandbox()) {
-        remoteSandboxStartedAtMs = Date.now()
+        const explicitToolConstraint = explicitTaskToolConstraintFromText(
+          latestUserContent(agentMessages),
+        )
+        const shouldWarmRemoteBrowser = toolAllowedByExplicitTaskConstraint(
+          explicitToolConstraint,
+          'browser_navigate',
+        )
         remoteSandboxReadyPromise = (async () => {
-          if (startIsolatedTaskSandbox) {
+          if (startIsolatedTaskSandbox || staleLeaseRecovery) {
             await resetE2BSandbox(conversationId)
           }
-          await ensureE2BRemoteBrowser(conversationId)
+          // Provider sandbox confirmation is the billing activation boundary.
+          // Keep Chromium warm-up separate so terminal/file tasks do not wait
+          // for a browser, while still guaranteeing that billing cannot begin
+          // until E2B returned and durably committed a real sandbox instance.
+          await getOrCreateE2BSandbox(conversationId)
+          const descriptor = await getE2BSandboxBillingDescriptor(conversationId)
+          remoteSandboxBillingSegmentId = await activateServerE2BRuntimeBilling({
+            userId,
+            conversationId,
+            runId: creditRunId,
+            attempt: directiveWorkerAttempt,
+            providerSandboxId: descriptor.providerSandboxId,
+            lifecycleGeneration: descriptor.lifecycleGeneration,
+            startedAtMs: descriptor.startedAtMs,
+            activatedAtMs: Date.now(),
+          })
+          // Activation can settle a crashed predecessor on graceful handoff.
+          // Recheck the authoritative balance before allowing any tool work.
+          await assertServerCreditsAvailable(userId)
+          await checkpointRemoteSandboxCredit()
+          remoteSandboxCreditTimer = setInterval(() => {
+            void checkpointRemoteSandboxCredit().catch(() => undefined)
+          }, E2B_BILLING_CHECKPOINT_INTERVAL_MS)
+          ;(remoteSandboxCreditTimer as unknown as { unref?: () => void }).unref?.()
         })()
+        if (shouldWarmRemoteBrowser) {
+          // Chromium startup is useful for most agent tasks, but it is not a
+          // prerequisite for acknowledgement, planning, terminal work or file
+          // tools. Warm it in parallel so browsing is ready when selected
+          // without putting every task behind browser launch.
+          void remoteSandboxReadyPromise
+            .then(async () => {
+              if (!runSignal.aborted) await ensureE2BRemoteBrowser(conversationId)
+            })
+            .catch((error) => {
+              if (!runSignal.aborted) {
+                console.warn('[AgentDiagnostics] E2B browser warmup failed', {
+                  conversationId,
+                  error: error instanceof Error ? error.message : String(error),
+                })
+              }
+            })
+        }
+        const localStartupReadyPromise = startupReadyPromise
+        startupReadyPromise = Promise.all([
+          localStartupReadyPromise,
+          remoteSandboxReadyPromise,
+        ]).then(async () => {
+          if (restorePersistedFilesAfterRemoteReset) {
+            await restorePersistedTaskFiles()
+          }
+        })
         void remoteSandboxReadyPromise.catch((error) => {
           console.error('[AgentDiagnostics] Background E2B sandbox preparation failed', {
             conversationId,
@@ -496,7 +750,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       }
       if (ACTIVE_CREDITS_PER_MINUTE > 0) {
         activeCreditTimer = setInterval(() => {
-          void chargeActiveCredit()
+          void chargeActiveCredit().catch(() => undefined)
         }, 5000)
       }
 
@@ -526,24 +780,44 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           void startupReadyPromise.catch(() => undefined)
         }
       }
+
+      if (startupReadyPromise && releaseStartupBrowserFence) {
+        const pendingStartup = startupReadyPromise
+        startupReadyPromise = pendingStartup.finally(() => {
+          releaseStartupBrowserFence?.()
+          releaseStartupBrowserFence = null
+        })
+        void startupReadyPromise.catch(() => undefined)
+      }
     }
 
     let resolvedStartupPlan = startupPlan
     if (!directChat && !resolvedStartupPlan?.items?.length && startupPlanExpected && creditRunId) {
       resolvedStartupPlan = await waitForTaskJobStartupPlan(creditRunId, {
         deadlineMs: startupPlanDeadlineMs,
-        signal,
+        signal: runSignal,
       })
     }
 
     if (directChat) {
-      await runDirectChat(emitter, messages, customInstructions, signal, userId, conversationId, creditRunId)
+      await runDirectChat(
+        emitter,
+        messages,
+        model,
+        customInstructions,
+        runSignal,
+        userId,
+        conversationId,
+        creditRunId,
+        directiveWorkerAttempt,
+        finalizeUsageBilling,
+      )
     } else {
       console.log('[AgentDiagnostics] Starting agent loop', {
         conversationId,
         messageCount: agentMessages.length,
         startFreshSandbox,
-        jobAborted: signal.aborted,
+        jobAborted: runSignal.aborted,
       })
       const { AgentLoop } = await import('@/lib/agent/AgentLoop')
       const loop = new AgentLoop(emitter, {
@@ -552,27 +826,44 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         conversationId,
         customInstructions,
         startFreshSandbox,
-        signal,
+        signal: runSignal,
         creditRunId,
+        workerAttempt: directiveWorkerAttempt,
+        recoveryAttempt: claimedWorkerAttempt ?? 1,
+        recoveryMode,
+        recoveryContext,
         userId,
         skipStartupAcknowledgement: skipStartupAcknowledgement === true,
         startupReadyPromise: startupReadyPromise ?? undefined,
         startupPlan: resolvedStartupPlan,
-        runMaxDurationMs: AGENT_WORKER_RUN_MAX_DURATION_MS,
-        deadlineFinalizationBufferMs: AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS,
-        deadlineModelTurnTimeoutMs: AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS,
-        deadlineHardStopBufferMs: AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS,
+        runMaxDurationMs,
+        deadlineFinalizationBufferMs,
+        deadlineModelTurnTimeoutMs,
+        deadlineHardStopBufferMs,
+        beforeDone: async () => {
+          await startupReadyPromise
+          // Token/tool debits commit before their corresponding work becomes
+          // visible. Exact remote-sandbox billing is finalized by the durable
+          // pre-terminal cleanup fence, which can retry without converting a
+          // completed task into an error on a transient database failure.
+          await finalizeActiveCredit()
+        },
+        registerInflightToolDrain,
       })
       await loop.run()
       console.log('[AgentDiagnostics] Agent loop returned', {
         conversationId,
         terminalStatus: emitter.terminalStatus,
-        jobAborted: signal.aborted,
+        jobAborted: runSignal.aborted,
       })
     }
 
     if (isJobAbort()) {
-      if (!emitter.terminalStatus) emitter.error('Task stopped.')
+      if (!isHandoffAbort() && !emitter.terminalStatus) {
+        emitter.error(runtimeDeadlineAbortController.signal.aborted
+          ? 'Task stopped at its runtime limit. Results completed before the cutoff are shown above.'
+          : 'Task stopped.')
+      }
     } else if (emitter.terminalStatus === 'error') {
       // Errors are already reported without issuing automatic credit adjustments.
     } else if (!emitter.terminalStatus) {
@@ -586,31 +877,87 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       error: error instanceof Error ? error.message : String(error),
     })
     if (isJobAbort()) {
-      if (!emitter.terminalStatus) emitter.error('Task stopped.')
+      if (!isHandoffAbort() && !emitter.terminalStatus) {
+        emitter.error(runtimeDeadlineAbortController.signal.aborted
+          ? 'Task stopped at its runtime limit. Results completed before the cutoff are shown above.'
+          : 'Task stopped.')
+      }
     } else if (emitOutOfCreditsStop(error)) {
       // Out-of-credit partial charges are preserved.
     } else {
       emitter.error(publicErrorMessage(error))
     }
   } finally {
+    let startupSettlementFailure: unknown = null
+    try {
+      await startupReadyPromise
+    } catch (error) {
+      startupSettlementFailure = error
+      console.error('[AgentDiagnostics] Task startup work failed before execution fencing', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    } finally {
+      releaseStartupBrowserFence?.()
+      releaseStartupBrowserFence = null
+    }
+    if (startupSettlementFailure && isHandoffAbort()) {
+      markHandoffUnsafe?.(`startup_failed:${startupSettlementFailure instanceof Error ? startupSettlementFailure.message : String(startupSettlementFailure)}`)
+    }
+    clearTimeout(runtimeDeadlineTimer)
     if (activeCreditTimer) {
       clearInterval(activeCreditTimer)
       activeCreditTimer = null
     }
-    if (!isJobAbort() && ACTIVE_CREDITS_PER_MINUTE > 0 && meteredTaskStarted) {
-      await chargeActiveCredit()
+    if (!activeCreditFinalized || !remoteSandboxCreditFinalized) {
+      await finalizeUsageBilling().catch((error) => {
+        if (isHandoffAbort()) {
+          markHandoffUnsafe?.(`usage_billing_failed:${error instanceof Error ? error.message : String(error)}`)
+        } else if (emitOutOfCreditsStop(error)) {
+          // The authoritative insufficient-credit result is already visible.
+        } else if (!isTransientUsageAccountingError(error) && !emitter.isClosed && !emitter.terminalStatus) {
+          emitter.error(USAGE_ACCOUNTING_FAILURE_MESSAGE)
+        } else {
+          console.warn('[AgentDiagnostics] Deferred transient usage reconciliation to sandbox cleanup', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })
     }
     await taskStartCreditPromise?.catch(() => undefined)
-    if (conversationId) {
-      destroyCloudSandboxAfterTask(
-        conversationId,
-        remoteSandboxReadyPromise,
-        remoteSandboxStartedAtMs === null
-          ? undefined
-          : { userId, creditRunId, startedAtMs: remoteSandboxStartedAtMs, emitCreditRecord },
-      )
+    if (conversationId && emitter.terminalStatus) {
+      if (!directChat) {
+        await sealLiveDirectiveRun(
+          conversationId,
+          userId,
+          creditRunId,
+          directiveWorkerAttempt,
+        )
+          .catch((error) => {
+            console.warn('[AgentDiagnostics] Terminal live directive sealing failed', {
+              conversationId,
+              runId: creditRunId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+            return false
+          })
+      }
     }
-    signal.removeEventListener('abort', onAbort)
+    if (conversationId && !directChat) {
+      const preserveSandbox = isJobAbort() && !emitter.terminalStatus && preserveSandboxOnAbort?.() === true
+      const cleanup = () => destroyCloudSandboxAfterTask(
+          conversationId,
+          startupReadyPromise,
+          preserveSandbox,
+        )
+      if (registerPreTerminalCleanup) {
+        registerPreTerminalCleanup(cleanup)
+      } else {
+        await cleanup()
+      }
+    }
+    runSignal.removeEventListener('abort', onAbort)
     console.log('[AgentDiagnostics] Background chat task closed', {
       conversationId,
       terminalStatus: emitter.terminalStatus,

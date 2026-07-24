@@ -106,7 +106,7 @@ export function ImagePreview({ artifact, compact = false }: ImagePreviewProps) {
             <button
               type="button"
               onClick={() => setLightbox(false)}
-              className="absolute top-4 right-4 z-20 w-9 h-9 rounded-xl bg-bg-secondary hover:bg-bg-secondary text-text-on-accent transition-all duration-150 flex items-center justify-center"
+              className="absolute top-4 right-4 z-20 flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--overlay-caption)] text-text-on-scrim transition-colors duration-150 hover:bg-[var(--overlay-scrim)]"
               aria-label="Close preview"
             >
               <X size={18} strokeWidth={2.25} />
@@ -209,7 +209,7 @@ export function ImagePreview({ artifact, compact = false }: ImagePreviewProps) {
           <button
             type="button"
             onClick={() => setLightbox(false)}
-            className="absolute top-4 right-4 z-20 w-9 h-9 rounded-xl bg-bg-secondary hover:bg-bg-secondary text-text-on-accent transition-all duration-150 flex items-center justify-center"
+            className="absolute top-4 right-4 z-20 flex h-9 w-9 items-center justify-center rounded-lg bg-[var(--overlay-caption)] text-text-on-scrim transition-colors duration-150 hover:bg-[var(--overlay-scrim)]"
             aria-label="Close preview"
           >
             <X size={18} strokeWidth={2.25} />

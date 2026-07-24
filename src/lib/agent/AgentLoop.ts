@@ -8,19 +8,20 @@
 import {
   ASSISTANT_SUPPORTS_IMAGE_INPUT,
   ASSISTANT_PROVIDER,
+  createCompletion,
   createStreamingCompletion,
+  type ChatCompletionResponse,
   type ChatCompletionTool,
   type ChatMessageParam,
   type StreamingChatCompletionChunk,
 } from '@/lib/llm'
-import { estimateUsageCost } from '@/lib/modelPricing'
 import { toolDefinitions } from '@/lib/tools'
 import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/lib/prompts'
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
 
-import type { AgentEventEmitter } from './SSEEmitter'
+import { sanitizeAgentEventEmitter, type AgentEventEmitter } from './SSEEmitter'
 import {
   AgentStateData,
   createInitialState,
@@ -30,11 +31,22 @@ import {
   logWork,
   recordWorkLedgerDeliverable,
   currentStepText,
+  isCurrentSynthesisStep,
   isResearchStepText,
-  isSynthesisStepText,
-  markPhaseNarrationEmitted,
   stepOpenedSourceDomains,
 } from './AgentState'
+import {
+  acceptProgressNarration,
+  beginNarrationCadenceAttempt,
+  deferNarrationCadenceAttempt,
+  finishNarrationCadenceAttempt,
+  recentNarrationPromptExclusions,
+  retryNarrationCadenceAfterNoProgress,
+  retryNarrationCadenceAttemptWithoutNewAction,
+  visibleNarrationActionHeadroom,
+  withCadenceProgressUpdateSchemas,
+  workLogSinceAcceptedNarration,
+} from './NarrationMemory'
 import {
   MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES,
   STREAM_MAX_RETRIES, STREAM_RETRY_BASE_MS, STREAM_RETRY_EXPONENT,
@@ -45,18 +57,50 @@ import {
   MAX_ITERATIONS,
   AGENT_RUN_MAX_DURATION_MS, AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS, AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
-  NARRATION_THRESHOLD_DEFAULT,
 } from './config'
-import { StreamProcessor, type StreamResult, type StreamUsage, type ToolCallData } from './StreamProcessor'
-import { ToolPipeline, type ToolExecutionResult } from './ToolPipeline'
+import {
+  StreamProcessor,
+  type StreamResult,
+  type StreamToolCallPolicy,
+  type StreamUsage,
+  type ToolCallData,
+} from './StreamProcessor'
+import { estimateConservativeMissingStreamUsage } from './StreamUsageEstimate'
+import {
+  PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH,
+  ToolPipeline,
+  partialAppendRecoveryCountForPath,
+  type ToolExecutionResult,
+} from './ToolPipeline'
+import {
+  decidePaidModelTurnProgress,
+  type PaidModelTurnProgressSnapshot,
+} from './PaidModelTurnProgress'
+import {
+  classifyDeterministicProviderRequestFailure,
+  MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS,
+  sanitizeProviderRequestMessagesForRetry,
+} from './ProviderRequestFailure'
 import { PolicyEngine } from './PolicyEngine'
 import { PlanManager, type RequiredPlanStep } from './PlanManager'
 import { isPromptInjection, type TierTimeouts } from './guards'
-import { currentStepWebSearchLimit, explicitWebSearchLimitFromText, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import {
+  currentStepWebSearchLimit,
+  explicitTaskToolTargetLabel,
+  explicitTaskToolConstraintFromText,
+  explicitWebSearchLimitFromText,
+  hasSingleWebSearchLimit,
+  isFixedWebSearchInlineAnswerState,
+  taskDefaultsToMarkdownDeliverable,
+  toolAllowedByExplicitTaskConstraint,
+  toolMatchesExplicitTaskToolTarget,
+} from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
 import { ContextManager } from './ContextManager'
 import { ToolRegistry } from './ToolRegistry'
+import type { InflightToolDrain } from './toolSafety'
+import { scopeAgentTaskMessages } from './messageScope'
 import { isNudgeableTimeout, TimeoutError } from './errors'
 
 import { createAgentLogger } from './Logger'
@@ -69,25 +113,38 @@ import { GoalTracker } from './GoalTracker'
 import { OutputVerifier } from './OutputVerifier'
 import { auditAgentCompletion } from './CompletionAudit'
 import { shouldDefaultFrontendToNextTsx } from './frontendDefaults'
+import { analyzeTaskIntent } from './TaskIntent'
 import { isWebsiteEntryPath } from '@/lib/localWebsiteServer'
 import { getNextWebsiteProjectStatus } from '@/lib/tsxWebsitePreview'
 import { OUT_OF_CREDITS_MESSAGE, type CreditTokenUsage } from '@/lib/creditPolicy'
 import { assertServerCreditsAvailable, chargeServerTokenUsage, isOutOfCreditsError } from '@/lib/serverCredits'
-import { drainLiveDirectives, type LiveDirective } from '@/lib/liveDirectives'
+import {
+  drainLiveDirectives,
+  sealLiveDirectiveRun,
+  type LiveDirective,
+} from '@/lib/liveDirectives'
 import { MAX_DELIVERABLE_REVISIONS } from './config'
 import type { StepAdvanceStatus } from '@/types'
 import {
   hydrateResearchActivityIndex,
   loadResearchActivityEntries,
+  normalizeResearchUrl,
+  researchSearchCandidateCoverage,
   researchActivityContext,
 } from './ResearchActivityLog'
 import { userErrorMessage } from '@/lib/errorMessages'
 import { cleanTaskSubjectText, humanTopicLabel } from './taskText'
-import { researchDepthProfileForState } from './ResearchDepth'
+import { hasCredibleResearchRecoveryPacket, researchDepthProfileForState } from './ResearchDepth'
+import {
+  assessBriefInlineRunResearchEvidence,
+  assessBriefInlineResearchEvidence,
+  briefInlineFinalDeliveryStepIndex,
+  type BriefInlineResearchEvidenceAssessment,
+} from './BriefInlineResearch'
 import { toolTypeRateLimitForState } from './ToolLimits'
-import { sanitizeNarrationText } from '@/lib/stream/cleaners'
+import { persistSandboxTaskFile } from '@/lib/taskFiles'
 
-const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request', 'youtube_transcript'])
+const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request'])
 
 function executedParallelSourceExtractionBatch(results: ToolExecutionResult[]): boolean {
   return results.length > 1 && results.every(result => PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES.has(result.tc.name))
@@ -151,6 +208,11 @@ function executedToolCallsForProviderHistory(
 ): ToolCallData[] {
   const requestedIds = new Set(Array.from(requestedToolCalls.values()).map(tc => tc.id))
   return toolResults
+    // Keep rejected-but-well-formed calls in the assistant envelope too: their
+    // tool result messages explain the rejection and the provider protocol
+    // still requires a matching assistant tool_call. Only the internal
+    // malformed-JSON sentinel must be omitted because it was never executed.
+    .filter(result => !isMalformedToolArgumentsRecovery(result))
     .map(result => result.tc)
     .filter(tc => requestedIds.has(tc.id))
     .map(tc => ({
@@ -165,6 +227,13 @@ function isMalformedToolArgumentsRecovery(result: ToolExecutionResult): boolean 
     ? (result.result as { error?: unknown }).error
     : null
   return typeof error === 'string' && /^INTERNAL_RECOVERY:\s*malformed tool arguments\b/i.test(error)
+}
+
+function paidTurnProgressForIteration(
+  progress: PaidModelTurnProgressSnapshot | null,
+  iteration: number,
+): PaidModelTurnProgressSnapshot | null {
+  return progress?.iteration === iteration ? progress : null
 }
 
 function assistantHistoryMessageForStreamResult(
@@ -185,31 +254,52 @@ function assistantHistoryMessageForStreamResult(
 function approximateStreamUsageForCompletedTurn(
   model: string,
   requestMessages: ChatMessageParam[],
-  result: StreamResult,
+  result: Pick<StreamResult, 'assistantContent' | 'reasoningContent' | 'toolCalls'>,
+  requestTools: unknown[] = [],
 ): StreamUsage {
-  const promptChars = requestMessages.reduce((sum, message) => {
-    if (typeof message.content === 'string') return sum + message.content.length
-    if (Array.isArray(message.content)) {
-      return sum + message.content.reduce((inner, part) => inner + (part.text?.length || 0), 0)
-    }
-    return sum
-  }, 0)
-  const toolArgChars = [...result.toolCalls.values()].reduce((sum, toolCall) => {
-    return sum + toolCall.name.length + toolCall.arguments.length
-  }, 0)
-  const completionChars =
-    result.assistantContent.length +
-    result.reasoningContent.length +
-    toolArgChars
-  const promptTokens = Math.max(1, Math.ceil(promptChars / 4))
-  const completionTokens = Math.max(1, Math.ceil(completionChars / 4))
-  const totalTokens = promptTokens + completionTokens
-  const cost = estimateUsageCost({
+  return estimateConservativeMissingStreamUsage({
     model,
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
-  }) ?? 0
-  return { promptTokens, completionTokens, totalTokens, cost }
+    requestMessages,
+    requestTools,
+    assistantContent: result.assistantContent,
+    reasoningContent: result.reasoningContent,
+    toolCalls: [...result.toolCalls.values()],
+  })
+}
+
+function completionUsageForNarration(
+  model: string,
+  requestMessages: ChatMessageParam[],
+  response: ChatCompletionResponse,
+  content: string,
+): StreamUsage {
+  const raw = response.usage
+  if (
+    raw &&
+    Number.isFinite(raw.prompt_tokens) &&
+    Number.isFinite(raw.completion_tokens) &&
+    Number.isFinite(raw.cost)
+  ) {
+    const promptTokens = Math.max(0, Math.round(raw.prompt_tokens || 0))
+    const completionTokens = Math.max(0, Math.round(raw.completion_tokens || 0))
+    return {
+      promptTokens,
+      completionTokens,
+      totalTokens: Number.isFinite(raw.total_tokens)
+        ? Math.max(0, Math.round(raw.total_tokens || 0))
+        : promptTokens + completionTokens,
+      cost: Math.max(0, Number(raw.cost || 0)),
+    }
+  }
+
+  return estimateConservativeMissingStreamUsage({
+    model,
+    requestMessages,
+    requestTools: [],
+    assistantContent: content,
+    reasoningContent: response.choices[0]?.message?.reasoning_content || '',
+    toolCalls: [],
+  })
 }
 
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
@@ -218,11 +308,19 @@ const FAST_ACTION_REQUEST_TIMEOUT_MS = 4_500
 const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 5_000
 const FAST_SOURCE_ACTION_ITERATION_TIMEOUT_MS = 4_500
 const FAST_ACTION_ITERATION_TIMEOUT_MS = 4_500
-const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 1_100
-const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 1_100
+// A fast action still needs enough first-token/inter-chunk headroom for normal
+// routed-provider jitter. Cutting a healthy native tool envelope at 1.5s only
+// buys another model turn and makes the task slower overall.
+const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 2_500
+const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 2_500
 const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
-const FAST_SOURCE_ACTION_MAX_TOKENS = 260
+// Routed models may spend part of this allowance on hidden reasoning before
+// emitting a native tool call. A 260-token ceiling repeatedly cut otherwise
+// tiny search JSON at the stream boundary, making the runtime pay for a full
+// repair turn. Keep this far below synthesis budgets while leaving enough room
+// for one complete action envelope (or the bounded three-source read batch).
+const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const NO_THINKING_REASONING = { enabled: false as const, exclude: true }
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -383,7 +481,6 @@ function updateExactExtractionGuardAfterTools(
   state.exactExtractionGuardAttempts++
   state.forceTextNextIteration = false
   state.forcedNarrationRepairAttempts = 0
-  state.visibleToolActionsSinceLastNarration = 0
 }
 
 async function deliverableContentForVerification(
@@ -459,19 +556,15 @@ function shouldPauseForPhaseEndNarrationBeforeAutoAdvance(
 ): boolean {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
 
-  if (assistantContent.trim() && sanitizeNarrationText(assistantContent, {
-    requireSignal: false,
-    maxSentences: 2,
-    maxLength: 300,
-  })) {
-    markPhaseNarrationEmitted(state)
-    state.phaseEndNarrationPending = false
-    state.forceTextNextIteration = false
-    state.forcedNarrationRepairAttempts = 0
-    return false
+  if (assistantContent.trim()) {
+    acceptProgressNarration(state, assistantContent, {
+      requireSignal: false,
+      clearPhaseEndPending: true,
+    })
   }
-
-  return state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT
+  // Narration is opportunistic cadence, never a phase transition gate. A phase
+  // with enough evidence must advance even if narration is slow or unusable.
+  return false
 }
 
 function pauseForPhaseEndNarrationBeforeAutoAdvance(
@@ -480,19 +573,10 @@ function pauseForPhaseEndNarrationBeforeAutoAdvance(
   reason: string,
   assistantContent = '',
 ): boolean {
-  if (!shouldPauseForPhaseEndNarrationBeforeAutoAdvance(state, assistantContent)) return false
-  state.phaseEndNarrationPending = true
-  state.forceTextNextIteration = true
-  state.forcedNarrationRepairAttempts = 0
-  contextManager.push({
-    role: 'system',
-    content: [
-      `PHASE-END NARRATION REQUIRED before advancing: ${reason}.`,
-      'Every phase must show at least one real LLM-written progress paragraph, even if the phase used fewer than 3 tools.',
-      'Write one concise, result-first paragraph from completed work only, then put <next_step/> on its own final line. Do not call tools in this response.',
-    ].join(' '),
-  } as ChatMessageParam)
-  return true
+  void contextManager
+  void reason
+  shouldPauseForPhaseEndNarrationBeforeAutoAdvance(state, assistantContent)
+  return false
 }
 
 function liveDirectiveContextMessage(directives: LiveDirective[]): string {
@@ -647,6 +731,8 @@ function iterationBudgetFinalizationMessage(state: AgentStateData, overrunStep: 
 
 export interface AgentLoopOptions {
   messages: Array<{
+    id?: string
+    timestamp?: number
     role: string
     content: string
     attachments?: Array<{
@@ -668,6 +754,10 @@ export interface AgentLoopOptions {
   startFreshSandbox?: boolean
   signal?: AbortSignal
   creditRunId?: string
+  workerAttempt?: number
+  recoveryAttempt?: number
+  recoveryMode?: 'graceful_handoff' | 'stale_lease'
+  recoveryContext?: string
   userId?: string
   skipStartupAcknowledgement?: boolean
   startupReadyPromise?: Promise<unknown>
@@ -679,6 +769,8 @@ export interface AgentLoopOptions {
   deadlineFinalizationBufferMs?: number
   deadlineModelTurnTimeoutMs?: number
   deadlineHardStopBufferMs?: number
+  beforeDone?: () => Promise<void>
+  registerInflightToolDrain?: (drain: InflightToolDrain) => void
   diagnostics?: (event: { type: string; data: Record<string, unknown> }) => void
 }
 
@@ -689,13 +781,15 @@ type Phase = 'PLANNING' | 'STREAMING' | 'EXECUTING_TOOLS' | 'EVALUATING' | 'COMP
 const AUTOSAVE_DRAFT_MIN_CHARS = 1200
 const FINAL_AUTOSAVE_DRAFT_MIN_CHARS = 600
 const TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS = 3_500
+const NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS = new Set([
+  'safety_leakage',
+  'runtime_deadline',
+  'runtime_deadline_finalized',
+])
 const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 const MAX_PLANNING_SKILL_CHARS = 18_000
 const MAX_PLANNING_ATTACHMENT_CHARS = 12_000
 const MAX_PRELOADED_ATTACHMENT_PANEL_CHARS = 5_000
-const FRESH_TASK_CONTEXT_MESSAGES = 1
-const CONTEXTUAL_TASK_CONTEXT_MESSAGES = 6
-const HISTORICAL_CONTEXT_CHARS = 1200
 type AgentAttachment = NonNullable<AgentLoopOptions['messages'][number]['attachments']>[number]
 type ToolDefinitionLike = { function?: { name?: string } }
 type ModelToolDefinition = ToolDefinitionLike & {
@@ -744,7 +838,6 @@ const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
   'http_request',
-  'youtube_transcript',
   'image_search',
   'browser_get_content',
   'browser_navigate',
@@ -752,7 +845,6 @@ const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
 const SOURCE_OPENING_RUNTIME_TOOLS = new Set([
   'read_document',
   'http_request',
-  'youtube_transcript',
   'browser_get_content',
   'browser_find_text',
 ])
@@ -760,7 +852,6 @@ const COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
   'http_request',
-  'youtube_transcript',
   'browser_navigate',
   'browser_get_content',
   'browser_find_text',
@@ -770,7 +861,6 @@ const COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS = new Set([
   'web_search',
   'read_document',
   'http_request',
-  'youtube_transcript',
   'browser_navigate',
   'browser_get_content',
   'browser_find_text',
@@ -847,32 +937,6 @@ function containsFalseCapabilityRefusal(content: string): boolean {
   return /(?:i (?:cannot|can't|am unable to|am not able to).{0,120}(?:access|browse|interact|perform|retrieve|search|images?|photos?|pictures?)|i can only provide text[- ]based information|please use (?:a )?(?:search engine|google images|bing images))/i.test(content)
 }
 
-function compactHistoricalAgentMessage(message: AgentLoopOptions['messages'][number], isLatest: boolean): AgentLoopOptions['messages'][number] {
-  if (isLatest) return message
-  const content = message.content.length > HISTORICAL_CONTEXT_CHARS
-    ? `${message.content.slice(0, HISTORICAL_CONTEXT_CHARS)}\n...[historical message compacted]`
-    : message.content
-  return {
-    ...message,
-    content,
-    attachments: undefined,
-  }
-}
-
-function scopedMessagesForAgentTask(messages: AgentLoopOptions['messages']): AgentLoopOptions['messages'] {
-  const latestUserIndex = messages.map((message, index) => ({ message, index }))
-    .filter(({ message }) => message.role === 'user' && message.content.trim())
-    .at(-1)?.index ?? messages.length - 1
-
-  if (!isContextualTaskUpdate(messages)) {
-    return messages.slice(Math.max(0, latestUserIndex)).slice(-FRESH_TASK_CONTEXT_MESSAGES)
-  }
-
-  const recent = messages.slice(Math.max(0, messages.length - CONTEXTUAL_TASK_CONTEXT_MESSAGES))
-  const lastIndex = recent.length - 1
-  return recent.map((message, index) => compactHistoricalAgentMessage(message, index === lastIndex))
-}
-
 function taskWantsImageArtifact(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -896,39 +960,25 @@ function taskWantsPdfArtifact(
 }
 
 function explicitSavedFinalArtifactRequested(text: string): boolean {
-  const cleaned = text
-    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
-    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/gi, ' ')
-  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
-  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
-    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
-    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable)\b/i.test(cleaned) ||
-    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned) ||
-    taskDefaultsToMarkdownDeliverable(text)
-  return positiveArtifactRequest && !declinesSavedArtifact
+  return analyzeTaskIntent([{ role: 'user', content: text }]).requiresSavedArtifact
 }
 
 function originalRequestPrefersInlineBrief(text: string): boolean {
   if (!text) return false
   if (explicitSavedFinalArtifactRequested(text)) return false
-  return /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast)\b/i.test(text)
+  return /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast|one[-\s]?sentence|two[-\s]?sentence|in\s+(?:one|two|three|four|five|\d+)\s+sentences?)\b/i.test(text)
 }
 
 function taskNeedsSavedFinalArtifact(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
-  const userText = messages
-    .filter(m => m.role === 'user')
-    .map(m => m.content)
-    .join(' ')
+  const userText = state.originalUserRequest || effectiveTaskRequest(messages)
   if (originalRequestPrefersInlineBrief(userText)) return false
-  const taskText = `${currentToolIntentText(state)} ${userText}`
   return state.buildTask ||
     state.taskStrategy === 'build' ||
-    state.taskStrategy === 'code' ||
     state.taskStrategy === 'creative' ||
-    explicitSavedFinalArtifactRequested(taskText)
+    explicitSavedFinalArtifactRequested(userText)
 }
 
 function isBriefInlineDirectAnswerTask(
@@ -943,24 +993,36 @@ function isBriefInlineDirectAnswerTask(
   if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|serious analysis|strategic|technical|comparative)\b/.test(taskText)) {
     return false
   }
-  const brief = /\b(?:brief|briefly|quick|quickly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/.test(taskText)
+  const brief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/.test(taskText)
   const inline = /\b(?:no file|no document|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/.test(taskText)
   return (brief || inline) && !taskNeedsSavedFinalArtifact(state, messages)
 }
 
-function shouldAutoAdvanceBriefInlineResearchAfterTools(
+function briefInlineResearchEvidenceAfterTools(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
   results: ToolExecutionResult[],
-): boolean {
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
-  if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return false
-  if (!isBriefInlineDirectAnswerTask(state, messages)) return false
-  if (!results.some(result => !result.isError)) return false
-  const openedOrExtractedSource = state.stepVisitedUrls.size > 0 || stepOpenedSourceDomains(state).size > 0
-  const usefulDiscovery = state.stepSearchQueries.size > 0 || state.stepSourceDomainCounts.size > 0
-  return openedOrExtractedSource ||
-    (state.stepResearchCallCount >= 2 && usefulDiscovery)
+): BriefInlineResearchEvidenceAssessment | null {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return null
+  if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return null
+  if (!isBriefInlineDirectAnswerTask(state, messages)) return null
+  const userText = messages
+    .filter(message => message.role === 'user')
+    .map(message => message.content)
+    .join(' ')
+  return assessBriefInlineResearchEvidence({
+    request: state.originalUserRequest || userText,
+    researchCalls: state.stepResearchCallCount,
+    openedSourceUrls: state.stepVisitedUrls,
+    sourceEvidence: state.workLedger.sources
+      .filter(source => source.stepIdx === state.currentStepIdx && !!source.url)
+      .map(source => ({ url: source.url!, title: source.title })),
+    toolResults: results.map(result => ({
+      toolName: result.tc.name,
+      isError: result.isError,
+      acceptedForExecution: result.acceptedForExecution,
+    })),
+  })
 }
 
 function isLeanFinalSynthesisStep(state: AgentStateData): boolean {
@@ -972,8 +1034,56 @@ function isLeanFinalSynthesisStep(state: AgentStateData): boolean {
     !state.buildTask
 }
 
+function isFinalDeliveryStep(state: AgentStateData): boolean {
+  return !!state.currentPlanItems &&
+    state.currentPlanItems.length > 0 &&
+    state.currentStepIdx === state.currentPlanItems.length - 1 &&
+    state.currentPhase === 'deliver'
+}
+
 function finalInlineAnswerTurn(state: AgentStateData, messages: Array<{ role: string; content: string }>): boolean {
-  return isLeanFinalSynthesisStep(state) && !taskNeedsSavedFinalArtifact(state, messages)
+  return isFinalDeliveryStep(state) && !taskNeedsSavedFinalArtifact(state, messages)
+}
+
+function finalBriefInlineResearchNeedsEvidenceAction(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (!finalInlineAnswerTurn(state, messages)) return false
+  const request = state.originalUserRequest || effectiveTaskRequest(messages)
+  // Plan advancement resets step-local counters. Reassess the evidence from
+  // fresh, run-wide tool successes and sources actually opened in this run so
+  // the final step neither repeats completed research nor trusts search-result
+  // links or hydrated activity from an earlier run.
+  const runEvidence = assessBriefInlineRunResearchEvidence({
+    request,
+    successfulToolTypeCounts: state.taskSuccessfulToolTypeCounts,
+    openedSourceUrls: state.visitedUrls,
+    sourceEvidence: state.workLedger.sources
+      .filter(source => !!source.url)
+      .map(source => ({ url: source.url!, title: source.title })),
+  })
+  if (runEvidence.ready) return false
+  return /\b(?:research|search|look\s*up|find\s*out|current|latest|recent|source|fact|verify|evidence)\b/i.test(request)
+}
+
+function finalSavedResearchNeedsEvidenceAction(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  if (!finalSavedDeliverableTurn(state, messages)) return false
+  const request = state.originalUserRequest || effectiveTaskRequest(messages)
+  if (!/\b(?:research|search|look\s*up|find\s*out|current|latest|recent|source|citation|reference|credible|official|primary|fact|verify|evidence)\b/i.test(request)) {
+    return false
+  }
+  return !assessBriefInlineRunResearchEvidence({
+    request,
+    successfulToolTypeCounts: state.taskSuccessfulToolTypeCounts,
+    openedSourceUrls: state.visitedUrls,
+    sourceEvidence: state.workLedger.sources
+      .filter(source => !!source.url)
+      .map(source => ({ url: source.url!, title: source.title })),
+  }).ready
 }
 
 function shouldCompleteFinalInlineAnswerTurn(
@@ -1080,6 +1190,13 @@ function shouldContinueSavedFinalDeliverableChunk(
   return content.trim().length < savedFinalDeliverableMinimumChars(state, messages)
 }
 
+function isPartialRecoveryClosingAppendTurn(state: AgentStateData): boolean {
+  const pending = state.partialFileWriteRecoveryPending
+  return !!pending &&
+    state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS &&
+    partialAppendRecoveryCountForPath(state, pending.path) >= PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH
+}
+
 function finalSavedDeliverableToolCallInstruction(
   state: AgentStateData,
   reason: string,
@@ -1093,7 +1210,7 @@ function finalSavedDeliverableToolCallInstruction(
       : 'Use create_file for the final saved output under deliverables/ unless the user named a different path.'
   const chunkGuidance = !pending && !existingPath
     ? 'For the first create_file call, save a concise complete Markdown deliverable when the scope is small; for longer reports, save the title, intro, and first complete section, ending at a clean sentence boundary.'
-    : 'Append the next useful chunk only. Do not repeat existing content.'
+    : 'Append the next complete, substantive section only—normally 350–650 words when that much content remains, or all remaining content when less remains. Do not repeat existing headings, claims, citations, or paragraphs, and never dribble out a tiny fragment.'
 
   return [
     reason,
@@ -1129,6 +1246,7 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
   const step = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable'
   const pendingPartial = state.partialFileWriteRecoveryPending
   if (pendingPartial) {
+    const boundedClosingAppend = isPartialRecoveryClosingAppendTurn(state)
     return [
       `PARTIAL FILE CONTINUATION NOW: make exactly one native append_file call to "${pendingPartial.path}" immediately.`,
       request ? `User request: ${request}.` : '',
@@ -1137,8 +1255,10 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       'Begin the tool call immediately; do not internally outline, narrate, or wait to draft a full report before starting the append_file arguments.',
       'Do not call create_file, edit_file, read_file, list_files, export_pdf, or any research/browser tool.',
       'Do not write visible prose, a status update, a plan, a source summary, or a permission question.',
-      'Append only the next missing complete section or paragraph-bounded chunk. End cleanly at a sentence or section boundary; never stop mid-sentence. Do not repeat already-written content, and do not emit <next_step/> until after a successful append clears this partial-file state.',
-      'Use the full output budget for the append_file content so long reports and code files continue instead of restarting.',
+      boundedClosingAppend
+        ? 'This is the only permitted closing append. Add only the most important missing closing material in roughly 180–300 words, then stop at a clean sentence or section boundary.'
+        : 'Append only the next missing complete, substantive section—normally 350–650 words when that much remains, or all remaining content when less remains. End cleanly at a sentence or section boundary; never stop mid-sentence.',
+      'Do not repeat existing headings, claims, citations, or paragraphs, and do not emit <next_step/> until after a successful append clears this partial-file state.',
     ].filter(Boolean).join(' ')
   }
   const existingPath = existingFinalDeliverablePath(state)
@@ -1212,6 +1332,7 @@ function isFastActionToolTurn(
   if (state.deadlineFinalizationStarted) return false
   if (finalInlineAnswerTurn(state, messages) || finalSavedDeliverableTurn(state, messages)) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (isCurrentSynthesisStep(state)) return false
   if (state.currentPhase === 'deliver') return false
 
   return state.taskStrategy === 'browse' ||
@@ -1252,7 +1373,7 @@ function fastSourceActionToolsForState(
   const allowed = needsOpenedSourceBeforeMoreSearch
     ? new Set(SOURCE_OPENING_RUNTIME_TOOLS)
     : hasKnownSourceTarget
-    ? new Set(['read_document', 'http_request', 'youtube_transcript', 'browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search'])
+    ? new Set(['read_document', 'http_request', 'browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search'])
     : new Set(['web_search', ...(researchStepAllowsImageSearch(state) ? ['image_search'] : [])])
   if (needsOpenedSourceBeforeMoreSearch && !hasRenderedBrowserContext(state)) {
     allowed.delete('browser_get_content')
@@ -1264,6 +1385,18 @@ function fastSourceActionToolsForState(
     return allowed.has(name)
   })
   return narrowed.length > 0 ? narrowed : tools
+}
+
+function userRequestedRepeatedSourceExtraction(state: AgentStateData): boolean {
+  return /\b(?:exhaustive(?:ly)?|all\s+(?:the\s+)?(?:results?|sources?|links?|pages?)|every\s+(?:result|source|link|page)|open\s+(?:and\s+)?read\s+(?:them\s+)?all|extract\s+(?:them\s+)?all|read\s+every)\b/i
+    .test(state.originalUserRequest || '')
+}
+
+function sourceExtractionBatchConsumedForLatestSearch(state: AgentStateData): boolean {
+  if (userRequestedRepeatedSourceExtraction(state)) return false
+  const searchCount = state.stepSearchQueries.size
+  return searchCount > 0 &&
+    state.stepLastSourceExtractionSearchCount === searchCount
 }
 
 function totalOpenedSourceReadsForStep(state: AgentStateData): number {
@@ -1298,9 +1431,13 @@ function shouldUseNaturalCadenceNarration(
   if (state.forceTextNextIteration || state.exactExtractionGuardPending) return false
   if (state.deadlineFinalizationStarted) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.visibleToolActionsSinceLastNarration < NARRATION_THRESHOLD_DEFAULT) return false
-  if (state.partialFileWriteRecoveryPending) return false
-  if (finalInlineAnswerTurn(state, messages) || finalSavedDeliverableTurn(state, messages)) return false
+  if (state.narrationCadenceInFlight) return false
+  if (state.visibleToolActionsSinceLastNarration < state.narrationNextAttemptAt) return false
+  // Saved-file writes are still visible work. Long reports may require several
+  // create/append actions, so keep the same LLM-authored 3–4 action narration
+  // cadence active while those chunks stream. Only a single inline final answer
+  // has no intermediate action cluster to narrate.
+  if (finalInlineAnswerTurn(state, messages)) return false
   return true
 }
 
@@ -1498,11 +1635,22 @@ function compactResearchOpenedSourceToolsForState(
 ): ToolDefinitionLike[] {
   const openedDomains = stepOpenedSourceDomains(state).size
   const candidateDomains = state.stepSourceDomainCounts.size
+  const candidateCoverage = researchSearchCandidateCoverage({
+    stepIdx: state.currentStepIdx,
+    searchResults: state.workLedger.searchResults,
+    visitedUrls: state.stepVisitedUrls,
+  })
+  const hasKnownCandidateUrls = candidateCoverage.knownCandidateCount > 0
+  const hasUnopenedCandidateUrls = candidateCoverage.unopenedCandidateCount > 0
+  const exhaustedKnownCandidateUrls = hasKnownCandidateUrls && !hasUnopenedCandidateUrls
   const hasSearchCandidatesAwaitingOpen =
     state.stepSearchQueries.size > 0 &&
     candidateDomains > 0 &&
-    openedDomains === 0 &&
-    state.stepVisitedUrls.size === 0
+    (hasUnopenedCandidateUrls || (
+      !hasKnownCandidateUrls &&
+      openedDomains === 0 &&
+      state.stepVisitedUrls.size === 0
+    ))
   const recentSourceOpeningFailures = state.failureLog.slice(-8).filter(f =>
     (f.tool === 'read_document' || f.tool === 'browser_navigate' || f.tool === 'browse_page' || f.tool === 'browser_get_content') &&
     (f.category === 'access-block' || f.category === 'timeout' || f.category === 'service-down' || /404|403|not found|forbidden|timed out|timeout/i.test(f.error)),
@@ -1511,6 +1659,7 @@ function compactResearchOpenedSourceToolsForState(
     state.suppressedResearchToolName === 'read_document' ||
     state.stepLoopDetections > 0 ||
     state.consecutiveNoToolCalls > 0 ||
+    exhaustedKnownCandidateUrls ||
     (state.stepResearchCallCount >= 2 && openedDomains < Math.min(2, Math.max(1, candidateDomains)))
 
   const allowed = needsAlternateSourceRoute
@@ -1520,7 +1669,12 @@ function compactResearchOpenedSourceToolsForState(
     allowed.clear()
     allowed.add('web_search')
   }
-  if (hasSearchCandidatesAwaitingOpen && recentSourceOpeningFailures < 2 && state.stepLoopDetections < 4) {
+  if (
+    !needsAlternateSourceRoute &&
+    hasSearchCandidatesAwaitingOpen &&
+    recentSourceOpeningFailures < 2 &&
+    state.stepLoopDetections < 4
+  ) {
     allowed.delete('web_search')
   }
   if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
@@ -1687,7 +1841,9 @@ function pruneToolsForCurrentStep(state: AgentStateData, tools: ToolDefinitionLi
       return !BROWSER_ADVANCED_POINTER_TOOLS.has(name) && (name !== 'read_document' || browserStepAllowsDocumentTool(state))
     })
   }
-  let stepTools = tools
+  let stepTools = sourceExtractionBatchConsumedForLatestSearch(state)
+    ? tools.filter(tool => !PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES.has(tool.function?.name || ''))
+    : tools
   if (shouldPreferExtractionBeforeColdBrowser(state)) {
     const narrowed = stepTools.filter(tool => !RESEARCH_COLD_BROWSER_RUNTIME_TOOLS.has(tool.function?.name || ''))
     if (narrowed.length > 0) stepTools = narrowed
@@ -2103,6 +2259,7 @@ function maxTokensForIteration(state: AgentStateData): number {
 
 function shouldForceAgenticToolCall(state: AgentStateData, hasActivePlanStep: boolean): boolean {
   if (!hasActivePlanStep || state.currentPhase === 'deliver') return false
+  if (isCurrentSynthesisStep(state)) return false
   if (state.taskStrategy === 'browse') return true
 
   const stepLooksActionable = isResearchStepText(currentStepText(state))
@@ -2158,8 +2315,10 @@ function sourceLooksLocal(value: unknown): boolean {
 
 function toolCallNeedsStartupReady(toolCall: ToolCallData): boolean {
   if (STARTUP_READY_REQUIRED_TOOLS.has(toolCall.name)) return true
+  if (toolCall.name === 'browse_page' || toolCall.name.startsWith('browser_')) return true
   if (toolCall.name === 'read_document') {
-    return sourceLooksLocal(parsedToolCallArgs(toolCall).source)
+    const args = parsedToolCallArgs(toolCall)
+    return sourceLooksLocal(args.url || args.source)
   }
   if (toolCall.name === 'http_request') {
     return sourceLooksLocal(parsedToolCallArgs(toolCall).url)
@@ -2187,43 +2346,168 @@ function latestUserMessageText(messages: ChatMessageParam[]): string {
   return ''
 }
 
+const NARRATION_STRUCTURAL_FORMS = [
+  'evidence → implication: lead with the newest concrete evidence, then state what it changes or clarifies',
+  'contrast → resolution: set two new findings against each other, then resolve the distinction or limitation',
+  'multi-signal synthesis: combine the latest independent signals into one conclusion without adding a forward-looking sentence',
+  'state change → verification: name the completed artifact or interface change, then the check that proves it works',
+  'constraint → pivot: name the exact blocker, then the different evidence or implementation route now replacing it',
+  'milestone → closure: close the resolved line of work with its newest concrete implication, without announcing a broader next phase',
+] as const
+
+function preferredNarrationStructure(
+  state: AgentStateData,
+  recentActions: string[],
+  recentToolEvidence: string[],
+): string {
+  const evidence = `${recentActions.join(' ')} ${recentToolEvidence.join(' ')}`.toLowerCase()
+  if (/\b(?:blocked|failed|error|unavailable|timeout|denied|missing)\b/.test(evidence)) {
+    return NARRATION_STRUCTURAL_FORMS[4]
+  }
+  if (
+    state.buildTask ||
+    /\b(?:creat|writ|edit|append|patch|build|render|screenshot|preview|test|verif|deploy|file|component|page|style)\w*\b/.test(evidence)
+  ) {
+    return NARRATION_STRUCTURAL_FORMS[3]
+  }
+  if (state.phaseEndNarrationPending) return NARRATION_STRUCTURAL_FORMS[5]
+  if (/\b(?:compar|versus|difference|whereas|however|trade-?off|benchmark)\w*\b/.test(evidence)) {
+    return NARRATION_STRUCTURAL_FORMS[1]
+  }
+
+  // Rotate among research-friendly forms so nearby updates do not collapse
+  // into one repeated "research confirms … next …" template. This remains a
+  // preference: the narration model may choose another form when it fits the
+  // evidence better.
+  const researchForms = [
+    NARRATION_STRUCTURAL_FORMS[0],
+    NARRATION_STRUCTURAL_FORMS[2],
+    NARRATION_STRUCTURAL_FORMS[1],
+  ]
+  return researchForms[(state.recentNarrations.length + state.currentStepIdx) % researchForms.length]
+}
+
+function recentNarrationToolEvidence(messages: ChatMessageParam[], limit = 3): string[] {
+  return messages
+    .filter(message => message.role === 'tool')
+    .slice(-limit)
+    .map(message => messageText(message.content).replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .map(text => text.slice(0, 280))
+}
+
 function compactForcedNarrationMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
   const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'current step'
   const currentScope = state.currentPlanScopes?.[state.currentStepIdx]
-  const recentActions = state.workLog
-    .slice(-6)
+  const recentActions = workLogSinceAcceptedNarration(state)
     .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
     .filter(Boolean)
-  const recentFindings = [...state.stepFindings.entries()]
-    .slice(-3)
-    .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+  const currentFinding = state.stepFindings.get(state.currentStepIdx)
+  const recentToolEvidence = recentNarrationToolEvidence(allMessages)
   const browserEvidence = state.browserTaskCompletionEvidence.slice(-3)
   const visualObservations = state.workLedger.visualObservations
     .slice(-3)
     .map(item => `${item.title || item.url || item.tool}: ${item.detail}`)
+  const previousNarrations = recentNarrationPromptExclusions(state)
+  const previousUsedForwardTransition = /(?:^|[.!?]\s+)(?:next|from here)\b|\b(?:i|we)(?:'|’)?ll\b|\b(?:i|we)\s+will\b/i
+    .test(previousNarrations.at(-1) || '')
+  const preferredStructure = preferredNarrationStructure(state, recentActions, recentToolEvidence)
 
   const context = [
     `User request: ${state.originalUserRequest || latestUserMessageText(allMessages) || 'not available'}`,
     `Active phase: ${state.currentStepIdx + 1}/${state.currentPlanItems?.length || 1} - ${currentStep}`,
     currentScope ? `Phase scope: ${currentScope}` : '',
-    recentActions.length ? `Recent visible work:\n- ${recentActions.join('\n- ')}` : '',
-    recentFindings.length ? `Recent findings:\n- ${recentFindings.join('\n- ')}` : '',
+    recentActions.length ? `New visible work since the last accepted update:\n- ${recentActions.join('\n- ')}` : 'No new work-log entries are available; do not restate an earlier update.',
+    recentToolEvidence.length ? `Newest tool-result evidence — use this before any cumulative summary:\n- ${recentToolEvidence.join('\n- ')}` : '',
+    currentFinding ? `Active-phase background — use only to interpret the new delta, never to repeat the running conclusion:\n- ${currentFinding}` : '',
     browserEvidence.length ? `Browser completion evidence:\n- ${browserEvidence.join('\n- ')}` : '',
     visualObservations.length ? `Recent browser/page observations:\n- ${visualObservations.join('\n- ')}` : '',
+    previousNarrations.length ? `Already shown — do not repeat, paraphrase, or reuse the same rhetorical shape:\n- ${previousNarrations.join('\n- ')}` : '',
+    previousUsedForwardTransition
+      ? 'Transition note: the most recent update already used a forward transition, so keep this update result-only.'
+      : 'Immediate-action note: this narration-only request has no selected next action. Keep it result-only; do not use "Next" or infer an action from the next plan phase.',
+    `Preferred structural form for this update, if it fits the evidence: ${preferredStructure}.`,
   ].filter(Boolean).join('\n\n')
+
+  const narrationInstruction = [
+    state.phaseEndNarrationPending
+      ? 'FAST PHASE-END PROGRESS NARRATION ONLY.'
+      : 'FAST PROGRESS NARRATION ONLY.',
+    'Do not solve, plan, browse, search, write files, or call tools.',
+    'Write one natural Manus-style progress paragraph from the compact context only.',
+    'Treat it as a progressive evidence trace: select the newest delta, not the cumulative task conclusion.',
+    'Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters.',
+    'Lead with the genuinely new result or progress.',
+    'Adapt the structure to the evidence. Vary grammatical subject, voice, rhythm, and sentence count; do not imitate either of the two most recent updates.',
+    'This asynchronous narration-only request has no selected next action, so keep it result-only. Do not use "Next", add a future-action sentence, or infer an action from the following plan phase.',
+    'No permission questions, internal step numbers, action counts, source dumps, vague sufficiency claims, or command fragments.',
+    'Describe only user-visible findings, completed changes, or real blockers. Never mention tools, tool results, payloads, JSON, parsing, truncation, confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
+    state.phaseEndNarrationPending ? 'Put <next_step/> on its own final line after the paragraph.' : '',
+  ].filter(Boolean).join(' ')
 
   return [
     {
       role: 'system',
-      content: state.phaseEndNarrationPending
-        ? 'FAST PHASE-END PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style result-first progress paragraph from the compact context only, then put <next_step/> on its own final line. This applies before the next phase starts in every task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters before the marker. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful. Many updates should stop after the result sentence. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.'
-        : 'FAST PROGRESS NARRATION ONLY. Do not solve, plan, browse, search, write files, or call tools. Write one natural Manus-style progress paragraph from the compact context only. This applies to the current phase regardless of task type. Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters. Default to one strong past-tense result sentence; add a short Next/Will sentence only when it is specific and useful, and never force one. Many updates should stop after the result sentence. Be result-first and concrete. Vary the opening verb and sentence shape; do not repeat the same starter pattern. Never ask permission to continue or write opt-in handoffs. No internal step numbers, no vague "sufficient evidence", no command fragments, no source dump. Do not start with "Synthesized key", "Completed N searches", or tool/action accounting.',
+      content: narrationInstruction,
     },
     {
       role: 'user',
       content: context || 'Write a concise progress update from the recent completed work.',
     },
   ]
+}
+
+function compactResearchRemainingCandidates(state: AgentStateData): string[] {
+  const visited = new Set(
+    [...state.stepVisitedUrls]
+      .filter(Boolean)
+      .map(normalizeResearchUrl),
+  )
+  const failed = new Set(
+    state.workLedger.failedRoutes
+      .filter(route => route.stepIdx === state.currentStepIdx && /^https?:\/\//i.test(route.target))
+      .map(route => normalizeResearchUrl(route.target)),
+  )
+  const seen = new Set<string>()
+  const candidates: string[] = []
+
+  for (const result of state.workLedger.searchResults) {
+    if (result.stepIdx !== state.currentStepIdx || !result.url.trim()) continue
+    const normalized = normalizeResearchUrl(result.url)
+    if (!normalized || seen.has(normalized) || visited.has(normalized) || failed.has(normalized)) continue
+    seen.add(normalized)
+    const title = result.title?.replace(/\s+/g, ' ').trim().slice(0, 100)
+    candidates.push(title ? `${title} — ${result.url}` : result.url)
+    if (candidates.length >= 5) break
+  }
+
+  return candidates
+}
+
+function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
+  const newWork = workLogSinceAcceptedNarration(state)
+    .slice(-6)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const alreadyShown = recentNarrationPromptExclusions(state, 8)
+  return [
+    'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
+    'Every available tool schema includes a required, non-empty progress_update. Put exactly one concise 1-2 sentence completed-result update in that field.',
+    'The field must describe completed work, never only a future action, plan, promise, or command. Never repeat or paraphrase an already-shown update. Do not mention action/tool/search counts, internal steps, or ask permission to continue.',
+    'A second sentence beginning "Next, ..." is optional, never required, and never a template. When it fits naturally, place it after the completed finding and use it only when it names the exact concrete tool action this same response is starting immediately; never use it for a broader phase, a general shift in analysis, or planned later work.',
+    'progress_update is display-only. Still complete every normal required tool argument and make the tool call without waiting for a separate narration turn.',
+    newWork.length ? `New work:\n- ${newWork.join('\n- ')}` : 'State the newest concrete completed result from the active work; progress_update must not be empty.',
+    alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
+  ].filter(Boolean).join('\n\n')
+}
+
+function cadenceNarrationActionRetryMessage(reason: string): string {
+  return [
+    `CADENCE ACTION RETRY: ${reason}.`,
+    'Retry the same active phase now in the ordinary action-selection turn.',
+    'Make exactly one concrete native tool call. Put a genuinely new, non-empty completed-result sentence in progress_update.',
+    'Do not output ordinary prose, planning, speculation, a future action fragment, or narration without a tool call.',
+  ].join(' ')
 }
 
 function compactResearchTurnMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
@@ -2247,21 +2531,27 @@ function compactResearchTurnMessages(state: AgentStateData, allMessages: ChatMes
     .sort(([a], [b]) => a - b)
     .slice(-4)
     .map(([idx, finding]) => `Step ${idx + 1}: ${finding}`)
+  const remainingCandidates = compactResearchRemainingCandidates(state)
 
   const context = [
     `User request: ${request}`,
     `Active phase: ${state.currentStepIdx + 1}/${state.currentPlanItems?.length || 1} - ${currentStep}`,
     currentScope ? `Phase scope: ${currentScope}` : '',
     memoryText,
+    remainingCandidates.length ? `Remaining candidate URLs (not yet opened or failed):\n- ${remainingCandidates.join('\n- ')}` : '',
     recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
     recentActions.length ? `Recent completed work:\n- ${recentActions.join('\n- ')}` : '',
     findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
 
+  const actionInstruction = compactResearchEvidenceComplete(state)
+    ? 'The runtime has confirmed this phase has enough opened-source evidence. Write one concise result-first progress paragraph and emit <next_step/>.'
+    : 'This phase still needs evidence. Make one concrete native research tool call now. Do not write progress prose, a final answer, or <next_step/> in this response.'
+
   return [
     {
       role: 'system',
-      content: 'COMPACT RESEARCH TURN. Continue from the compact task state below; do not ask to see the full transcript and do not repeat completed source actions. Tool caps are ceilings, never targets: do not chase available search/extraction budget once the phase has a credible evidence packet. Use targeted web_search for the next missing evidence gap, then read_document on the strongest candidate URL. If strong candidate URLs are already available, read the best one instead of searching again. If the phase has enough evidence, write one concise result-first progress paragraph and emit <next_step/>. Use browser navigation only when rendered state, interaction, screenshots, or page scripts are necessary.',
+      content: `COMPACT RESEARCH TURN. Continue from the compact task state below; do not ask to see the full transcript and do not repeat completed source actions. Tool caps are ceilings, never targets: do not chase available search/extraction budget once the phase has a credible evidence packet. Use targeted web_search for the next missing evidence gap, then read_document on the strongest candidate URL. If strong candidate URLs are already available, read the best one instead of searching again. ${actionInstruction} Use browser navigation only when rendered state, interaction, screenshots, or page scripts are necessary.`,
     },
     {
       role: 'user',
@@ -2275,13 +2565,23 @@ function shouldUseCompactResearchTurn(state: AgentStateData): boolean {
   if (state.deadlineFinalizationStarted) return false
   if (!(state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.currentPhase === 'research')) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (isSynthesisStepText(currentStepText(state))) return false
+  if (isCurrentSynthesisStep(state)) return false
   if (state.currentStepIdx === state.currentPlanItems.length - 1 && state.currentPhase === 'deliver') return false
   return true
 }
 
 function compactResearchNeedsToolAction(state: AgentStateData): boolean {
   return !compactResearchEvidenceComplete(state)
+}
+
+function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
+  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return false
+  const researchLike = state.currentPhase === 'research' ||
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    isResearchStepText(currentStepText(state))
+  return researchLike && hasCredibleResearchRecoveryPacket(state)
 }
 
 function compactResearchBreadthSaturated(state: AgentStateData, depth: ReturnType<typeof researchDepthProfileForState>): boolean {
@@ -2477,6 +2777,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
   const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Create the requested deliverable.'
   const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final deliverable'
   const pendingPartial = state.partialFileWriteRecoveryPending
+  const boundedClosingAppend = isPartialRecoveryClosingAppendTurn(state)
   const existingPath = existingFinalDeliverablePath(state)
   const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
   const findings = [...state.stepFindings.entries()]
@@ -2517,9 +2818,11 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             `Make exactly one native append_file call to "${pendingPartial.path}" now; do not write visible prose before it.`,
             'Start the append_file call immediately; do not spend a hidden pass outlining the next section.',
             'Do not call create_file, edit_file, read_file, list_files, export_pdf, research tools, or browser tools.',
-            'Append the next missing complete section or paragraph-bounded chunk only. End cleanly at a sentence or section boundary; never stop mid-sentence. Do not repeat already-written content.',
+            boundedClosingAppend
+              ? 'This is the one permitted closing append after repeated clipped writes. Add only the most important missing closing material, roughly 180–300 words, and finish at a clean sentence or section boundary.'
+              : 'Append the next missing complete, substantive section only—normally 350–650 words when that much remains, or all remaining content when less remains. End cleanly at a sentence or section boundary; never stop mid-sentence.',
+            'Do not repeat existing headings, claims, citations, or paragraphs.',
             'Do not emit <next_step/> until after a successful append clears the partial-file state.',
-            'Use the full available output budget for this append so clipped long reports and code continue cleanly.',
           ].join(' ')
         : existingPath
           ? [
@@ -2659,11 +2962,11 @@ function compactResearchToolRequiredMessage(state: AgentStateData, reason: strin
     ? 'The evidence floor is already satisfied; emit <next_step/> only if this phase is complete.'
     : 'The evidence floor is not satisfied yet.'
   const recoveryToolNote = shouldUseCompactResearchRecoveryTools(state)
-    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or when candidate URLs already exist, use up to 4 parallel read_document/http_request/youtube_transcript source extraction calls. Do not ask for another broad planning turn.'
-    : 'Choose the most useful source/search/browser/document action for this specific step; if independent candidate URLs already exist, you may use up to 4 parallel read_document/http_request/youtube_transcript calls. Use strict JSON object arguments.'
+    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or when candidate URLs already exist, use up to 3 parallel read_document/http_request source extraction calls. Do not ask for another broad planning turn.'
+    : 'Choose the most useful source/search/browser/document action for this specific step; if independent candidate URLs already exist, you may use up to 3 parallel read_document/http_request calls. Use strict JSON object arguments.'
   return [
     'RESEARCH TOOL REQUIRED:',
-    `Continue "${step}" with an appropriate evidence tool call now; for independent source URLs, up to 4 parallel source extraction calls are allowed.`,
+    `Continue "${step}" with an appropriate evidence tool call now; for independent source URLs, up to 3 parallel source extraction calls are allowed.`,
     `Reason: ${reason}.`,
     evidenceNeed,
     recoveryToolNote,
@@ -2698,8 +3001,10 @@ function isDisplayContractRepairResult(result: ToolExecutionResult): boolean {
   const value = result.result && typeof result.result === 'object'
     ? (result.result as { error?: unknown }).error
     : undefined
-  return typeof value === 'string' &&
-    /display contract repair needed before executing this action/i.test(value)
+  return typeof value === 'string' && (
+    /display contract repair needed before executing this action/i.test(value) ||
+    /tool call was skipped because (?:it declared )?plan_step_index\b/i.test(value)
+  )
 }
 
 function displayContractRepairInstruction(state: AgentStateData, results: ToolExecutionResult[]): string {
@@ -2752,11 +3057,14 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
+const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = 700
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
 const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
 const FORCED_NARRATION_MAX_TOKENS = 48
+const NARRATION_SIDECAR_REQUEST_TIMEOUT_MS = 4_000
+const NARRATION_SIDECAR_MAX_TOKENS = 64
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
 export class AgentLoop {
@@ -2765,7 +3073,7 @@ export class AgentLoop {
   private lastCreditRunwayCheckAt = Date.now()
 
   constructor(emitter: AgentEventEmitter, options: AgentLoopOptions) {
-    this.emitter = emitter
+    this.emitter = sanitizeAgentEventEmitter(emitter)
     this.options = options
   }
 
@@ -2785,6 +3093,7 @@ export class AgentLoop {
     workingMemory: WorkingMemory,
     goalTracker: GoalTracker,
     outputVerifier: OutputVerifier,
+    toolPipeline: ToolPipeline,
   ): Promise<Phase | null> {
     const { conversationId } = this.options
     if (!conversationId || !shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
@@ -2794,10 +3103,61 @@ export class AgentLoop {
     const id = `autosave_${state.iterations}_${state.currentStepIdx}`
     const isLastStep = !!state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
 
-    const previewContent = content.length > 5000
-      ? content.slice(0, 5000) + '\n\n...[autosaved draft continues in the saved file]'
-      : content
-    this.emitter.toolStart(id, 'create_file', { path, content: previewContent })
+    this.emitter.toolStart(id, 'create_file', {
+      path,
+      contentCharCount: content.length,
+      contentLineCount: content.split('\n').length,
+    })
+    await this.emitter.flush?.()
+    if (this.options.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+
+    const savePromise = toolPipeline.trackInflightOperation(
+      createFileInSandbox(conversationId, path, content),
+      'create_file',
+      { path },
+    )
+    let result = await Promise.race([
+      this.awaitWithTaskSignal(savePromise),
+      this.wait(TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS).then(() => null),
+    ])
+
+    if (!result) {
+      console.log('[AgentDiagnostics] Text-only draft save still in progress; waiting before completion', {
+        path,
+        chars: content.length,
+      })
+      result = await this.awaitWithTaskSignal(savePromise)
+    }
+    if (result.size === undefined) {
+      this.emitter.toolResult(id, 'create_file', result as never)
+      contextManager.push({
+        role: 'system',
+        content: `The draft text was not saved because create_file failed for ${path}. Retry with a shorter create_file call or a safer path.`,
+      } as ChatMessageParam)
+      return null
+    }
+
+    if (this.options.userId) {
+      try {
+        const persisted = await persistSandboxTaskFile({
+          userId: this.options.userId,
+          conversationId,
+          path,
+        })
+        if (!persisted) {
+          throw new Error('The saved draft could not be copied to durable task storage.')
+        }
+      } catch (error) {
+        this.emitter.toolResult(id, 'create_file', {
+          error: 'The draft was written in the active workspace but could not be saved durably.',
+          path,
+        } as never)
+        throw error
+      }
+    }
+
+    this.emitter.toolResult(id, 'create_file', result as never)
+
     if (isLastStep) {
       this.emitter.artifactCreated({
         id: `artifact_${id}`,
@@ -2810,45 +3170,6 @@ export class AgentLoop {
         deliverable: true,
         createdAt: Date.now(),
       })
-    }
-
-    const savePromise = createFileInSandbox(conversationId, path, content)
-    const result = await Promise.race([
-      savePromise,
-      this.wait(TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS).then(() => null),
-    ])
-
-    if (!result) {
-      this.emitter.toolResult(id, 'create_file', {
-        action: 'created',
-        path,
-        content: previewContent,
-        size: content.length,
-      } as never)
-      void savePromise
-        .then(saveResult => {
-          console.log('[AgentDiagnostics] Text-only draft save completed after visible artifact', {
-            path,
-            size: saveResult.size,
-            hasError: saveResult.size === undefined,
-          })
-        })
-        .catch(err => {
-          console.warn('[AgentDiagnostics] Text-only draft save finished after completion with error', {
-            path,
-            error: err instanceof Error ? err.message : String(err),
-          })
-        })
-    } else {
-      this.emitter.toolResult(id, 'create_file', result as never)
-    }
-
-    if (result && result.size === undefined) {
-      contextManager.push({
-        role: 'system',
-        content: `The draft text was not saved because create_file failed for ${path}. Retry with a shorter create_file call or a safer path.`,
-      } as ChatMessageParam)
-      return null
     }
 
     state.createdFiles.add(path)
@@ -2883,7 +3204,7 @@ export class AgentLoop {
         state.deliverableVerificationDone = false
         contextManager.push({
           role: 'system',
-          content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${path}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next useful section. Do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
+          content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${path}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next complete, substantive section (normally 350–650 words when that much remains). Do not repeat existing headings or paragraphs, do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
         } as ChatMessageParam)
         return 'STREAMING'
       }
@@ -3064,6 +3385,7 @@ export class AgentLoop {
     const injectionDetected = latestUserMessage ? isPromptInjection(latestUserMessage.content || '') : false
     if (injectionDetected) {
       this.emitter.textDelta("I can't reveal or override internal instructions. Send the task normally and I'll work on it.")
+      await this.options.beforeDone?.()
       this.emitter.done()
       this.emitter.close()
       return
@@ -3073,7 +3395,7 @@ export class AgentLoop {
 
     const log = createAgentLogger()
 
-    const scopedMessages = scopedMessagesForAgentTask(messages)
+    const scopedMessages = scopeAgentTaskMessages(messages)
     const strategy = resolveStrategy(scopedMessages)
     const complexity = estimateTaskComplexity(scopedMessages)
     const iterationLimit = computeIterationLimit(complexity)
@@ -3083,6 +3405,9 @@ export class AgentLoop {
 
     const isBuild = strategy.type === 'build' || strategy.type === 'code'
     const state = createInitialState(isBuild, timeouts)
+    const creditAttempt = Number.isFinite(Number(this.options.workerAttempt))
+      ? Math.max(1, Math.floor(Number(this.options.workerAttempt)))
+      : 1
     state.runMaxDurationMs = this.options.runMaxDurationMs ?? AGENT_RUN_MAX_DURATION_MS
     state.deadlineFinalizationBufferMs = this.options.deadlineFinalizationBufferMs ?? AGENT_DEADLINE_FINALIZATION_BUFFER_MS
     state.deadlineModelTurnTimeoutMs = this.options.deadlineModelTurnTimeoutMs ?? AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS
@@ -3135,6 +3460,24 @@ export class AgentLoop {
       systemPrompt,
       processedMessages as ChatMessageParam[]
     )
+    if ((this.options.recoveryAttempt || 1) > 1) {
+      const recoveryStateGuidance = this.options.recoveryMode === 'graceful_handoff'
+        ? 'The existing browser session and remote workspace may be reusable, and durable files/event history may already reflect successful side effects from that attempt.'
+        : 'This is stale-lease recovery: the old sandbox was kill-fenced and the browser is fresh. Only durable files, results, and event history may remain; do not assume any prior browser session state is reusable.'
+      contextManager.push({
+        role: 'system',
+        content: [
+          `WORKER RECOVERY ATTEMPT ${this.options.recoveryAttempt}: a previous worker lost its lease before it could commit a terminal result.`,
+          recoveryStateGuidance,
+          'Before any write, submit, send, purchase, delete, upload, or other irreversible action, inspect the current state with list_files/read_file and browser_screenshot/browser_get_content as applicable.',
+          'Reuse completed work and continue from verified state. Do not repeat an irreversible action merely because it is absent from the original messages or plan.',
+          'If state cannot be verified safely, stop with the concrete uncertainty instead of guessing or duplicating the action.',
+          this.options.recoveryContext
+            ? `Durable recovery summary (completed results/artifacts only; verify before relying on it): ${this.options.recoveryContext}`
+            : '',
+        ].filter(Boolean).join(' '),
+      } as ChatMessageParam, 10)
+    }
     if (scopedMessages.some(m => m.role === 'assistant' && containsFalseCapabilityRefusal(m.content))) {
       contextManager.push({
         role: 'system',
@@ -3158,7 +3501,7 @@ export class AgentLoop {
     })
     const toolRetry = new ToolRetry(log.child('Retry'))
     const errorRecovery = new ErrorRecoveryEngine()
-    const streamProcessor = new StreamProcessor(this.emitter, timeouts)
+    const streamProcessor = new StreamProcessor(this.emitter, timeouts, signal)
     const workingMemory = new WorkingMemory()
     state.workingMemory = workingMemory
     const browserFrameStream = {
@@ -3174,6 +3517,11 @@ export class AgentLoop {
         this.emitter.browserFrame(frame)
       })
     }
+    const releaseBrowserFrameStream = () => {
+      browserFrameStream.unsubscribe?.()
+      browserFrameStream.unsubscribe = null
+      browserFrameStream.lastFrameAt = 0
+    }
     const toolPipeline = new ToolPipeline(this.emitter, conversationId, {
       cache: toolCache,
       retry: toolRetry,
@@ -3182,8 +3530,10 @@ export class AgentLoop {
       recovery: errorRecovery,
       signal,
       creditRunId: this.options.creditRunId,
+      creditAttempt,
       userId: this.options.userId,
       ensureBrowserFrameStream,
+      registerInflightToolDrain: this.options.registerInflightToolDrain,
     })
     const policyEngine = new PolicyEngine()
     const reflectionEngine = new ReflectionEngine()
@@ -3192,24 +3542,27 @@ export class AgentLoop {
     const outputVerifier = new OutputVerifier()
     const recordPlannerUsage = async (usage: CreditTokenUsage, chargeId: string) => {
       if (!this.options.userId || !this.options.conversationId || !this.options.creditRunId) return
-      try {
-        const recorded = await chargeServerTokenUsage(
-          this.options.userId,
-          this.options.conversationId,
-          this.options.creditRunId,
-          usage,
-          chargeId,
-        )
-        if (recorded?.created) this.emitter.creditEvent(recorded.entry)
-      } catch (error) {
-        log.warn('Failed to record planner token usage; continuing task', {
-          error: error instanceof Error ? error.message : String(error),
-          chargeId,
-        })
-      }
+      const recorded = await chargeServerTokenUsage(
+        this.options.userId,
+        this.options.conversationId,
+        this.options.creditRunId,
+        usage,
+        `attempt:${creditAttempt}:${chargeId}`,
+      )
+      if (recorded?.created) this.emitter.creditEvent(recorded.entry)
     }
     const assertPlannerCreditRunway = async () => this.assertServerCreditRunwayCached()
-    const planManager = new PlanManager(this.emitter, planningMessages, complexity, requiredFirstSteps, effectiveCustomInstructions, recordPlannerUsage, assertPlannerCreditRunway, this.options.skipStartupAcknowledgement === true)
+    const planManager = new PlanManager(
+      this.emitter,
+      planningMessages,
+      complexity,
+      requiredFirstSteps,
+      effectiveCustomInstructions,
+      recordPlannerUsage,
+      assertPlannerCreditRunway,
+      this.options.skipStartupAcknowledgement === true,
+      signal,
+    )
 
     planManager.setStateRef(state)
     const startupPlanUsed = this.options.startupPlan?.items?.length
@@ -3222,10 +3575,180 @@ export class AgentLoop {
     let lastStreamResult: StreamResult | null = null
     let lastStreamWasCompactNarration = false
     let lastToolResults: ToolExecutionResult[] = []
+    let pendingPaidTurnProgress: PaidModelTurnProgressSnapshot | null = null
+    let pendingCadenceTurnProgress: {
+      attemptIteration: number
+      visibleActionFrontier: number
+    } | null = null
+    let consecutivePaidNoProgressTurns = 0
+    let consecutivePaidInternalRecoveryTurns = 0
     let cumulativeInputTokens = 0
     let cumulativeOutputTokens = 0
     let cumulativeCost = 0
+    let narrationSidecarPromise: Promise<void> | null = null
+    let narrationSidecarAbortController: AbortController | null = null
+    let narrationSidecarSequence = 0
+    let narrationIntentEpoch = 0
     let terminalReason = 'unknown'
+
+    const settleNarrationSidecar = async (): Promise<void> => {
+      const pending = narrationSidecarPromise
+      if (pending) await pending
+    }
+
+    const injectRunLiveDirectives = async (
+      options: { sealWhenEmpty?: boolean } = {},
+    ): Promise<false | 'injected'> => {
+      const result = await this.injectLiveDirectives(contextManager, options)
+      if (!result) return false
+
+      narrationIntentEpoch += 1
+      narrationSidecarAbortController?.abort(
+        new DOMException('Narration superseded by a newer live instruction.', 'AbortError'),
+      )
+      return result
+    }
+
+    /**
+     * Cadence narration has its own tiny LLM request so action selection never
+     * waits for prose and a provider cannot accidentally omit narration from a
+     * native tool argument. Only one request may run at a time; later actions
+     * remain fully concurrent and are retained as cadence remainder.
+     */
+    const launchNarrationSidecarIfDue = (): void => {
+      if (narrationSidecarPromise) return
+      if (!shouldUseNaturalCadenceNarration(state, this.options.messages)) return
+      if (!beginNarrationCadenceAttempt(state)) return
+
+      const sequence = ++narrationSidecarSequence
+      const visibleActionFrontier = state.visibleToolActionsSinceLastNarration
+      const workLogFrontier = state.workLog.at(-1)
+      const recordStepIdx = state.currentStepIdx
+      const recordIteration = state.iterations
+      const afterToolId = Array.from(state.visibleNarrationToolStartIds).at(-1)
+      const intentEpoch = narrationIntentEpoch
+      const sidecarAbortController = new AbortController()
+      const narrationAbortSignal = signal
+        ? AbortSignal.any([signal, sidecarAbortController.signal])
+        : sidecarAbortController.signal
+      narrationSidecarAbortController = sidecarAbortController
+      const requestMessages = compactForcedNarrationMessages(
+        state,
+        contextManager.getMessages(),
+      )
+
+      const sidecarTask = (async () => {
+        try {
+          await this.assertServerCreditRunwayCached()
+          const response = await createCompletion({
+            model,
+            messages: requestMessages,
+            // A small amount of lexical and syntactic freedom prevents the
+            // short sidecar from collapsing into one repeated status template;
+            // the evidence-only prompt and post-generation guards still keep
+            // the update factual.
+            temperature: 0.55,
+            max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
+            reasoning: NO_THINKING_REASONING,
+            includeTemporalContext: false,
+            requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,
+            retryMaxAttempts: 0,
+            abortSignal: narrationAbortSignal,
+          })
+          const content = response.choices[0]?.message?.content?.trim() || ''
+          const usage = completionUsageForNarration(
+            model,
+            requestMessages,
+            response,
+            content,
+          )
+
+          if (intentEpoch !== narrationIntentEpoch) {
+            retryNarrationCadenceAttemptWithoutNewAction(state)
+            return
+          }
+
+          if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
+            const recorded = await chargeServerTokenUsage(
+              this.options.userId,
+              this.options.conversationId,
+              this.options.creditRunId,
+              usage,
+              `attempt:${creditAttempt}:narration:${sequence}`,
+            )
+            if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+          }
+          cumulativeInputTokens += usage.promptTokens
+          cumulativeOutputTokens += usage.completionTokens
+          cumulativeCost += usage.cost
+
+          if (intentEpoch !== narrationIntentEpoch) {
+            retryNarrationCadenceAttemptWithoutNewAction(state)
+            return
+          }
+
+          const remainingVisibleActions = Math.max(
+            0,
+            state.visibleToolActionsSinceLastNarration - visibleActionFrontier,
+          )
+          const review = acceptProgressNarration(state, content, {
+            requireSignal: false,
+            remainingVisibleActions,
+            resetCadence: true,
+            workLogFrontier,
+            recordStepIdx,
+            recordIteration,
+          })
+          if (review.status !== 'accepted') {
+            retryNarrationCadenceAttemptWithoutNewAction(state)
+            console.warn('[AgentDiagnostics] LLM narration sidecar returned unusable progress', {
+              sequence,
+              status: review.status,
+              step: recordStepIdx,
+              visibleActionFrontier,
+            })
+            return
+          }
+
+          if (intentEpoch !== narrationIntentEpoch) {
+            retryNarrationCadenceAttemptWithoutNewAction(state)
+            return
+          }
+
+          this.emitter.progressUpdate(review.text, {
+            stepIndex: recordStepIdx,
+            afterToolId,
+            remainingVisibleActions,
+          })
+          console.log('[AgentDiagnostics] Emitted asynchronous LLM progress narration', {
+            sequence,
+            step: recordStepIdx,
+            visibleActionFrontier,
+            remainingVisibleActions,
+            chars: review.text.length,
+          })
+        } catch (error) {
+          retryNarrationCadenceAttemptWithoutNewAction(state)
+          if (isOutOfCreditsError(error) && error.record?.created) {
+            this.emitter.creditEvent(error.record.entry)
+          }
+          if (intentEpoch === narrationIntentEpoch && !sidecarAbortController.signal.aborted) {
+            console.warn('[AgentDiagnostics] LLM narration sidecar failed without blocking task actions', {
+              sequence,
+              step: recordStepIdx,
+              visibleActionFrontier,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
+        } finally {
+          if (narrationSidecarSequence === sequence) {
+            narrationSidecarPromise = null
+            narrationSidecarAbortController = null
+          }
+        }
+      })()
+      narrationSidecarPromise = sidecarTask
+    }
 
     // ── Main Loop ─────────────────────────────────────────────────────
 
@@ -3292,7 +3815,118 @@ export class AgentLoop {
 
           // ── STREAMING ─────────────────────────────────────────────
           case 'STREAMING': {
+            const liveDirectiveInjected = await injectRunLiveDirectives()
+            if (liveDirectiveInjected) {
+              // A new user directive starts a fresh intent boundary rather than
+              // consuming the autonomous recovery allowance from the old intent.
+              pendingPaidTurnProgress = null
+              pendingCadenceTurnProgress = null
+              consecutivePaidNoProgressTurns = 0
+              consecutivePaidInternalRecoveryTurns = 0
+              state.toolJsonRecoveryCount = 0
+              state.suppressedResearchToolName = null
+              log.info('Injected live user directive before model turn')
+            }
+
+            if (pendingCadenceTurnProgress) {
+              const cadenceTurn = pendingCadenceTurnProgress
+              pendingCadenceTurnProgress = null
+              const matchingPaidTurn = pendingPaidTurnProgress?.iteration === cadenceTurn.attemptIteration
+                ? pendingPaidTurnProgress
+                : null
+              retryNarrationCadenceAfterNoProgress(state, {
+                ...cadenceTurn,
+                acceptedVisibleAction:
+                  matchingPaidTurn?.acceptedToolCall === true &&
+                  state.visibleToolActionsSinceLastNarration > cadenceTurn.visibleActionFrontier,
+              })
+            }
+
+            if (pendingPaidTurnProgress) {
+              const priorTurn = pendingPaidTurnProgress
+              pendingPaidTurnProgress = null
+              const progressDecision = decidePaidModelTurnProgress(
+                priorTurn,
+                state.currentStepIdx,
+                consecutivePaidNoProgressTurns,
+                consecutivePaidInternalRecoveryTurns,
+              )
+              consecutivePaidNoProgressTurns = progressDecision.consecutiveNoProgressTurns
+              consecutivePaidInternalRecoveryTurns = progressDecision.consecutiveInternalRecoveryTurns
+
+              if (progressDecision.kind === 'stop') {
+                if (canAdvanceResearchAfterPaidNoProgress(state)) {
+                  const stepBeforeAdvance = state.currentStepIdx
+                  const recoveryEvidence = {
+                    researchCalls: state.stepResearchCallCount,
+                    openedPages: state.stepVisitedUrls.size,
+                    openedDomains: stepOpenedSourceDomains(state).size,
+                  }
+                  const advanceMsg = planManager.handleStepAdvance(state)
+                  if (state.currentStepIdx > stepBeforeAdvance) {
+                    contextManager.compactForStepTransition(state)
+                    if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+                    if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+                    this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                    consecutivePaidNoProgressTurns = 0
+                    consecutivePaidInternalRecoveryTurns = 0
+                    this.options.diagnostics?.({
+                      type: 'paid_no_progress_research_advance',
+                      data: {
+                        iteration: priorTurn.iteration,
+                        step: stepBeforeAdvance,
+                        nextStep: state.currentStepIdx,
+                        ...recoveryEvidence,
+                      },
+                    })
+                    console.warn('[AgentDiagnostics] Advanced research phase at paid no-progress boundary using existing evidence', {
+                      step: stepBeforeAdvance,
+                      nextStep: state.currentStepIdx,
+                      ...recoveryEvidence,
+                    })
+                    state.lastIterationEnd = Date.now()
+                    phase = 'STREAMING'
+                    break
+                  }
+                }
+
+                if (progressDecision.reason === 'internal_recovery_cap') {
+                  terminalReason = 'paid_internal_recovery_cap'
+                } else {
+                  terminalReason = 'paid_no_progress_cap'
+                }
+                this.options.diagnostics?.({
+                  type: terminalReason,
+                  data: {
+                    iteration: priorTurn.iteration,
+                    step: state.currentStepIdx,
+                    stepBefore: priorTurn.stepIdxBefore,
+                    visibleText: priorTurn.visibleText,
+                    acceptedToolCall: priorTurn.acceptedToolCall,
+                    internalRecoveryScheduled: priorTurn.internalRecoveryScheduled || null,
+                    consecutiveNoProgressTurns: consecutivePaidNoProgressTurns,
+                    consecutiveInternalRecoveryTurns: consecutivePaidInternalRecoveryTurns,
+                  },
+                })
+
+                const planLength = state.currentPlanItems?.length ?? 0
+                const planAlreadyComplete = planLength > 0 && state.currentStepIdx >= planLength
+                if (planAlreadyComplete) {
+                  phase = 'COMPLETE'
+                  break
+                }
+
+                state.lastModelErrorForUser =
+                  progressDecision.reason === 'internal_recovery_cap'
+                    ? 'The agent could not produce a valid concrete action after two bounded repair attempts. Please retry the task.'
+                    : 'The agent could not produce a concrete next action after one recovery attempt. Please retry the task.'
+                phase = 'ERROR'
+                break
+              }
+            }
+
             state.iterations++
+            const modelTurnStartStepIdx = state.currentStepIdx
 
             // Rate limit delay
             const elapsed = Date.now() - state.lastIterationEnd
@@ -3304,28 +3938,66 @@ export class AgentLoop {
               state.iterationDelayMs = Math.max(MIN_ITERATION_DELAY_MS, state.iterationDelayMs - 500)
             }
 
-            if (this.injectLiveDirectives(contextManager)) {
-              log.info('Injected live user directive before model turn')
-            }
-
             this.maybeStartDeadlineFinalization(state, contextManager)
 
             // Context trimming
             contextManager.compactForModelCall(state)
             contextManager.trimIfNeeded(state)
 
+            const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
+            // Progress prose is generated by the independent sidecar after
+            // completed actions. Keep the action request schema minimal and
+            // never make tool selection wait for narration.
+            const cadenceNarrationInMainTurn = false
+            let modelRequestMessagesForUsage = [...contextManager.getMessages()]
+            let modelRequestToolsForUsage: unknown[] = []
+            let streamToolCallPolicy: StreamToolCallPolicy = {
+              allowParallelSourceExtractionCalls: false,
+              maxParallelSourceExtractionCalls: 1,
+              cadenceProgressUpdateEnabled: false,
+            }
             const response = await this.callLLMWithRetry(
-              model, contextManager.getMessages(), state, strategy, toolRegistry
+              model,
+              modelRequestMessagesForUsage,
+              state,
+              strategy,
+              toolRegistry,
+              cadenceNarrationInMainTurn,
+              (requestMessages, requestTools) => {
+                modelRequestMessagesForUsage = [...requestMessages]
+                modelRequestToolsForUsage = [...requestTools]
+              },
+              policy => {
+                streamToolCallPolicy = policy
+              },
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
 
+            const cadenceNarrationForRequestedStream =
+              cadenceNarrationInMainTurn &&
+              streamToolCallPolicy.cadenceProgressUpdateEnabled === true
+
             if (!response) {
+              // A deterministic provider rejection is terminal. Fence it
+              // before cadence or generic null-stream recovery can mutate
+              // state and accidentally schedule another paid iteration.
+              if (state.lastModelErrorForUser) {
+                phase = 'ERROR'
+                break
+              }
+              if (cadenceNarrationForRequestedStream) {
+                retryNarrationCadenceAttemptWithoutNewAction(state)
+              } else if (cadenceNarrationInMainTurn) {
+                // Tool availability was finalized before the provider request.
+                // A text-only request cannot carry progress_update, so keep the
+                // cadence due at the same visible-action frontier.
+                retryNarrationCadenceAttemptWithoutNewAction(state)
+              }
               if (state.pendingToolJsonRecovery) {
                 state.pendingToolJsonRecovery = false
                 state.lastModelErrorForUser = null
                 state.consecutiveNullStreams = 0
-                const recoveringFinalSavedDeliverable = finalSavedDeliverableTurn(state, this.options.messages)
-                state.forceTextNextIteration = !recoveringFinalSavedDeliverable && state.taskStrategy !== 'browse'
+                state.forceTextNextIteration = false
                 contextManager.push({
                   role: 'system',
                   content: toolJsonRecoveryMessage(state, this.options.messages),
@@ -3335,8 +4007,7 @@ export class AgentLoop {
               }
 
               const wasForcedNarrationRecovery = state.forceTextNextIteration
-              const wasCompactCadenceNarration = !wasForcedNarrationRecovery &&
-                shouldUseNaturalCadenceNarration(state, this.options.messages)
+              const wasCompactCadenceNarration = false
               state.consecutiveNullStreams = (state.consecutiveNullStreams || 0) + 1
               console.error('[AgentDiagnostics] Stream unavailable after model call', {
                 attempt: state.consecutiveNullStreams,
@@ -3352,17 +4023,24 @@ export class AgentLoop {
                 compactCadenceNarration: wasCompactCadenceNarration,
               })
               log.info(`Agent returned no stream (attempt ${state.consecutiveNullStreams}/1)`)
-              if (state.lastModelErrorForUser) {
-                this.emitter.error(state.lastModelErrorForUser)
-                phase = 'ERROR'
+              if (
+                cadenceNarrationForRequestedStream &&
+                state.currentPlanItems &&
+                state.currentStepIdx < state.currentPlanItems.length &&
+                state.consecutiveNullStreams <= 2
+              ) {
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                contextManager.push({
+                  role: 'system',
+                  content: cadenceNarrationActionRetryMessage('the prior cadence-enabled action turn did not start streaming'),
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
                 break
               }
               if (wasForcedNarrationRecovery || wasCompactCadenceNarration) {
                 const phaseEndNarrationWasPending = state.phaseEndNarrationPending
-                state.forceTextNextIteration = false
-                state.phaseEndNarrationPending = false
-                state.forcedNarrationRepairAttempts = 0
-                state.visibleToolActionsSinceLastNarration = 0
+                deferNarrationCadenceAttempt(state)
                 state.consecutiveNullStreams = 0
                 state.iterationDelayMs = MIN_ITERATION_DELAY_MS
                 state.lastIterationEnd = Date.now()
@@ -3492,7 +4170,7 @@ export class AgentLoop {
                   break
                 }
                 if (!hasSavedFinalDeliverable && state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP) {
-                  this.emitter.error('The final file write could not start quickly enough. Please retry the task.')
+                  state.lastModelErrorForUser = 'The final file write could not start quickly enough. Please retry the task.'
                   phase = 'ERROR'
                   break
                 }
@@ -3515,45 +4193,90 @@ export class AgentLoop {
                 break
               }
               if (!wasForcedNarrationRecovery && state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
-                state.forceTextNextIteration = true
+                deferNarrationCadenceAttempt(state)
                 state.iterationDelayMs = MIN_ITERATION_DELAY_MS
                 contextManager.push({
                   role: 'system',
-                  content: 'MODEL START RECOVERY: The previous full model turn timed out before streaming. Do not retry the same heavy context. Use the compact forced-narration path next so the UI gets a concrete progress update quickly, then continue from the active phase.',
+                  content: 'MODEL START RECOVERY: The previous model turn timed out before streaming. Continue the active phase immediately with one concrete native tool call. Do not detour into progress narration, planning, apologies, or a final answer.',
                 } as ChatMessageParam)
                 state.lastIterationEnd = Date.now()
-                console.log('[Agent] Switching to compact progress recovery after empty stream')
+                console.log('[Agent] Continuing with a concrete action after empty stream')
                 break
               }
-              this.emitter.error('Agent could not start the next action quickly enough. Please retry the task.')
+              state.lastModelErrorForUser = 'Agent could not start the next action quickly enough. Please retry the task.'
               phase = 'ERROR'
               break
             }
+            if (cadenceNarrationInMainTurn && !cadenceNarrationForRequestedStream) {
+              // Tool availability is finalized inside callLLMWithRetry. If
+              // filtering left this as a text-only request, release the cadence
+              // attempt at the same action frontier instead of requiring a
+              // tool field that the provider had no tool schema to emit.
+              retryNarrationCadenceAttemptWithoutNewAction(state)
+            }
+            const cadenceNarrationForOpenedStream = cadenceNarrationForRequestedStream
             state.consecutiveNullStreams = 0
 
             // Process stream
             let processedCompactNarrationTurn = false
+            streamProcessor.beginBufferedEmission()
             try {
               lastStreamWasCompactNarration = false
-              processedCompactNarrationTurn =
-                (state.forceTextNextIteration && !state.exactExtractionGuardPending) ||
-                (!state.forceTextNextIteration && shouldUseNaturalCadenceNarration(state, this.options.messages))
+              processedCompactNarrationTurn = state.forceTextNextIteration && !state.exactExtractionGuardPending
               lastStreamWasCompactNarration = processedCompactNarrationTurn
               streamProcessor.setTierTimeouts(tierTimeoutsForIteration(state, this.options.messages, processedCompactNarrationTurn))
               lastStreamResult = await streamProcessor.processStream(
                 response,
                 state,
+                cadenceNarrationForOpenedStream,
+                streamOutput => approximateStreamUsageForCompletedTurn(
+                  model,
+                  modelRequestMessagesForUsage,
+                  streamOutput,
+                  modelRequestToolsForUsage,
+                ),
+                streamToolCallPolicy,
               )
             } catch (streamError) {
+              if (cadenceNarrationForOpenedStream) {
+                retryNarrationCadenceAttemptWithoutNewAction(state)
+              }
+              streamProcessor.discardBufferedEmission()
               log.info(`Stream error: ${streamError instanceof Error ? streamError.message : String(streamError)}`)
-              phase = this.handleStreamError(streamError, state, contextManager, state.buildTask)
+              phase = this.handleStreamError(
+                streamError,
+                state,
+                contextManager,
+                state.buildTask,
+                cadenceNarrationForOpenedStream,
+              )
               break
             }
+            // Timeout nudges are a consecutive-stall budget, not a lifetime
+            // run budget. Reset only after a stream finishes normally. A
+            // partial tool envelope returned from a timed-out stream is still
+            // part of the same stall sequence and must not erase that budget.
+            if (!lastStreamResult.timedOut) state.timeoutNudgeCount = 0
+            if (cadenceNarrationForOpenedStream) finishNarrationCadenceAttempt(state)
 
             if (lastStreamResult.leakageDetected) {
               terminalReason = 'safety_leakage'
-              phase = 'COMPLETE'
-              break
+              const normalizedWorkerAttempt = Number.isFinite(Number(this.options.workerAttempt))
+                ? Math.max(1, Math.floor(Number(this.options.workerAttempt)))
+                : 1
+              if (conversationId) {
+                try {
+                  await sealLiveDirectiveRun(
+                    conversationId,
+                    this.options.userId,
+                    this.options.creditRunId,
+                    normalizedWorkerAttempt,
+                  )
+                } catch (error) {
+                  streamProcessor.discardBufferedEmission()
+                  throw error
+                }
+              }
             }
 
             // Log costs. Provider usage metadata can arrive late or be unavailable
@@ -3563,7 +4286,7 @@ export class AgentLoop {
               contextManager.getMessages(),
               lastStreamResult,
             )
-            if (!lastStreamResult.usage) {
+            if (lastStreamResult.usageEstimated || !lastStreamResult.usage) {
               console.warn('[AgentDiagnostics] Missing model usage metadata; continuing with estimated usage', {
                 iteration: state.iterations,
                 phase: state.currentPhase,
@@ -3577,22 +4300,84 @@ export class AgentLoop {
             cumulativeOutputTokens += u.completionTokens
             cumulativeCost += u.cost
             console.log(`[COST] iter=${state.iterations} in=${u.promptTokens} out=${u.completionTokens} cost=$${u.cost.toFixed(6)} totalCost=$${cumulativeCost.toFixed(6)}`)
-            if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
-              try {
+            const usageDebitStartedAt = Date.now()
+            try {
+              if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
                 const recorded = await chargeServerTokenUsage(
                   this.options.userId,
                   this.options.conversationId,
                   this.options.creditRunId,
                   u,
-                  `tokens:${state.iterations}`,
+                  `attempt:${creditAttempt}:tokens:${state.iterations}`,
                 )
                 if (recorded?.created) this.emitter.creditEvent(recorded.entry)
-              } catch (error) {
-                log.warn('Failed to record iteration token usage; continuing task', {
-                  error: error instanceof Error ? error.message : String(error),
-                  iteration: state.iterations,
-                })
               }
+              // Model text and ordinary provisional actions become
+              // durable/visible only after the corresponding debit commits.
+              // Validated current-step file writes stream their action and LIVE
+              // preview immediately; discardBufferedEmission settles those
+              // optimistic actions if this turn cannot commit.
+              // A cadence violation is only possible when the turn supplied no
+              // executable tool call; useful actions never enter this repair
+              // branch merely because display narration was absent or invalid.
+              if (lastStreamResult.cadenceProgressViolation) {
+                streamProcessor.discardBufferedEmission()
+              } else {
+                streamProcessor.commitBufferedEmission()
+                if (lastStreamResult.cadenceProgressUpdate) {
+                  acceptProgressNarration(state, lastStreamResult.cadenceProgressUpdate, {
+                    requireSignal: false,
+                    remainingVisibleActions: lastStreamResult.cadenceProgressVisibleActionsAfter || 0,
+                    resetCadence: true,
+                  })
+                }
+              }
+              console.log(lastStreamResult.cadenceProgressViolation
+                ? '[AgentDiagnostics] Discarded cadence-contract-invalid model-turn emissions'
+                : '[AgentDiagnostics] Released billed model-turn emissions', {
+                iteration: state.iterations,
+                usageDebitMs: Date.now() - usageDebitStartedAt,
+                firstContentHeldMs: lastStreamResult.contentStreamingStartTime === null
+                  ? 0
+                  : Date.now() - lastStreamResult.contentStreamingStartTime,
+                cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
+              })
+              pendingPaidTurnProgress = {
+                iteration: state.iterations,
+                stepIdxBefore: modelTurnStartStepIdx,
+                visibleText: !lastStreamResult.cadenceProgressViolation &&
+                  lastStreamResult.assistantContent.trim().length > 0,
+                acceptedToolCall: false,
+                ...(lastStreamResult.cadenceProgressViolation
+                  ? { internalRecoveryScheduled: 'display_contract' as const }
+                  : {}),
+              }
+              pendingCadenceTurnProgress = cadenceNarrationForOpenedStream
+                ? {
+                    attemptIteration: state.iterations,
+                    visibleActionFrontier: cadenceVisibleActionFrontier,
+                  }
+                : null
+            } catch (error) {
+              streamProcessor.discardBufferedEmission()
+              throw error
+            }
+
+            if (lastStreamResult.cadenceProgressViolation) {
+              contextManager.push({
+                role: 'system',
+                content: cadenceNarrationActionRetryMessage(
+                  lastStreamResult.cadenceProgressViolation.reason,
+                ),
+              } as ChatMessageParam)
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
+
+            if (lastStreamResult.leakageDetected) {
+              phase = 'COMPLETE'
+              break
             }
 
             updatePhase(state)
@@ -3600,19 +4385,25 @@ export class AgentLoop {
             if (
               processedCompactNarrationTurn &&
               !state.phaseEndNarrationPending &&
-              lastStreamResult.toolCalls.size === 0 &&
-              lastStreamResult.assistantContent.trim() &&
-              sanitizeNarrationText(lastStreamResult.assistantContent, {
-                requireSignal: false,
-                maxSentences: 2,
-                maxLength: 300,
-              })
+              lastStreamResult.toolCalls.size === 0
             ) {
-              markPhaseNarrationEmitted(state)
-              state.forceTextNextIteration = false
-              state.forcedNarrationRepairAttempts = 0
-              state.visibleToolActionsSinceLastNarration = 0
-              state.consecutiveNoToolCalls = 0
+              const narration = acceptProgressNarration(state, lastStreamResult.assistantContent, {
+                requireSignal: false,
+                remainingVisibleActions: 0,
+              })
+              if (narration.status === 'accepted') {
+                state.consecutiveNoToolCalls = 0
+              } else {
+                deferNarrationCadenceAttempt(state)
+                contextManager.push({
+                  role: 'system',
+                  content: 'The optional progress update was skipped because it was empty, invalid, or repeated prior information. Do not retry narration. Continue immediately with the next concrete tool call for the active phase.',
+                } as ChatMessageParam)
+                lastStreamResult = { ...lastStreamResult, assistantContent: '' }
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
             }
 
             if (
@@ -3741,7 +4532,20 @@ export class AgentLoop {
 
             const stepIdxBeforeExec = state.currentStepIdx
 
-            if (this.injectLiveDirectives(contextManager)) {
+            if (await injectRunLiveDirectives()) {
+              for (const toolCall of lastStreamResult.toolCalls.values()) {
+                if (!toolCall.provisionalStartEmitted) continue
+                this.emitter.toolResult(toolCall.id, toolCall.name, {
+                  superseded: true,
+                  error: 'Superseded by a newer live instruction before execution.',
+                } as never)
+                if (state.visibleNarrationToolStartIds.delete(toolCall.id)) {
+                  state.visibleToolActionsSinceLastNarration = Math.max(
+                    0,
+                    state.visibleToolActionsSinceLastNarration - 1,
+                  )
+                }
+              }
               log.info('Live user directive superseded pending tool calls')
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -3752,7 +4556,7 @@ export class AgentLoop {
               startupReadyAwaited = true
               const waitStartedAt = Date.now()
               try {
-                await this.options.startupReadyPromise
+                await this.awaitWithTaskSignal(this.options.startupReadyPromise)
                 console.log('[AgentDiagnostics] Tool startup prerequisites ready', {
                   elapsedMs: Date.now() - waitStartedAt,
                   step: state.currentStepIdx,
@@ -3763,7 +4567,7 @@ export class AgentLoop {
                   elapsedMs: Date.now() - waitStartedAt,
                   error: error instanceof Error ? error.message : String(error),
                 })
-                this.emitter.error(userErrorMessage(error, 'Task setup failed before tools could run. Please try again.'))
+                state.lastModelErrorForUser = userErrorMessage(error, 'Task setup failed before tools could run. Please try again.')
                 phase = 'ERROR'
                 break
               }
@@ -3778,34 +4582,145 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
+            launchNarrationSidecarIfDue()
+            const currentPaidTurnProgress = paidTurnProgressForIteration(
+              pendingPaidTurnProgress,
+              state.iterations,
+            )
+            if (currentPaidTurnProgress) {
+              currentPaidTurnProgress.acceptedToolCall ||= lastToolResults.some(
+                // A cache hit is useful context, but it is not a newly admitted
+                // action. Counting repeated cached reads as paid-turn progress
+                // hid source loops from the bounded no-progress fence.
+                result => result.acceptedForExecution === true && result.cached !== true,
+              )
+            }
 
-            if (lastToolResults.some(isMalformedToolArgumentsRecovery)) {
+            const malformedToolResults = lastToolResults.filter(isMalformedToolArgumentsRecovery)
+            if (malformedToolResults.length > 0) {
+              const acceptedSiblingResults = lastToolResults.filter(
+                result => result.acceptedForExecution === true && !isMalformedToolArgumentsRecovery(result),
+              )
+              // A provider may return a valid source call beside an incomplete
+              // streamed sibling. Keep every admitted sibling in provider
+              // history before scheduling recovery; otherwise the model never
+              // sees evidence the runtime already gathered and asks for the
+              // same cached reads again.
+              const executedSiblingCalls = executedToolCallsForProviderHistory(
+                lastStreamResult.toolCalls,
+                acceptedSiblingResults,
+              )
+              if (executedSiblingCalls.length > 0) {
+                const assistantMsg: Record<string, unknown> = {
+                  role: 'assistant',
+                  content: lastStreamResult.assistantContent || null,
+                  tool_calls: executedSiblingCalls.map(tc => ({
+                    id: tc.id,
+                    type: 'function' as const,
+                    function: { name: tc.name, arguments: tc.arguments },
+                  })),
+                }
+                if (ASSISTANT_PROVIDER === 'deepseek' && lastStreamResult.reasoningContent) {
+                  assistantMsg.reasoning_content = lastStreamResult.reasoningContent
+                }
+                contextManager.push(assistantMsg as unknown as ChatMessageParam)
+                for (const msg of toolPipeline.buildToolResultMessages(acceptedSiblingResults, state)) {
+                  contextManager.push(msg as unknown as ChatMessageParam, 4)
+                }
+                for (const result of acceptedSiblingResults) toolRegistry.recordCall(result.tc.name)
+              } else if (lastStreamResult.assistantContent) {
+                contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              }
+
+              state.toolJsonRecoveryCount += 1
+              if (currentPaidTurnProgress) {
+                currentPaidTurnProgress.internalRecoveryScheduled = 'malformed_tool_arguments'
+              }
               state.consecutiveNoToolCalls = 0
               state.consecutiveNullStreams = 0
               state.forceTextNextIteration = false
               state.iterationDelayMs = MIN_ITERATION_DELAY_MS
-              state.recentToolCalls = []
-              state.recentToolSequence = []
-              contextManager.push({
-                role: 'system',
-                content: [
-                  'TOOL JSON RECOVERY: The previous model turn streamed an incomplete or malformed native tool-call argument object before execution.',
-                  'Do not expose this runtime issue to the user.',
-                  'Retry the active step now with exactly one native tool call using complete strict JSON arguments.',
-                  'For web_search, include both action_label and query as real strings; never use placeholder text such as Search Results.',
-                ].join(' '),
-              } as ChatMessageParam)
-              console.warn('[AgentDiagnostics] Reissued tool call after malformed streamed tool arguments', {
-                step: state.currentStepIdx,
-                totalSteps: state.currentPlanItems?.length || 0,
-                tools: lastToolResults.map(result => result.tc.name),
-              })
+
+              if (state.toolJsonRecoveryCount === 1) {
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    'TOOL JSON RECOVERY: One native tool call in the previous model turn streamed an incomplete or malformed argument object before execution.',
+                    'Any valid sibling results are already preserved above; do not request those sources again.',
+                    'Do not expose this runtime issue to the user.',
+                    'Make one bounded repair attempt now with exactly one native tool call using complete strict JSON arguments.',
+                    'For web_search, include both action_label and query as real strings; never use placeholder text such as Search Results.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                console.warn('[AgentDiagnostics] Reissued tool call after malformed streamed tool arguments', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  recoveryAttempt: state.toolJsonRecoveryCount,
+                  malformedTools: malformedToolResults.map(result => result.tc.name),
+                  preservedSiblingTools: acceptedSiblingResults.map(result => result.tc.name),
+                })
+              } else {
+                const malformedResearchTool = malformedToolResults
+                  .map(result => result.tc.name)
+                  .find(name => [
+                    'web_search', 'read_document', 'http_request',
+                    'browser_navigate', 'browser_get_content', 'browser_find_text',
+                  ].includes(name))
+                if (malformedResearchTool) {
+                  state.suppressedResearchToolName = malformedResearchTool
+                  state.stepLoopDetections = Math.max(1, state.stepLoopDetections + 1)
+                }
+
+                if (canAdvanceResearchAfterPaidNoProgress(state)) {
+                  const stepBeforeAdvance = state.currentStepIdx
+                  const advanceMsg = planManager.handleStepAdvance(state)
+                  if (state.currentStepIdx > stepBeforeAdvance) {
+                    contextManager.compactForStepTransition(state)
+                    if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+                    if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+                    this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                    console.warn('[AgentDiagnostics] Advanced research phase after bounded malformed-tool recovery using preserved evidence', {
+                      step: stepBeforeAdvance,
+                      nextStep: state.currentStepIdx,
+                      malformedTools: malformedToolResults.map(result => result.tc.name),
+                      preservedSiblingTools: acceptedSiblingResults.map(result => result.tc.name),
+                    })
+                    state.lastIterationEnd = Date.now()
+                    phase = 'STREAMING'
+                    break
+                  }
+                }
+
+                state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    'TOOL JSON RECOVERY LIMIT REACHED: do not retry the malformed tool route or any source already returned from cache.',
+                    malformedResearchTool
+                      ? `The runtime has disabled ${malformedResearchTool} for the next recovery action.`
+                      : 'The runtime will not allow another same-route JSON repair in this step.',
+                    'Use one materially different available source/search/browser tool, or advance from the evidence already gathered.',
+                    'Do not narrate this internal recovery condition to the user.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                console.warn('[AgentDiagnostics] Switched route after bounded malformed streamed tool arguments', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  recoveryAttempts: state.toolJsonRecoveryCount,
+                  suppressedTool: malformedResearchTool || null,
+                  malformedTools: malformedToolResults.map(result => result.tc.name),
+                  preservedSiblingTools: acceptedSiblingResults.map(result => result.tc.name),
+                })
+              }
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
               break
             }
 
             if (lastToolResults.length > 0 && lastToolResults.every(isDisplayContractRepairResult)) {
+              if (currentPaidTurnProgress) {
+                currentPaidTurnProgress.internalRecoveryScheduled = 'display_contract'
+              }
               if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
                 contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
               }
@@ -3897,7 +4812,7 @@ export class AgentLoop {
               contextManager.push({
                 role: 'system',
                 content: executedParallelSourceBatch
-                  ? 'TOOL EXECUTION NOTE: The runtime executed the allowed parallel source extraction batch, capped at 4 calls. Continue from those source results; use another parallel source batch only if this phase still needs distinct evidence.'
+                  ? 'TOOL EXECUTION NOTE: The runtime executed the one allowed model-selected source batch for this search set, capped at 3 calls. Do not extract more links from that result set. Continue by synthesizing or advancing when the evidence is sufficient, browsing a promising site when rendered exploration is useful, or making a materially different targeted search for a real remaining gap.'
                   : 'TOOL EXECUTION NOTE: Multiple tool calls were requested in one assistant turn, but only safe source extraction calls can run in parallel. Continue from the executed result and call the next required tool separately.',
               } as ChatMessageParam, 2)
             }
@@ -3906,12 +4821,14 @@ export class AgentLoop {
               toolRegistry.recordCall(result.tc.name)
             }
 
-            if (this.injectLiveDirectives(contextManager)) {
-              log.info('Injected live user directive after tool results')
-              state.lastIterationEnd = Date.now()
-              phase = 'STREAMING'
-              break
-            }
+            // Do not drain live directives again at the post-result boundary.
+            // Every continuation from here either reaches STREAMING, whose
+            // entry drain injects the directive immediately before the next
+            // model turn, or COMPLETE, whose atomic seal/drain owns the final
+            // acceptance race. The pre-execution drain above remains the
+            // supersession fence for already-selected tool calls. Polling here
+            // as well made the common result -> next-model path perform two
+            // consecutive empty write transactions without improving safety.
 
             // Goal tracking: record tool contributions
             if (goalTracker.isInitialized()) {
@@ -3967,14 +4884,102 @@ export class AgentLoop {
             // Last-step deliverable created → verify quality before terminating
             if (isLastStep && deliverableCreated) {
               const deliverableResult = lastToolResults.find(isSuccessfulFinalDeliverableWrite)
-              const recoveredPartialWrite = !!(deliverableResult?.result as { partialWriteIncomplete?: boolean } | undefined)?.partialWriteIncomplete
+              const partialRecoveryResult = deliverableResult?.result as {
+                partialWriteIncomplete?: boolean
+                partialWriteRecoveryLimitReached?: boolean
+              } | undefined
+              const recoveredPartialWrite = !!partialRecoveryResult?.partialWriteIncomplete
               if (deliverableResult && recoveredPartialWrite) {
                 const pending = state.partialFileWriteRecoveryPending
                 const path = pending?.path || toolResultPath(deliverableResult) || 'the saved deliverable'
+                if (partialRecoveryResult?.partialWriteRecoveryLimitReached && conversationId && path !== 'the saved deliverable') {
+                  try {
+                    const verifiedContent = await deliverableContentForVerification(conversationId, deliverableResult)
+                    const originalRequest = messages[messages.length - 1]?.content || ''
+                    const verification = outputVerifier.verify(
+                      verifiedContent.content,
+                      verifiedContent.path || path,
+                      originalRequest,
+                      state.taskStrategy,
+                      workingMemory,
+                      state.taskComplexity,
+                    )
+                    if (verifiedContent.path) {
+                      recordWorkLedgerDeliverable(state, {
+                        path: verifiedContent.path,
+                        purpose: 'deliverable',
+                      })
+                    }
+
+                    if (verification.passed) {
+                      state.partialFileWriteRecoveryPending = null
+                      state.partialFileWriteRecoveryNudged = false
+                      state.deliverableVerificationDone = true
+                      state.pendingDeliverableRevision = null
+                      state.currentStepIdx = state.currentPlanItems!.length
+                      terminalReason = 'deliverable_created'
+                      for (let i = stepIdxBeforeExec; i < state.currentStepIdx; i++) {
+                        this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                      }
+                      log.info('Recovered deliverable passed whole-file verification at append recovery limit')
+                      phase = 'COMPLETE'
+                      break
+                    }
+
+                    const appendRecoveryCount = partialAppendRecoveryCountForPath(state, path)
+                    const closingAppendAlreadyGranted =
+                      appendRecoveryCount > PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH ||
+                      state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS
+                    if (!closingAppendAlreadyGranted) {
+                      state.deliverableRevisionCount = MAX_DELIVERABLE_REVISIONS
+                      state.pendingDeliverableRevision = {
+                        path,
+                        failures: verification.failures,
+                        suggestions: verification.suggestions,
+                        createdAt: Date.now(),
+                      }
+                      contextManager.push({
+                        role: 'system',
+                        content: `PARTIAL APPEND RECOVERY LIMIT REACHED: "${path}" has been read back and verified as a whole. Make exactly one final small append_file call to the same path, limited to the most important missing closing material (${verification.failures.join('; ')}). Keep it to roughly 180–300 words, finish at a clean sentence or section boundary, and do not repeat existing content. This is the only remaining append attempt; do not write visible prose or emit <next_step/>.`,
+                      } as ChatMessageParam)
+                      log.info('Partial append recovery limit reached — allowing one bounded closing append')
+                      phase = 'EVALUATING'
+                      break
+                    }
+
+                    state.partialFileWriteRecoveryPending = null
+                    state.partialFileWriteRecoveryNudged = false
+                    state.pendingDeliverableRevision = {
+                      path,
+                      failures: verification.failures,
+                      suggestions: verification.suggestions,
+                      createdAt: Date.now(),
+                    }
+                    state.deliverableVerificationDone = false
+                    terminalReason = 'deliverable_verification_failed'
+                    log.warn('Recovered deliverable still failed verification after bounded closing append', {
+                      path,
+                      failures: verification.failures,
+                    })
+                    phase = 'COMPLETE'
+                    break
+                  } catch (error) {
+                    state.partialFileWriteRecoveryPending = null
+                    state.partialFileWriteRecoveryNudged = false
+                    state.deliverableVerificationDone = false
+                    terminalReason = 'deliverable_verification_failed'
+                    log.warn('Could not verify recovered deliverable after append recovery limit', {
+                      path,
+                      error: error instanceof Error ? error.message : String(error),
+                    })
+                    phase = 'COMPLETE'
+                    break
+                  }
+                }
                 log.info('Recovered partial deliverable write on last step — requiring append continuation')
                 contextManager.push({
                   role: 'system',
-                  content: `PARTIAL DELIVERABLE SAVED: ${path} already exists. Do not call create_file for it again. Next response must be exactly one append_file call to the same path with the next complete missing section, using the full available output budget. Do not emit <next_step/> or any visible prose until a successful append_file call clears this partial-file state.`,
+                  content: `PARTIAL DELIVERABLE SAVED: ${path} already exists. Do not call create_file for it again. Next response must be exactly one append_file call to the same path with the next complete, substantive missing section (normally 350–650 words when that much remains). End at a clean sentence or section boundary and do not repeat existing headings or paragraphs. Do not emit <next_step/> or any visible prose until a successful append_file call clears this partial-file state.`,
                 } as ChatMessageParam)
                 phase = 'EVALUATING'
                 break
@@ -4011,7 +5016,7 @@ export class AgentLoop {
                       state.partialFileWriteRecoveryNudged = false
                       contextManager.push({
                         role: 'system',
-                        content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${continuationPath}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next useful section. Do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
+                        content: `SAVED DELIVERABLE CONTINUATION REQUIRED: "${continuationPath}" has started successfully but is not complete enough for the requested saved output yet. Next response must be exactly one native append_file call to the same path with the next complete, substantive section (normally 350–650 words when that much remains). Do not repeat existing headings or paragraphs, do not recreate the file, do not write visible prose, and do not emit <next_step/> yet.`,
                       } as ChatMessageParam)
                       phase = 'EVALUATING'
                       break
@@ -4263,10 +5268,10 @@ export class AgentLoop {
               contextManager.push(debugInjection as ChatMessageParam)
             }
 
-            if (
-              state.currentStepIdx === stepIdxBeforeExec &&
-              shouldAutoAdvanceBriefInlineResearchAfterTools(state, this.options.messages, lastToolResults)
-            ) {
+            const briefEvidenceAssessment = state.currentStepIdx === stepIdxBeforeExec
+              ? briefInlineResearchEvidenceAfterTools(state, this.options.messages, lastToolResults)
+              : null
+            if (briefEvidenceAssessment?.ready) {
               if (pauseForPhaseEndNarrationBeforeAutoAdvance(
                 state,
                 contextManager,
@@ -4278,7 +5283,24 @@ export class AgentLoop {
               }
               log.info(`Brief inline research evidence gathered on step ${state.currentStepIdx} — advancing to answer`)
               const stepBeforeAdvance = state.currentStepIdx
-              const advanceMsg = planManager.handleStepAdvance(state)
+              const userText = this.options.messages
+                .filter(message => message.role === 'user')
+                .map(message => message.content)
+                .join(' ')
+              const fastFinalStepIdx = briefInlineFinalDeliveryStepIndex({
+                request: state.originalUserRequest || userText,
+                planItems: state.currentPlanItems || [],
+                planScopes: state.currentPlanScopes,
+                currentStepIdx: state.currentStepIdx,
+              })
+              const targetStepIdx = fastFinalStepIdx ?? Math.min(
+                state.currentStepIdx + 1,
+                (state.currentPlanItems?.length || 1) - 1,
+              )
+              let advanceMsg: { role: string; content: string } | null = null
+              do {
+                advanceMsg = planManager.handleStepAdvance(state)
+              } while (state.currentStepIdx < targetStepIdx)
               if (state.currentStepIdx > stepBeforeAdvance) {
                 contextManager.compactForStepTransition(state)
               }
@@ -4286,6 +5308,20 @@ export class AgentLoop {
                 contextManager.push(advanceMsg as ChatMessageParam)
               }
               if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+            } else if (
+              briefEvidenceAssessment?.reason === 'explicit-source-quality' &&
+              briefEvidenceAssessment.recoveryInstruction &&
+              !state.briefInlineSourceQualityNudged
+            ) {
+              state.briefInlineSourceQualityNudged = true
+              contextManager.push({
+                role: 'system',
+                content: briefEvidenceAssessment.recoveryInstruction,
+              } as ChatMessageParam)
+              log.info(
+                `Brief inline source-quality gate kept step ${state.currentStepIdx} active ` +
+                `(${briefEvidenceAssessment.qualifyingSourceCount}/${briefEvidenceAssessment.requiredOpenedSources} qualifying)`,
+              )
             }
 
             // Emit SSE step_advance events for any step advancement that happened
@@ -4310,6 +5346,7 @@ export class AgentLoop {
                 workingMemory,
                 goalTracker,
                 outputVerifier,
+                toolPipeline,
               )
               if (recoveredPhase) {
                 phase = recoveredPhase
@@ -4518,7 +5555,13 @@ export class AgentLoop {
               contextManager.push({ role: 'system', content: consolidated } as ChatMessageParam)
             }
 
-            if (shouldTerminate) { phase = 'COMPLETE'; break }
+            if (shouldTerminate) {
+              if (pendingPaidTurnProgress?.iteration === state.iterations) {
+                pendingPaidTurnProgress.terminalAction = true
+              }
+              phase = 'COMPLETE'
+              break
+            }
 
             state.lastIterationEnd = Date.now()
             phase = 'STREAMING'
@@ -4536,7 +5579,7 @@ export class AgentLoop {
         )
         if (websiteBlocker) {
           if (state.iterations >= state.dynamicIterationLimit) {
-            this.emitter.error(`Website build did not complete. ${websiteBlocker}`)
+            state.lastModelErrorForUser = `Website build did not complete. ${websiteBlocker}`
             phase = 'ERROR'
             break
           }
@@ -4546,12 +5589,50 @@ export class AgentLoop {
           continue
         }
 
-        break
-      }
+        // Final directive acceptance and the empty-queue seal happen in one
+        // transaction. If an instruction won the race, reopen the final phase
+        // and give it real execution budget; otherwise no later POST can be
+        // accepted between this check and the terminal event.
+        const terminalCanAcceptLiveDirective = !NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS.has(terminalReason)
+        if (!terminalCanAcceptLiveDirective) {
+          const normalizedWorkerAttempt = Number.isFinite(Number(this.options.workerAttempt))
+            ? Math.max(1, Math.floor(Number(this.options.workerAttempt)))
+            : 1
+          if (conversationId) {
+            await sealLiveDirectiveRun(
+              conversationId,
+              this.options.userId,
+              this.options.creditRunId,
+              normalizedWorkerAttempt,
+            )
+          }
+        } else if (await injectRunLiveDirectives({ sealWhenEmpty: true })) {
+          log.info('Injected live user directive at completion boundary')
+          terminalReason = 'unknown'
+          state.lastIterationEnd = Date.now()
+          state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 4)
+          state.deadlineFinalizationStarted = false
+          state.forceTextNextIteration = false
+          state.phaseEndNarrationPending = false
+          state.forcedNarrationRepairAttempts = 0
+          state.consecutiveNoToolCalls = 0
+          state.deliverableVerificationDone = false
+          if (state.currentPlanItems?.length && state.currentStepIdx >= state.currentPlanItems.length) {
+            state.currentStepIdx = state.currentPlanItems.length - 1
+            updatePhase(state)
+            if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+          }
+          phase = 'STREAMING'
+          continue
+        }
 
-      // ── Finalization ──────────────────────────────────────────────────
+        // ── Finalization ────────────────────────────────────────────────
 
-      if (phase === 'COMPLETE') {
+        // A narration request never delays tool execution. At the terminal
+        // boundary only, let the already-running bounded request finish so its
+        // event and token debit cannot race the durable done event.
+        await settleNarrationSidecar()
+
         const totalUsage = {
           promptTokens: cumulativeInputTokens,
           completionTokens: cumulativeOutputTokens,
@@ -4585,15 +5666,23 @@ export class AgentLoop {
           return
         }
 
+        await this.options.beforeDone?.()
         this.emitter.done(totalUsage)
         this.emitter.close()
-      } else {
-        // ERROR: keep the stream open so the API route can finish accounting
-        // and close the response.
+        break
+      }
+
+      if (phase === 'ERROR') {
+        await settleNarrationSidecar()
+        if (!signal?.aborted && !this.emitter.isClosed && !this.emitter.terminalStatus) {
+          this.emitter.error(
+            state.lastModelErrorForUser ||
+            'The task stopped before it finished. Please try again.',
+          )
+        }
       }
     } catch (err) {
       if (signal?.aborted) {
-        this.emitter.close()
         return
       }
       log.error('Unhandled error in agent loop', {
@@ -4601,6 +5690,7 @@ export class AgentLoop {
         iterations: state.iterations,
         phase: state.currentPhase,
       })
+      await settleNarrationSidecar()
       if (!this.emitter.isClosed) {
         if (isOutOfCreditsError(err) && err.record?.created) {
           this.emitter.creditEvent(err.record.entry)
@@ -4608,11 +5698,34 @@ export class AgentLoop {
         this.emitter.error(publicAgentErrorMessage(err))
       }
     } finally {
-      browserFrameStream.unsubscribe?.()
+      await settleNarrationSidecar()
+      planManager.dispose()
+      releaseBrowserFrameStream()
     }
   }
 
   // ── Private Helpers ───────────────────────────────────────────────────
+
+  /**
+   * Await shared startup work without allowing a hung sandbox/bootstrap promise
+   * to outlive cancellation, lease loss, or the hard runtime deadline.
+   */
+  private async awaitWithTaskSignal<T>(promise: Promise<T>): Promise<T> {
+    const signal = this.options.signal
+    if (!signal) return promise
+    if (signal.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+
+    let onAbort: (() => void) | null = null
+    const abortPromise = new Promise<never>((_, reject) => {
+      onAbort = () => reject(new DOMException('The operation was aborted.', 'AbortError'))
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([promise, abortPromise])
+    } finally {
+      if (onAbort) signal.removeEventListener('abort', onAbort)
+    }
+  }
 
   /**
    * Abort-aware sleep for delays between model calls.
@@ -4638,11 +5751,23 @@ export class AgentLoop {
     })
   }
 
-  private injectLiveDirectives(contextManager: ContextManager): false | 'injected' {
-    const { conversationId, userId } = this.options
+  private async injectLiveDirectives(
+    contextManager: ContextManager,
+    options: { sealWhenEmpty?: boolean } = {},
+  ): Promise<false | 'injected'> {
+    const { conversationId, userId, creditRunId, workerAttempt } = this.options
     if (!conversationId) return false
 
-    const directives = drainLiveDirectives(conversationId, userId)
+    const normalizedWorkerAttempt = Number.isFinite(Number(workerAttempt))
+      ? Math.max(1, Math.floor(Number(workerAttempt)))
+      : 1
+    const directives = await drainLiveDirectives(
+      conversationId,
+      userId,
+      creditRunId,
+      normalizedWorkerAttempt,
+      options,
+    )
     if (directives.length === 0) return false
 
     contextManager.push({
@@ -4670,27 +5795,59 @@ export class AgentLoop {
     state: AgentStateData,
     strategy: TaskStrategyConfig,
     toolRegistry: ToolRegistry,
+    cadenceNarrationInMainTurn = false,
+    captureUsageEstimateEnvelope?: (
+      requestMessages: ChatMessageParam[],
+      requestTools: unknown[],
+    ) => void,
+    captureStreamToolCallPolicy?: (policy: StreamToolCallPolicy) => void,
   ): Promise<AsyncIterable<StreamingChatCompletionChunk> | null> {
-    const useCompactForcedNarration = state.forceTextNextIteration && !state.exactExtractionGuardPending
-    const useCompactCadenceNarration = !useCompactForcedNarration &&
-      shouldUseNaturalCadenceNarration(state, this.options.messages)
-    const useCompactNarration = useCompactForcedNarration || useCompactCadenceNarration
+    const useCompactForcedNarration = false
+    const useCompactNarration = useCompactForcedNarration
+    const scopedTaskRequest = state.originalUserRequest || effectiveTaskRequest(this.options.messages)
+    const explicitTaskToolConstraint = explicitTaskToolConstraintFromText(scopedTaskRequest)
+    const pendingExplicitTaskToolTargets = explicitTaskToolConstraint?.required.filter(
+      target => ![...state.taskSuccessfulToolTypeCounts.keys()].some(
+        toolName => toolMatchesExplicitTaskToolTarget(target, toolName),
+      ),
+    ) || []
+    const explicitTaskToolNeedsInitialAction = pendingExplicitTaskToolTargets.length > 0
+    const hasPersistentExplicitTaskToolRestriction =
+      (explicitTaskToolConstraint?.exclusive.length || 0) > 0 ||
+      (explicitTaskToolConstraint?.forbidden.length || 0) > 0
+    const briefInlineResearchNeedsEvidenceAction =
+      !explicitTaskToolNeedsInitialAction &&
+      !hasPersistentExplicitTaskToolRestriction &&
+      finalBriefInlineResearchNeedsEvidenceAction(state, this.options.messages)
+    const savedResearchNeedsEvidenceAction =
+      !explicitTaskToolNeedsInitialAction &&
+      !hasPersistentExplicitTaskToolRestriction &&
+      finalSavedResearchNeedsEvidenceAction(state, this.options.messages)
     const useCompactFinalInlineAnswer = finalInlineAnswerTurn(state, this.options.messages) &&
       !useCompactNarration &&
-      !state.exactExtractionGuardPending
+      !state.exactExtractionGuardPending &&
+      !briefInlineResearchNeedsEvidenceAction &&
+      !explicitTaskToolNeedsInitialAction
     const useTextFinalDeliverable = shouldUseTextSavedFinalDeliverable(state, this.options.messages) &&
       !useCompactNarration &&
-      !state.exactExtractionGuardPending
+      !state.exactExtractionGuardPending &&
+      !savedResearchNeedsEvidenceAction &&
+      !explicitTaskToolNeedsInitialAction &&
+      !hasPersistentExplicitTaskToolRestriction
     const useCompactFinalDeliverable = finalSavedDeliverableTurn(state, this.options.messages) &&
       !useTextFinalDeliverable &&
       !useCompactNarration &&
-      !state.exactExtractionGuardPending
+      !state.exactExtractionGuardPending &&
+      !savedResearchNeedsEvidenceAction &&
+      !explicitTaskToolNeedsInitialAction &&
+      !hasPersistentExplicitTaskToolRestriction
     const useCompactResearchTurn = !useCompactNarration &&
       !useCompactFinalInlineAnswer &&
       !useTextFinalDeliverable &&
       !useCompactFinalDeliverable &&
       shouldUseCompactResearchTurn(state)
-    const compactResearchPhaseCanAdvance = useCompactResearchTurn &&
+    const compactResearchPhaseCanAdvance = !explicitTaskToolNeedsInitialAction &&
+      useCompactResearchTurn &&
       !!state.currentPlanItems &&
       state.currentStepIdx < state.currentPlanItems.length - 1 &&
       compactResearchEvidenceComplete(state)
@@ -4729,6 +5886,7 @@ export class AgentLoop {
       ]
     } else if (partialFileContinuationNeedsTool && state.partialFileWriteRecoveryPending) {
       const pending = state.partialFileWriteRecoveryPending
+      const boundedClosingAppend = isPartialRecoveryClosingAppendTurn(state)
       requestMessages = [
         ...requestMessages,
         {
@@ -4738,20 +5896,9 @@ export class AgentLoop {
             `The only valid next action is one native append_file call to "${pending.path}".`,
             `That file already has ${pending.lines} lines / ${pending.chars} characters from a recovered clipped write.`,
             'Do not call create_file, edit_file, read_file, list_files, export_pdf, browser tools, research tools, or emit <next_step/>.',
-            'Append only the next missing section or chunk, without repeating earlier content.',
-          ].join(' '),
-        } as ChatMessageParam,
-      ]
-    }
-    if (state.forceTextNextIteration) {
-      requestMessages = [
-        ...requestMessages,
-        {
-          role: 'system',
-          content: [
-            'NARRATION DUE: write exactly one concise, concrete progress paragraph from completed work.',
-            'This is a narration-only repair turn: do not call tools, do not ask permission to continue, and do not stop with future intent.',
-            'After this paragraph is accepted, the following turn can continue the active phase or final answer.',
+            boundedClosingAppend
+              ? 'This is the only permitted closing append. Add only the most important missing closing material in roughly 180–300 words, end cleanly, and do not repeat existing content.'
+              : 'Append only the next missing complete, substantive section—normally 350–650 words when that much remains, or all remaining content when less remains. Do not repeat existing headings, claims, citations, or paragraphs.',
           ].join(' '),
         } as ChatMessageParam,
       ]
@@ -4768,6 +5915,22 @@ export class AgentLoop {
         } as ChatMessageParam,
       ]
     }
+    if (
+      sourceExtractionBatchConsumedForLatestSearch(state) &&
+      !isCurrentSynthesisStep(state)
+    ) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: [
+            'SOURCE-SET DECISION COMPLETE: you already chose and opened the useful direct-extraction batch from the latest search results.',
+            'Do not mine that same result set with another read_document/http_request batch.',
+            'Use your judgment now: synthesize or advance if the evidence is sufficient, browse a promising site when rendered exploration will help, or make a materially different targeted search for a real remaining gap.',
+          ].join(' '),
+        } as ChatMessageParam,
+      ]
+    }
     if (useCompactResearchTurn && compactResearchNeedsOpenedSource(state)) {
       const sourceOpeningExhausted = compactResearchSourceOpeningExhausted(
         state,
@@ -4778,10 +5941,10 @@ export class AgentLoop {
         {
           role: 'system',
           content: sourceOpeningExhausted
-            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, up to 4 parallel read_document/http_request/youtube_transcript calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
+            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, one parallel batch of up to 3 read_document/http_request calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
             : state.suppressedResearchToolName === 'read_document'
-              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now: browser_navigate to a surfaced authoritative URL, browser_get_content from a different already-open useful page, or http_request/youtube_transcript when appropriate. Do not call web_search again while known result URLs are still unopened.'
-              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using up to 4 parallel read_document/http_request/youtube_transcript calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
+              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now. Open a usable untried URL from the Remaining candidate URLs block with browser_navigate, browser_get_content from a different already-open useful page, or http_request when appropriate. If no remaining candidate is visible or the remaining candidates are already attempted, blocked, or unusable, make one targeted web_search for a new authoritative domain. Do not retry the same cached URL or repeat the same search query.'
+              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using one parallel batch of up to 3 read_document/http_request calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
         } as ChatMessageParam,
       ]
     }
@@ -4794,7 +5957,15 @@ export class AgentLoop {
         } as ChatMessageParam,
       ]
     }
-    if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
+    if (savedResearchNeedsEvidenceAction) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: 'LIVE EVIDENCE REQUIRED BEFORE WRITING: The requested saved research output does not yet have usable source-page evidence from this run. Choose the most direct research action now. Select a concrete source URL before calling a source reader, do not reopen an already extracted source, and do not create or revise the deliverable until evidence exists.',
+        } as ChatMessageParam,
+      ]
+    } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
       requestMessages = [
         ...requestMessages,
         {
@@ -4829,7 +6000,9 @@ export class AgentLoop {
     }
     let relaxRequiredToolChoice = false
     let lastShouldRequireToolCall = false
-    for (let attempt = 0; attempt <= STREAM_MAX_RETRIES; attempt++) {
+    let providerRequestRepairAttempts = 0
+    const maxModelStartAttempts = STREAM_MAX_RETRIES + MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS + 1
+    for (let attempt = 0; attempt < maxModelStartAttempts; attempt++) {
       try {
         const budgetFraction = state.dynamicIterationLimit
           ? state.iterations / state.dynamicIterationLimit
@@ -4864,7 +6037,24 @@ export class AgentLoop {
             activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
               .filter(t => deadlineFinalTools.has(t.function?.name || ''))
           }
+        } else if (savedResearchNeedsEvidenceAction) {
+          const researchToolState = {
+            ...state,
+            currentPhase: 'research' as const,
+          }
+          const allowedSavedResearchTools = new Set([
+            'web_search',
+            'browser_navigate',
+            'browser_get_content',
+            'browser_find_text',
+            'read_document',
+            'http_request',
+          ])
+          activeTools = (toolRegistry.getActiveDefinitions(researchToolState) as ToolDefinitionLike[])
+            .filter(tool => allowedSavedResearchTools.has(tool.function?.name || ''))
         } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
+          activeTools = []
+        } else if (finalInlineAnswerTurn(state, this.options.messages)) {
           activeTools = []
         } else if (isLeanFinalSynthesisStep(state)) {
           if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) {
@@ -5060,20 +6250,136 @@ export class AgentLoop {
             afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
           })
         }
-        const narrationWindowOpen =
-          hasActivePlanStep &&
-          !state.forceTextNextIteration &&
-          !state.exactExtractionGuardPending &&
-          state.visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT &&
-          !finalSavedDeliverableNeedsTool &&
-          !partialFileContinuationNeedsTool
+        if (
+          briefInlineResearchNeedsEvidenceAction &&
+          !isPostCompletion &&
+          !useCompactNarration
+        ) {
+          const researchToolState = {
+            ...state,
+            currentPhase: 'research' as const,
+          }
+          const allowedBriefResearchTools = new Set([
+            'web_search',
+            'browser_navigate',
+            'browser_get_content',
+            'browser_find_text',
+            'read_document',
+            'http_request',
+          ])
+          activeTools = (toolRegistry.getActiveDefinitions(researchToolState) as ToolDefinitionLike[])
+            .filter(tool => allowedBriefResearchTools.has(tool.function?.name || ''))
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: 'INLINE RESEARCH EVIDENCE REQUIRED: Before answering this short current-information request, make one targeted evidence action now. Use the most direct available research tool; if the user supplied a URL, open or read that URL directly. Do not create a file and do not add unrelated research.',
+            } as ChatMessageParam,
+          ]
+        }
+        if (
+          explicitTaskToolConstraint &&
+          !isPostCompletion &&
+          !useCompactNarration &&
+          !useTextFinalDeliverable &&
+          !compactResearchPhaseCanAdvance
+        ) {
+          const availabilityState = {
+            ...state,
+            currentPhase: 'unknown' as const,
+          }
+          const availableTools = toolRegistry.getActiveDefinitions(availabilityState) as ToolDefinitionLike[]
+          const permittedAvailableTools = availableTools.filter(tool =>
+            toolAllowedByExplicitTaskConstraint(
+              explicitTaskToolConstraint,
+              tool.function?.name || '',
+            ),
+          )
+          const unavailableRequiredTargets = pendingExplicitTaskToolTargets.filter(
+            target => !permittedAvailableTools.some(tool =>
+              toolMatchesExplicitTaskToolTarget(target, tool.function?.name || ''),
+            ),
+          )
+          const unavailableExclusiveTargets = explicitTaskToolConstraint.exclusive.length > 0 &&
+            permittedAvailableTools.length === 0
+            ? explicitTaskToolConstraint.exclusive
+            : []
+          const unavailableTargets = [
+            ...new Set([...unavailableRequiredTargets, ...unavailableExclusiveTargets]),
+          ]
+
+          if (unavailableTargets.length > 0) {
+            activeTools = []
+          } else if (pendingExplicitTaskToolTargets.length > 0) {
+            activeTools = permittedAvailableTools.filter(tool =>
+              pendingExplicitTaskToolTargets.some(target =>
+                toolMatchesExplicitTaskToolTarget(target, tool.function?.name || ''),
+              ),
+            )
+          } else if (explicitTaskToolConstraint.exclusive.length > 0) {
+            activeTools = permittedAvailableTools
+          } else if (explicitTaskToolConstraint.forbidden.length > 0) {
+            activeTools = activeTools.filter(tool =>
+              toolAllowedByExplicitTaskConstraint(
+                explicitTaskToolConstraint,
+                tool.function?.name || '',
+              ),
+            )
+          }
+
+          const requiredLabels = pendingExplicitTaskToolTargets
+            .map(explicitTaskToolTargetLabel)
+            .join(', ')
+          const exclusiveLabels = explicitTaskToolConstraint.exclusive
+            .map(explicitTaskToolTargetLabel)
+            .join(', ')
+          const forbiddenLabels = explicitTaskToolConstraint.forbidden
+            .map(explicitTaskToolTargetLabel)
+            .join(', ')
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: unavailableTargets.length > 0
+                ? `USER TOOL INSTRUCTION BLOCKER: The explicitly named tool scope (${unavailableTargets.map(explicitTaskToolTargetLabel).join(', ')}) is not currently available under the runtime's safety, permission, and availability checks. Do not silently substitute another tool. Report this concrete blocker briefly.`
+                : [
+                    'USER TOOL INSTRUCTION: Preserve the user-specified step order.',
+                    requiredLabels
+                      ? `Use one of the following required named tool scopes now, before normal tool freedom resumes: ${requiredLabels}.`
+                      : '',
+                    exclusiveLabels
+                      ? `Every tool action must remain inside this exclusive allowed scope: ${exclusiveLabels}.`
+                      : '',
+                    forbiddenLabels
+                      ? `Never call tools in this forbidden scope: ${forbiddenLabels}.`
+                      : '',
+                    'Safety, permissions, and actual tool availability still take precedence. Do not silently substitute for an unavailable required tool.',
+                  ].filter(Boolean).join(' '),
+            } as ChatMessageParam,
+          ]
+        }
+        const effectiveCadenceNarrationInMainTurn =
+          cadenceNarrationInMainTurn &&
+          activeTools.length > 0
+        if (effectiveCadenceNarrationInMainTurn && !useCompactNarration) {
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: cadenceNarrationMainTurnGuidance(state),
+            } as ChatMessageParam,
+          ]
+        }
         const shouldRequireToolCall =
           activeTools.length > 0 &&
           !isPostCompletion &&
           !state.forceTextNextIteration &&
           (
+            effectiveCadenceNarrationInMainTurn ||
             partialFileContinuationNeedsTool ||
             finalSavedDeliverableNeedsTool ||
+            explicitTaskToolNeedsInitialAction ||
+            briefInlineResearchNeedsEvidenceAction ||
             (
               state.currentPhase !== 'deliver' &&
               (
@@ -5086,12 +6392,23 @@ export class AgentLoop {
               )
             )
           )
-        const requiredToolIntent = shouldRequireToolCall && !narrationWindowOpen
+        const requiredToolIntent = shouldRequireToolCall
         const fastActionTurn = activeTools.length > 0 &&
           !isPostCompletion &&
           isFastActionToolTurn(state, this.options.messages)
-        const fastSourceActionTurn = fastActionTurn &&
+        const fastSourceActionTurn = !explicitTaskToolNeedsInitialAction &&
+          !hasPersistentExplicitTaskToolRestriction &&
+          fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
+        // A source batch can contain up to three visible actions. It is one
+        // optional model-selected batch for the latest result set, and it must
+        // stay within the max-four narration frontier.
+        const allowParallelSourceToolCalls = fastSourceActionTurn &&
+          !sourceExtractionBatchConsumedForLatestSearch(state) &&
+          visibleNarrationActionHeadroom(state) >= 3
+        const maxParallelSourceExtractionCalls = allowParallelSourceToolCalls
+          ? Math.min(3, visibleNarrationActionHeadroom(state))
+          : 1
         if (fastSourceActionTurn) {
           const fastSourceTools = fastSourceActionToolsForState(state, activeTools)
           if (fastSourceTools !== activeTools) activeTools = fastSourceTools
@@ -5102,7 +6419,9 @@ export class AgentLoop {
             {
               role: 'system',
               content: fastSourceActionTurn
-                ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs, make up to 4 parallel source extraction calls using read_document, http_request, or youtube_transcript. Do not use parallel browser navigation/state tools or file tools. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
+                ? allowParallelSourceToolCalls
+                ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs and no extraction batch has been used for that search set, make one parallel batch of up to 3 source extraction calls using read_document or http_request. Do not use parallel browser navigation/state tools or file tools. Do not write ordinary prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
+                : 'HOT PATH SOURCE ACTION TURN: decide immediately and make exactly one native evidence tool call. Cadence headroom is intentionally reserving the next source actions for the following ordinary turn. Do not write prose, status, plans, apologies, or hidden reasoning.'
                 : 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
             } as ChatMessageParam,
           ]
@@ -5119,14 +6438,22 @@ export class AgentLoop {
         }, 0)
         console.log(`[Agent] iter=${state.iterations} msgs=${requestMessages.length} ~${Math.round(approxChars / 4)}tok tools=${activeTools.length} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0}`)
 
-        const modelTools = compactToolDefinitionsForModel(activeTools)
+        const modelTools = withCadenceProgressUpdateSchemas(
+          compactToolDefinitionsForModel(activeTools),
+          effectiveCadenceNarrationInMainTurn,
+        )
         const isFinalInlineAnswerTurn = finalInlineAnswerTurn(state, this.options.messages)
         const isFinalSavedDeliverableTurn = finalSavedDeliverableTurn(state, this.options.messages)
         const isInitialFinalSavedDeliverableTurn = isFinalSavedDeliverableTurn &&
           !state.partialFileWriteRecoveryPending &&
           !hasSavedFinalDeliverableCandidate(state)
+        const isBoundedPartialRecoveryClosingAppend =
+          isFinalSavedDeliverableTurn &&
+          isPartialRecoveryClosingAppendTurn(state)
         const maxTokens = useCompactNarration
           ? Math.min(maxTokensForIteration(state), FORCED_NARRATION_MAX_TOKENS)
+          : isBoundedPartialRecoveryClosingAppend
+          ? Math.min(maxTokensForIteration(state), PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS)
           : isFinalInlineAnswerTurn
           ? Math.min(maxTokensForIteration(state), finalInlineAnswerMaxTokens(state, this.options.messages))
           : useTextFinalDeliverable
@@ -5193,14 +6520,29 @@ export class AgentLoop {
           fastActionTurn,
           fastSourceActionTurn,
           forceTextNextIteration: !!state.forceTextNextIteration,
-          compactCadenceNarration: !!useCompactCadenceNarration,
+          cadenceNarrationInMainTurn: effectiveCadenceNarrationInMainTurn,
           approxTokens: Math.round(approxChars / 4),
           maxTokens,
           finalInlineAnswer: isFinalInlineAnswerTurn,
           finalSavedDeliverable: isFinalSavedDeliverableTurn,
           requestTimeoutMs,
         })
+        // Preserve the exact request envelope for the synchronous conservative
+        // debit if this provider omits the final streamed usage chunk. Capture
+        // again on retry so accounting follows the request that actually ran.
+        captureUsageEstimateEnvelope?.(requestMessages, modelTools)
         await this.assertServerCreditRunwayCached()
+        const streamPolicy = {
+          allowParallelSourceExtractionCalls: allowParallelSourceToolCalls,
+          maxParallelSourceExtractionCalls,
+          cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn,
+        }
+        // Capture the exact request policy before awaiting provider response
+        // headers. If the request itself times out, the outer loop can still
+        // distinguish a real cadence-enabled action request from a text-only
+        // request and avoid an unnecessary cadence retry.
+        captureStreamToolCallPolicy?.(streamPolicy)
+
         const response = await createStreamingCompletion({
           model,
           messages: requestMessages,
@@ -5209,7 +6551,7 @@ export class AgentLoop {
             : {}),
           ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
           temperature: requestTemperature,
-          parallel_tool_calls: fastSourceActionTurn,
+          parallel_tool_calls: allowParallelSourceToolCalls,
           max_tokens: maxTokens,
           ...requestReasoning,
           includeTemporalContext: shouldIncludeTemporalContextForTurn(state),
@@ -5260,7 +6602,7 @@ export class AgentLoop {
           return null
         }
         const invalidToolArguments = status === 400 &&
-          /\bfunction\.arguments\b[\s\S]*\bJSON format\b|invalid_parameter_error|invalid_parameter/i.test(errorText)
+          /\bfunction\.arguments\b[\s\S]*\bJSON format\b|\b(?:invalid_parameter_error|invalid_parameter)\b[\s\S]{0,240}\b(?:function\.arguments|tool(?: call)? arguments?)\b/i.test(errorText)
         if (invalidToolArguments) {
           this.options.diagnostics?.({
             type: 'stream_error',
@@ -5277,14 +6619,15 @@ export class AgentLoop {
           })
           console.error('[AgentDiagnostics] Streaming model rejected malformed tool arguments', {
             attempt: attempt + 1,
-            maxAttempts: STREAM_MAX_RETRIES + 1,
+            maxAttempts: maxModelStartAttempts,
             iteration: state.iterations,
             phase: state.currentPhase,
             step: state.currentStepIdx,
             status,
             error: sanitizeAgentServiceError(streamErr),
           })
-          if (attempt < STREAM_MAX_RETRIES) {
+          if (providerRequestRepairAttempts < MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS) {
+            providerRequestRepairAttempts++
             console.warn('[Agent] Assistant service rejected malformed tool-call JSON; retrying with stricter tool-call instruction.')
             requestMessages = [
               ...requestMessages,
@@ -5296,16 +6639,15 @@ export class AgentLoop {
             state.iterationDelayMs = MIN_ITERATION_DELAY_MS
             continue
           }
-          state.lastModelErrorForUser = null
-          state.pendingToolJsonRecovery = true
-          state.toolJsonRecoveryCount = (state.toolJsonRecoveryCount || 0) + 1
-          console.warn('[Agent] Assistant service rejected malformed tool-call JSON after retry; recovering with a text-only nudge.')
+          state.pendingToolJsonRecovery = false
+          state.lastModelErrorForUser = 'The assistant rejected malformed tool-call data after one bounded repair attempt. Please retry the task.'
+          console.error('[Agent] Assistant service rejected malformed tool-call JSON after its bounded repair; stopping the run.')
           return null
         }
         const providerRejectedForcedToolMode = status === 400 &&
           lastShouldRequireToolCall &&
           !relaxRequiredToolChoice &&
-          /\b(?:tool_choice|required|tools?|function(?:s| calling)?|schema|unsupported|not supported|not available|does not support|invalid request)\b/i.test(errorText)
+          /\b(?:tool_choice|required tool(?: call)?|forced tool(?: call)?|function(?:s| calling)?[^\n]{0,100}(?:unsupported|not supported|not available)|tools?[^\n]{0,100}(?:unsupported|not supported|not available|does not support))\b/i.test(errorText)
         if (providerRejectedForcedToolMode) {
           this.options.diagnostics?.({
             type: 'stream_error',
@@ -5322,7 +6664,7 @@ export class AgentLoop {
           })
           console.error('[AgentDiagnostics] Streaming model rejected forced tool mode', {
             attempt: attempt + 1,
-            maxAttempts: STREAM_MAX_RETRIES + 1,
+            maxAttempts: maxModelStartAttempts,
             iteration: state.iterations,
             phase: state.currentPhase,
             step: state.currentStepIdx,
@@ -5331,7 +6673,8 @@ export class AgentLoop {
             error: sanitizeAgentServiceError(streamErr),
           })
           relaxRequiredToolChoice = true
-          if (attempt < STREAM_MAX_RETRIES) {
+          if (providerRequestRepairAttempts < MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS) {
+            providerRequestRepairAttempts++
             console.warn('[Agent] Assistant service rejected forced tool-call mode; retrying with optional tool-call recovery.')
             requestMessages = [
               ...requestMessages,
@@ -5340,13 +6683,12 @@ export class AgentLoop {
                 content: providerToolModeRecoveryMessage(state, this.options.messages),
               } as ChatMessageParam,
             ]
-          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+            state.iterationDelayMs = MIN_ITERATION_DELAY_MS
             continue
           }
-          state.lastModelErrorForUser = null
-          state.pendingToolJsonRecovery = true
-          state.toolJsonRecoveryCount = (state.toolJsonRecoveryCount || 0) + 1
-          console.warn('[Agent] Assistant service rejected forced tool-call mode after retry; recovering with a text-only nudge.')
+          state.pendingToolJsonRecovery = false
+          state.lastModelErrorForUser = 'The assistant rejected the tool-call request after one bounded compatibility repair. Please retry the task.'
+          console.error('[Agent] Assistant service rejected forced tool-call mode after its bounded repair; stopping the run.')
           return null
         }
         if (status === 402) {
@@ -5371,6 +6713,75 @@ export class AgentLoop {
             error: sanitizeAgentServiceError(streamErr),
           })
           state.lastModelErrorForUser = 'Agent could not start the next action because the assistant service token or credit limit was exceeded.'
+          return null
+        }
+        const deterministicRequestFailure = classifyDeterministicProviderRequestFailure(status, errorText)
+        if (deterministicRequestFailure) {
+          const repair = deterministicRequestFailure.messagePayloadRepairable &&
+            providerRequestRepairAttempts < MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS
+            ? sanitizeProviderRequestMessagesForRetry(requestMessages)
+            : null
+
+          if (repair?.changed) {
+            providerRequestRepairAttempts++
+            requestMessages = repair.messages as ChatMessageParam[]
+            state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+            this.options.diagnostics?.({
+              type: 'stream_error',
+              data: {
+                category: 'provider_request_payload_repair',
+                providerCategory: deterministicRequestFailure.category,
+                attempt: attempt + 1,
+                maxAttempts: maxModelStartAttempts,
+                repairAttempt: providerRequestRepairAttempts,
+                iteration: state.iterations,
+                phase: state.currentPhase,
+                step: state.currentStepIdx,
+                status,
+                error: sanitizeAgentServiceError(streamErr),
+              },
+            })
+            console.warn('[AgentDiagnostics] Retrying one normalized provider request before the terminal 4xx fence', {
+              category: deterministicRequestFailure.category,
+              repairAttempt: providerRequestRepairAttempts,
+              iteration: state.iterations,
+              step: state.currentStepIdx,
+              status,
+            })
+            continue
+          }
+
+          this.options.diagnostics?.({
+            type: 'stream_error',
+            data: {
+              category: 'provider_request_rejected_terminal',
+              providerCategory: deterministicRequestFailure.category,
+              attempt: attempt + 1,
+              maxAttempts: maxModelStartAttempts,
+              repairAttempts: providerRequestRepairAttempts,
+              repairAvailable: deterministicRequestFailure.messagePayloadRepairable,
+              iteration: state.iterations,
+              phase: state.currentPhase,
+              step: state.currentStepIdx,
+              status,
+              error: sanitizeAgentServiceError(streamErr),
+            },
+          })
+          console.error('[AgentDiagnostics] Deterministic provider request failure reached the terminal fence', {
+            category: deterministicRequestFailure.category,
+            attempt: attempt + 1,
+            repairAttempts: providerRequestRepairAttempts,
+            iteration: state.iterations,
+            step: state.currentStepIdx,
+            status,
+            error: sanitizeAgentServiceError(streamErr),
+          })
+          state.pendingToolJsonRecovery = false
+          state.lastModelErrorForUser = deterministicRequestFailure.category === 'authentication'
+            ? 'The assistant service credentials were rejected. Please check the configured provider credentials and retry the task.'
+            : providerRequestRepairAttempts > 0
+              ? 'The assistant rejected its request data after one bounded repair attempt. Please retry the task.'
+              : 'The assistant rejected the request data before the next action could start. Please retry the task.'
           return null
         }
         if (status === 429 && attempt < STREAM_MAX_RETRIES) {
@@ -5469,6 +6880,7 @@ export class AgentLoop {
     state: AgentStateData,
     contextManager: ContextManager,
     isBuild: boolean,
+    cadenceNarrationRetry = false,
   ): Phase {
     if (!(error instanceof Error)) {
       return 'ERROR'
@@ -5476,7 +6888,7 @@ export class AgentLoop {
 
     // Fatal timeout
     if (error instanceof TimeoutError && !error.nudgeable) {
-      this.emitter.error('The assistant stopped responding.')
+      state.lastModelErrorForUser = 'The assistant stopped responding.'
       return 'ERROR'
     }
 
@@ -5505,7 +6917,7 @@ export class AgentLoop {
           return 'STREAMING'
         }
 
-        this.emitter.error('The final answer took too long to respond. Please try again.')
+        state.lastModelErrorForUser = 'The final answer took too long to respond. Please try again.'
         return 'ERROR'
       }
 
@@ -5531,7 +6943,7 @@ export class AgentLoop {
           return 'COMPLETE'
         }
         if (!hasSavedFinalDeliverable && state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES) {
-          this.emitter.error('The final file write took too long to start. Please retry the task.')
+          state.lastModelErrorForUser = 'The final file write took too long to start. Please retry the task.'
           return 'ERROR'
         }
         if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
@@ -5567,22 +6979,24 @@ export class AgentLoop {
         state.timeoutNudgeCount++
 
         const partialContent = error.partialContent || ''
-        if (partialContent) {
+        if (!cadenceNarrationRetry && partialContent) {
           contextManager.push({ role: 'assistant', content: partialContent } as ChatMessageParam)
         }
 
-        const nudgeMessage = state.taskStrategy === 'browse'
-          ? 'Time check: you have been reasoning too long for a live website task. Call a browser tool now — browser_screenshot, browser_click_at, browser_type, browser_scroll, browser_select, or browser_find_text — and continue from the current page.'
-          : isBuild
-            ? 'Time check: you have been generating text for a while. Call a tool to make progress — image_search, create_file, append_file, export_pdf, or edit_file.'
-            : 'Time check: extended reasoning detected. Call a tool to gather information or produce output. If you are stuck, try a different approach.'
+        const nudgeMessage = cadenceNarrationRetry
+          ? cadenceNarrationActionRetryMessage('the prior cadence-enabled action stream stalled before completing an action')
+          : state.taskStrategy === 'browse'
+            ? 'Time check: you have been reasoning too long for a live website task. Call a browser tool now — browser_screenshot, browser_click_at, browser_type, browser_scroll, browser_select, or browser_find_text — and continue from the current page.'
+            : isBuild
+              ? 'Time check: you have been generating text for a while. Call a tool to make progress — image_search, create_file, append_file, export_pdf, or edit_file.'
+              : 'Time check: extended reasoning detected. Call a tool to gather information or produce output. If you are stuck, try a different approach.'
         contextManager.push({ role: 'system', content: nudgeMessage } as unknown as ChatMessageParam)
 
         state.lastIterationEnd = Date.now()
         return 'STREAMING'
       }
 
-      this.emitter.error('The task took too long to respond. Please try again.')
+      state.lastModelErrorForUser = 'The task took too long to respond. Please try again.'
       return 'ERROR'
     }
 
@@ -5591,18 +7005,16 @@ export class AgentLoop {
       state.iterationDelayMs = MIN_ITERATION_DELAY_MS
       state.lastIterationEnd = Date.now()
       if (state.consecutiveNullStreams <= 2) {
-        const narrationRecovery =
-          state.forceTextNextIteration ||
-          (!state.forceTextNextIteration && shouldUseNaturalCadenceNarration(state, this.options.messages))
+        if (!cadenceNarrationRetry) deferNarrationCadenceAttempt(state)
         contextManager.push({
           role: 'system',
-          content: narrationRecovery
-            ? 'MODEL STREAM NETWORK RECOVERY: the previous compact narration stream disconnected before completion. Retry one concise completed-result progress paragraph now. Do not call tools, do not restart the phase, and do not ask permission.'
+          content: cadenceNarrationRetry
+            ? cadenceNarrationActionRetryMessage('the prior cadence-enabled action stream disconnected before completion')
             : 'MODEL STREAM NETWORK RECOVERY: the previous model stream disconnected before completion. Retry the active phase immediately with one concrete next action. Do not restart, summarize, apologize, or ask permission.',
         } as ChatMessageParam)
         return 'STREAMING'
       }
-      this.emitter.error('Assistant stream lost connection repeatedly. Please retry the task.')
+      state.lastModelErrorForUser = 'Assistant stream lost connection repeatedly. Please retry the task.'
       return 'ERROR'
     }
 
@@ -5613,7 +7025,7 @@ export class AgentLoop {
       state.iterationDelayMs = MIN_ITERATION_DELAY_MS
       return 'STREAMING'
     }
-    this.emitter.error('The task stopped before it finished. Please try again.')
+    state.lastModelErrorForUser = 'The task stopped before it finished. Please try again.'
     return 'ERROR'
   }
 }

@@ -25,6 +25,7 @@ import { CheckCircleIcon } from '@phosphor-icons/react/dist/csr/CheckCircle'
 import { CircleIcon as PhCircle } from '@phosphor-icons/react/dist/csr/Circle'
 import { ClockIcon as PhClock } from '@phosphor-icons/react/dist/csr/Clock'
 import { CodeIcon as PhCode } from '@phosphor-icons/react/dist/csr/Code'
+import { CompassIcon } from '@phosphor-icons/react/dist/csr/Compass'
 import { CopyIcon as PhCopy } from '@phosphor-icons/react/dist/csr/Copy'
 import { CornersInIcon } from '@phosphor-icons/react/dist/csr/CornersIn'
 import { CornersOutIcon } from '@phosphor-icons/react/dist/csr/CornersOut'
@@ -57,8 +58,6 @@ import { LightningIcon } from '@phosphor-icons/react/dist/csr/Lightning'
 import { LinkIcon as PhLink } from '@phosphor-icons/react/dist/csr/Link'
 import { ListIcon } from '@phosphor-icons/react/dist/csr/List'
 import { MagnifyingGlassIcon } from '@phosphor-icons/react/dist/csr/MagnifyingGlass'
-import { MicrophoneIcon } from '@phosphor-icons/react/dist/csr/Microphone'
-import { MicrophoneSlashIcon } from '@phosphor-icons/react/dist/csr/MicrophoneSlash'
 import { MonitorIcon as PhMonitor } from '@phosphor-icons/react/dist/csr/Monitor'
 import { MonitorPlayIcon as PhMonitorPlay } from '@phosphor-icons/react/dist/csr/MonitorPlay'
 import { MoonIcon as PhMoon } from '@phosphor-icons/react/dist/csr/Moon'
@@ -139,6 +138,7 @@ export const Circle = makeControlIcon(PhCircle)
 export const Clock = makeIcon(PhClock)
 export const Code = makeIcon(PhCode)
 export const Code2 = makeIcon(PhCode)
+export const Compass = makeIcon(CompassIcon)
 export const Copy = makeIcon(PhCopy)
 export const CornerDownLeft = makeIcon(ArrowElbowDownLeftIcon)
 export const Database = makeIcon(PhDatabase)
@@ -161,6 +161,27 @@ export const HardDrive = makeIcon(HardDrivesIcon)
 export const Home = makeIcon(HouseIcon)
 export const Image = makeIcon(PhImage)
 export const ImageIcon = makeIcon(ImageSquareIcon)
+export const ImageSearch = forwardRef<SVGSVGElement, AppIconProps>(
+  ({ size = 24, strokeWidth = 1.8, className, weight: _weight, ...props }, ref) => (
+    <svg
+      ref={ref}
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      className={className}
+      aria-hidden="true"
+      {...props}
+    >
+      <rect x="3.25" y="3.25" width="13.5" height="13.5" rx="2.35" stroke="currentColor" strokeWidth={strokeWidth} />
+      <circle cx="8.2" cy="8.15" r="1.45" fill="currentColor" />
+      <path d="M5.8 14.2l3.15-3.2 2.45 2.35 1.8-1.75 1.25 1.25" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="16.3" cy="16.35" r="3.15" stroke="currentColor" strokeWidth={strokeWidth} />
+      <path d="M18.65 18.7L21 21" stroke="currentColor" strokeWidth={strokeWidth} strokeLinecap="round" />
+    </svg>
+  )
+)
+ImageSearch.displayName = 'ImageSearch'
 export const Info = makeIcon(PhInfo)
 export const KeyRound = makeIcon(KeyIcon)
 export const Keyboard = makeIcon(PhKeyboard)
@@ -171,8 +192,6 @@ export const LogOut = makeIcon(SignOutIcon)
 export const Maximize2 = makeIcon(CornersOutIcon)
 export const Menu = makeControlIcon(ListIcon)
 export const MessageSquare = makeIcon(ChatCircleIcon)
-export const Mic = makeIcon(MicrophoneIcon)
-export const MicOff = makeIcon(MicrophoneSlashIcon)
 export const Minimize2 = makeIcon(CornersInIcon)
 export const Monitor = makeIcon(PhMonitor)
 export const MonitorPlay = makeIcon(PhMonitorPlay)

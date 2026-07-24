@@ -1,5 +1,12 @@
 import type { SSEEvent } from '@/types'
 
+export class SSEParseError extends Error {
+  constructor() {
+    super('The live task stream contained malformed event data.')
+    this.name = 'SSEParseError'
+  }
+}
+
 function findEventDelimiter(buffer: string): { index: number; length: number } | null {
   const lf = buffer.indexOf('\n\n')
   const crlf = buffer.indexOf('\r\n\r\n')
@@ -22,7 +29,10 @@ function parseSSEBlock(block: string): SSEEvent | null {
   try {
     return JSON.parse(data) as SSEEvent
   } catch {
-    return null
+    // Silently skipping malformed data can advance the caller past a missing
+    // durable event. Throw so the consumer reconnects from its last committed
+    // sequence instead.
+    throw new SSEParseError()
   }
 }
 
@@ -35,11 +45,16 @@ export async function* parseSSEStream(
 ): AsyncGenerator<SSEEvent, void, unknown> {
   const decoder = new TextDecoder()
   let buffer = ''
+  let reachedEnd = false
 
   try {
     while (true) {
       const { done, value } = await reader.read()
-      if (done) break
+      if (done) {
+        reachedEnd = true
+        buffer += decoder.decode()
+        break
+      }
 
       buffer += decoder.decode(value, { stream: true })
       let delimiter = findEventDelimiter(buffer)
@@ -61,6 +76,11 @@ export async function* parseSSEStream(
       if (event) yield event
     }
   } finally {
+    // Breaking out of the async generator on a terminal event otherwise only
+    // releases the lock and can leave the fetch body/network connection alive.
+    if (!reachedEnd) {
+      await reader.cancel().catch(() => undefined)
+    }
     reader.releaseLock()
   }
 }

@@ -1,9 +1,34 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
 const root = process.cwd()
+const [agentLoopSource, taskJobsSource] = await Promise.all([
+  readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf-8'),
+  readFile(join(root, 'src/lib/agent/taskJobs.ts'), 'utf-8'),
+])
+assert.match(
+  agentLoopSource,
+  /partialWriteRecoveryLimitReached[\s\S]*deliverableContentForVerification\(conversationId,\s*deliverableResult\)[\s\S]*outputVerifier\.verify\(/,
+  'repeated malformed final appends must read and verify the whole saved file',
+)
+assert.match(
+  agentLoopSource,
+  /PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS[\s\S]*isPartialRecoveryClosingAppendTurn[\s\S]*180–300 words/,
+  'a failed whole-file recovery check may permit only one small token-bounded closing append',
+)
+assert.doesNotMatch(
+  agentLoopSource,
+  /partial deliverable[\s\S]{0,500}full available output budget/i,
+  'partial append recovery must not request another maximum-sized call that can clip again',
+)
+assert.match(
+  taskJobsSource,
+  /event_json like '%"type":"text_delta"%'[\s\S]{0,160}event_json like '%"type":"progress_update"%'/,
+  'task recovery assessment must include persisted LLM narration events',
+)
 const workDir = await mkdtemp(join(root, 'scripts/.partial-file-recovery-smoke-runner-'))
 const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
@@ -66,9 +91,69 @@ export async function runSmoke() {
     assert.equal((recovered.result as any).partialWriteIncomplete, true)
     assert.equal(state.partialFileWriteRecoveryPending?.path, 'draft.md')
     assert.ok(state.partialFileWriteRecoveryPending.lines >= 3)
+    const initialRecoveryChars = state.partialFileWriteRecoveryPending?.chars || 0
+    const initialRecoveryLines = state.partialFileWriteRecoveryPending?.lines || 0
 
     const readRecovered = await readFileInSandbox(conversationId, 'draft.md')
     assert.match(String(readRecovered.content || ''), /first recovered section/)
+
+    const partialAppendContent = '\\\\n## Recovered continuation\\\\nThis clipped append adds another complete section without repeating the opening.\\\\n'
+    const decodedPartialAppendContent = partialAppendContent.replaceAll('\\\\n', '\\n')
+    const recoveredAppend = await call(
+      pipeline,
+      state,
+      'partial-append',
+      'append_file',
+      '{\\"path\\":\\"draft.md\\",\\"content\\":\\"' + partialAppendContent,
+    )
+    assert.equal(recoveredAppend.isError, false, 'a clipped append should also be recovered')
+    assert.equal((recoveredAppend.result as any).recoveredFromPartial, true)
+    assert.equal(
+      state.partialFileWriteRecoveryPending?.chars,
+      initialRecoveryChars + decodedPartialAppendContent.length,
+      'append recovery must retain the cumulative saved character boundary',
+    )
+    assert.equal(
+      state.partialFileWriteRecoveryPending?.lines,
+      initialRecoveryLines + partialAppendContent.split('\\\\n').length - 1,
+      'append recovery must retain the cumulative saved line boundary without double-counting the fragment join',
+    )
+    assert.notEqual(
+      (recoveredAppend.result as any).partialWriteRecoveryLimitReached,
+      true,
+      'the first malformed append may still receive one bounded recovery continuation',
+    )
+    const latestRecovery = state.partialFileWriteRecoveries.at(-1)
+    assert.equal(latestRecovery?.chars, state.partialFileWriteRecoveryPending?.chars)
+    assert.equal(latestRecovery?.lines, state.partialFileWriteRecoveryPending?.lines)
+    const readRecoveredAppend = await readFileInSandbox(conversationId, 'draft.md')
+    assert.match(String(readRecoveredAppend.content || ''), /Recovered continuation/)
+
+    const firstAppendRecoveryChars = state.partialFileWriteRecoveryPending?.chars || 0
+    const firstAppendRecoveryLines = state.partialFileWriteRecoveryPending?.lines || 0
+    const finalPartialAppendContent = '\\\\n## Final clipped continuation\\\\nThis second clipped append reaches the per-file malformed append recovery limit.\\\\n'
+    const decodedFinalPartialAppendContent = finalPartialAppendContent.replaceAll('\\\\n', '\\n')
+    const finalRecoveredAppend = await call(
+      pipeline,
+      state,
+      'partial-append-limit',
+      'append_file',
+      '{\\"path\\":\\"draft.md\\",\\"content\\":\\"' + finalPartialAppendContent,
+    )
+    assert.equal(finalRecoveredAppend.isError, false)
+    assert.equal(
+      (finalRecoveredAppend.result as any).partialWriteRecoveryLimitReached,
+      true,
+      'the second malformed append must signal whole-file verification instead of another unbounded retry',
+    )
+    assert.equal(
+      state.partialFileWriteRecoveryPending?.chars,
+      firstAppendRecoveryChars + decodedFinalPartialAppendContent.length,
+    )
+    assert.equal(
+      state.partialFileWriteRecoveryPending?.lines,
+      firstAppendRecoveryLines + finalPartialAppendContent.split('\\\\n').length - 1,
+    )
 
     const visibleStartsBeforeBadContinuation = emitter.events.filter(event => event.type === 'tool_start').length
     const recreate = await call(

@@ -6,6 +6,7 @@ import { User, Settings, LogOut } from '@/components/icons'
 import { useUIStore } from '@/store/ui'
 import { useClickOutside } from '@/lib/useClickOutside'
 import { ProfileAvatar } from './ProfileAvatar'
+import { ControlTooltip } from './ControlTooltip'
 
 export function UserMenu() {
   const [open, setOpen] = useState(false)
@@ -20,24 +21,25 @@ export function UserMenu() {
   useClickOutside(ref, () => setOpen(false))
 
   return (
-    <div className="relative" ref={ref}>
+    <div className="group/tooltip relative" ref={ref}>
       <button
         onClick={() => setOpen(!open)}
-        className="flex h-9 w-9 items-center justify-center rounded-full border border-transparent bg-transparent text-text-secondary transition-all duration-200 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary"
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-transparent text-text-secondary transition-opacity duration-150 hover:opacity-70 active:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-text-muted/35 focus-visible:ring-offset-2 focus-visible:ring-offset-bg-primary"
         aria-label="User menu"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        data-no-focus-ring=""
       >
         {imageUrl ? (
-          <ProfileAvatar imageUrl={imageUrl} name={displayName} className="h-9 w-9 border-0" iconSize={14} />
+          <ProfileAvatar imageUrl={imageUrl} name={displayName} className="h-8 w-8 border-0" iconSize={13} />
         ) : (
           <User size={14} strokeWidth={2.25} />
         )}
       </button>
+      {!open && <ControlTooltip label="Account" align="right" />}
 
       {open && (
-        <div
-          className="fixed left-3 right-3 top-12 mt-2 menu-surface border border-border-primary rounded-2xl w-auto overflow-hidden z-[100] animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[260px]"
-          style={{ boxShadow: 'var(--shadow-lg)' }}
-        >
+        <div className="fixed left-3 right-3 top-12 mt-2 menu-surface border border-border-primary rounded-2xl w-auto overflow-hidden z-[100] animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[260px]">
           {/* User info */}
           <div className="px-3.5 pt-3.5 pb-3 border-b border-border-primary">
             <div className="flex items-center gap-3">
@@ -62,7 +64,7 @@ export function UserMenu() {
                 setSettingsOpen(true)
                 setOpen(false)
               }}
-              className="w-full px-2.5 h-9 flex items-center gap-2.5 text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-secondary transition-all duration-150 rounded-xl"
+              className="w-full px-2.5 h-9 flex items-center gap-2.5 text-[12.5px] font-medium text-text-secondary hover:text-text-primary hover:bg-bg-hover focus-visible:bg-bg-hover transition-all duration-150 rounded-lg"
             >
               <Settings size={13.5} className="text-current" strokeWidth={2.25} />
               Settings
@@ -73,7 +75,7 @@ export function UserMenu() {
           <div className="border-t border-border-primary p-1.5">
             <button
               onClick={() => void signOut({ callbackUrl: '/sign-in' })}
-              className="w-full px-2.5 h-9 flex items-center gap-2.5 text-[12.5px] font-medium text-accent-red hover:bg-accent-red/10 transition-all duration-150 rounded-xl"
+              className="w-full px-2.5 h-9 flex items-center gap-2.5 text-[12.5px] font-medium text-accent-red hover:bg-accent-red/10 focus-visible:bg-accent-red/10 transition-all duration-150 rounded-lg"
             >
               <LogOut size={13.5} strokeWidth={2.25} />
               Sign out

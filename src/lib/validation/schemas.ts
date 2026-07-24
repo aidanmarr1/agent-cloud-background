@@ -14,6 +14,8 @@ const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 const MAX_ATTACHMENT_CONTENT_CHARS = 16 * 1024 * 1024
 
 const ChatMessageSchema = z.object({
+  id: z.string().uuid().optional(),
+  timestamp: z.number().finite().nonnegative().optional(),
   role: z.enum(['user', 'assistant']),
   content: z.string().max(MAX_MESSAGE_CONTENT_CHARS),
   attachments: z.array(z.object({
@@ -35,6 +37,8 @@ const ChatMessageSchema = z.object({
 ))
 
 export const ChatRequestSchema = z.object({
+  runId: z.string().uuid(),
+  assistantMessageId: z.string().uuid().optional(),
   messages: z.array(ChatMessageSchema).min(1).max(MAX_CHAT_MESSAGES),
   model: z.string().optional().default('').transform(v => resolveModel(v || '')),
   conversationId: z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/, 'task id must contain only alphanumeric, hyphens, underscores'),

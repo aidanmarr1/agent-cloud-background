@@ -19,7 +19,7 @@ const NUMBER_WORDS: Record<string, number> = {
 
 const MARKDOWN_DELIVERABLE_PATTERN = /\b(?:\.md|markdown|md\s+file|markdown\s+file)\b/i
 const FILE_DELIVERABLE_PATTERN = /\b(?:create|write|save|return|deliver|make)\b.{0,80}\b(?:file|report|document)\b/i
-const INLINE_ANSWER_PATTERN = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|write\s+(?:it|this|the answer|the\s+(?:final\s+)?report|the summary|the findings?)\s+(?:directly\s+)?(?:in chat|here)|just\s+answer|inline)\b/i
+const INLINE_ANSWER_PATTERN = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|answer\b.{0,40}\bin\s+(?:one|two|three|four|five|\d+)\s+sentences?|(?:one|two|three|four|five|\d+)[-\s]+sentence\s+(?:answer|response|summary)|write\s+(?:it|this|the answer|the\s+(?:final\s+)?report|the summary|the findings?)\s+(?:directly\s+)?(?:in chat|here)|just\s+answer|inline)\b/i
 const REPORT_MARKDOWN_DEFAULT_PATTERN = /\b(?:research\s+(?:about|on|into|for|why|whether|all\s+about)|deep\s+research|report(?:\s+on|\s+about)?|research\s+report|findings?|write[-\s]?up|source[-\s]?backed\s+summary|cited\s+summary|compile\s+(?:the\s+)?(?:findings|research|report)|synthesi[sz]e\s+(?:the\s+)?(?:findings|research)|deliver\s+(?:the\s+)?(?:findings|report))\b/i
 const BARE_RESEARCH_OVERVIEW_PATTERN = /^\s*(?:please\s+)?(?:research|look\s+up|search(?:\s+for)?|find\s+out\s+about|learn\s+about)\s+(?:about|on|into|for)?\s+(.{2,120}?)\s*[.!?]*\s*$/i
 const SUBSTANTIVE_RESEARCH_SCOPE_PATTERN = /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|all\s+about|everything\s+about|current|latest|recent|today|this\s+(?:week|month|year)|202[4-9]|news|report|memo|briefing|analysis|markdown|\.md|file|document|sources?|citations?|cited|references?|evidence|verified|verify|compare|versus|vs\.?|landscape|ecosystem|applications?|use\s+cases?|trends?|history|timeline|ethical|societal|future|risks?|opportunities?|market|pricing|funding|reviews?)\b/i
@@ -35,6 +35,142 @@ const FIXED_SEARCH_DELIVERABLE_DIRECTIVE_PATTERNS = [
   /\b(?:and|then)\s+(?:return|deliver|send)\s+(?:it|the\s+(?:file|report|document))\b/gi,
   /\b(?:in|as)\s+(?:an?\s+)?(?:\.md|markdown|md)\s+(?:report\s+)?file\b/gi,
 ]
+
+export interface ExplicitTaskToolConstraint {
+  /** Named tools/groups that must be used at least once. */
+  required: string[]
+  /** When non-empty, every tool action must match one of these targets. */
+  exclusive: string[]
+  /** Tool actions matching these targets are never allowed. */
+  forbidden: string[]
+}
+
+interface ExplicitToolTargetDefinition {
+  target: string
+  pattern: string
+}
+
+const RAW_TOOL_NAMES = [
+  'web_search',
+  'image_search',
+  'create_file',
+  'read_file',
+  'delete_file',
+  'list_files',
+  'edit_file',
+  'append_file',
+  'export_pdf',
+  'read_document',
+  'http_request',
+  'execute_command',
+  'run_code',
+  'browser_navigate',
+  'browser_click_at',
+  'browser_type',
+  'browser_fill_form',
+  'browser_find_text',
+  'browser_screenshot',
+  'browser_get_content',
+  'browser_scroll',
+  'browser_hover',
+  'browser_select',
+  'browser_press_key',
+  'browser_go_back',
+  'browser_action_sequence',
+  'browser_click_and_hold',
+  'browser_drag',
+] as const
+
+const EXPLICIT_TOOL_TARGETS: ExplicitToolTargetDefinition[] = [
+  { target: 'terminal', pattern: String.raw`(?:terminal|shell|command(?:[-\s]?line)?|cli)` },
+  { target: 'web_search', pattern: String.raw`(?:web_search|web[-\s]?search(?:\s+tool)?|search(?:ing)?\s+the\s+web)` },
+  { target: 'image_search', pattern: String.raw`(?:image_search|image[-\s]?search(?:\s+tool)?|search(?:ing)?\s+(?:for\s+)?images?)` },
+  { target: 'browser', pattern: String.raw`(?:browser(?:[-\s]?tools?)?|brows(?:e|ing))` },
+  { target: 'read_document', pattern: String.raw`(?:read_document|direct[-\s]?document[-\s]?extraction|document[-\s]?extraction(?:\s+tool)?)` },
+  { target: 'http_request', pattern: String.raw`(?:http_request|HTTP(?:\s+request)?)` },
+  { target: 'file_tools', pattern: String.raw`(?:file[-\s]?tools?)` },
+  { target: 'export_pdf', pattern: String.raw`(?:export_pdf|export(?:ing)?\s+(?:(?:a|the)\s+)?PDF|PDF[-\s]?export(?:\s+tool)?)` },
+  ...RAW_TOOL_NAMES
+    .filter(name => !['web_search', 'image_search', 'read_document', 'http_request', 'export_pdf'].includes(name))
+    .map(name => ({ target: name, pattern: name })),
+]
+
+const TERMINAL_TOOL_NAMES = new Set(['execute_command', 'run_code'])
+const FILE_TOOL_NAMES = new Set([
+  'create_file',
+  'read_file',
+  'delete_file',
+  'list_files',
+  'edit_file',
+  'append_file',
+  'export_pdf',
+])
+
+interface DirectiveMatch {
+  mode: 'required' | 'exclusive' | 'forbidden' | 'release'
+  index: number
+  end: number
+}
+
+function allDirectiveMatches(
+  text: string,
+  targetPattern: string,
+  mode: DirectiveMatch['mode'],
+  patterns: string[],
+): DirectiveMatch[] {
+  const matches: DirectiveMatch[] = []
+  for (const pattern of patterns) {
+    const regex = new RegExp(pattern.replaceAll('__TARGET__', targetPattern), 'gi')
+    for (const match of text.matchAll(regex)) {
+      matches.push({
+        mode,
+        index: match.index,
+        end: match.index + match[0].length,
+      })
+    }
+  }
+  return matches
+}
+
+function rangesOverlap(a: DirectiveMatch, b: DirectiveMatch): boolean {
+  return a.index < b.end && b.index < a.end
+}
+
+function directiveModeForTarget(
+  text: string,
+  targetPattern: string,
+): DirectiveMatch['mode'] | null {
+  const release = allDirectiveMatches(text, targetPattern, 'release', [
+    String.raw`\b(?:do\s+not|don'?t|dont|never)\s+(?:only|exclusively|strictly|solely)\s+(?:use|using)?\s*(?:the\s+)?__TARGET__\b`,
+    String.raw`\b(?:no\s+longer|not|isn'?t|is\s+not)\s+(?:the\s+)?__TARGET__[-\s]?(?:only|exclusive)\b`,
+    String.raw`\b(?:stop|quit)\s+(?:using|working\s+in)\s+(?:the\s+)?__TARGET__\s+only\b`,
+    String.raw`\b(?:do\s+not|don'?t|dont)\s+need\s+to\s+use\s+(?:the\s+)?__TARGET__\b`,
+    String.raw`\b(?:can|could|may|might)\s+(?:use|try)\s+(?:the\s+)?__TARGET__\b`,
+    String.raw`\bfeel\s+free\s+to\s+use\s+(?:the\s+)?__TARGET__\b`,
+  ])
+  const exclusive = allDirectiveMatches(text, targetPattern, 'exclusive', [
+    String.raw`\b(?:only|exclusively|strictly|solely)\s+(?:use|using|via|with|through|in)?\s*(?:the\s+)?__TARGET__\b`,
+    String.raw`\b(?:use|using|via|with|through|in)\s+(?:only|exclusively|strictly|solely)\s*(?:the\s+)?__TARGET__\b`,
+    String.raw`\b(?:use|using|via|with|through|in)\s+(?:the\s+)?__TARGET__\s+(?:only|exclusively|strictly|solely)\b`,
+    String.raw`\b__TARGET__[-\s]?(?:only|exclusive)\b`,
+  ]).filter(candidate => !release.some(other => rangesOverlap(candidate, other)))
+  const forbidden = allDirectiveMatches(text, targetPattern, 'forbidden', [
+    String.raw`\b(?:do\s+not|don'?t|dont|never|avoid|no\s+longer)\s+(?:use|using|call|calling|open|opening|run|running)?\s*(?:the\s+)?__TARGET__\b`,
+    String.raw`\bwithout\s+(?:use|using)?\s*(?:the\s+)?__TARGET__\b`,
+    String.raw`\bno\s+(?:use\s+of\s+)?(?:the\s+)?__TARGET__\b`,
+  ]).filter(candidate => !release.some(other => rangesOverlap(candidate, other)))
+  const stronger = [...release, ...exclusive, ...forbidden]
+  const required = allDirectiveMatches(text, targetPattern, 'required', [
+    String.raw`\b(?:use|using|via|call|invoke|open|run)\s+(?:the\s+)?__TARGET__\b`,
+    String.raw`\b(?:do|run|make|perform|conduct)\s+(?:a\s+)?__TARGET__\b`,
+    String.raw`\b(?:do|perform|complete|execute|handle)\s+(?:this|it|the\s+task|the\s+work)\s+(?:in|with|through|via)\s+(?:the\s+)?__TARGET__\b`,
+  ]).filter(candidate => !stronger.some(other => rangesOverlap(candidate, other)))
+
+  const candidates = [...stronger, ...required]
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => a.index - b.index || a.end - b.end)
+  return candidates[candidates.length - 1]?.mode || null
+}
 
 function parseSmallCount(value: string): number | null {
   const normalized = value.toLowerCase()
@@ -57,6 +193,94 @@ export function explicitWebSearchLimitFromText(text: string | null | undefined):
   if (exactTool?.[1]) return parseSmallCount(exactTool[1])
 
   return null
+}
+
+/**
+ * Parse clear user-authored named-tool instructions. A plain "use X" requires
+ * one X action; "only X" keeps every action inside X; negative directives
+ * remove X. Mere mentions and optional suggestions are intentionally ignored.
+ */
+export function explicitTaskToolConstraintFromText(
+  text: string | null | undefined,
+): ExplicitTaskToolConstraint | null {
+  if (!text) return null
+  const required = new Set<string>()
+  const exclusive = new Set<string>()
+  const forbidden = new Set<string>()
+
+  for (const definition of EXPLICIT_TOOL_TARGETS) {
+    let mode = directiveModeForTarget(text, definition.pattern)
+    if (!mode && definition.target === 'browser' && /(?:^|[.;!?]\s*|\b(?:please|then)\s+)browse\b/i.test(text)) {
+      mode = 'required'
+    }
+    if (!mode && definition.target === 'web_search' && /(?:^|[.;!?]\s*|\b(?:please|then)\s+)(?:search\s+the\s+web|web[-\s]?search)\b/i.test(text)) {
+      mode = 'required'
+    }
+    if (!mode && definition.target === 'image_search' && /(?:^|[.;!?]\s*|\b(?:please|then)\s+)(?:search\s+(?:for\s+)?images?|image[-\s]?search)\b/i.test(text)) {
+      mode = 'required'
+    }
+    if (!mode && definition.target === 'export_pdf' && /(?:^|[.;!?]\s*|\b(?:please|then)\s+)export\s+(?:(?:a|the)\s+)?PDF\b/i.test(text)) {
+      mode = 'required'
+    }
+    if (!mode || mode === 'release') continue
+    if (mode === 'forbidden') {
+      forbidden.add(definition.target)
+      continue
+    }
+    required.add(definition.target)
+    if (mode === 'exclusive') exclusive.add(definition.target)
+  }
+
+  // A natural group alias wins over raw members captured inside the same
+  // phrase (for example "browser tools" or "terminal only").
+  for (const group of ['terminal', 'browser', 'file_tools']) {
+    if (required.has(group)) {
+      for (const definition of EXPLICIT_TOOL_TARGETS) {
+        if (definition.target !== group && toolMatchesExplicitTaskToolTarget(group, definition.target)) {
+          required.delete(definition.target)
+          exclusive.delete(definition.target)
+        }
+      }
+    }
+    if (forbidden.has(group)) {
+      for (const definition of EXPLICIT_TOOL_TARGETS) {
+        if (definition.target !== group && toolMatchesExplicitTaskToolTarget(group, definition.target)) {
+          forbidden.delete(definition.target)
+        }
+      }
+    }
+  }
+
+  if (required.size === 0 && exclusive.size === 0 && forbidden.size === 0) return null
+  return {
+    required: [...required],
+    exclusive: [...exclusive],
+    forbidden: [...forbidden],
+  }
+}
+
+export function toolMatchesExplicitTaskToolTarget(target: string, toolName: string): boolean {
+  if (target === 'terminal') return TERMINAL_TOOL_NAMES.has(toolName)
+  if (target === 'browser') return toolName === 'browse_page' || toolName.startsWith('browser_')
+  if (target === 'file_tools') return FILE_TOOL_NAMES.has(toolName)
+  return target === toolName
+}
+
+export function explicitTaskToolTargetLabel(target: string): string {
+  if (target === 'terminal') return 'terminal command tools'
+  if (target === 'browser') return 'browser tools'
+  if (target === 'file_tools') return 'file tools'
+  return target
+}
+
+export function toolAllowedByExplicitTaskConstraint(
+  constraint: ExplicitTaskToolConstraint | null,
+  toolName: string,
+): boolean {
+  if (!constraint) return true
+  if (constraint.forbidden.some(target => toolMatchesExplicitTaskToolTarget(target, toolName))) return false
+  return constraint.exclusive.length === 0 ||
+    constraint.exclusive.some(target => toolMatchesExplicitTaskToolTarget(target, toolName))
 }
 
 export function latestUserContent(messages: Array<{ role: string; content: string }>): string {
@@ -133,8 +357,7 @@ export function taskDefaultsToMarkdownDeliverable(text: string | null | undefine
   const reportDefault = REPORT_MARKDOWN_DEFAULT_PATTERN.test(text)
   if (
     !explicitArtifact &&
-    !reportDefault &&
-    /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast)\b/i.test(text)
+    /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast|one[-\s]?sentence|two[-\s]?sentence|in\s+(?:one|two|three|four|five|\d+)\s+sentences?)\b/i.test(text)
   ) {
     return false
   }

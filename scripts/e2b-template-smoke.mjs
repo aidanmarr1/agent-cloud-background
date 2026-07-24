@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createJiti } from 'jiti'
-import { chromium as playwrightChromium } from 'playwright'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
@@ -11,6 +10,7 @@ const srcPath = fileURLToPath(new URL('../src', import.meta.url))
 const args = process.argv.slice(2)
 const skipBrowser = args.includes('--skip-browser')
 const keepSandbox = args.includes('--keep-sandbox')
+const testCancellation = args.includes('--test-cancel')
 
 loadLocalEnvFiles(rootUrl)
 
@@ -67,6 +67,12 @@ const {
   getOrCreateE2BSandbox,
   pauseE2BSandbox,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/e2bSandbox.ts', import.meta.url)))
+const {
+  browserNavigate,
+  browserResize,
+  destroyBrowserSession,
+  subscribeToBrowserFrames,
+} = await jiti.import(fileURLToPath(new URL('../src/lib/browser.ts', import.meta.url)))
 
 const conversationId = `e2b-smoke-${randomUUID().slice(0, 8)}`
 const startedAt = Date.now()
@@ -109,9 +115,66 @@ try {
     throw new Error(`E2B template command smoke failed: ${commandResult.stderr || commandResult.stdout || `exit ${commandResult.exitCode}`}`)
   }
 
+  let cancellationInfo = null
+  if (testCancellation) {
+    const abortController = new AbortController()
+    const cancelStartedAt = Date.now()
+    const cancelTimer = setTimeout(() => abortController.abort(), 750)
+    let cancelled = false
+    try {
+      await withTimeout(
+        executeCommandInE2B(
+          conversationId,
+          'printf ready; sleep 300',
+          undefined,
+          undefined,
+          undefined,
+          abortController.signal,
+        ),
+        5_000,
+        'Timed out cancelling E2B command.',
+      )
+    } catch (error) {
+      cancelled = abortController.signal.aborted &&
+        error instanceof Error &&
+        error.name === 'AbortError'
+    } finally {
+      clearTimeout(cancelTimer)
+    }
+    if (!cancelled) throw new Error('E2B command did not unwind cleanly after cancellation.')
+
+    const afterCancel = await withTimeout(
+      executeCommandInE2B(conversationId, 'printf after-cancel'),
+      5_000,
+      'E2B sandbox did not accept a command after cancellation.',
+    )
+    if (afterCancel.exitCode !== 0 || afterCancel.stdout !== 'after-cancel') {
+      throw new Error('E2B sandbox was not healthy after command cancellation.')
+    }
+    cancellationInfo = {
+      unwoundMs: Date.now() - cancelStartedAt,
+      sandboxReusable: true,
+    }
+  }
+
   let browserInfo = null
   if (!skipBrowser) {
     const endpoint = await ensureE2BRemoteBrowser(conversationId)
+    const browserSandbox = await getOrCreateE2BSandbox(conversationId)
+    if (browserSandbox.sandboxId !== sandboxId) {
+      throw new Error('E2B Chromium and terminal resolved different task sandboxes.')
+    }
+    const browserPort = Number.parseInt(env('AGENT_E2B_BROWSER_PORT') || '9222', 10)
+    if (!Number.isFinite(browserPort) || browserPort < 1 || browserPort > 65_535) {
+      throw new Error('AGENT_E2B_BROWSER_PORT must be a valid TCP port.')
+    }
+    const sameVmProbe = await executeCommandInE2B(
+      conversationId,
+      `curl -fsS http://127.0.0.1:${browserPort}/json/version >/dev/null && printf shared-e2b-vm`,
+    )
+    if (sameVmProbe.exitCode !== 0 || sameVmProbe.stdout !== 'shared-e2b-vm') {
+      throw new Error('The task terminal could not reach task Chromium over sandbox localhost.')
+    }
     const response = await withTimeout(
       fetch(`${endpoint}/json/version`),
       Number.parseInt(env('AGENT_E2B_BROWSER_VERIFY_TIMEOUT_MS') || '15000', 10),
@@ -125,17 +188,69 @@ try {
       throw new Error('E2B Chromium endpoint did not return JSON.')
     }
     const debuggerUrl = await ensureE2BRemoteBrowserDebuggerUrl(conversationId)
-    const connectedBrowser = await withTimeout(
-      playwrightChromium.connectOverCDP(debuggerUrl),
-      Number.parseInt(env('AGENT_E2B_BROWSER_VERIFY_TIMEOUT_MS') || '15000', 10),
-      'Timed out connecting to E2B Chromium over CDP.',
-    )
-    await connectedBrowser.close().catch(() => undefined)
+    let liveFrameCount = 0
+    let firstLiveFrameAt = 0
+    let largestLiveFrameBytes = 0
+    const liveFrameFingerprints = new Set()
+    let resolveLiveFrames
+    const liveFramesReady = new Promise((resolve) => {
+      resolveLiveFrames = resolve
+    })
+    const unsubscribe = subscribeToBrowserFrames(conversationId, (frame) => {
+      const byteLength = Buffer.from(frame, 'base64').byteLength
+      if (byteLength > 0) {
+        liveFrameCount++
+        liveFrameFingerprints.add(createHash('sha1').update(frame).digest('hex'))
+        if (!firstLiveFrameAt) firstLiveFrameAt = Date.now()
+        largestLiveFrameBytes = Math.max(largestLiveFrameBytes, byteLength)
+        if (liveFrameCount >= 3 && liveFrameFingerprints.size >= 2) resolveLiveFrames()
+      }
+    })
+    const navigationStartedAt = Date.now()
+    let navigation
+    try {
+      navigation = await withTimeout(
+        browserNavigate(conversationId, 'https://example.com'),
+        20_000,
+        'Timed out navigating from the E2B browser runtime.',
+      )
+      if (!navigation.success) {
+        throw new Error(`E2B browser navigation failed: ${navigation.error || navigation.action}`)
+      }
+      await browserResize(conversationId, 1100, 700)
+      await browserResize(conversationId, 900, 620)
+      await withTimeout(
+        liveFramesReady,
+        10_000,
+        'E2B Chromium did not emit distinct live frames through the browser subscriber.',
+      )
+    } finally {
+      unsubscribe?.()
+      await destroyBrowserSession(conversationId).catch(() => undefined)
+    }
+    const pageTitle = navigation?.title || ''
+    if (
+      pageTitle !== 'Example Domain' ||
+      liveFrameCount < 3 ||
+      liveFrameFingerprints.size < 2 ||
+      largestLiveFrameBytes < 1_000
+    ) {
+      throw new Error('E2B Chromium did not return the expected navigated page and live frame stream.')
+    }
     browserInfo = {
       endpoint,
+      sameSandboxId: true,
+      terminalReachedBrowserOverLocalhost: true,
       debuggerHostMatchesEndpoint: new URL(debuggerUrl).host === new URL(endpoint).host,
       browser: version.Browser || null,
       webSocketDebuggerUrl: typeof version.webSocketDebuggerUrl === 'string',
+      navigatedTitle: pageTitle,
+      navigationMs: Date.now() - navigationStartedAt,
+      liveFrameTransport: 'browser-subscriber-cdp-screencast',
+      liveFrameCount,
+      distinctLiveFrames: liveFrameFingerprints.size,
+      firstLiveFrameMs: firstLiveFrameAt - navigationStartedAt,
+      largestLiveFrameBytes,
     }
   }
 
@@ -156,6 +271,7 @@ try {
       stdout: commandResult.stdout.trim().split(/\r?\n/).slice(0, 12),
       durationMs: commandResult.durationMs,
     },
+    cancellation: cancellationInfo,
     browser: browserInfo,
     durationMs: Date.now() - startedAt,
   }, null, 2))

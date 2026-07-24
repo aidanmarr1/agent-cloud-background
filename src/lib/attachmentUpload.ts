@@ -40,6 +40,7 @@ export async function uploadAttachmentsToServer(
   const uploadable: Array<{ originalIndex: number; file: File }> = []
 
   for (let index = 0; index < attachments.length; index += 1) {
+    if (attachments[index].id && attachments[index].persisted) continue
     const file = await attachmentToFile(attachments[index])
     if (file) uploadable.push({ originalIndex: index, file })
   }

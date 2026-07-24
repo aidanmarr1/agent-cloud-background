@@ -19,6 +19,7 @@ export function PanelHeader() {
     analyzing: 'Analyzing',
     running: 'Running code',
     thinking: 'Thinking',
+    stopping: 'Stopping',
   }
 
   const isLive = Boolean(isStreaming && streamingStatus)
@@ -27,9 +28,9 @@ export function PanelHeader() {
       : "Agent's Computer"
 
   return (
-    <div className="h-12 flex items-center justify-between px-3 border-b border-border-primary flex-shrink-0 sm:px-4">
+    <div className="flex h-16 flex-shrink-0 items-center justify-between border-b border-border-secondary px-4 sm:px-5">
       <div className="flex items-center gap-2.5 min-w-0">
-        <span className="text-[14.5px] font-semibold text-text-primary [font-family:var(--font-display)] tracking-[0] truncate">
+        <span className="truncate text-[14px] font-semibold tracking-[-0.01em] text-text-primary">
           {headerText}
         </span>
       </div>

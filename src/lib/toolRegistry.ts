@@ -16,7 +16,6 @@ import {
   executeInSandbox,
   isCloudSandboxProviderEnabled,
 } from './sandbox'
-import { getYouTubeTranscript } from './youtube'
 import { readDocument } from './document'
 import { makeHttpRequest } from './httpRequest'
 import {
@@ -33,6 +32,8 @@ import type { ToolContext } from './tools'
 interface ToolRegistration {
   /** Required string arguments */
   required?: string[]
+  /** At least one non-empty string argument from this list is required. */
+  requiredOneOf?: string[]
   /** Whether the tool needs conversationId */
   needsConversation?: boolean
   /** The handler */
@@ -50,19 +51,18 @@ function register(name: string, reg: ToolRegistration) {
 
 register('web_search', {
   required: ['query'],
-  execute: async (args) => webSearch(args.query as string),
+  execute: async (args, ctx) => webSearch(args.query as string, ctx.signal),
 })
 
 register('image_search', {
   required: ['query'],
   needsConversation: true,
   execute: async (args, ctx) => {
-    const count = typeof args.count === 'number' ? args.count : 5
-    const results = await imageSearch(args.query as string, count)
+    const results = await imageSearch(args.query as string, 8, ctx.signal)
     if (results.length === 0) {
       return { downloaded: [], failed: [], message: 'No images found for this query.' }
     }
-    const dl = await downloadImagesToSandbox(ctx.conversationId!, results)
+    const dl = await downloadImagesToSandbox(ctx.conversationId!, results, ctx.signal)
     return {
       downloaded: dl.downloaded,
       failed: dl.failed,
@@ -140,29 +140,32 @@ register('execute_command', {
   required: ['command'],
   needsConversation: true,
   execute: async (args, ctx) =>
-    executeInSandbox(ctx.conversationId!, args.command as string, ctx.onTerminalOutput),
+    executeInSandbox(ctx.conversationId!, args.command as string, ctx.onTerminalOutput, ctx.signal),
 })
 
 // --- Media & Docs ---
 
-register('youtube_transcript', {
-  required: ['url'],
-  execute: async (args) => getYouTubeTranscript(args.url as string),
-})
-
 register('read_document', {
-  required: ['source'],
-  execute: async (args, ctx) => readDocument(args.source as string, ctx.conversationId),
+  // `url` is the model-visible canonical argument. `source` remains accepted
+  // for already-running tasks whose earlier context contains the old schema.
+  requiredOneOf: ['url', 'source'],
+  execute: async (args, ctx) => {
+    const target = typeof args.url === 'string' && args.url.trim()
+      ? args.url
+      : args.source as string
+    return readDocument(target, ctx.conversationId, ctx.signal)
+  },
 })
 
 register('http_request', {
   required: ['method', 'url'],
-  execute: async (args) =>
+  execute: async (args, ctx) =>
     makeHttpRequest(
       args.method as string,
       args.url as string,
       args.headers as Record<string, string> | undefined,
       args.body as string | undefined,
+      ctx.signal,
     ),
 })
 
@@ -360,6 +363,15 @@ export async function executeToolFromRegistry(
       }
     }
   }
+  if (reg.requiredOneOf) {
+    const hasValue = reg.requiredOneOf.some(field => {
+      const value = args[field]
+      return typeof value === 'string' && value.trim().length > 0
+    })
+    if (!hasValue) {
+      return { error: `Missing required argument: ${reg.requiredOneOf[0]}` }
+    }
+  }
 
   // Validate task context
   if (reg.needsConversation && !context?.conversationId) {
@@ -367,8 +379,12 @@ export async function executeToolFromRegistry(
   }
 
   try {
-    return await reg.execute(args, context || {})
+    if (context?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+    const result = await reg.execute(args, context || {})
+    if (context?.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+    return result
   } catch (err) {
+    if (context?.signal?.aborted || (err as { name?: string })?.name === 'AbortError') throw err
     console.error(`[ToolRegistry] Unhandled error in tool "${name}":`, err)
     return { error: `Tool execution failed: ${err instanceof Error ? err.message : String(err)}` }
   }

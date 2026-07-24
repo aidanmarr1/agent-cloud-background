@@ -114,6 +114,16 @@ try {
 
   const firstWorkerId = `lease-smoke-live-worker-${queueName}`
   const replacementWorkerId = `lease-smoke-replacement-worker-${queueName}`
+  const firstWorkerStartedAt = Date.now()
+  await recordTaskWorkerHeartbeat({
+    workerId: firstWorkerId,
+    startedAtMs: firstWorkerStartedAt,
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
   const firstClaim = await claimNextTaskJob(firstWorkerId, 10)
   if (!firstClaim || firstClaim.runId !== runId) {
     throw new Error(`Initial worker did not claim the diagnostic job. Claimed: ${firstClaim?.runId || 'none'}`)
@@ -123,8 +133,7 @@ try {
   }
   await recordTaskWorkerHeartbeat({
     workerId: firstWorkerId,
-    queueName,
-    startedAtMs: Date.now(),
+    startedAtMs: firstWorkerStartedAt,
     pollMs: 100,
     heartbeatMs: 15_000,
     status: 'running',
@@ -134,6 +143,15 @@ try {
 
   await sleep(35)
 
+  await recordTaskWorkerHeartbeat({
+    workerId: replacementWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
   const protectedClaim = await claimNextTaskJob(replacementWorkerId, 60_000)
   if (protectedClaim) {
     throw new Error(`A fresh worker heartbeat should prevent stale-lease recovery. Claimed: ${protectedClaim.runId}`)
@@ -183,12 +201,32 @@ try {
       message: `queue=${queueName}`,
     },
   })
-  const exhaustedFirstClaim = await claimNextTaskJob(`lease-smoke-exhausted-worker-${queueName}`, 10)
+  const exhaustedFirstWorkerId = `lease-smoke-exhausted-worker-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId: exhaustedFirstWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const exhaustedFirstClaim = await claimNextTaskJob(exhaustedFirstWorkerId, 10)
   if (!exhaustedFirstClaim || exhaustedFirstClaim.runId !== exhaustedRunId) {
     throw new Error(`Retry exhaustion first worker did not claim the diagnostic job. Claimed: ${exhaustedFirstClaim?.runId || 'none'}`)
   }
   await sleep(35)
-  const exhaustedReplacementClaim = await claimNextTaskJob(`lease-smoke-exhausted-replacement-${queueName}`, 60_000)
+  const exhaustedReplacementWorkerId = `lease-smoke-exhausted-replacement-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId: exhaustedReplacementWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const exhaustedReplacementClaim = await claimNextTaskJob(exhaustedReplacementWorkerId, 60_000)
   if (exhaustedReplacementClaim) {
     throw new Error('Retry-exhausted diagnostic job was claimable after exceeding AGENT_TASK_WORKER_MAX_ATTEMPTS.')
   }

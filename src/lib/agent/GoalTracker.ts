@@ -127,7 +127,7 @@ export class GoalTracker {
       }
       case 'read_document': {
         const args = this.safeParseArgs(result.tc.arguments)
-        const source = args?.url || args?.path || 'document'
+        const source = args?.url || args?.source || args?.path || 'document'
         evidence = `Read: ${this.truncate(String(source), 50)}`
         break
       }

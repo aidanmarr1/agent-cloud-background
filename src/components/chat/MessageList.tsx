@@ -8,7 +8,7 @@ import { BranchIndicator } from './BranchIndicator'
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useVirtualizedList } from '@/lib/useVirtualizedList'
-import { ArrowDown } from '@/components/icons'
+import { ArrowDown, MessageSquare } from '@/components/icons'
 
 // Memoized message wrappers to prevent re-renders of unchanged messages
 const MemoizedUserMessage = memo(function MemoizedUserMessage({
@@ -109,7 +109,7 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
     getItemKey: useCallback((i: number) => messages[i]?.id ?? String(i), [messages]),
     overscan: 3,
     alwaysRenderLast,
-    estimatedItemHeight: 150,
+    estimatedItemHeight: 190,
     volatileKeys,
   })
 
@@ -191,10 +191,18 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
 
   // Render a single message by index
   const renderMessage = (msg: Message, i: number, ref?: (el: HTMLElement | null) => void) => {
+    const previousRole = messages[i - 1]?.role
+    const nextRole = messages[i + 1]?.role
+
     if (msg.role === 'user') {
       const hasBranches = conversation?.branches?.some(b => b.parentMessageId === msg.id) ?? false
+      const topSpacing = i === 0
+        ? 'pt-5'
+        : previousRole === 'assistant'
+          ? 'pt-5'
+          : 'pt-3'
       return (
-        <div key={msg.id} ref={ref} className="py-6">
+        <div key={msg.id} ref={ref} className={`${topSpacing} pb-3`}>
           <MemoizedUserMessage
             message={msg}
             hasBranches={hasBranches}
@@ -205,8 +213,13 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
       )
     }
 
+    const closesTurn = nextRole === 'user'
     return (
-      <div key={msg.id} ref={ref} className="py-6">
+      <div
+        key={msg.id}
+        ref={ref}
+        className={`pt-7 ${closesTurn ? 'pb-5' : 'pb-6'}`}
+      >
         <MemoizedAgentMessage
           message={msg}
           isLastAssistant={i === lastAssistantIndex}
@@ -219,19 +232,43 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
     )
   }
 
+  if (messages.length === 0) {
+    return (
+      <div
+        ref={containerRef}
+        className="relative flex-1 overflow-y-auto px-4 py-6 sm:px-7 sm:py-8"
+        role="log"
+        aria-live="polite"
+        aria-label="Conversation"
+      >
+        <div className="mx-auto flex min-h-full w-full max-w-[860px] items-center justify-center">
+          <div className="max-w-sm px-4 text-center animate-fade-in">
+            <span className="mx-auto mb-3 flex h-10 w-10 items-center justify-center rounded-xl border border-border-primary bg-bg-card text-text-muted" style={{ boxShadow: 'var(--shadow-sm)' }}>
+              <MessageSquare size={17} />
+            </span>
+            <h2 className="text-[14px] font-semibold text-text-primary">This task is ready</h2>
+            <p className="mt-1.5 text-[12.5px] leading-relaxed text-text-muted">Add a direction below to start a new turn.</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   // Non-virtualized render for short conversations
   if (!shouldVirtualize) {
     return (
       <div
         ref={containerRef}
-        className="flex-1 overflow-y-auto px-3 py-5 relative sm:px-5 sm:py-10 md:px-7"
+        className="relative flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7 lg:px-10"
         role="log"
         aria-live="polite"
+        aria-label="Conversation"
+        aria-busy={isStreaming}
       >
-        <div className="max-w-[810px] w-full mx-auto space-y-7">
+        <div className="mx-auto w-full max-w-[860px]">
           {messages.map((msg, i) => renderMessage(msg, i))}
           {showTyping && (
-            <div className="py-6">
+            <div className="pt-3 pb-6">
               <AgentMessage
                 message={{
                   id: 'pending-agent-message',
@@ -251,13 +288,13 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
         {isScrolledUp && (
           <div className="sticky bottom-4 flex justify-center pointer-events-none z-10">
             <button
+              type="button"
               onClick={scrollToBottom}
               aria-label="Scroll to bottom"
-              className="pointer-events-auto flex items-center gap-2 px-4 h-9 bg-bg-card border border-border-primary rounded-full text-[12px] font-semibold text-text-secondary hover:text-text-primary hover:-translate-y-0.5 hover:bg-bg-secondary transition-all duration-200 animate-slide-up"
+              className="pointer-events-auto flex h-11 w-11 items-center justify-center rounded-full border border-border-primary bg-bg-card text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-bg-secondary hover:text-text-primary animate-slide-up"
               style={{ boxShadow: 'var(--shadow-lg)' }}
             >
               <ArrowDown size={12} strokeWidth={2.5} />
-              {isStreaming ? 'New messages' : 'Scroll to bottom'}
             </button>
           </div>
         )}
@@ -271,12 +308,14 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
 
   return (
     <div
-      ref={containerRef}
-      className="flex-1 overflow-y-auto px-3 py-5 relative sm:px-5 sm:py-10 md:px-7"
+    ref={containerRef}
+      className="relative flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-7 lg:px-10"
       role="log"
       aria-live="polite"
+      aria-label="Conversation"
+      aria-busy={isStreaming}
     >
-      <div className="max-w-[810px] w-full mx-auto">
+      <div className="mx-auto w-full max-w-[860px]">
         {/* Virtualized portion */}
         <div style={{ height: totalHeight, position: 'relative' }}>
           <div style={{ transform: `translateY(${offsetTop}px)` }}>
@@ -294,7 +333,7 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
         })}
 
         {showTyping && (
-          <div className="py-6">
+          <div className="pt-3 pb-6">
             <AgentMessage
               message={{
                 id: 'pending-agent-message',
@@ -314,10 +353,11 @@ export function MessageList({ messages, conversationId, onFollowUp, onRegenerate
       {isScrolledUp && (
         <div className="sticky bottom-4 flex justify-center pointer-events-none z-10">
           <button
+            type="button"
             onClick={scrollToBottom}
             aria-label="Scroll to bottom"
-            className="pointer-events-auto flex items-center gap-2 px-4 py-2 bg-bg-card border border-border-primary rounded-full text-[12px] font-semibold text-text-secondary hover:text-text-primary hover:-translate-y-0.5 hover:shadow-[var(--shadow-lg)] transition-all animate-slide-up"
-            style={{ boxShadow: 'var(--shadow-md)' }}
+            className="pointer-events-auto flex h-9 items-center gap-2 rounded-full border border-border-primary bg-bg-card px-4 text-[12px] font-semibold text-text-secondary transition-all duration-200 hover:-translate-y-0.5 hover:bg-bg-secondary hover:text-text-primary animate-slide-up"
+            style={{ boxShadow: 'var(--shadow-lg)' }}
           >
             <ArrowDown size={12} />
             {isStreaming ? 'New messages' : 'Scroll to bottom'}

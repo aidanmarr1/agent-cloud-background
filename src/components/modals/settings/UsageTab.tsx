@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo } from 'react'
 import { BarChart3, Clock, Sparkles } from '@/components/icons'
-import { SectionLabel } from '@/components/ui/SectionLabel'
+import { SettingsSection, settingsPanelClass } from './SettingsSection'
 import {
   getTaskUsageSummaries,
   getTotalCredits,
@@ -173,11 +173,13 @@ export function UsageTab() {
   const taskCount = usageSummary?.taskCount ?? taskRows.length
 
   return (
-    <div className="space-y-6">
-      <div>
-        <SectionLabel>Spend overview</SectionLabel>
-        <div className="grid gap-3 md:grid-cols-[1.25fr_0.85fr]">
-          <div className="rounded-2xl border border-border-primary bg-bg-secondary p-4">
+    <div className="space-y-8">
+      <SettingsSection
+        title="Spend overview"
+        description="See recent usage, lifetime spend, and the credits available now."
+      >
+        <div className="grid gap-3 lg:grid-cols-[1.25fr_0.85fr]">
+          <div className="rounded-xl border border-border-primary bg-bg-card p-4">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="text-[12px] font-semibold text-text-tertiary">Recent spend</div>
@@ -197,7 +199,7 @@ export function UsageTab() {
           </div>
 
           <div className="grid gap-3">
-            <div className="rounded-2xl border border-border-primary bg-bg-secondary p-4">
+            <div className="rounded-xl border border-border-primary bg-bg-card p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-[12px] font-semibold text-text-tertiary">Overall spend</div>
@@ -210,7 +212,7 @@ export function UsageTab() {
               </div>
             </div>
 
-            <div className="rounded-2xl border border-border-primary bg-bg-secondary p-4">
+            <div className="rounded-xl border border-border-primary bg-bg-card p-4">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <div className="text-[12px] font-semibold text-text-tertiary">Credits available</div>
@@ -224,17 +226,17 @@ export function UsageTab() {
             </div>
           </div>
         </div>
-      </div>
+      </SettingsSection>
 
-      <div>
-        <SectionLabel>Task spend</SectionLabel>
-        <div className="overflow-hidden rounded-2xl border border-border-primary bg-bg-secondary">
+      <SettingsSection
+        title="Credit activity"
+        description="Review task spend and credit grants, ordered by latest activity."
+      >
+        <div className={settingsPanelClass}>
           <div className="flex flex-col gap-3 border-b border-border-primary px-4 py-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
-              <div className="text-[14px] font-semibold tracking-[0] text-text-primary">Task spend and credit grants</div>
-              <div className="mt-1 text-[12px] leading-relaxed text-text-tertiary">
-                Agent Admin credits and task totals, ordered by latest activity.
-              </div>
+              <div className="text-[13px] font-semibold tracking-[0] text-text-primary">Activity ledger</div>
+              <div className="mt-1 text-[11.5px] leading-relaxed text-text-tertiary">Newest activity appears first</div>
             </div>
             <div className="text-left sm:text-right">
               <div className="text-[22px] font-semibold leading-none tracking-[0] text-text-primary tabular-nums">
@@ -266,8 +268,6 @@ export function UsageTab() {
                           <span>{formatDateTime(row.timestamp)}</span>
                           <span className="text-text-muted">/</span>
                           <span>{row.reason}</span>
-                          <span className="text-text-muted">/</span>
-                          <span className="break-all font-mono text-[10.5px] text-text-muted">Ledger trace: {row.id}</span>
                         </div>
                       </div>
                       <div className="flex items-center justify-between gap-3 sm:justify-end">
@@ -324,7 +324,7 @@ export function UsageTab() {
           </span>
           <span>Totals sync from the server credit ledger.</span>
         </div>
-      </div>
+      </SettingsSection>
     </div>
   )
 }

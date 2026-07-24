@@ -15,6 +15,7 @@ async function assertSourceContracts() {
     useAgentStream,
     creditPolicy,
     chatRoute,
+    chatTaskRunner,
     events,
     emitter,
     tasks,
@@ -38,6 +39,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
     readFile(join(root, 'src/lib/creditPolicy.ts'), 'utf8'),
     readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/chatTaskRunner.ts'), 'utf8'),
     readFile(join(root, 'src/types/events.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/SSEEmitter.ts'), 'utf8'),
     readFile(join(root, 'src/types/tasks.ts'), 'utf8'),
@@ -141,9 +143,10 @@ async function assertSourceContracts() {
   assert.doesNotMatch(policyEngine, /Text-only response blocked:[\s\S]{0,120}state\.consecutiveNoToolCalls = 0/, 'browser text-only recovery must preserve no-tool counter')
   assert.match(dispatcher, /'stopped'/, 'stream dispatcher must distinguish user stop from done')
   assert.match(dispatcher, /event\.status === 'incomplete'/, 'dispatcher must render incomplete advances distinctly from done')
-  assert.match(useAgentStream, /finalizeOnAbort\('stopped'/, 'manual abort must not mark running steps done')
+  assert.match(useAgentStream, /markActiveAssistantInterrupted[\s\S]*group\.status === 'running' \? 'incomplete'[\s\S]*step\.status === 'running' \? \{ \.\.\.step, status: 'incomplete' \}/, 'manual abort must mark running work incomplete rather than done')
+  assert.match(useAgentStream, /replayCompletedRunAfterStop[\s\S]*completedBeforeStop[\s\S]*await replayCompletedRunAfterStop/, 'a stop racing successful completion must replay final durable events before clearing the run cursor')
   assert.match(creditPolicy, /ACTIVE_CREDITS_PER_MINUTE\s*=\s*0/, 'wall-clock idle time must not be billable')
-  assert.match(chatRoute, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'chat route must not run passive active-time billing when disabled')
+  assert.match(chatTaskRunner, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'the shared task runner must not run passive active-time billing when disabled')
   assert.match(events, /StepAdvanceStatus = 'done' \| 'incomplete'/, 'stream contract must carry incomplete step advancement')
   assert.match(emitter, /stepAdvance\(status: StepAdvanceStatus = 'done'/, 'SSE emitter must accept step advancement status')
   assert.match(tasks, /status: 'pending' \| 'running' \| 'done' \| 'incomplete' \| 'error'/, 'task groups must support incomplete status')
@@ -161,6 +164,7 @@ async function assertCompletionRuntime() {
 import assert from 'node:assert/strict'
 import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
+import { PolicyEngine } from ${JSON.stringify(join(root, 'src/lib/agent/PolicyEngine.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -224,6 +228,34 @@ export function runCompletionAuditSmoke() {
   earlyMarkdownDeliverable.deliverableVerificationDone = true
   audit = auditAgentCompletion(earlyMarkdownDeliverable, 'deliverable_created')
   assert.equal(audit.complete, true)
+
+  const inlineCodeExplanation = createInitialState(false, timeouts)
+  inlineCodeExplanation.currentPlanItems = ['Find one credible source', 'Give the concise summary']
+  inlineCodeExplanation.currentPlanScopes = [
+    'Find current evidence about SVG generation',
+    'Summarize how AI models generate SVG code in two sentences',
+  ]
+  inlineCodeExplanation.currentStepIdx = 1
+  inlineCodeExplanation.taskStrategy = 'research'
+  inlineCodeExplanation.originalUserRequest =
+    'Find one current credible source explaining how AI models generate SVG code, then give a concise two-sentence summary.'
+  inlineCodeExplanation.currentStepIdx = 2
+  audit = auditAgentCompletion(inlineCodeExplanation, 'inline_answer_complete')
+  assert.equal(audit.complete, true, 'a code-related research question must remain an inline answer')
+
+  inlineCodeExplanation.currentStepIdx = 1
+  const policyActions = new PolicyEngine().evaluate(
+    inlineCodeExplanation,
+    new Map(),
+    'A current source explains that language models can emit SVG as structured XML text by learning syntax and visual patterns from training data. The output still benefits from validation because malformed paths, coordinates or accessibility metadata can make the image unusable.',
+    false,
+    40,
+  )
+  assert.equal(
+    policyActions.some(action => action.type === 'terminate' && action.reason === 'inline_answer_complete'),
+    true,
+    'final-step policy must accept the inline SVG explanation instead of forcing a file',
+  )
 }
 `, 'utf8')
 

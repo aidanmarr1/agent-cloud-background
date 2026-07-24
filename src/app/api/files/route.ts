@@ -3,6 +3,7 @@ import {
   MAX_SANDBOX_FILE_SIZE,
   readSandboxFileBytes,
 } from '@/lib/sandbox'
+import { findActiveTaskJobForConversation } from '@/lib/agent/taskJobs'
 import { assertTaskAccess } from '@/lib/taskAccess'
 import { auth } from '@/auth'
 import {
@@ -27,7 +28,7 @@ function safeDownloadName(name: string): string {
 }
 
 function wantsRawFile(searchParams: URLSearchParams): boolean {
-  return searchParams.get('raw') === '1' || searchParams.get('download') === '1'
+  return searchParams.get('raw') === '1' || searchParams.get('inline') === '1' || searchParams.get('download') === '1'
 }
 
 function shouldInlineFile(mimeType: string): boolean {
@@ -54,6 +55,12 @@ export async function GET(request: Request) {
 
   const access = await assertTaskAccess(request, conversationId, { userId })
   if (!access.ok) return access.response
+
+  let activeJobPromise: ReturnType<typeof findActiveTaskJobForConversation> | null = null
+  const getActiveJob = () => {
+    activeJobPromise ??= findActiveTaskJobForConversation(userId, conversationId)
+    return activeJobPromise
+  }
 
   // Check if reading a specific file
   const filePath = searchParams.get('file')
@@ -87,6 +94,13 @@ export async function GET(request: Request) {
       }
     }
 
+    // Durable storage is authoritative once a task is no longer active. Do not
+    // let an idle/terminal file request create a fresh paid cloud sandbox.
+    const activeJob = await getActiveJob()
+    if (!activeJob) {
+      return Response.json({ error: 'File not found' }, { status: 404 })
+    }
+
     const read = await readSandboxFileBytes(conversationId, filePath)
     if (!read.ok) {
       if (read.status === 413) {
@@ -116,15 +130,27 @@ export async function GET(request: Request) {
   }
 
   // List all files
-  const { files, truncated } = await listSandboxFilesDetailed(conversationId)
   const persistedFiles = await listTaskFilesForUser(userId, conversationId).catch(() => [])
   const byPath = new Map<string, SandboxFile>()
-  for (const file of files) {
-    byPath.set(file.path, file)
-  }
   for (const file of persistedFiles) {
     byPath.set(file.path, toPublicTaskFile(file))
   }
+
+  let truncated = false
+  const activeJob = await getActiveJob()
+  if (activeJob) {
+    const liveFiles = await listSandboxFilesDetailed(conversationId)
+    truncated = liveFiles.truncated
+    for (const file of liveFiles.files) {
+      byPath.set(file.path, file)
+    }
+    // Persisted records are the durable authority when both sources contain a
+    // path, including their stable MIME type and modification timestamp.
+    for (const file of persistedFiles) {
+      byPath.set(file.path, toPublicTaskFile(file))
+    }
+  }
+
   const mergedFiles = Array.from(byPath.values()).sort((a, b) => b.modifiedAt - a.modifiedAt)
   return Response.json({ files: mergedFiles, truncated }, { headers: access.headers })
 }

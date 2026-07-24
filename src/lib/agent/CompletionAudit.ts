@@ -1,5 +1,5 @@
 import type { AgentStateData } from './AgentState'
-import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { analyzeTaskIntent } from './TaskIntent'
 
 export interface CompletionAuditResult {
   complete: boolean
@@ -25,25 +25,13 @@ function currentTaskText(state: AgentStateData): string {
 function requiresFinalDeliverable(state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
   if (state.taskStrategy === 'browse') return false
-  const text = currentTaskText(state)
+  const userRequest = state.originalUserRequest || ''
+  const taskIntent = analyzeTaskIntent([{ role: 'user', content: userRequest }])
   return state.buildTask ||
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'code' ||
     state.taskStrategy === 'creative' ||
-    explicitSavedArtifactRequested(text)
-}
-
-function explicitSavedArtifactRequested(text: string): boolean {
-  const cleaned = text
-    .replace(/\b(?:do\s+not|don't|dont|never)\s+(?:save|create|write|export|make|generate|deliver|return)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/gi, ' ')
-    .replace(/\b(?:no|without)\s+(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/gi, ' ')
-  const declinesSavedArtifact = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don't\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer)\b/i.test(text)
-  const positiveArtifactRequest = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|pptx|xlsx)\b/i.test(cleaned) ||
-    /\b(?:save|create|write|export|make|generate|deliver)\b.{0,80}\b(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/i.test(cleaned) ||
-    /\breturn\s+(?:a|an|the)?\s*(?:file|pdf|markdown|document|slides?|presentation|deck|website|web\s*site|app|code|script|component|deliverable|manuscript|novel|book)\b/i.test(cleaned) ||
-    /\b(?:website|web\s*app|next\.?js|page\.tsx|layout\.tsx|globals\.css)\b/i.test(cleaned) ||
-    taskDefaultsToMarkdownDeliverable(text)
-  return positiveArtifactRequest && !declinesSavedArtifact
+    taskIntent.requiresSavedArtifact
 }
 
 function isWebsiteLike(state: AgentStateData): boolean {

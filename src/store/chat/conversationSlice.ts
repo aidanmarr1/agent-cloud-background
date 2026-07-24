@@ -62,7 +62,9 @@ export const createConversationSlice: SliceCreator<ConversationSlice> = (set, ge
   toggleStar: (id) => {
     set((state) => ({
       conversations: state.conversations.map((c) =>
-        c.id === id ? { ...c, starred: !c.starred } : c
+        c.id === id
+          ? { ...c, starred: !c.starred, updatedAt: Math.max(Date.now(), c.updatedAt + 1) }
+          : c
       ),
     }))
   },
@@ -170,7 +172,9 @@ export const createConversationSlice: SliceCreator<ConversationSlice> = (set, ge
   starConversations: (ids) => {
     set((state) => ({
       conversations: state.conversations.map((c) =>
-        ids.includes(c.id) ? { ...c, starred: true } : c
+        ids.includes(c.id)
+          ? { ...c, starred: true, updatedAt: Math.max(Date.now(), c.updatedAt + 1) }
+          : c
       ),
     }))
   },

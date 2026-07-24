@@ -1,8 +1,5 @@
 import { ImageSearchResult } from '@/types'
-import { getOrCreateSandboxDir, resolveAndVerify } from './sandbox'
-import { constants } from 'fs'
-import { mkdir, open, unlink } from 'fs/promises'
-import { join } from 'path'
+import { writeSandboxFileBytes } from './sandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 import { normalizeSearchQuery } from './searchQuery'
 
@@ -29,6 +26,9 @@ type ImageFetchOptions = Omit<RequestInit, 'body'>
 async function fetchWithTimeout(url: string, options: ImageFetchOptions, timeoutMs: number): Promise<Response> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal
   try {
     // Manual redirect loop with per-hop SSRF re-validation. fetch's default
     // redirect handling does NOT re-check the host, so an attacker-controlled
@@ -37,7 +37,7 @@ async function fetchWithTimeout(url: string, options: ImageFetchOptions, timeout
     let currentUrl = url
     let response: Response | null = null
     for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-      response = await guardedFetch(currentUrl, { ...options, signal: controller.signal, redirect: 'manual', maxBytes: MAX_IMAGE_BYTES })
+      response = await guardedFetch(currentUrl, { ...options, signal, redirect: 'manual', maxBytes: MAX_IMAGE_BYTES })
       const isRedirect = response.status >= 300 && response.status < 400 && response.headers.has('location')
       if (!isRedirect) return response
       if (hop === MAX_REDIRECTS) throw new Error(`too many redirects (max ${MAX_REDIRECTS})`)
@@ -72,11 +72,12 @@ function serperApiKey(): string {
   return key
 }
 
-async function serperImages(rawQuery: unknown, count: number): Promise<SerperImagesResponse> {
+async function serperImages(rawQuery: unknown, count: number, signal?: AbortSignal): Promise<SerperImagesResponse> {
   const query = normalizeSearchQuery(rawQuery)
   if (!query) throw new Error('Image search query is empty after cleanup')
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), IMAGE_SEARCH_TIMEOUT_MS)
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
   try {
     const response = await fetch(`${SERPER_BASE_URL}/images`, {
       method: 'POST',
@@ -86,7 +87,7 @@ async function serperImages(rawQuery: unknown, count: number): Promise<SerperIma
         Accept: 'application/json',
       },
       body: JSON.stringify({ q: query, num: count }),
-      signal: controller.signal,
+      signal: requestSignal,
     })
     if (!response.ok) {
       const body = (await response.text()).replace(/\s+/g, ' ').trim().slice(0, 220)
@@ -105,13 +106,13 @@ async function serperImages(rawQuery: unknown, count: number): Promise<SerperIma
   }
 }
 
-export async function imageSearch(query: unknown, count: number = 5): Promise<ImageSearchResult[]> {
-  count = Math.max(1, Math.min(5, count))
+export async function imageSearch(query: unknown, count: number = 8, signal?: AbortSignal): Promise<ImageSearchResult[]> {
+  count = Math.max(1, Math.min(8, count))
 
   let timeoutId: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
-      imageSearchInner(query, count),
+      imageSearchInner(query, count, signal),
       new Promise<ImageSearchResult[]>((resolve) => {
         timeoutId = setTimeout(() => {
           console.error('[ImageSearch] Overall timeout reached')
@@ -124,8 +125,8 @@ export async function imageSearch(query: unknown, count: number = 5): Promise<Im
   }
 }
 
-async function imageSearchInner(query: unknown, count: number): Promise<ImageSearchResult[]> {
-  const data = await serperImages(query, count)
+async function imageSearchInner(query: unknown, count: number, signal?: AbortSignal): Promise<ImageSearchResult[]> {
+  const data = await serperImages(query, count, signal)
   return (data.images || [])
     .filter(result => result.imageUrl || result.thumbnailUrl)
     .slice(0, count)
@@ -167,15 +168,9 @@ function getExtensionFromUrl(url: string): string {
 
 export async function downloadImagesToSandbox(
   conversationId: string,
-  results: ImageSearchResult[]
+  results: ImageSearchResult[],
+  signal?: AbortSignal,
 ): Promise<{ downloaded: string[]; failed: string[] }> {
-  const sandboxDir = await getOrCreateSandboxDir(conversationId)
-  const downloadsDir = join(sandboxDir, 'downloads')
-  await mkdir(downloadsDir, { recursive: true })
-  if (!await resolveAndVerify(sandboxDir, downloadsDir)) {
-    return { downloaded: [], failed: results.map(result => result.imageUrl) }
-  }
-
   const downloaded: string[] = []
   const failed: string[] = []
 
@@ -187,6 +182,7 @@ export async function downloadImagesToSandbox(
 
       const response = await fetchWithTimeout(result.imageUrl, {
         headers: { 'User-Agent': randomUA() },
+        signal,
       }, 8000)
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -212,30 +208,16 @@ export async function downloadImagesToSandbox(
 
       const titlePart = sanitizeFilename(result.title || `image_${idx}`)
       const filename = `${idx}_${titlePart}.${ext}`
-      const filePath = join(downloadsDir, filename)
+      const filePath = `downloads/${filename}`
 
       const buffer = Buffer.from(await response.arrayBuffer())
+      if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
       // Real size check after download — catches missing/malformed Content-Length headers
       if (buffer.length > MAX_IMAGE_BYTES) {
         throw new Error('Image exceeds 20MB size limit')
       }
-      const fd = await open(
-        filePath,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o644,
-      )
-      try {
-        await fd.writeFile(buffer)
-      } finally {
-        await fd.close()
-      }
-
-      if (!await resolveAndVerify(sandboxDir, filePath)) {
-        try { await unlink(filePath) } catch { /* best effort */ }
-        throw new Error('Image path escaped sandbox')
-      }
-
-      return `downloads/${filename}`
+      await writeSandboxFileBytes(conversationId, filePath, new Uint8Array(buffer))
+      return filePath
     })
   )
 

@@ -17,6 +17,8 @@ import {
 } from '@/lib/creditPolicy'
 import { tursoExecute, tursoTransaction } from '@/lib/db/turso'
 
+const CREDIT_EVENT_WRITE_ATTEMPTS = 3
+
 export interface ServerCreditLedger {
   version: 1
   entries: CreditLedgerEvent[]
@@ -90,6 +92,47 @@ type CreditLedgerRow = {
   conversation_id?: unknown
   tool_name?: unknown
   run_id?: unknown
+  balance_after?: unknown
+}
+
+type E2BRuntimeSegmentRow = {
+  id?: unknown
+  user_id?: unknown
+  conversation_id?: unknown
+  run_id?: unknown
+  attempt?: unknown
+  provider_sandbox_id?: unknown
+  lifecycle_generation?: unknown
+  started_at_ms?: unknown
+  activated_at_ms?: unknown
+  accounted_through_ms?: unknown
+  accounted_credits?: unknown
+  unpaid_credits?: unknown
+  next_sequence?: unknown
+  status?: unknown
+  ended_at_ms?: unknown
+  last_ledger_id?: unknown
+}
+
+export interface ServerE2BRuntimeActivation {
+  userId: string
+  conversationId: string
+  runId: string
+  attempt: number
+  providerSandboxId: string
+  lifecycleGeneration: number
+  startedAtMs: number
+  activatedAtMs?: number
+}
+
+export interface ServerE2BRuntimeCheckpoint {
+  segmentId: string
+  record: ServerCreditRecord | null
+  closed: boolean
+  outOfCredits: boolean
+  balanceAfter: number
+  requiredCredits: number
+  unpaidCredits: number
 }
 
 type CreditSpendRow = {
@@ -161,9 +204,32 @@ async function ensureCreditSchema(): Promise<void> {
           balance_after real not null
         )
       `)
+      await tursoExecute(`
+        create table if not exists credit_e2b_runtime_segments (
+          id text primary key,
+          user_id text not null,
+          conversation_id text not null,
+          run_id text not null,
+          attempt integer not null,
+          provider_sandbox_id text not null,
+          lifecycle_generation integer not null,
+          started_at_ms integer not null,
+          activated_at_ms integer not null,
+          accounted_through_ms integer not null,
+          accounted_credits real not null default 0,
+          unpaid_credits real not null default 0,
+          next_sequence integer not null default 1,
+          status text not null default 'open',
+          ended_at_ms integer,
+          last_ledger_id text,
+          updated_at_ms integer not null
+        )
+      `)
       await tursoExecute('create index if not exists credit_ledger_user_time_idx on credit_ledger(user_id, timestamp desc)')
       await tursoExecute('create index if not exists credit_ledger_user_run_idx on credit_ledger(user_id, run_id)')
       await tursoExecute('create index if not exists credit_ledger_user_conversation_idx on credit_ledger(user_id, conversation_id)')
+      await tursoExecute('create index if not exists credit_e2b_runtime_owner_idx on credit_e2b_runtime_segments(conversation_id, provider_sandbox_id, lifecycle_generation, status)')
+      await tursoExecute('create index if not exists credit_e2b_runtime_run_idx on credit_e2b_runtime_segments(run_id, attempt, status)')
       await tursoExecute('update credit_accounts set monthly_balance = 0 where monthly_balance < 0')
       await tursoExecute('update credit_ledger set balance_after = 0 where balance_after < 0')
       await tursoExecute(`
@@ -400,68 +466,56 @@ async function recordServerCreditEvent(
   userId: string,
   conversationId: string,
   entry: CreditLedgerEvent,
+  options: { requireFullAmount?: boolean } = {},
 ): Promise<ServerCreditRecord> {
   if (!userId) {
     throw new Error('Missing user id for credit event')
   }
 
   return withAccountLock(userId, async () => {
-    const result = await withCreditSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+    const writeCreditEvent = () => withCreditSchemaRepair(() => tursoTransaction('write', async (transaction) => {
       const now = new Date().toISOString()
-      await transaction.execute({
-        sql: `
-          insert or ignore into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
-          values (?, ?, ?, ?, ?, ?)
-        `,
-        args: [userId, ACCOUNT_STARTING_CREDITS, ACCOUNT_STARTING_CREDITS, monthKey(), now, now],
-      })
-
-      const existingResult = await transaction.execute({
-        sql: `
-          select id, timestamp, amount, category, reason, conversation_id, tool_name, run_id
-          from credit_ledger
-          where user_id = ? and id = ?
-          limit 1
-        `,
-        args: [userId, entry.id],
-      })
+      const currentPeriod = monthKey()
+      const [, existingResult, accountResult] = await transaction.batch([
+        {
+          sql: `
+            insert or ignore into credit_accounts (user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at)
+            values (?, ?, ?, ?, ?, ?)
+          `,
+          args: [userId, ACCOUNT_STARTING_CREDITS, ACCOUNT_STARTING_CREDITS, currentPeriod, now, now],
+        },
+        {
+          sql: `
+            select id, timestamp, amount, category, reason, conversation_id, tool_name, run_id, balance_after
+            from credit_ledger
+            where user_id = ? and id = ?
+            limit 1
+          `,
+          args: [userId, entry.id],
+        },
+        {
+          sql: 'select user_id, monthly_allowance, monthly_balance, period_key from credit_accounts where user_id = ? limit 1',
+          args: [userId],
+        },
+      ])
       const existing = toLedgerEvent(existingResult.rows[0] as CreditLedgerRow | undefined)
       if (existing) {
+        const requestedAmount = roundCreditAmount(finiteCreditNumber(entry.amount))
+        const balanceAfter = roundCreditAmount(Math.max(
+          0,
+          finiteCreditNumber((existingResult.rows[0] as CreditLedgerRow | undefined)?.balance_after),
+        ))
         return {
           record: { entry: existing, created: false },
-          balanceAfter: Number.POSITIVE_INFINITY,
-          isCharge: false,
-          requestedAmount: 0,
+          balanceAfter,
+          isCharge: requestedAmount > 0,
+          requestedAmount,
         }
       }
 
-      const accountResult = await transaction.execute({
-        sql: 'select user_id, monthly_allowance, monthly_balance, period_key from credit_accounts where user_id = ? limit 1',
-        args: [userId],
-      })
-      let row = accountResult.rows[0] as CreditAccountRow | undefined
+      const row = accountResult.rows[0] as CreditAccountRow | undefined
       if (!row) {
         throw new Error('Credit account could not be created.')
-      }
-
-      const currentPeriod = monthKey()
-      const storedPeriod = typeof row.period_key === 'string' ? row.period_key : currentPeriod
-      if (storedPeriod !== currentPeriod) {
-        const preservedBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS)))
-        await transaction.execute({
-          sql: `
-            update credit_accounts
-            set monthly_allowance = ?, monthly_balance = ?, period_key = ?, updated_at = ?
-            where user_id = ?
-          `,
-          args: [ACCOUNT_STARTING_CREDITS, preservedBalance, currentPeriod, now, userId],
-        })
-        row = {
-          user_id: userId,
-          monthly_allowance: ACCOUNT_STARTING_CREDITS,
-          monthly_balance: preservedBalance,
-          period_key: currentPeriod,
-        }
       }
 
       const currentBalance = roundCreditAmount(finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS))
@@ -470,66 +524,78 @@ async function recordServerCreditEvent(
       if (isCharge && currentBalance <= 0) {
         throw new OutOfCreditsError(undefined, Math.max(0, currentBalance), requestedAmount)
       }
+      if (isCharge && options.requireFullAmount && currentBalance < requestedAmount) {
+        throw new OutOfCreditsError(undefined, Math.max(0, currentBalance), requestedAmount)
+      }
 
       const amount = isCharge ? roundCreditAmount(Math.min(requestedAmount, currentBalance)) : requestedAmount
       const storedEntry = { ...entry, amount }
-      let nextBalance = currentBalance
-
-      if (isCharge) {
-        const debitResult = requestedAmount > currentBalance
-          ? await transaction.execute({
+      const accountUpdate = isCharge && requestedAmount > currentBalance
+        ? {
+            sql: `
+              update credit_accounts
+              set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
+                  monthly_balance = 0, period_key = ?, updated_at = ?
+              where user_id = ? and monthly_balance = ?
+            `,
+            args: [currentPeriod, ACCOUNT_STARTING_CREDITS, currentPeriod, now, userId, currentBalance],
+          }
+        : isCharge
+          ? {
               sql: `
                 update credit_accounts
-                set monthly_balance = 0, updated_at = ?
-                where user_id = ? and monthly_balance = ?
-              `,
-              args: [now, userId, currentBalance],
-            })
-          : await transaction.execute({
-              sql: `
-                update credit_accounts
-                set monthly_balance = round(monthly_balance - ?, 2), updated_at = ?
+                set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
+                    monthly_balance = round(monthly_balance - ?, 2), period_key = ?, updated_at = ?
                 where user_id = ? and monthly_balance >= ?
               `,
-              args: [amount, now, userId, amount],
-            })
-        if (debitResult.rowsAffected !== 1) {
+              args: [currentPeriod, ACCOUNT_STARTING_CREDITS, amount, currentPeriod, now, userId, amount],
+            }
+          : {
+              sql: `
+                update credit_accounts
+                set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
+                    monthly_balance = round(monthly_balance - ?, 2), period_key = ?, updated_at = ?
+                where user_id = ?
+              `,
+              args: [currentPeriod, ACCOUNT_STARTING_CREDITS, amount, currentPeriod, now, userId],
+            }
+      const [balanceUpdateResult, updatedAccountResult] = await transaction.batch([
+        accountUpdate,
+        {
+          sql: 'select monthly_balance from credit_accounts where user_id = ? limit 1',
+          args: [userId],
+        },
+        {
+          sql: `
+            insert into credit_ledger (
+              id, user_id, conversation_id, run_id, amount, category, reason, tool_name, timestamp, balance_after
+            )
+            values (?, ?, ?, ?, ?, ?, ?, ?, ?, (select monthly_balance from credit_accounts where user_id = ? limit 1))
+          `,
+          args: [
+            storedEntry.id,
+            userId,
+            storedEntry.conversationId || conversationId,
+            storedEntry.runId || null,
+            amount,
+            storedEntry.category,
+            storedEntry.reason,
+            storedEntry.toolName || null,
+            storedEntry.timestamp,
+            userId,
+          ],
+        },
+      ])
+      if (balanceUpdateResult.rowsAffected !== 1) {
+        if (isCharge) {
           throw new OutOfCreditsError(undefined, Math.max(0, currentBalance), requestedAmount)
         }
-      } else {
-        await transaction.execute({
-          sql: 'update credit_accounts set monthly_balance = round(monthly_balance - ?, 2), updated_at = ? where user_id = ?',
-          args: [amount, now, userId],
-        })
+        throw new Error('Credit account balance could not be updated.')
       }
-      const updatedAccountResult = await transaction.execute({
-        sql: 'select monthly_balance from credit_accounts where user_id = ? limit 1',
-        args: [userId],
-      })
-      nextBalance = roundCreditAmount(finiteCreditNumber((updatedAccountResult.rows[0] as CreditAccountRow | undefined)?.monthly_balance))
+      const nextBalance = roundCreditAmount(finiteCreditNumber((updatedAccountResult.rows[0] as CreditAccountRow | undefined)?.monthly_balance))
       if (nextBalance < 0) {
         throw new OutOfCreditsError(undefined, 0, amount)
       }
-      await transaction.execute({
-        sql: `
-          insert into credit_ledger (
-            id, user_id, conversation_id, run_id, amount, category, reason, tool_name, timestamp, balance_after
-          )
-          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `,
-        args: [
-          storedEntry.id,
-          userId,
-          storedEntry.conversationId || conversationId,
-          storedEntry.runId || null,
-          amount,
-          storedEntry.category,
-          storedEntry.reason,
-          storedEntry.toolName || null,
-          storedEntry.timestamp,
-          nextBalance,
-        ],
-      })
 
       return {
         record: { entry: storedEntry, created: true },
@@ -539,7 +605,26 @@ async function recordServerCreditEvent(
       }
     }))
 
-    if (result.isCharge && result.balanceAfter <= 0) {
+    let result: Awaited<ReturnType<typeof writeCreditEvent>> | null = null
+    let lastError: unknown = null
+    for (let attempt = 0; attempt < CREDIT_EVENT_WRITE_ATTEMPTS; attempt += 1) {
+      try {
+        result = await writeCreditEvent()
+        break
+      } catch (error) {
+        if (isOutOfCreditsError(error)) throw error
+        lastError = error
+        if (attempt + 1 < CREDIT_EVENT_WRITE_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)))
+        }
+      }
+    }
+    if (!result) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Credit event persistence failed'))
+    }
+
+    const paidAmount = roundCreditAmount(Math.max(0, finiteCreditNumber(result.record.entry.amount)))
+    if (result.isCharge && paidAmount < result.requestedAmount) {
       throw new OutOfCreditsError(result.record, result.balanceAfter, result.requestedAmount)
     }
 
@@ -664,7 +749,7 @@ export async function chargeServerTaskStart(
     amount: TASK_START_CREDITS,
     category: 'task',
     reason: 'Task started',
-  }))
+  }), { requireFullAmount: true })
 }
 
 export async function chargeServerActiveTime(
@@ -673,12 +758,13 @@ export async function chargeServerActiveTime(
   runId: string,
   tick: number,
   elapsedMs: number,
+  attempt = 1,
 ): Promise<ServerCreditRecord | null> {
   const amount = roundCreditAmount((Math.max(0, elapsedMs) / 60_000) * ACTIVE_CREDITS_PER_MINUTE)
   if (amount <= 0) return null
 
   return recordServerCreditEvent(userId, conversationId, makeEntry({
-    id: `credit:${runId}:active:${tick}`,
+    id: `credit:${runId}:active:${Math.max(1, Math.floor(attempt))}:${tick}`,
     runId,
     conversationId,
     amount,
@@ -687,12 +773,558 @@ export async function chargeServerActiveTime(
   }))
 }
 
+function normalizeE2BRuntimeAttempt(attempt: number): number {
+  return Math.max(1, Math.floor(finiteCreditNumber(attempt, 1)))
+}
+
+function e2bRuntimeSegmentId(runId: string, attempt: number): string {
+  return `e2b-runtime:${runId}:${normalizeE2BRuntimeAttempt(attempt)}`
+}
+
+function requiredE2BRuntimeString(value: string, label: string): string {
+  const normalized = String(value || '').trim()
+  if (!normalized || normalized.length > 512) {
+    throw new Error(`Invalid ${label} for E2B runtime billing.`)
+  }
+  return normalized
+}
+
+function e2bRuntimeAmount(startedAtMs: number, endedAtMs: number): number {
+  return e2bSandboxRuntimeCreditCharge({
+    elapsedMs: Math.max(0, endedAtMs - startedAtMs),
+    vcpuCount: envPositiveNumber('AGENT_E2B_VCPU_COUNT', E2B_DEFAULT_VCPU_COUNT),
+    memoryGiB: envPositiveNumber('AGENT_E2B_MEMORY_GIB', E2B_DEFAULT_MEMORY_GIB),
+  })
+}
+
+function runtimeRowString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function runtimeRowInteger(value: unknown, fallback = 0): number {
+  const parsed = Math.floor(finiteCreditNumber(value, fallback))
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+async function readE2BRuntimeSegment(segmentId: string): Promise<E2BRuntimeSegmentRow | null> {
+  const result = await tursoExecute(
+    `
+      select id, user_id, conversation_id, run_id, attempt, provider_sandbox_id,
+             lifecycle_generation, started_at_ms, activated_at_ms, accounted_through_ms,
+             accounted_credits, unpaid_credits, next_sequence, status, ended_at_ms,
+             last_ledger_id
+      from credit_e2b_runtime_segments
+      where id = ?
+      limit 1
+    `,
+    [segmentId],
+  )
+  return (result.rows[0] as E2BRuntimeSegmentRow | undefined) ?? null
+}
+
+/**
+ * Activates billing only after the provider sandbox is confirmed usable. The
+ * provider identity and lifecycle generation are checked against the durable
+ * sandbox row so a stale worker cannot attach billing to a newer sandbox.
+ * Browser startup is deliberately independent from this boundary because
+ * terminal/file-only tasks do not require Chromium. No credits are debited by activation itself.
+ */
+export async function activateServerE2BRuntimeBilling(
+  input: ServerE2BRuntimeActivation,
+): Promise<string> {
+  const userId = requiredE2BRuntimeString(input.userId, 'user id')
+  const conversationId = requiredE2BRuntimeString(input.conversationId, 'conversation id')
+  const runId = requiredE2BRuntimeString(input.runId, 'run id')
+  const providerSandboxId = requiredE2BRuntimeString(input.providerSandboxId, 'provider sandbox id')
+  const attempt = normalizeE2BRuntimeAttempt(input.attempt)
+  const lifecycleGeneration = Math.max(0, runtimeRowInteger(input.lifecycleGeneration))
+  const activatedAtMs = Math.min(Date.now(), Math.max(0, runtimeRowInteger(input.activatedAtMs, Date.now())))
+  const startedAtMs = Math.min(activatedAtMs, Math.max(0, runtimeRowInteger(input.startedAtMs, activatedAtMs)))
+  const segmentId = e2bRuntimeSegmentId(runId, attempt)
+
+  await ensureCreditSchema()
+  const writeActivation = () => withCreditSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+    const ownership = await transaction.execute({
+      sql: `
+        select provider_sandbox_id, lifecycle_generation, lifecycle_state
+        from agent_cloud_sandboxes
+        where conversation_id = ? and provider = 'e2b'
+        limit 1
+      `,
+      args: [conversationId],
+    })
+    const owner = ownership.rows[0]
+    if (
+      owner?.provider_sandbox_id !== providerSandboxId ||
+      runtimeRowInteger(owner?.lifecycle_generation, -1) !== lifecycleGeneration ||
+      owner?.lifecycle_state !== 'active'
+    ) {
+      throw new Error('E2B sandbox ownership changed before runtime billing activation.')
+    }
+
+    const existingResult = await transaction.execute({
+      sql: `
+        select id, user_id, conversation_id, run_id, attempt, provider_sandbox_id,
+               lifecycle_generation, started_at_ms, status
+        from credit_e2b_runtime_segments
+        where id = ?
+        limit 1
+      `,
+      args: [segmentId],
+    })
+    const existing = existingResult.rows[0] as E2BRuntimeSegmentRow | undefined
+    if (existing) {
+      const sameIdentity =
+        existing.user_id === userId &&
+        existing.conversation_id === conversationId &&
+        existing.run_id === runId &&
+        runtimeRowInteger(existing.attempt) === attempt &&
+        existing.provider_sandbox_id === providerSandboxId &&
+        runtimeRowInteger(existing.lifecycle_generation, -1) === lifecycleGeneration &&
+        runtimeRowInteger(existing.started_at_ms, -1) === startedAtMs
+      if (!sameIdentity) {
+        throw new Error('E2B runtime billing idempotency key was reused for different ownership.')
+      }
+      if (existing.status !== 'open') {
+        throw new Error('E2B runtime billing segment was already closed.')
+      }
+      return
+    }
+
+    await transaction.execute({
+      sql: `
+        insert into credit_e2b_runtime_segments (
+          id, user_id, conversation_id, run_id, attempt, provider_sandbox_id,
+          lifecycle_generation, started_at_ms, activated_at_ms, accounted_through_ms,
+          accounted_credits, unpaid_credits, next_sequence, status, ended_at_ms,
+          last_ledger_id, updated_at_ms
+        )
+        values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 1, 'open', null, null, ?)
+      `,
+      args: [
+        segmentId,
+        userId,
+        conversationId,
+        runId,
+        attempt,
+        providerSandboxId,
+        lifecycleGeneration,
+        startedAtMs,
+        activatedAtMs,
+        startedAtMs,
+        activatedAtMs,
+      ],
+    })
+  }))
+  let activated = false
+  let activationError: unknown = null
+  for (let writeAttempt = 0; writeAttempt < CREDIT_EVENT_WRITE_ATTEMPTS; writeAttempt += 1) {
+    try {
+      await writeActivation()
+      activated = true
+      break
+    } catch (error) {
+      activationError = error
+      if (writeAttempt + 1 < CREDIT_EVENT_WRITE_ATTEMPTS) {
+        await new Promise((resolve) => setTimeout(resolve, 75 * (writeAttempt + 1)))
+      }
+    }
+  }
+  if (!activated) {
+    throw activationError instanceof Error
+      ? activationError
+      : new Error(String(activationError || 'E2B runtime billing activation failed'))
+  }
+
+  // Graceful handoff can reconnect to the same provider sandbox under a newer
+  // durable generation. Only a strictly older attempt of this same run and
+  // provider can be superseded here, so a stale attempt can never close a newer
+  // segment. Replaced provider sandboxes are settled by lifecycle cleanup.
+  const older = await tursoExecute(
+    `
+      select id
+      from credit_e2b_runtime_segments
+      where run_id = ?
+        and conversation_id = ?
+        and provider_sandbox_id = ?
+        and attempt < ?
+        and status = 'open'
+      order by attempt asc
+    `,
+    [runId, conversationId, providerSandboxId, attempt],
+  )
+  for (const row of older.rows) {
+    if (typeof row.id !== 'string' || !row.id) continue
+    await checkpointServerE2BRuntimeBilling(row.id, startedAtMs, {
+      close: true,
+      requirePaid: false,
+      allowHandoffOwnership: true,
+    })
+  }
+
+  return segmentId
+}
+
+/**
+ * Atomically advances a durable E2B segment, debits the account, and writes the
+ * corresponding ledger entry. Cumulative pricing prevents checkpoint rounding
+ * drift; the durable sequence makes transaction retries and lost ACKs exactly
+ * idempotent.
+ */
+export async function checkpointServerE2BRuntimeBilling(
+  segmentId: string,
+  endedAtMs = Date.now(),
+  options: {
+    close?: boolean
+    requirePaid?: boolean
+    allowFencedOwnership?: boolean
+    allowHandoffOwnership?: boolean
+  } = {},
+): Promise<ServerE2BRuntimeCheckpoint> {
+  const safeSegmentId = requiredE2BRuntimeString(segmentId, 'runtime segment id')
+  await ensureCreditSchema()
+  const firstRead = await withCreditSchemaRepair(() => readE2BRuntimeSegment(safeSegmentId))
+  if (!firstRead) throw new Error('E2B runtime billing segment was not found.')
+  const userId = requiredE2BRuntimeString(runtimeRowString(firstRead.user_id), 'runtime segment user id')
+
+  const result = await withAccountLock(userId, async () => {
+    const writeCheckpoint = () => withCreditSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+      const selected = await transaction.execute({
+        sql: `
+          select id, user_id, conversation_id, run_id, attempt, provider_sandbox_id,
+                 lifecycle_generation, started_at_ms, activated_at_ms, accounted_through_ms,
+                 accounted_credits, unpaid_credits, next_sequence, status, ended_at_ms,
+                 last_ledger_id
+          from credit_e2b_runtime_segments
+          where id = ?
+          limit 1
+        `,
+        args: [safeSegmentId],
+      })
+      const row = selected.rows[0] as E2BRuntimeSegmentRow | undefined
+      if (!row || row.user_id !== userId) {
+        throw new Error('E2B runtime billing segment ownership changed.')
+      }
+
+      const startedAt = Math.max(0, runtimeRowInteger(row.started_at_ms))
+      const previousThrough = Math.max(startedAt, runtimeRowInteger(row.accounted_through_ms, startedAt))
+      const requestedEnd = Math.max(startedAt, runtimeRowInteger(endedAtMs, Date.now()))
+      const targetEnd = Math.min(Date.now(), Math.max(previousThrough, requestedEnd))
+      const previousAssessed = roundCreditAmount(Math.max(0, finiteCreditNumber(row.accounted_credits)))
+      const targetAssessed = e2bRuntimeAmount(startedAt, targetEnd)
+      const requestedAmount = roundCreditAmount(Math.max(0, targetAssessed - previousAssessed))
+      const previousUnpaid = roundCreditAmount(Math.max(0, finiteCreditNumber(row.unpaid_credits)))
+      const statusClosed = row.status === 'closed'
+
+      const readLastRecord = async (): Promise<ServerCreditRecord | null> => {
+        if (typeof row.last_ledger_id !== 'string' || !row.last_ledger_id) return null
+        const ledger = await transaction.execute({
+          sql: `
+            select id, timestamp, amount, category, reason, conversation_id, tool_name, run_id, balance_after
+            from credit_ledger
+            where user_id = ? and id = ?
+            limit 1
+          `,
+          args: [userId, row.last_ledger_id],
+        })
+        const event = toLedgerEvent(ledger.rows[0] as CreditLedgerRow | undefined)
+        return event ? { entry: event, created: false } : null
+      }
+
+      if (statusClosed) {
+        if (options.close !== true) {
+          throw new Error('E2B runtime billing segment was closed by a newer lifecycle owner.')
+        }
+        const record = await readLastRecord()
+        const account = await transaction.execute({
+          sql: 'select monthly_balance from credit_accounts where user_id = ? limit 1',
+          args: [userId],
+        })
+        const balanceAfter = roundCreditAmount(Math.max(
+          0,
+          finiteCreditNumber((account.rows[0] as CreditAccountRow | undefined)?.monthly_balance),
+        ))
+        return {
+          segmentId: safeSegmentId,
+          record,
+          closed: true,
+          outOfCredits: previousUnpaid > 0,
+          balanceAfter,
+          requiredCredits: previousUnpaid,
+          unpaidCredits: previousUnpaid,
+        } satisfies ServerE2BRuntimeCheckpoint
+      }
+
+      const ownershipResult = await transaction.execute({
+        sql: `
+          select provider_sandbox_id, lifecycle_generation, lifecycle_source_generation, lifecycle_state
+          from agent_cloud_sandboxes
+          where conversation_id = ? and provider = 'e2b'
+          limit 1
+        `,
+        args: [runtimeRowString(row.conversation_id)],
+      })
+      const ownership = ownershipResult.rows[0]
+      const segmentGeneration = runtimeRowInteger(row.lifecycle_generation, -1)
+      const ownsActiveSandbox =
+        ownership?.provider_sandbox_id === row.provider_sandbox_id &&
+        ownership?.lifecycle_state === 'active' &&
+        runtimeRowInteger(ownership.lifecycle_generation, -1) === segmentGeneration
+      const ownsFencedSandbox =
+        options.allowFencedOwnership === true &&
+        ownership?.provider_sandbox_id === row.provider_sandbox_id &&
+        (ownership?.lifecycle_state === 'resetting' || ownership?.lifecycle_state === 'destroying') &&
+        runtimeRowInteger(ownership.lifecycle_source_generation, -1) === segmentGeneration
+      const ownsHandoffSandbox =
+        options.allowHandoffOwnership === true &&
+        ownership?.provider_sandbox_id === row.provider_sandbox_id &&
+        ownership?.lifecycle_state === 'active' &&
+        runtimeRowInteger(ownership.lifecycle_generation, -1) >= segmentGeneration
+      const ownsExpectedLifecycle = options.allowFencedOwnership === true
+        ? ownsFencedSandbox
+        : options.allowHandoffOwnership === true
+          ? ownsHandoffSandbox
+          : ownsActiveSandbox
+      if (!ownsExpectedLifecycle) {
+        throw new Error('E2B sandbox ownership changed before runtime checkpoint.')
+      }
+
+      let balanceAfter = 0
+      let paidAmount = 0
+      let record: ServerCreditRecord | null = null
+      let lastLedgerId = typeof row.last_ledger_id === 'string' ? row.last_ledger_id : null
+      const sequence = Math.max(1, runtimeRowInteger(row.next_sequence, 1))
+
+      if (requestedAmount > 0) {
+        const now = new Date().toISOString()
+        await transaction.execute({
+          sql: `
+            insert or ignore into credit_accounts (
+              user_id, monthly_allowance, monthly_balance, period_key, created_at, updated_at
+            )
+            values (?, ?, ?, ?, ?, ?)
+          `,
+          args: [userId, ACCOUNT_STARTING_CREDITS, ACCOUNT_STARTING_CREDITS, monthKey(), now, now],
+        })
+        const accountResult = await transaction.execute({
+          sql: 'select user_id, monthly_allowance, monthly_balance, period_key from credit_accounts where user_id = ? limit 1',
+          args: [userId],
+        })
+        let account = accountResult.rows[0] as CreditAccountRow | undefined
+        if (!account) throw new Error('Credit account could not be created.')
+        const currentPeriod = monthKey()
+        if (account.period_key !== currentPeriod) {
+          const preservedBalance = roundCreditAmount(Math.max(
+            0,
+            finiteCreditNumber(account.monthly_balance, ACCOUNT_STARTING_CREDITS),
+          ))
+          await transaction.execute({
+            sql: `
+              update credit_accounts
+              set monthly_allowance = ?, monthly_balance = ?, period_key = ?, updated_at = ?
+              where user_id = ?
+            `,
+            args: [ACCOUNT_STARTING_CREDITS, preservedBalance, currentPeriod, now, userId],
+          })
+          account = {
+            user_id: userId,
+            monthly_allowance: ACCOUNT_STARTING_CREDITS,
+            monthly_balance: preservedBalance,
+            period_key: currentPeriod,
+          }
+        }
+
+        const currentBalance = roundCreditAmount(Math.max(
+          0,
+          finiteCreditNumber(account.monthly_balance, ACCOUNT_STARTING_CREDITS),
+        ))
+        paidAmount = roundCreditAmount(Math.min(requestedAmount, currentBalance))
+        balanceAfter = currentBalance
+        if (paidAmount > 0) {
+          const debit = paidAmount === currentBalance
+            ? await transaction.execute({
+                sql: `
+                  update credit_accounts
+                  set monthly_balance = 0, updated_at = ?
+                  where user_id = ? and monthly_balance = ?
+                `,
+                args: [now, userId, currentBalance],
+              })
+            : await transaction.execute({
+                sql: `
+                  update credit_accounts
+                  set monthly_balance = round(monthly_balance - ?, 2), updated_at = ?
+                  where user_id = ? and monthly_balance >= ?
+                `,
+                args: [paidAmount, now, userId, paidAmount],
+              })
+          if (debit.rowsAffected !== 1) {
+            throw new Error('Concurrent credit debit prevented E2B runtime accounting.')
+          }
+          balanceAfter = roundCreditAmount(Math.max(0, currentBalance - paidAmount))
+          lastLedgerId = `credit:${runtimeRowString(row.run_id)}:e2b-runtime:${normalizeE2BRuntimeAttempt(runtimeRowInteger(row.attempt, 1))}:${sequence}`
+          const elapsedSeconds = Math.max(0, Math.round((targetEnd - startedAt) / 1000))
+          const event: CreditLedgerEvent = {
+            id: lastLedgerId,
+            timestamp: targetEnd,
+            amount: paidAmount,
+            category: 'tool',
+            reason: `E2B sandbox runtime (${elapsedSeconds}s total)`,
+            conversationId: runtimeRowString(row.conversation_id),
+            toolName: 'e2b_sandbox',
+            runId: runtimeRowString(row.run_id),
+            source: 'server',
+          }
+          await transaction.execute({
+            sql: `
+              insert into credit_ledger (
+                id, user_id, conversation_id, run_id, amount, category, reason,
+                tool_name, timestamp, balance_after
+              )
+              values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `,
+            args: [
+              event.id,
+              userId,
+              event.conversationId || null,
+              event.runId || null,
+              event.amount,
+              event.category,
+              event.reason,
+              event.toolName || null,
+              event.timestamp,
+              balanceAfter,
+            ],
+          })
+          record = { entry: event, created: true }
+        }
+      } else {
+        const account = await transaction.execute({
+          sql: 'select monthly_balance from credit_accounts where user_id = ? limit 1',
+          args: [userId],
+        })
+        balanceAfter = roundCreditAmount(Math.max(
+          0,
+          finiteCreditNumber((account.rows[0] as CreditAccountRow | undefined)?.monthly_balance),
+        ))
+      }
+
+      const unpaidCredits = roundCreditAmount(previousUnpaid + Math.max(0, requestedAmount - paidAmount))
+      const closed = options.close === true
+      const advanced = await transaction.execute({
+        sql: `
+          update credit_e2b_runtime_segments
+          set accounted_through_ms = ?,
+              accounted_credits = ?,
+              unpaid_credits = ?,
+              next_sequence = ?,
+              status = ?,
+              ended_at_ms = case when ? = 1 then ? else ended_at_ms end,
+              last_ledger_id = ?,
+              updated_at_ms = ?
+          where id = ?
+            and status = 'open'
+            and accounted_through_ms = ?
+            and next_sequence = ?
+        `,
+        args: [
+          targetEnd,
+          targetAssessed,
+          unpaidCredits,
+          sequence + (record ? 1 : 0),
+          closed ? 'closed' : 'open',
+          closed ? 1 : 0,
+          closed ? targetEnd : null,
+          lastLedgerId,
+          Date.now(),
+          safeSegmentId,
+          previousThrough,
+          sequence,
+        ],
+      })
+      if (advanced.rowsAffected !== 1) {
+        throw new Error('Concurrent E2B runtime checkpoint prevented accounting advancement.')
+      }
+
+      return {
+        segmentId: safeSegmentId,
+        record,
+        closed,
+        outOfCredits: unpaidCredits > 0,
+        balanceAfter,
+        requiredCredits: roundCreditAmount(Math.max(requestedAmount, unpaidCredits)),
+        unpaidCredits,
+      } satisfies ServerE2BRuntimeCheckpoint
+    }))
+
+    let checkpoint: ServerE2BRuntimeCheckpoint | null = null
+    let lastError: unknown = null
+    for (let attempt = 0; attempt < CREDIT_EVENT_WRITE_ATTEMPTS; attempt += 1) {
+      try {
+        checkpoint = await writeCheckpoint()
+        break
+      } catch (error) {
+        lastError = error
+        if (attempt + 1 < CREDIT_EVENT_WRITE_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)))
+        }
+      }
+    }
+    if (!checkpoint) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError || 'E2B runtime checkpoint failed'))
+    }
+    return checkpoint
+  })
+
+  if (options.requirePaid !== false && result.outOfCredits) {
+    throw new OutOfCreditsError(result.record ?? undefined, result.balanceAfter, result.requiredCredits)
+  }
+  return result
+}
+
+/** Close only segments attached to the exact sandbox ownership fence. */
+export async function reconcileServerE2BRuntimeBillingForSandbox(input: {
+  conversationId: string
+  providerSandboxId: string
+  lifecycleGeneration: number
+  endedAtMs?: number
+}): Promise<ServerE2BRuntimeCheckpoint[]> {
+  const conversationId = requiredE2BRuntimeString(input.conversationId, 'conversation id')
+  const providerSandboxId = requiredE2BRuntimeString(input.providerSandboxId, 'provider sandbox id')
+  const lifecycleGeneration = Math.max(0, runtimeRowInteger(input.lifecycleGeneration))
+  const endedAtMs = Math.min(Date.now(), Math.max(0, runtimeRowInteger(input.endedAtMs, Date.now())))
+  await ensureCreditSchema()
+  const segments = await withCreditSchemaRepair(() => tursoExecute(
+    `
+      select id
+      from credit_e2b_runtime_segments
+      where conversation_id = ?
+        and provider_sandbox_id = ?
+        and lifecycle_generation = ?
+        and status = 'open'
+      order by activated_at_ms asc, attempt asc
+    `,
+    [conversationId, providerSandboxId, lifecycleGeneration],
+  ))
+  const checkpoints: ServerE2BRuntimeCheckpoint[] = []
+  for (const row of segments.rows) {
+    if (typeof row.id !== 'string' || !row.id) continue
+    checkpoints.push(await checkpointServerE2BRuntimeBilling(row.id, endedAtMs, {
+      close: true,
+      requirePaid: false,
+      allowFencedOwnership: true,
+    }))
+  }
+  return checkpoints
+}
+
 export async function chargeServerE2BRuntime(
   userId: string,
   conversationId: string,
   runId: string,
   startedAtMs: number,
   endedAtMs = Date.now(),
+  attempt = 1,
 ): Promise<ServerCreditRecord | null> {
   const elapsedMs = Math.max(0, finiteCreditNumber(endedAtMs) - finiteCreditNumber(startedAtMs))
   const amount = e2bSandboxRuntimeCreditCharge({
@@ -704,7 +1336,7 @@ export async function chargeServerE2BRuntime(
 
   const elapsedSeconds = Math.max(0, Math.round(elapsedMs / 1000))
   return recordServerCreditEvent(userId, conversationId, makeEntry({
-    id: `credit:${runId}:e2b-runtime`,
+    id: `credit:${runId}:e2b-runtime:${Math.max(1, Math.floor(attempt))}`,
     runId,
     conversationId,
     amount,
@@ -725,14 +1357,14 @@ export async function chargeServerTool(
   if (amount <= 0) return null
 
   return recordServerCreditEvent(userId, conversationId, makeEntry({
-    id: `credit:${toolCallId}:tool:${toolName}`,
+    id: `credit:${runId || 'standalone'}:${toolCallId}:tool:${toolName}`,
     runId,
     conversationId,
     amount,
     category: 'tool',
     reason: toolName.replace(/_/g, ' '),
     toolName,
-  }))
+  }), { requireFullAmount: true })
 }
 
 export async function chargeServerTokenUsage(

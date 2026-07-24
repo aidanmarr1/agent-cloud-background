@@ -61,6 +61,10 @@ services:
         value: "60000"
       - key: AGENT_TASK_WORKER_MAX_ATTEMPTS
         value: "3"
+      - key: AGENT_WORKER_HARD_TASK_EXIT_MS
+        value: "930000"
+      - key: AGENT_WORKER_CANCEL_HARD_EXIT_MS
+        value: "5000"
       - key: AGENT_DEPLOYMENT_VERSION
         value: ""
       - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION
@@ -157,6 +161,10 @@ services:
         value: "60000"
       - key: AGENT_TASK_WORKER_MAX_ATTEMPTS
         value: "3"
+      - key: AGENT_WORKER_HARD_TASK_EXIT_MS
+        value: "930000"
+      - key: AGENT_WORKER_CANCEL_HARD_EXIT_MS
+        value: "5000"
       - key: AGENT_DEPLOYMENT_VERSION
         value: ""
       - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION

@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ChevronDown, Sparkles, Zap } from '@/components/icons'
+import { Sparkles, Zap } from '@/components/icons'
 import { getTaskUsageSummaries, getTotalCredits, useCreditStore } from '@/store/credits'
 import { useChatStore } from '@/store/chat'
 import { useUIStore } from '@/store/ui'
@@ -88,37 +88,28 @@ export function CreditPill() {
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-label={`Credit balance: ${formatCredits(total)} credits`}
-        className={`h-9 rounded-full border border-border-primary bg-bg-primary px-2 text-text-secondary transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 active:scale-[0.97] sm:px-2.5 ${
+        className={`h-9 rounded-lg border border-border-primary bg-bg-primary px-2.5 text-text-secondary transition-all duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 active:scale-[0.97] ${
           activeSession ? 'text-text-primary' : ''
         }`}
       >
         <span className="flex items-center gap-2">
           <span className="relative flex h-5 w-5 items-center justify-center">
-            <Sparkles size={11} className="text-accent-blue" strokeWidth={2.2} />
+            <Sparkles size={13} className="text-text-secondary" strokeWidth={2.2} />
             {activeSession && (
               <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-text-secondary shadow-[0_0_0_2px_var(--bg-secondary)]" />
             )}
           </span>
-          <span className="hidden text-[12.5px] font-semibold tabular-nums sm:inline">
+          <span className="hidden text-[13px] font-semibold tabular-nums sm:inline">
             {formatCredits(total)}
           </span>
           <span className="text-[12.5px] font-semibold tabular-nums sm:hidden">
             {formatCompact(total)}
           </span>
-          <span className="hidden text-[12px] font-medium text-text-tertiary sm:inline">credits</span>
-          <ChevronDown
-            size={12}
-            strokeWidth={2.25}
-            className={`text-text-muted transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
-          />
         </span>
       </button>
 
       {open && (
-        <div
-          className="fixed left-3 right-3 top-12 z-[100] mt-2 w-auto overflow-hidden rounded-2xl border border-border-primary menu-surface animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[316px]"
-          style={{ boxShadow: 'var(--shadow-xl)' }}
-        >
+        <div className="fixed left-3 right-3 top-12 z-[100] mt-2 w-auto overflow-hidden rounded-2xl border border-border-primary menu-surface animate-scale-in sm:absolute sm:left-auto sm:right-0 sm:top-full sm:w-[316px]">
           <div className="border-b border-border-primary px-4 py-3.5">
             <div className="flex items-start justify-between gap-3">
               <div>

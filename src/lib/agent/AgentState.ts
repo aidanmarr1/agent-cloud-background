@@ -3,7 +3,11 @@ import type { WorkingMemory } from './WorkingMemory'
 import type { GoalTracker } from './GoalTracker'
 import type { TaskStrategyConfig } from './TaskStrategy'
 import type { BrowserActionRecord } from '@/lib/browserIntelligence'
-import { createResearchActivityIndex, type ResearchActivityIndex } from './ResearchActivityLog'
+import {
+  createResearchActivityIndex,
+  normalizeResearchUrl,
+  type ResearchActivityIndex,
+} from './ResearchActivityLog'
 import {
   MIN_ITERATION_DELAY_MS,
   AGENT_RUN_MAX_DURATION_MS,
@@ -17,7 +21,9 @@ import {
   WORK_SUMMARY_RECENT_SEARCHES,
   WORK_SUMMARY_RECENT_URLS,
   WORK_SUMMARY_RECENT_ACTIONS,
+  NARRATION_THRESHOLD_DEFAULT,
 } from './config'
+import type { AcceptedNarrationRecord } from './NarrationMemory'
 
 // Re-export from config so existing imports don't break
 export { MAX_ITERATIONS, MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES, MAX_CONTEXT_MESSAGES } from './config'
@@ -69,6 +75,10 @@ export interface AgentStateData {
   iterationsSinceLastContent: number
   visibleToolActionsSinceLastNarration: number
   visibleNarrationToolStartIds: Set<string>
+  recentNarrations: AcceptedNarrationRecord[]
+  narrationWorkLogFrontier: string | null
+  narrationNextAttemptAt: number
+  narrationCadenceInFlight: boolean
   phaseNarrationEmittedThisStep: boolean
   forceTextNextIteration: boolean
   forcedNarrationRepairAttempts: number
@@ -122,6 +132,7 @@ export interface AgentStateData {
 
   // Flags
   researchCompletenessNudged: boolean
+  briefInlineSourceQualityNudged: boolean
   deliverableQualityNudged: boolean
   semanticLoopNudged: boolean
   sourceDiversityNudged: boolean
@@ -160,6 +171,9 @@ export interface AgentStateData {
   stepResearchCallCount: number  // ONLY real research calls (search/browse/read/http) — excludes note files
   stepSearchQueries: Set<string>  // search queries in current step (for fuzzy dedup)
   stepVisitedUrls: Set<string>    // unique rendered/read URLs visited in current step
+  // Search-result count at which the model last chose a direct 1–3 source
+  // extraction batch. One result set gets one model-selected batch by default.
+  stepLastSourceExtractionSearchCount: number
 
   // Conditional branching
   pendingConditions: Array<{ condition: string; ifTrue: string; ifFalse: string }>
@@ -257,6 +271,12 @@ export interface AgentStateData {
 
   // Per-step tool type counters — for rate limiting
   stepToolTypeCounts: Map<string, number>
+  // Whole-task counters — explicit "use X" instructions release after the
+  // named tool/group has been attempted, even after the plan advances.
+  taskToolTypeCounts: Map<string, number>
+  // Successful accepted executions are tracked separately from attempts so
+  // preflight blocks and execution errors cannot satisfy "use X" instructions.
+  taskSuccessfulToolTypeCounts: Map<string, number>
 
   // Cross-tool pattern tracking — ordered list of tool/target signatures for cycle detection
   recentToolSequence: string[]
@@ -276,6 +296,7 @@ export const BROWSER_INTERACTION_TOOLS = new Set([
 const BUILD_STEP_PATTERN = /\b(?:build|create|code|implement|develop|design|write|draft|style|css|html|assemble|layout|page|component|file|scaffold|set\s*up|setup|configure|config|install|initialize|initialise|init|bootstrap|wire|package|dependencies?|tailwind|next\.?js|tsx|jsx|react|route|preview|test|verify|run|boot|inspect|responsive)\b/i
 const RESEARCH_STEP_PATTERN = /\b(?:research|gather|find|search|source|sources|collect|asset|assets|image|images|photo|photos|picture|pictures|reference|references|investigate|analy[sz]e|compare|evaluate|assess|impact|risk|policy|evidence|perspective|benefits?|problems?|browse|look\s*up)\b/i
 const SYNTHESIS_STEP_PATTERN = /\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i
+const SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|prepare|polish)\b/i
 const SOURCE_GATHERING_STEP_PATTERN = /\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look\s*up|current|latest|recent|news|reported|publicly|public|asset|assets|image|images|reference|references)\b/i
 
 export function isBuildStepText(text: string | undefined | null): boolean {
@@ -289,6 +310,19 @@ export function isResearchStepText(text: string | undefined | null): boolean {
 export function isSynthesisStepText(text: string | undefined | null): boolean {
   const value = text || ''
   return SYNTHESIS_STEP_PATTERN.test(value) && !SOURCE_GATHERING_STEP_PATTERN.test(value)
+}
+
+/**
+ * Plan scopes often mention "sources" or "evidence" even when the plan item
+ * itself is explicitly a synthesis action. Give that action title precedence
+ * so scope wording cannot accidentally force another research tool call.
+ */
+export function isCurrentSynthesisStep(
+  state: Pick<AgentStateData, 'currentPlanItems' | 'currentPlanScopes' | 'currentStepIdx'>,
+): boolean {
+  const title = state.currentPlanItems?.[state.currentStepIdx] || ''
+  if (SYNTHESIS_LEADING_STEP_PATTERN.test(title)) return true
+  return isSynthesisStepText(currentStepText(state))
 }
 
 export function isBuildStrategyState(state: Pick<AgentStateData, 'currentPhase' | 'taskStrategy' | 'buildTask'>): boolean {
@@ -340,6 +374,10 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     iterationsSinceLastContent: 0,
     visibleToolActionsSinceLastNarration: 0,
     visibleNarrationToolStartIds: new Set(),
+    recentNarrations: [],
+    narrationWorkLogFrontier: null,
+    narrationNextAttemptAt: NARRATION_THRESHOLD_DEFAULT,
+    narrationCadenceInFlight: false,
     phaseNarrationEmittedThisStep: false,
     forceTextNextIteration: false,
     forcedNarrationRepairAttempts: 0,
@@ -388,6 +426,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     stepOpenedSourceDomainCounts: new Map(),
     failureLog: [],
     researchCompletenessNudged: false,
+    briefInlineSourceQualityNudged: false,
     deliverableQualityNudged: false,
     semanticLoopNudged: false,
     sourceDiversityNudged: false,
@@ -408,6 +447,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     stepResearchCallCount: 0,
     stepSearchQueries: new Set(),
     stepVisitedUrls: new Set(),
+    stepLastSourceExtractionSearchCount: -1,
     pendingConditions: [],
     loopDetectionCount: 0,
     stepLoopDetections: 0,
@@ -468,6 +508,8 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     sessionHealthSummary: null,
     lastLoopSignal: null,
     stepToolTypeCounts: new Map(),
+    taskToolTypeCounts: new Map(),
+    taskSuccessfulToolTypeCounts: new Map(),
     recentToolSequence: [],
     iterationNewFactCounts: [],
     diminishingReturnsNudged: false,
@@ -479,6 +521,17 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
 export function trackToolCall(state: AgentStateData, name: string, args: string): void {
   state.recentToolCalls.push({ name, args: args.slice(0, 200) })
   if (state.recentToolCalls.length > RECENT_TOOL_CALL_WINDOW) state.recentToolCalls.shift()
+  state.taskToolTypeCounts.set(name, (state.taskToolTypeCounts.get(name) || 0) + 1)
+}
+
+export function trackSuccessfulToolExecution(
+  state: Pick<AgentStateData, 'taskSuccessfulToolTypeCounts'>,
+  name: string,
+): void {
+  state.taskSuccessfulToolTypeCounts.set(
+    name,
+    (state.taskSuccessfulToolTypeCounts.get(name) || 0) + 1,
+  )
 }
 
 export function trackFileCreate(state: AgentStateData, filePath: string): void {
@@ -564,6 +617,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.stepFailureCount = 0
   state.stepSearchQueries = new Set()
   state.stepVisitedUrls = new Set()
+  state.stepLastSourceExtractionSearchCount = -1
   state.stepSourceDomainCounts = new Map()
   state.stepOpenedSourceDomainCounts = new Map()
   state.consecutiveNoToolCalls = 0  // Reset so nudges don't carry across steps
@@ -586,6 +640,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.stepLoopDetections = 0  // Per-step loop counter resets
   state.stepCrossToolCycleDetections = 0
   state.suppressedResearchToolName = null
+  state.toolJsonRecoveryCount = 0
   state.displayContractRepairAttempts = 0
   state.lastLoopSignal = null
   state.stepResearchCallsAtReflection = 0  // Reflection snapshot resets
@@ -603,6 +658,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.semanticLoopNudged = false
   state.sourceDiversityNudged = false
   state.researchCompletenessNudged = false
+  state.briefInlineSourceQualityNudged = false
   state.clickOscillationNudged = false
   state.stepReflectionNudged = false
   state.atomicStepDriftNudged = false  // Phase 10 Fix III — per-step
@@ -945,9 +1001,23 @@ export function getWorkSummary(state: AgentStateData): string {
   if (recentSources.length > 0) {
     parts.push(`Recent source domains: ${[...new Set(recentSources.map(source => source.domain))].join(', ')}`)
   }
-  const recentSearchResults = state.workLedger.searchResults.slice(-5)
-  if (recentSearchResults.length > 0) {
-    parts.push(`Recent search result routes: ${recentSearchResults.map(result => `${result.domain}${result.title ? ` (${result.title})` : ''}`).join('; ')}`)
+  const normalizedStepVisitedUrls = new Set(
+    [...state.stepVisitedUrls].map(url => normalizeResearchUrl(url)),
+  )
+  const unopenedSearchResults = state.workLedger.searchResults
+    .filter(result =>
+      result.stepIdx === state.currentStepIdx &&
+      !normalizedStepVisitedUrls.has(normalizeResearchUrl(result.url)),
+    )
+    .slice(0, 5)
+  const searchResultRoutes = unopenedSearchResults.length > 0
+    ? unopenedSearchResults
+    : state.workLedger.searchResults.slice(-5)
+  if (searchResultRoutes.length > 0) {
+    const routeLabel = unopenedSearchResults.length > 0
+      ? 'Unopened search result routes'
+      : 'Recent search result routes'
+    parts.push(`${routeLabel}: ${searchResultRoutes.map(result => `${result.url}${result.title ? ` (${result.title})` : ''}`).join('; ')}`)
   }
   const recentFailures = state.workLedger.failedRoutes.slice(-3)
   if (recentFailures.length > 0) {
@@ -1156,7 +1226,7 @@ export function updatePhase(state: AgentStateData): void {
   }
   const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
   const stepText = currentStepText(state).toLowerCase()
-  if (isLastStep || isSynthesisStepText(stepText)) {
+  if (isLastStep || isCurrentSynthesisStep(state)) {
     state.currentPhase = 'deliver'
   } else {
     // Check step content for phase hints
@@ -1191,7 +1261,8 @@ export function detectToolCallLoop(state: AgentStateData): { looping: boolean; t
     } else if (call.name === 'read_document') {
       try {
         const parsed = JSON.parse(call.args)
-        if (parsed.source) key = `read_document:${String(parsed.source).toLowerCase().trim()}`
+        const target = parsed.url || parsed.source
+        if (target) key = `read_document:${String(target).toLowerCase().trim()}`
       } catch { /* use plain name */ }
     } else if (call.name === 'browser_navigate' || call.name === 'browse_page') {
       try {

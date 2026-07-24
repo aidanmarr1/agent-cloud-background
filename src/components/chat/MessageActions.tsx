@@ -25,13 +25,11 @@ export function MessageActions({ variant, onCopy, onRegenerate, onPin, isPinned 
   }
 
   return (
-    <div
-      className="absolute -top-10 right-0 opacity-0 group-hover:opacity-100 transition-all duration-200 flex items-center gap-0.5 menu-surface border border-border-primary rounded-xl p-1"
-      style={{ boxShadow: 'var(--shadow-md)' }}
-    >
+    <div className="message-actions absolute -top-8 right-0 z-20 flex items-center gap-0.5 transition-opacity duration-100">
       <button
+        type="button"
         onClick={handleCopy}
-        className="w-7 h-7 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary transition-all duration-150"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors duration-100 hover:bg-bg-secondary hover:text-text-primary"
         title="Copy"
         aria-label={copied ? 'Copied' : 'Copy message'}
       >
@@ -43,8 +41,9 @@ export function MessageActions({ variant, onCopy, onRegenerate, onPin, isPinned 
       </button>
       {variant === 'assistant' && onRegenerate && (
         <button
+          type="button"
           onClick={onRegenerate}
-          className="w-7 h-7 rounded-lg flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary transition-all duration-150"
+          className="flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors duration-100 hover:bg-bg-secondary hover:text-text-primary"
           title="Regenerate"
           aria-label="Regenerate response"
         >
@@ -53,8 +52,9 @@ export function MessageActions({ variant, onCopy, onRegenerate, onPin, isPinned 
       )}
       {onPin && (
         <button
+          type="button"
           onClick={onPin}
-          className={`w-7 h-7 rounded-lg flex items-center justify-center transition-all duration-150 ${
+          className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors duration-100 ${
             isPinned
               ? 'text-text-secondary bg-bg-secondary'
               : 'text-text-muted hover:text-text-primary hover:bg-bg-secondary'

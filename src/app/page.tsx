@@ -1,10 +1,9 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { HeroSection, getTimeBand, type TimeDisplay } from '@/components/home/HeroSection'
+import { HeroSection } from '@/components/home/HeroSection'
 import { QuickActions } from '@/components/home/QuickActions'
-import { LaunchCard } from '@/components/home/LaunchCard'
 import { ModelSelector } from '@/components/ui/ModelSelector'
 import { CreditPill } from '@/components/ui/CreditPill'
 import { UserMenu } from '@/components/ui/UserMenu'
@@ -14,29 +13,21 @@ import { bindAttachmentsToTask } from '@/lib/attachmentUpload'
 import type { FileAttachment } from '@/types'
 import { startInitialAgentTask } from '@/stream/client/useAgentStream'
 
-const DEFAULT_TIME_DISPLAY: TimeDisplay = {
-  band: 'afternoon',
-  todayLabel: 'Today',
-}
-
 export default function HomePage() {
   const router = useRouter()
   const createConversation = useChatStore((s) => s.createConversation)
   const addToast = useUIStore((s) => s.addToast)
   const [prefillText, setPrefillText] = useState('')
-  const [timeDisplay, setTimeDisplay] = useState<TimeDisplay>(DEFAULT_TIME_DISPLAY)
+  const prefillFrameRef = useRef<number | null>(null)
 
   useEffect(() => {
     useUIStore.getState().setRouteHandoffPending(false)
-    const now = new Date()
-    setTimeDisplay({
-      band: getTimeBand(now.getHours()),
-      todayLabel: now.toLocaleDateString(undefined, {
-        weekday: 'long',
-        month: 'long',
-        day: 'numeric',
-      }),
-    })
+
+    return () => {
+      if (prefillFrameRef.current !== null) {
+        cancelAnimationFrame(prefillFrameRef.current)
+      }
+    }
   }, [])
 
   const handleSubmit = async (message: string, attachments?: FileAttachment[]) => {
@@ -78,34 +69,40 @@ export default function HomePage() {
     })()
   }
 
-  const handleQuickAction = (prompt: string) => {
-    setPrefillText(prompt)
-  }
+  const handleQuickAction = useCallback((prompt: string) => {
+    if (prefillFrameRef.current !== null) {
+      cancelAnimationFrame(prefillFrameRef.current)
+    }
+
+    // Reset first so selecting the same starter twice still updates and focuses the composer.
+    setPrefillText('')
+    prefillFrameRef.current = requestAnimationFrame(() => {
+      setPrefillText(prompt)
+      prefillFrameRef.current = null
+    })
+  }, [])
 
   return (
     <div className="relative min-h-screen overflow-x-hidden">
-      {/* Top bar */}
-      <div className="absolute top-0 left-0 right-0 h-12 flex items-center justify-between px-4 z-[80] md:px-6">
+      <header className="absolute left-0 right-0 top-0 z-[80] flex h-14 items-center justify-between bg-bg-primary px-4 md:px-6">
         <div className="pl-10 md:pl-0">
           <ModelSelector />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <CreditPill />
           <UserMenu />
         </div>
-      </div>
+      </header>
 
-      <div className="relative flex min-h-screen flex-col items-center justify-center px-3 py-[clamp(5.25rem,8vh,6.5rem)]">
-        <div className="flex w-full translate-y-7 flex-col items-center justify-center animate-home-enter md:translate-y-8">
+      <main className="relative flex min-h-screen items-center justify-center px-5 pb-8 pt-16 sm:px-8 md:pb-[12vh] lg:px-10">
+        <div className="mx-auto flex w-full max-w-[900px] flex-col animate-home-enter">
           <HeroSection
             onSubmit={handleSubmit}
             prefillText={prefillText}
-            timeDisplay={timeDisplay}
           />
           <QuickActions onAction={handleQuickAction} />
-          <LaunchCard />
         </div>
-      </div>
+      </main>
     </div>
   )
 }

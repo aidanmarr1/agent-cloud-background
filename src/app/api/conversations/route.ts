@@ -57,8 +57,8 @@ export async function POST(request: Request) {
     return noStore(Response.json({ error: 'Invalid conversation sync payload' }, { status: 400 }))
   }
 
-  await syncUserConversations(userId, payload)
-  return noStore(Response.json({ ok: true }))
+  const conversations = await syncUserConversations(userId, payload)
+  return noStore(Response.json({ ok: true, conversations }))
 }
 
 export async function DELETE(request: Request) {

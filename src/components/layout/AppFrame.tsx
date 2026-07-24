@@ -27,7 +27,7 @@ export function AppFrame({
 
   if (authRoute) {
     return (
-      <main id="main-content" className="app-main-content auth-main-content flex-1 min-w-0 w-full min-h-screen ml-0 md:ml-0">
+      <main id="main-content" className="auth-main-content flex-1 min-w-0 w-full min-h-screen ml-0 md:ml-0">
         {children}
       </main>
     )

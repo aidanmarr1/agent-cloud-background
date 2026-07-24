@@ -1,15 +1,14 @@
 'use client'
 
 import { useState, useRef, useEffect, useCallback, KeyboardEvent, ChangeEvent } from 'react'
-import { ArrowUp, Square, Plus, Paperclip, BookOpen, FolderUp, Loader2 } from '@/components/icons'
+import { ArrowUp, Square, Plus, Paperclip, BookOpen, FolderUp, Loader2, ChevronRight, Search, Settings, X } from '@/components/icons'
 import { useUIStore } from '@/store/ui'
 import { useSettingsStore } from '@/store/settings'
-import type { FileAttachment, SlashCommand } from '@/types'
+import type { FileAttachment, SavedSkill, SlashCommand } from '@/types'
 import { filterCommands } from '@/lib/slashCommands'
 import { createSkillAttachment, FILE_ACCEPT, processFilesForAttachments, SKILL_ATTACHMENT_TYPE } from '@/lib/fileHandling'
 import { uploadAttachmentsToServer } from '@/lib/attachmentUpload'
 import { SlashCommandMenu } from './SlashCommandMenu'
-import { VoiceInput } from './VoiceInput'
 import { AttachmentPreviewRow, getAttachmentKey } from './AttachmentPreview'
 import { MAX_TASK_INPUT_CHARS, clampTaskInput, taskInputLimitMessage } from '@/lib/inputLimits'
 
@@ -21,6 +20,7 @@ interface ChatInputProps {
   rainbow?: boolean
   conversationId?: string
   initialValue?: string
+  variant?: 'hero' | 'thread'
 }
 
 interface SlashRange {
@@ -59,20 +59,29 @@ function getActiveSlashRange(text: string, cursor: number): SlashRange | null {
   return { start: tokenStart, end: tokenEnd, query: token }
 }
 
-export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or ask anything', rainbow = false, conversationId, initialValue }: ChatInputProps) {
+export function ChatInput({
+  onSubmit,
+  onStop,
+  placeholder = 'Assign a task or ask anything',
+  rainbow = false,
+  conversationId,
+  initialValue,
+  variant = 'hero',
+}: ChatInputProps) {
   const [value, setValue] = useState('')
   const [focused, setFocused] = useState(false)
   const [attachments, setAttachments] = useState<FileAttachment[]>([])
   const [sendButtonPop, setSendButtonPop] = useState(false)
   const [submitPending, setSubmitPending] = useState(false)
-  const [fileProcessingCount, setFileProcessingCount] = useState(0)
-  const [processingLabel, setProcessingLabel] = useState('Preparing files for the agent')
+  const [pendingFiles, setPendingFiles] = useState<Array<{ id: string; name: string }>>([])
   const [slashMenuOpen, setSlashMenuOpen] = useState(false)
   const [slashSelectedIndex, setSlashSelectedIndex] = useState(0)
   const [slashFiltered, setSlashFiltered] = useState<SlashCommand[]>([])
   const [slashRange, setSlashRange] = useState<SlashRange | null>(null)
   const [cursorPosition, setCursorPosition] = useState(0)
   const [attachMenuOpen, setAttachMenuOpen] = useState(false)
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false)
+  const [skillQuery, setSkillQuery] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
@@ -81,16 +90,23 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
   const prevHasValueRef = useRef(false)
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const cursorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const pendingBatchRef = useRef(0)
   const isStreaming = useUIStore((s) => s.isStreaming)
   const skills = useSettingsStore((s) => s.skillLibrary)
-  const isProcessingFiles = fileProcessingCount > 0
+  const normalizedSkillQuery = skillQuery.trim().toLowerCase()
+  const visibleSkills = normalizedSkillQuery
+    ? skills.filter((skill) => `${skill.name} ${skill.description}`.toLowerCase().includes(normalizedSkillQuery))
+    : skills
+  const isProcessingFiles = pendingFiles.length > 0
   const hasText = value.trim().length > 0
   const hasValue = value.trim().length > 0 || attachments.length > 0
   const inputBusy = submitPending || isProcessingFiles
   const optimisticTaskStarting = submitPending && !isStreaming && !isProcessingFiles
   const canSendLiveInstruction = isStreaming && hasText && attachments.length === 0 && !inputBusy
   const liveInstructionBlockedByAttachments = isStreaming && attachments.length > 0
-  const showStopButton = (isStreaming || optimisticTaskStarting) && (!hasText || liveInstructionBlockedByAttachments) && !!onStop
+  const showStopButton = (isStreaming || optimisticTaskStarting) && !!onStop
+  const showSendButton = !(isStreaming || optimisticTaskStarting) || canSendLiveInstruction
+  const compact = variant === 'thread'
   const atInputLimit = value.length >= MAX_TASK_INPUT_CHARS
 
   const setClampedValue = useCallback((next: string) => {
@@ -191,10 +207,14 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
       const target = event.target as Node | null
       if (target && attachMenuRef.current?.contains(target)) return
       setAttachMenuOpen(false)
+      setSkillPickerOpen(false)
     }
 
     const handleEscape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') setAttachMenuOpen(false)
+      if (event.key === 'Escape') {
+        setAttachMenuOpen(false)
+        setSkillPickerOpen(false)
+      }
     }
 
     document.addEventListener('pointerdown', handlePointerDown)
@@ -209,37 +229,6 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
     const ta = textareaRef.current
     setCursorPosition(ta?.selectionStart ?? value.length)
   }, [value.length])
-
-  const insertTranscript = useCallback((text: string) => {
-    const transcript = text.replace(/\s+/g, ' ').trim()
-    if (!transcript) return
-
-    setValue((prev) => {
-      const ta = textareaRef.current
-      const selectionStart = Math.max(0, Math.min(ta?.selectionStart ?? cursorPosition, prev.length))
-      const selectionEnd = Math.max(selectionStart, Math.min(ta?.selectionEnd ?? selectionStart, prev.length))
-      const before = prev.slice(0, selectionStart)
-      const after = prev.slice(selectionEnd)
-      const leading = before && !/\s$/.test(before) ? ' ' : ''
-      const trailing = after ? (/^\s/.test(after) ? '' : ' ') : ' '
-      const inserted = `${leading}${transcript}${trailing}`
-      const unclamped = `${before}${inserted}${after}`
-      const next = clampTaskInput(unclamped)
-      const nextCursor = Math.min(before.length + inserted.length, next.length)
-      if (unclamped.length > MAX_TASK_INPUT_CHARS) {
-        queueMicrotask(() => useUIStore.getState().addToast(taskInputLimitMessage(), 'error'))
-      }
-
-      requestAnimationFrame(() => {
-        const input = textareaRef.current
-        if (!input) return
-        input.selectionStart = input.selectionEnd = Math.min(nextCursor, input.value.length)
-        setCursorPosition(input.selectionStart)
-      })
-
-      return next
-    })
-  }, [cursorPosition])
 
   // Slash command detection at the current cursor position, not only at the beginning.
   useEffect(() => {
@@ -256,6 +245,28 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
     }
   }, [cursorPosition, value, skills])
 
+  const attachSavedSkill = useCallback((skill: SavedSkill, replaceActiveSlash = false) => {
+    const skillAttachment = createSkillAttachment(skill)
+    setAttachments((prev) => [
+      ...prev.filter((att) => !(att.type === SKILL_ATTACHMENT_TYPE && att.name === skillAttachment.name)),
+      skillAttachment,
+    ])
+
+    const instruction = `Use the "${skill.name}" skill. `
+    if (replaceActiveSlash) {
+      replaceSlashRange(instruction)
+    } else {
+      const separator = value && !value.endsWith(' ') ? ' ' : ''
+      const clamped = setClampedValue(`${value}${separator}${instruction}`)
+      setTextareaCursorAt(clamped.length)
+    }
+
+    setAttachMenuOpen(false)
+    setSkillPickerOpen(false)
+    setSkillQuery('')
+    useUIStore.getState().addToast(`Attached skill: ${skill.name}`, 'success')
+  }, [replaceSlashRange, setClampedValue, setTextareaCursorAt, value])
+
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
     setSlashMenuOpen(false)
     if (cmd.handler === 'skill' && cmd.skillId) {
@@ -264,15 +275,9 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
         useUIStore.getState().addToast('That saved skill is no longer available.', 'error')
         return
       }
-      const skillAttachment = createSkillAttachment(skill)
-      setAttachments((prev) => [
-        ...prev.filter((att) => !(att.type === SKILL_ATTACHMENT_TYPE && att.name === skillAttachment.name)),
-        skillAttachment,
-      ])
-      replaceSlashRange(`Use the "${skill.name}" skill. `)
-      useUIStore.getState().addToast(`Attached skill: ${skill.name}`, 'success')
+      attachSavedSkill(skill, true)
     }
-  }, [replaceSlashRange])
+  }, [attachSavedSkill])
 
   const handleSubmit = useCallback(() => {
     const trimmed = value.trim()
@@ -284,24 +289,38 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
 
     const submittedValue = value
     const submittedAttachments = attachments
+    let restorableAttachments = submittedAttachments
     const message = trimmed || 'Analyze the attached file(s).'
     setSubmitPending(true)
-    setValue('')
-    setAttachments([])
-    if (conversationId) localStorage.removeItem(`agent-draft-${conversationId}`)
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-    }
 
-    void Promise.resolve(onSubmit(message, submittedAttachments.length > 0 ? submittedAttachments : undefined))
-      .then(() => {
-        // The draft was already cleared once the send was accepted.
-      })
-      .catch(() => {
+    void (async () => {
+      let persistedAttachments = submittedAttachments
+      if (persistedAttachments.some((attachment) => !attachment.id || !attachment.persisted)) {
+        const uploadResult = await uploadAttachmentsToServer(persistedAttachments, conversationId)
+        persistedAttachments = uploadResult.attachments
+        restorableAttachments = persistedAttachments
+        if (uploadResult.errors.length > 0) {
+          throw new Error(uploadResult.errors[0])
+        }
+        if (persistedAttachments.some((attachment) => !attachment.id || !attachment.persisted)) {
+          throw new Error('One or more attachments did not finish uploading. Remove them and try again.')
+        }
+      }
+
+      setValue('')
+      setAttachments([])
+      if (conversationId) localStorage.removeItem(`agent-draft-${conversationId}`)
+      if (textareaRef.current) textareaRef.current.style.height = 'auto'
+      await onSubmit(message, persistedAttachments.length > 0 ? persistedAttachments : undefined)
+    })()
+      .catch((error) => {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : 'Could not start the task.'
+        useUIStore.getState().addToast(message, 'error')
         setValue(submittedValue)
-        setAttachments(submittedAttachments)
+        setAttachments(restorableAttachments)
         if (conversationId && submittedValue) localStorage.setItem(`agent-draft-${conversationId}`, submittedValue)
-        setSubmitPending(false)
       })
       .finally(() => {
         if (!useUIStore.getState().isStreaming) setSubmitPending(false)
@@ -312,8 +331,17 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
     const fileList = Array.from(files)
     if (fileList.length === 0) return
 
-    setProcessingLabel(formatFileBatch(fileList))
-    setFileProcessingCount((count) => count + 1)
+    const batchId = ++pendingBatchRef.current
+    const containsFolderPaths = fileList.some((file) => {
+      const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name
+      return path.includes('/')
+    })
+    const pendingNames = containsFolderPaths
+      ? [formatFileBatch(fileList)]
+      : fileList.map((file) => file.name)
+    const nextPending = pendingNames.map((name, index) => ({ id: `${batchId}-${index}`, name }))
+    const nextPendingIds = new Set(nextPending.map((item) => item.id))
+    setPendingFiles((current) => [...current, ...nextPending])
     try {
       const result = await processFilesForAttachments(fileList)
 
@@ -367,7 +395,7 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
         : 'Could not process the selected attachment.'
       useUIStore.getState().addToast(message, 'error')
     } finally {
-      setFileProcessingCount((count) => Math.max(0, count - 1))
+      setPendingFiles((current) => current.filter((item) => !nextPendingIds.has(item.id)))
     }
   }, [conversationId])
 
@@ -495,16 +523,22 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
     }
   }, [cursorPosition, value])
 
+  const attachmentItemCount = attachments.length + pendingFiles.length
+  const contextualPlaceholder = attachmentItemCount > 0
+    ? `Tell Agent what to do with the ${attachmentItemCount === 1 ? 'file' : 'files'}`
+    : placeholder
+
   return (
     <div
-      className={`relative bg-bg-secondary rounded-2xl border max-w-[810px] w-full transition-all duration-200 ${
+      className={`task-input-surface relative w-full border bg-bg-secondary transition-all duration-200 ${
+        compact ? 'max-w-[860px]' : 'max-w-[780px]'
+      } ${
+        compact ? 'min-h-[96px] rounded-[20px]' : 'min-h-[116px] rounded-[24px]'
+      } ${
         rainbow
           ? `border-transparent${dragOver ? ' scale-[1.01]' : ''}`
-          : dragOver ? 'border-border-primary bg-bg-secondary scale-[1.005]' : focused ? 'border-[var(--input-active-border)]' : 'border-border-primary hover:border-border-tertiary'
+          : dragOver ? 'border-border-tertiary bg-bg-tertiary scale-[1.005]' : focused ? 'border-border-tertiary' : 'border-border-primary hover:border-border-tertiary'
       }`}
-      style={{
-        boxShadow: focused ? 'var(--shadow-md)' : 'var(--shadow-sm)',
-      }}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -549,40 +583,40 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
       {/* Attachment previews */}
       {(attachments.length > 0 || isProcessingFiles) && (
         <div className="px-3 pt-3">
-          <div className="flex max-h-[132px] flex-col gap-1.5 overflow-y-auto rounded-xl border border-border-primary bg-bg-secondary p-1.5">
-            <div className="flex h-6 items-center justify-between px-1">
-              <span className="text-[10.5px] font-medium uppercase tracking-[0.12em] text-text-muted">
-                {attachments.length === 1 ? '1 context item' : `${attachments.length} context items`}
-              </span>
-              {attachments.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => setAttachments([])}
-                  className="rounded-md px-1.5 py-0.5 text-[10.5px] font-medium text-text-muted transition-colors duration-150 hover:bg-bg-secondary hover:text-text-primary"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
+          <div className="scrollbar-none flex gap-2 overflow-x-auto pb-0.5">
+            {attachments.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setAttachments([])}
+                aria-label="Remove all attached files"
+                title="Remove all files"
+                className="flex h-[66px] w-11 flex-none items-center justify-center rounded-lg border border-border-primary bg-bg-primary text-text-muted transition-colors hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary"
+              >
+                <X size={15} strokeWidth={2.25} />
+              </button>
+            )}
             {attachments.map((att, i) => (
               <AttachmentPreviewRow
-                key={`${att.name}-${i}`}
+                key={`${getAttachmentKey(att)}-${i}`}
                 attachment={att}
                 onRemove={() => removeAttachment(i)}
-                showReady
               />
             ))}
-            {isProcessingFiles && (
-              <div className="flex min-h-11 items-center gap-2 rounded-lg border border-border-secondary bg-bg-primary px-2 text-[12px] text-text-secondary">
-                <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border-primary bg-bg-secondary">
-                  <Loader2 size={15} className="text-text-muted" style={{ animation: 'spin 1s linear infinite' }} />
+            {pendingFiles.map((pendingFile) => (
+              <div
+                key={pendingFile.id}
+                className="flex h-[66px] w-[278px] flex-none items-center gap-3 rounded-xl border border-border-primary bg-bg-primary px-3 text-text-secondary animate-scale-in"
+                aria-label={`${pendingFile.name}, uploading`}
+              >
+                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border border-border-primary bg-bg-secondary">
+                  <Loader2 size={17} className="text-text-muted" style={{ animation: 'spin 1s linear infinite' }} />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="truncate text-[12.5px] font-semibold text-text-secondary">Reading attachments</div>
-                  <div className="truncate text-[10.5px] text-text-muted">{processingLabel}</div>
+                  <div className="truncate text-[13px] font-semibold text-text-primary">{pendingFile.name}</div>
+                  <div className="mt-0.5 truncate text-[11px] text-text-muted">Uploading …</div>
                 </div>
               </div>
-            )}
+            ))}
           </div>
         </div>
       )}
@@ -612,18 +646,24 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
         onFocus={() => setFocused(true)}
         onBlur={() => setFocused(false)}
         onPaste={handlePaste}
-        placeholder={placeholder}
+        placeholder={contextualPlaceholder}
         rows={1}
-        className="bg-transparent resize-none outline-none w-full px-4 pt-4 pb-1 placeholder:text-text-muted/80 chat-input-text text-text-primary leading-relaxed sm:px-5"
+        aria-label={compact ? 'Add a follow-up or give direction' : 'Describe a task for Agent'}
+        className={`${compact ? 'min-h-[46px] px-4 pt-3.5 pb-0.5 sm:px-5' : 'min-h-[64px] px-5 pt-5 pb-1 sm:px-5'} w-full resize-none bg-transparent text-text-primary outline-none placeholder:text-text-muted chat-input-text leading-relaxed`}
       />
-      <div className="h-12 px-2.5 pb-1 flex items-center justify-between sm:px-3">
+      <div className={`${compact ? 'h-[46px]' : 'h-[48px]'} flex items-center justify-between px-3 pb-1 sm:px-3.5`}>
         <div className="flex items-center gap-0.5">
           {/* Add attachment menu */}
           <div ref={attachMenuRef} className="relative">
             <button
               type="button"
-              onClick={() => setAttachMenuOpen((open) => !open)}
-              className={`subtle-icon-button w-9 h-9 rounded-full flex items-center justify-center transition-all duration-150 active:scale-[0.96] ${
+              onClick={() => {
+                setAttachMenuOpen((open) => {
+                  if (open) setSkillPickerOpen(false)
+                  return !open
+                })
+              }}
+              className={`subtle-icon-button h-9 w-9 rounded-full flex items-center justify-center transition-all duration-150 active:scale-[0.96] ${
                 attachMenuOpen ? 'is-active' : ''
               }`}
               title="Add attachment"
@@ -637,71 +677,119 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
             {attachMenuOpen && (
               <div
                 role="menu"
-                className="fixed left-3 right-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] z-40 mt-2 w-auto rounded-2xl border border-border-primary menu-surface p-2 animate-scale-in sm:absolute sm:left-0 sm:right-auto sm:top-full sm:bottom-auto sm:w-[318px]"
-                style={{ boxShadow: 'var(--shadow-lg)' }}
+                aria-label="Add context"
+                className={`fixed left-3 right-3 bottom-[calc(5.25rem+env(safe-area-inset-bottom))] z-40 w-auto origin-top-left rounded-xl border border-border-primary menu-surface p-1.5 animate-scale-in sm:absolute sm:left-0 sm:right-auto sm:w-[220px] ${
+                  compact ? 'sm:bottom-full sm:top-auto sm:mb-2' : 'sm:bottom-auto sm:top-full sm:mt-2'
+                }`}
+                style={{ boxShadow: 'var(--shadow-menu)' }}
               >
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={() => setSkillPickerOpen(false)}
                   onClick={() => {
                     setAttachMenuOpen(false)
+                    setSkillPickerOpen(false)
                     fileInputRef.current?.click()
                   }}
-                  className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all duration-150 hover:bg-bg-secondary"
+                  className="group flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors duration-100 hover:bg-bg-hover focus-visible:bg-bg-hover"
                 >
-                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-secondary">
-                    <Paperclip size={14} strokeWidth={2.25} />
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-primary">
+                    <Paperclip size={15} strokeWidth={2.15} />
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] font-semibold text-text-secondary">Attach files</span>
-                    <span className="block truncate text-[11.5px] text-text-muted">DOCX, PPTX, and readable text files</span>
-                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-text-primary">Add from local files</span>
                 </button>
                 <button
                   type="button"
                   role="menuitem"
+                  onMouseEnter={() => setSkillPickerOpen(false)}
                   onClick={() => {
                     setAttachMenuOpen(false)
+                    setSkillPickerOpen(false)
                     folderInputRef.current?.click()
                   }}
-                  className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all duration-150 hover:bg-bg-secondary"
+                  className="group flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors duration-100 hover:bg-bg-hover focus-visible:bg-bg-hover"
                 >
-                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-secondary">
-                    <FolderUp size={14} strokeWidth={2.25} />
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-primary">
+                    <FolderUp size={15} strokeWidth={2.15} />
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] font-semibold text-text-secondary">Attach folder</span>
-                    <span className="block truncate text-[11.5px] text-text-muted">Bundle readable project files as context</span>
-                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-text-primary">Add a folder</span>
                 </button>
+                <div className="my-1 h-px bg-border-secondary" />
                 <button
                   type="button"
                   role="menuitem"
                   disabled={skills.length === 0}
                   onClick={() => {
-                    setAttachMenuOpen(false)
-                    const next = value.trim() ? `${value}${value.endsWith(' ') ? '' : ' '}/` : '/'
-                    const clamped = setClampedValue(next)
-                    setCursorPosition(clamped.length)
-                    setSlashRange({ start: Math.max(0, clamped.length - 1), end: clamped.length, query: '/' })
-                    const commands = filterCommands('/', skills)
-                    setSlashFiltered(commands)
-                    setSlashSelectedIndex(0)
-                    setSlashMenuOpen(commands.length > 0)
-                    setTextareaCursorAt(clamped.length)
+                    if (skills.length > 0) setSkillPickerOpen((open) => !open)
                   }}
-                  className="group flex w-full items-center gap-3 rounded-xl px-2.5 py-2.5 text-left transition-all duration-150 hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                  onMouseEnter={() => {
+                    if (skills.length > 0) setSkillPickerOpen(true)
+                  }}
+                  aria-haspopup="dialog"
+                  aria-expanded={skillPickerOpen}
+                  className={`group flex h-10 w-full items-center gap-2.5 rounded-lg px-2.5 text-left transition-colors duration-100 hover:bg-bg-hover focus-visible:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent ${
+                    skillPickerOpen ? 'bg-bg-hover' : ''
+                  }`}
                 >
-                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-secondary">
-                    <BookOpen size={14} strokeWidth={2.25} />
+                  <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center text-text-muted transition-colors group-hover:text-text-primary">
+                    <BookOpen size={15} strokeWidth={2.15} />
                   </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-[13px] font-semibold text-text-secondary">Use saved skill</span>
-                    <span className="block truncate text-[11.5px] text-text-muted">
-                      {skills.length > 0 ? `${skills.length} in your skill library` : 'No skills saved yet'}
-                    </span>
-                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] font-medium text-text-primary">Use saved skill</span>
+                  <ChevronRight size={13} className="flex-shrink-0 text-text-muted" strokeWidth={2.1} />
                 </button>
+
+                {skillPickerOpen && skills.length > 0 && (
+                  <div
+                    role="dialog"
+                    aria-label="Saved skills"
+                    className="mt-1 rounded-lg border border-border-primary bg-bg-elevated p-1.5 sm:absolute sm:left-[calc(100%+8px)] sm:top-0 sm:mt-0 sm:w-[300px]"
+                    style={{ boxShadow: 'var(--shadow-menu)' }}
+                  >
+                    <div className="flex h-9 items-center gap-2 rounded-lg border border-border-primary bg-bg-primary px-2.5 text-text-muted focus-within:border-border-tertiary focus-within:text-text-secondary">
+                      <Search size={14} strokeWidth={2.1} />
+                      <input
+                        value={skillQuery}
+                        onChange={(event) => setSkillQuery(event.target.value)}
+                        placeholder="Search saved skills"
+                        aria-label="Search saved skills"
+                        className="min-w-0 flex-1 bg-transparent text-[12px] text-text-primary outline-none placeholder:text-text-muted"
+                      />
+                    </div>
+                    <div className="mt-1 max-h-[184px] overflow-y-auto">
+                      {visibleSkills.length > 0 ? visibleSkills.map((skill) => (
+                        <button
+                          key={skill.id}
+                          type="button"
+                          onClick={() => attachSavedSkill(skill)}
+                          className="group flex min-h-11 w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors duration-100 hover:bg-bg-hover focus-visible:bg-bg-hover"
+                        >
+                          <BookOpen size={14} className="mt-0.5 flex-shrink-0 text-text-muted group-hover:text-text-primary" strokeWidth={2.1} />
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-[12.5px] font-medium text-text-primary">{skill.name}</span>
+                            <span className="mt-0.5 block truncate text-[10.5px] text-text-muted">{skill.description || skill.sourceName}</span>
+                          </span>
+                        </button>
+                      )) : (
+                        <p className="px-3 py-5 text-center text-[11.5px] text-text-muted">No matching skills</p>
+                      )}
+                    </div>
+                    <div className="my-1 h-px bg-border-secondary" />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttachMenuOpen(false)
+                        setSkillPickerOpen(false)
+                        useUIStore.getState().setSettingsTab('skills')
+                        useUIStore.getState().setSettingsOpen(true)
+                      }}
+                      className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-[12px] font-medium text-text-primary transition-colors hover:bg-bg-hover focus-visible:bg-bg-hover"
+                    >
+                      <Settings size={14} className="text-text-muted" strokeWidth={2.1} />
+                      Manage skills
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -724,25 +812,26 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
               {sendWithEnter ? '↵ Send' : '⌘↵ Send'}
             </span>
           )}
-          <VoiceInput onTranscript={insertTranscript} />
-          {showStopButton ? (
+          {showStopButton && (
             <button
               type="button"
               onClick={onStop}
               aria-label="Stop task"
-              className="w-9 h-9 rounded-full flex items-center justify-center bg-text-primary hover:opacity-80 active:scale-90 transition-all duration-200"
+              className={`${compact ? 'h-9 w-9 rounded-full sm:w-auto sm:rounded-lg sm:px-3 sm:gap-1.5' : 'h-9 w-9 rounded-full'} flex items-center justify-center bg-text-primary hover:opacity-80 active:scale-95 transition-all duration-200`}
               title="Stop generating"
             >
               <Square size={11} className="text-primary-foreground" fill="currentColor" />
+              {compact && <span className="hidden text-[12px] font-semibold text-primary-foreground sm:inline">Stop</span>}
             </button>
-          ) : (
+          )}
+          {showSendButton && (
             <button
               type="button"
               onClick={handleSubmit}
               disabled={!hasValue || inputBusy || liveInstructionBlockedByAttachments}
               aria-label={canSendLiveInstruction ? 'Send live instruction' : 'Send message'}
               title={canSendLiveInstruction ? 'Send live instruction to current task' : 'Send message'}
-              className={`w-9 h-9 rounded-full flex items-center justify-center transition-all duration-200 ${
+              className={`${compact && canSendLiveInstruction ? 'h-9 w-9 rounded-full sm:w-auto sm:rounded-lg sm:px-3 sm:gap-1.5' : 'h-9 w-9 rounded-full'} flex items-center justify-center transition-all duration-200 ${
                 hasValue && !inputBusy
                   ? 'bg-text-primary hover:opacity-80 active:scale-90 scale-100'
                   : 'bg-border-primary scale-95 opacity-40'
@@ -751,11 +840,16 @@ export function ChatInput({ onSubmit, onStop, placeholder = 'Assign a task or as
               {submitPending || isProcessingFiles ? (
                 <Loader2 size={15} className="text-text-muted" style={{ animation: 'spin 1s linear infinite' }} />
               ) : (
-                <ArrowUp
-                  size={17}
-                  strokeWidth={2.5}
-                  className={hasValue && !inputBusy ? 'text-primary-foreground' : 'text-text-muted'}
-                />
+                <>
+                  {compact && canSendLiveInstruction && (
+                    <span className="hidden text-[12px] font-semibold text-primary-foreground sm:inline">Send direction</span>
+                  )}
+                  <ArrowUp
+                    size={17}
+                    strokeWidth={2.5}
+                    className={hasValue && !inputBusy ? 'text-primary-foreground' : 'text-text-muted'}
+                  />
+                </>
               )}
             </button>
           )}

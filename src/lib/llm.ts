@@ -3,6 +3,7 @@ import {
   DEFAULT_OPENROUTER_MODEL,
   estimateUsageCost,
 } from '@/lib/modelPricing'
+import { ensureJsonToolMessageContent } from '@/lib/agent/ToolMessageSerialization'
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const GENERATION_URL = `${OPENROUTER_BASE_URL}/generation`
@@ -69,7 +70,6 @@ const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
   'minimal',
 )
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
-const DEFAULT_DEEPSEEK_THINKING_ENABLED = booleanEnv(process.env.DEEPSEEK_THINKING_ENABLED, false)
 
 export type ChatMessageParam = {
   role: string
@@ -591,22 +591,28 @@ function textOnlyMessages(messages: ChatMessageParam[]): ChatMessageParam[] {
   })
 }
 
-function deepSeekHistoryHasAssistantWithoutReasoning(messages: ChatMessageParam[]): boolean {
-  if (ASSISTANT_PROVIDER !== 'deepseek') return false
-  return messages.some(message => {
-    if (message.role !== 'assistant') return false
-    const record = message as unknown as { reasoning_content?: unknown }
-    return typeof record.reasoning_content !== 'string' || record.reasoning_content.length === 0
+function jsonSafeToolMessages(messages: ChatMessageParam[]): ChatMessageParam[] {
+  if (ASSISTANT_PROVIDER !== 'deepseek') return messages
+  return messages.map((message) => {
+    if (message.role !== 'tool' || typeof message.content !== 'string') return message
+    // Keep this invariant beside provider shaping: DeepSeek receives one
+    // complete JSON value for every tool row, including historical rows.
+    const normalized = ensureJsonToolMessageContent(message.content)
+    return normalized === message.content ? message : { ...message, content: normalized }
   })
 }
 
-function deepSeekReasoningEffort(effort: ReasoningEffort | undefined): 'high' | 'max' {
-  return effort === 'xhigh' ? 'max' : 'high'
+function withoutDeepSeekReasoningHistory(messages: ChatMessageParam[]): ChatMessageParam[] {
+  if (ASSISTANT_PROVIDER !== 'deepseek') return messages
+  return messages.map((message) => {
+    if (message.role !== 'assistant' || !('reasoning_content' in message)) return message
+    const { reasoning_content: _reasoningContent, ...nonThinkingMessage } = message
+    return nonThinkingMessage
+  })
 }
 
 function providerReasoningPayload(
   reasoning: ChatCompletionParams['reasoning'],
-  options?: { disableDeepSeekThinking?: boolean },
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
   if (ASSISTANT_PROVIDER !== 'deepseek') {
     return {
@@ -617,20 +623,11 @@ function providerReasoningPayload(
     }
   }
 
-  const effort = reasoning?.effort ?? DEFAULT_REASONING_EFFORT
-  const disabled = options?.disableDeepSeekThinking === true ||
-    reasoning?.enabled === false ||
-    DEFAULT_DEEPSEEK_THINKING_ENABLED === false ||
-    (effort === 'minimal' && reasoning?.exclude === true)
-
-  if (disabled) {
-    return { thinking: { type: 'disabled' } }
-  }
-
-  return {
-    thinking: { type: 'enabled' },
-    reasoning_effort: deepSeekReasoningEffort(effort),
-  }
+  // DeepSeek maps "minimal", "low", and "medium" effort upward to "high".
+  // Its only lower-latency mode is the explicit non-thinking model selected by
+  // this toggle. Hard-pin it at the provider boundary so no individual request
+  // path or environment drift can silently re-enable hidden reasoning.
+  return { thinking: { type: 'disabled' } }
 }
 
 function withPinnedModel(
@@ -656,9 +653,9 @@ function withPinnedModel(
   const contextualMessages = includeTemporalContext === false
     ? messages
     : withCurrentTemporalContext(messages)
-  const providerMessages = textOnlyMessages(contextualMessages)
-  const hasNativeTools = Array.isArray(params.tools) && params.tools.length > 0
-  const hasNonThinkingAssistantHistory = deepSeekHistoryHasAssistantWithoutReasoning(providerMessages)
+  const providerMessages = withoutDeepSeekReasoningHistory(
+    jsonSafeToolMessages(textOnlyMessages(contextualMessages)),
+  )
 
   return {
     ...rest,
@@ -668,13 +665,7 @@ function withPinnedModel(
     ...(ASSISTANT_PROVIDER === 'openrouter' ? { usage: { include: true } } : {}),
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
-    ...providerReasoningPayload(_reasoning, {
-      disableDeepSeekThinking: ASSISTANT_PROVIDER === 'deepseek' && (
-        hasNativeTools ||
-        _toolChoice !== undefined ||
-        hasNonThinkingAssistantHistory
-      ),
-    }),
+    ...providerReasoningPayload(_reasoning),
   }
 }
 

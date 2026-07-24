@@ -186,7 +186,12 @@ function safeStatusRows(existingNames, pulledValues) {
     const exists = existingNames.has(entry.name)
     const expectedValue = valueFor(entry)
     const hasLocalValue = Boolean(expectedValue)
-    const valueChecked = exists && Boolean(pulledValues) && hasLocalValue && 'value' in entry
+    // `vercel env ls` proves only that a key exists. Pull into the private
+    // temporary file and compare every locally-known value, including secrets,
+    // so an accidentally empty production secret is detected as drift instead
+    // of being reported as healthy. Values remain private and the temp file is
+    // deleted by pullVercelEnvValues().
+    const valueChecked = exists && Boolean(pulledValues) && hasLocalValue
     const valueMatches = valueChecked
       ? normalizedCompareValue(pulledValues.get(entry.name)) === normalizedCompareValue(expectedValue)
       : null

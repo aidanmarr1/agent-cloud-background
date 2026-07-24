@@ -8,7 +8,12 @@ import {
   findActiveTaskJobForConversation,
 } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
-import { getRecentTaskWorkerHeartbeats, isLikelyLocalWorkerHostname, workerHeartbeatIsHosted } from '@/lib/agent/taskWorkerHeartbeat'
+import {
+  getRecentTaskWorkerHeartbeats,
+  isLikelyLocalWorkerHostname,
+  workerHeartbeatIsHosted,
+  workerHeartbeatMatchesCurrentProtocol,
+} from '@/lib/agent/taskWorkerHeartbeat'
 import { parseSSE } from '@/lib/stream'
 import type { SSEEvent } from '@/types'
 
@@ -80,17 +85,21 @@ function sleep(ms: number): Promise<void> {
 }
 
 function isCloudCapableWorker(worker: {
+  status?: string | null
   hostname?: string | null
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
+  orchestrationProtocolVersion?: string | null
   e2bApiKeyConfigured?: boolean | null
   e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
 
-  return worker.taskWorkerMode === 'external' &&
+  return workerHeartbeatMatchesCurrentProtocol(worker) &&
+    (worker.status === 'idle' || worker.status === 'running') &&
+    worker.taskWorkerMode === 'external' &&
     worker.sandboxProvider === 'e2b' &&
     worker.e2bApiKeyConfigured === true &&
     worker.e2bBrowserRuntimeConfigured === true &&
@@ -99,16 +108,20 @@ function isCloudCapableWorker(worker: {
 }
 
 function isE2BCapableWorker(worker: {
+  status?: string | null
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
+  orchestrationProtocolVersion?: string | null
   e2bApiKeyConfigured?: boolean | null
   e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
 
-  return worker.taskWorkerMode === 'external' &&
+  return workerHeartbeatMatchesCurrentProtocol(worker) &&
+    (worker.status === 'idle' || worker.status === 'running') &&
+    worker.taskWorkerMode === 'external' &&
     worker.sandboxProvider === 'e2b' &&
     worker.e2bApiKeyConfigured === true &&
     worker.e2bBrowserRuntimeConfigured === true &&
@@ -325,6 +338,7 @@ export async function GET(request: NextRequest) {
       taskWorkerMode: worker.taskWorkerMode,
       sandboxProvider: worker.sandboxProvider,
       deploymentVersion: worker.deploymentVersion,
+      orchestrationProtocolVersion: worker.orchestrationProtocolVersion,
     })),
     firstViewerLastSeq: first.lastSeq,
     firstViewerEvents: first.events.map(eventSummary),

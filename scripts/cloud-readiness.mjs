@@ -92,7 +92,7 @@ function readPackageJson() {
 
 function checkPackageScripts(pkg) {
   const scripts = pkg.scripts || {}
-  for (const name of ['build', 'start', 'worker', 'worker:once', 'worker:cloud', 'cloud:secrets', 'cloud:env-smoke', 'cloud:worker-env', 'cloud:vercel-env', 'cloud:render-worker-env', 'cloud:e2b-smoke', 'cloud:queue', 'cloud:status', 'cloud:finish-setup', 'cloud:preflight', 'cloud:check', 'cloud:render-smoke', 'cloud:worker-template-smoke', 'cloud:smoke', 'cloud:reconnect-smoke', 'cloud:event-smoke', 'cloud:task-start-smoke', 'cloud:worker-lease-smoke', 'cloud:worker-cancel-smoke', 'cloud:worker-shutdown-smoke', 'cloud:worker-ready', 'cloud:worker-smoke', 'e2b:template:build']) {
+  for (const name of ['build', 'start', 'worker', 'worker:once', 'worker:cloud', 'cloud:secrets', 'cloud:env-smoke', 'cloud:worker-env', 'cloud:vercel-env', 'cloud:render-worker-env', 'cloud:e2b-smoke', 'cloud:queue', 'cloud:status', 'cloud:finish-setup', 'cloud:preflight', 'cloud:check', 'cloud:render-smoke', 'cloud:worker-template-smoke', 'cloud:smoke', 'cloud:reconnect-smoke', 'cloud:event-smoke', 'cloud:task-start-smoke', 'cloud:worker-lease-smoke', 'cloud:worker-cancel-smoke', 'cloud:worker-shutdown-smoke', 'cloud:worker-supervisor-smoke', 'cloud:worker-ready', 'cloud:worker-smoke', 'e2b:template:build']) {
     if (scripts[name]) pass(`package script "${name}" exists`)
     else fail(`package script "${name}" is missing`)
   }
@@ -262,6 +262,8 @@ function checkEnvironment() {
 }
 
 function checkFiles() {
+  requireFile('scripts/task-worker-supervisor.mjs', 'self-healing worker supervisor')
+  requireFile('scripts/task-worker-supervisor-smoke.mjs', 'worker supervisor recovery smoke')
   requireFile('scripts/task-worker.mjs', 'worker entrypoint')
   requireFile('scripts/cloud-secrets.mjs', 'cloud deployment secret generator')
   requireFile('scripts/cloud-env-smoke.mjs', 'strict cloud environment value checker')

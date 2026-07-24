@@ -32,6 +32,8 @@ const TRACKING_QUERY_PARAMS = new Set([
   'utm_source',
   'utm_term',
 ])
+const SENSITIVE_HTTP_HEADER_NAME = /(?:authorization|proxy-authorization|api[-_]?key|token|secret|password|passwd|cookie|session|credential|private[-_]?key)/i
+const SENSITIVE_URL_PARAM_NAME = /(?:api[-_]?key|access[-_]?key|auth|authorization|code|credential|password|passwd|secret|session|sig|signature|token)/i
 
 function normalizeCacheUrl(value: string): string {
   const trimmed = value.trim()
@@ -50,6 +52,17 @@ function normalizeCacheUrl(value: string): string {
     return url.toString()
   } catch {
     return trimmed
+  }
+}
+
+function hasSensitiveUrlCredentials(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value.trim())
+    if (url.username || url.password) return true
+    return [...url.searchParams.keys()].some((key) => SENSITIVE_URL_PARAM_NAME.test(key))
+  } catch {
+    return /(?:[?&](?:api[-_]?key|access[-_]?key|auth|authorization|code|credential|password|secret|session|sig|signature|token)=)/i.test(value)
   }
 }
 
@@ -86,7 +99,7 @@ function normalizedHttpHeaders(value: unknown): Record<string, string> | null {
     if (typeof rawValue !== 'string') return null
     const key = rawKey.trim().toLowerCase()
     if (!key) return null
-    if (key === 'authorization' || key === 'cookie' || key === 'proxy-authorization') return null
+    if (SENSITIVE_HTTP_HEADER_NAME.test(key)) return null
     normalized[key] = rawValue.trim()
   }
 
@@ -104,6 +117,7 @@ function isCacheableHttpRequest(args: Record<string, unknown>): boolean {
   if (args.body !== undefined && typeof args.body !== 'string') return false
   if (typeof args.body === 'string' && args.body.trim()) return false
   if (typeof args.url !== 'string' || !/^https?:\/\//i.test(args.url.trim())) return false
+  if (hasSensitiveUrlCredentials(args.url)) return false
   return normalizedHttpHeaders(args.headers) !== null
 }
 
@@ -113,9 +127,12 @@ function isCacheableHttpResponse(result: unknown): boolean {
   const status = Number(response.status)
   if (!Number.isInteger(status) || status < 200 || status >= 300) return false
 
-  const headers = response.headers && typeof response.headers === 'object' && !Array.isArray(response.headers)
+  const rawHeaders = response.headers && typeof response.headers === 'object' && !Array.isArray(response.headers)
     ? response.headers as Record<string, unknown>
     : {}
+  const headers = Object.fromEntries(
+    Object.entries(rawHeaders).map(([key, value]) => [key.toLowerCase(), value]),
+  )
   const cacheControl = typeof headers['cache-control'] === 'string'
     ? headers['cache-control'].toLowerCase()
     : ''
@@ -131,7 +148,6 @@ const CACHEABLE_TOOLS = new Set([
   'read_file',
   'list_files',
   'read_document',
-  'youtube_transcript',
   'browser_get_content',
 ])
 
@@ -309,6 +325,7 @@ export class ToolCache {
   private isCacheable(toolName: string, args: Record<string, unknown>): boolean {
     if (toolName === 'http_request') return isCacheableHttpRequest(args)
     if (UNCACHEABLE_TOOLS.has(toolName)) return false
+    if (hasSensitiveUrlCredentials(args.url) || hasSensitiveUrlCredentials(args.source)) return false
     return CACHEABLE_TOOLS.has(toolName)
   }
 
@@ -327,11 +344,16 @@ export class ToolCache {
     if (toolName === 'web_search' && typeof sortedArgs.query === 'string') {
       sortedArgs.query = sortedArgs.query.toLowerCase().trim()
     }
-    if (toolName === 'read_document' && typeof sortedArgs.source === 'string') {
-      sortedArgs.source = normalizeCacheUrl(sortedArgs.source)
-    }
-    if (toolName === 'youtube_transcript' && typeof sortedArgs.url === 'string') {
-      sortedArgs.url = normalizeCacheUrl(sortedArgs.url)
+    if (toolName === 'read_document') {
+      const target = typeof sortedArgs.url === 'string'
+        ? sortedArgs.url
+        : typeof sortedArgs.source === 'string'
+          ? sortedArgs.source
+          : null
+      if (target) sortedArgs.url = normalizeCacheUrl(target)
+      // Canonicalise stale/in-flight legacy calls so they share cache entries
+      // with the model-visible `url` contract.
+      delete sortedArgs.source
     }
     if (toolName === 'read_file' && typeof sortedArgs.path === 'string') {
       sortedArgs.path = normalizeSandboxCachePath(sortedArgs.path)

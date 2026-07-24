@@ -10,11 +10,14 @@ function clampUserMessage(message: Message): Message {
 
 export interface MessageSlice {
   addMessage: (convId: string, message: Message) => void
+  removeMessages: (convId: string, messageIds: string[]) => void
+  rollbackPendingTaskStart: (convId: string, runId: string) => void
   addLiveDirectiveExchange: (convId: string, userMessage: Message, assistantMessage: Message) => void
   appendToLastMessage: (convId: string, text: string) => void
   appendReasoning: (convId: string, text: string) => void
   truncateAfterMessage: (convId: string, messageId: string) => void
   setLastMessageContent: (convId: string, content: string) => void
+  setAssistantStreamCursor: (convId: string, messageId: string, runId: string, seq: number) => void
   setFollowUps: (convId: string, suggestions: FollowUpSuggestion[]) => void
   toggleMessagePin: (convId: string, messageId: string) => void
 }
@@ -31,6 +34,34 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set) => ({
     }))
   },
 
+  removeMessages: (convId, messageIds) => {
+    if (!messageIds.length) return
+    const ids = new Set(messageIds)
+    set((state) => ({
+      conversations: state.conversations.map((conversation) => (
+        conversation.id === convId
+          ? {
+              ...conversation,
+              messages: conversation.messages.filter((message) => !ids.has(message.id)),
+              updatedAt: Date.now(),
+            }
+          : conversation
+      )),
+    }))
+  },
+
+  rollbackPendingTaskStart: (convId, runId) => {
+    if (!runId) return
+    set((state) => ({
+      conversations: state.conversations.map((conversation) => {
+        if (conversation.id !== convId) return conversation
+        const messages = conversation.messages.filter((message) => message.pendingStartRunId !== runId)
+        if (messages.length === conversation.messages.length) return conversation
+        return { ...conversation, messages, updatedAt: Date.now() }
+      }),
+    }))
+  },
+
   addLiveDirectiveExchange: (convId, userMessage, assistantMessage) => {
     const boundedUserMessage = clampUserMessage(userMessage)
     set((state) => ({
@@ -38,27 +69,32 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set) => ({
         if (c.id !== convId) return c
 
         const messages = [...c.messages]
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const current = messages[i]
-          if (current.role !== 'assistant') continue
-
+        const lastIndex = messages.length - 1
+        const current = messages[lastIndex]
+        if (current?.role === 'assistant') {
           const continuation: Message = {
             ...assistantMessage,
+            streamRunId: current.streamRunId,
+            streamSeq: current.streamSeq,
+            streamTerminalStatus: current.streamTerminalStatus,
             steps: current.steps,
             taskGroups: current.taskGroups,
             artifacts: current.artifacts,
             computerPanelData: current.computerPanelData,
           }
 
-          messages[i] = {
+          messages[lastIndex] = {
             ...current,
+            streamRunId: undefined,
+            streamSeq: undefined,
+            streamTerminalStatus: undefined,
             steps: current.steps?.length ? [] : current.steps,
             taskGroups: current.taskGroups?.length ? [] : current.taskGroups,
             artifacts: current.artifacts?.length ? [] : current.artifacts,
             computerPanelData: current.computerPanelData?.length ? [] : current.computerPanelData,
             followUps: undefined,
           }
-          messages.splice(i + 1, 0, boundedUserMessage, continuation)
+          messages.push(boundedUserMessage, continuation)
           return { ...c, messages, updatedAt: Date.now() }
         }
 
@@ -120,6 +156,33 @@ export const createMessageSlice: SliceCreator<MessageSlice> = (set) => ({
             messages[i] = { ...messages[i], content }
             break
           }
+        }
+        return { ...c, messages, updatedAt: Date.now() }
+      }),
+    }))
+  },
+
+  setAssistantStreamCursor: (convId, messageId, runId, seq) => {
+    if (!Number.isFinite(seq) || seq <= 0) return
+    set((state) => ({
+      conversations: state.conversations.map((c) => {
+        if (c.id !== convId) return c
+        const messageIndex = c.messages.findIndex((message) => (
+          message.id === messageId && message.role === 'assistant'
+        ))
+        if (messageIndex < 0) return c
+
+        const message = c.messages[messageIndex]
+        if (message.streamRunId === runId && (message.streamSeq ?? 0) >= seq) return c
+
+        const messages = [...c.messages]
+        messages[messageIndex] = {
+          ...message,
+          streamRunId: runId,
+          streamSeq: seq,
+          streamTerminalStatus: message.streamRunId === runId
+            ? message.streamTerminalStatus
+            : undefined,
         }
         return { ...c, messages, updatedAt: Date.now() }
       }),

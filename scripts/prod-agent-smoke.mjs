@@ -1,6 +1,84 @@
+import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+
+const INLINE_RESEARCH_FLAG = '--expect-inline-research'
+const SELF_TEST_FLAG = '--self-test'
+const INLINE_RESEARCH_DISCOVERY_TOOLS = new Set(['web_search'])
+const INLINE_RESEARCH_EVIDENCE_TOOLS = new Set([
+  'read_document',
+  'http_request',
+  'browser_navigate',
+  'browser_get_content',
+  'browse_page',
+])
+const FILE_OUTPUT_TOOLS = new Set([
+  'create_file',
+  'append_file',
+  'edit_file',
+  'export_pdf',
+])
+
+function inlineResearchContractFailures(body) {
+  const toolNames = Array.isArray(body?.toolStarts)
+    ? body.toolStarts
+      .map(entry => entry?.name)
+      .filter(name => typeof name === 'string')
+    : []
+  const finalText = typeof body?.textPreview === 'string'
+    ? body.textPreview.trim()
+    : ''
+  const failures = []
+
+  if (body?.ok !== true || body?.terminalStatus !== 'done') {
+    failures.push('agent run did not finish successfully')
+  }
+  if (!toolNames.some(name => INLINE_RESEARCH_DISCOVERY_TOOLS.has(name))) {
+    failures.push('no web discovery action was recorded')
+  }
+  if (!toolNames.some(name => INLINE_RESEARCH_EVIDENCE_TOOLS.has(name))) {
+    failures.push('no source page was opened or extracted')
+  }
+  const fileTools = toolNames.filter(name => FILE_OUTPUT_TOOLS.has(name))
+  if (fileTools.length > 0) {
+    failures.push(`unexpected saved-file tools were used: ${fileTools.join(', ')}`)
+  }
+  if (finalText.length < 20) {
+    failures.push('no substantive inline answer text was returned')
+  }
+
+  return failures
+}
+
+function runSelfTest() {
+  const passingFixture = {
+    ok: true,
+    terminalStatus: 'done',
+    toolStarts: [
+      { name: 'web_search' },
+      { name: 'read_document' },
+    ],
+    textPreview: 'A current source explains that language models emit SVG as structured XML text.',
+  }
+  assert.deepEqual(inlineResearchContractFailures(passingFixture), [])
+
+  const failingFixture = {
+    ok: true,
+    terminalStatus: 'done',
+    toolStarts: [
+      { name: 'create_file' },
+      { name: 'append_file' },
+    ],
+    textPreview: '',
+  }
+  const failures = inlineResearchContractFailures(failingFixture)
+  assert.ok(failures.some(message => message.includes('web discovery')))
+  assert.ok(failures.some(message => message.includes('source page')))
+  assert.ok(failures.some(message => message.includes('saved-file tools')))
+  assert.ok(failures.some(message => message.includes('inline answer')))
+  console.log('prod-agent-smoke contract self-test passed')
+}
 
 function loadLocalEnv() {
   const envPath = resolve(process.cwd(), '.env.local')
@@ -26,8 +104,21 @@ function loadLocalEnv() {
 
 loadLocalEnv()
 
-const baseUrl = (process.argv[2] || 'https://agent1-0.vercel.app').replace(/\/$/, '')
-const prompt = process.argv.slice(3).join(' ').trim()
+const rawArgs = process.argv.slice(2)
+const selfTest = rawArgs.includes(SELF_TEST_FLAG)
+const expectInlineResearch = rawArgs.includes(INLINE_RESEARCH_FLAG)
+const positionalArgs = rawArgs.filter(arg => (
+  arg !== SELF_TEST_FLAG &&
+  arg !== INLINE_RESEARCH_FLAG
+))
+
+if (selfTest) {
+  runSelfTest()
+  process.exit(0)
+}
+
+const baseUrl = (positionalArgs[0] || 'https://agent1-0.vercel.app').replace(/\/$/, '')
+const prompt = positionalArgs.slice(1).join(' ').trim()
 const path = '/api/internal/agent-smoke'
 const secret = process.env.AGENT_INTERNAL_HEALTH_SECRET || process.env.AUTH_SECRET
 
@@ -51,12 +142,31 @@ const response = await fetch(url, {
 })
 
 const body = await response.text()
+let parsedBody = null
+try {
+  parsedBody = body ? JSON.parse(body) : null
+} catch {
+  // The response dump below is still useful when a proxy or runtime returns
+  // non-JSON, but it must never count as a passing production agent smoke.
+}
 
 console.log(JSON.stringify({
   status: response.status,
-  body: body ? JSON.parse(body) : null,
+  body: parsedBody ?? body,
 }, null, 2))
 
-if (!response.ok) {
+const contractFailures = expectInlineResearch
+  ? inlineResearchContractFailures(parsedBody)
+  : []
+
+if (expectInlineResearch) {
+  console.log(JSON.stringify({
+    contract: 'inline-research',
+    ok: contractFailures.length === 0,
+    failures: contractFailures,
+  }, null, 2))
+}
+
+if (!response.ok || parsedBody?.ok !== true || contractFailures.length > 0) {
   process.exitCode = 1
 }

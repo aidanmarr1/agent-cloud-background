@@ -7,8 +7,8 @@ import { clearServerConversations, flushChatServerSync, useChatStore } from '@/s
 import { clearLegacyChatPersistence } from '@/store/chat/persistence'
 import { useUIStore } from '@/store/ui'
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, Trash2, Upload } from '@/components/icons'
-import { SectionLabel } from '@/components/ui/SectionLabel'
 import { ProfileAvatar } from '@/components/ui/ProfileAvatar'
+import { SettingsSection, settingsPanelClass } from './SettingsSection'
 
 export function DataTab() {
   const router = useRouter()
@@ -193,10 +193,12 @@ export function DataTab() {
   }
 
   return (
-    <div className="space-y-6">
-      <div>
-        <SectionLabel>Profile</SectionLabel>
-        <div className="rounded-2xl border border-border-primary bg-bg-secondary p-4">
+    <div className="space-y-8">
+      <SettingsSection
+        title="Profile"
+        description="Manage the identity shown across your Agent workspace."
+      >
+        <div className={`${settingsPanelClass} p-4`}>
           <input
             ref={profileInputRef}
             type="file"
@@ -222,9 +224,9 @@ export function DataTab() {
                 />
                 <span className="absolute inset-0 flex items-center justify-center rounded-full bg-[var(--overlay-profile)] opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100">
                   {profileLoading ? (
-                    <Loader2 size={18} className="animate-spin text-text-on-accent" strokeWidth={2.25} />
+                    <Loader2 size={18} className="animate-spin text-text-on-scrim" strokeWidth={2.25} />
                   ) : (
-                    <Upload size={18} className="text-text-on-accent" strokeWidth={2.25} />
+                    <Upload size={18} className="text-text-on-scrim" strokeWidth={2.25} />
                   )}
                 </span>
                 <span className="absolute -bottom-0.5 -right-0.5 flex h-7 w-7 items-center justify-center rounded-full border border-border-primary bg-bg-primary text-text-secondary shadow-sm transition-colors duration-150 group-hover:bg-bg-secondary group-hover:text-text-primary">
@@ -238,28 +240,33 @@ export function DataTab() {
               <div className="min-w-0">
                 <div className="truncate text-[13px] font-semibold tracking-[0] text-text-primary">{displayName}</div>
                 <div className="mt-0.5 truncate text-[11.5px] text-text-muted">{displayEmail}</div>
-                <div className="mt-2 inline-flex rounded-full border border-border-primary bg-bg-primary px-2 py-1 text-[10.5px] font-semibold leading-none text-text-tertiary">
-                  Profile photo
-                </div>
+                <div className="mt-2 text-[10.5px] leading-snug text-text-tertiary">PNG, JPEG, WebP, or GIF</div>
               </div>
             </div>
-            <div className="flex flex-shrink-0 justify-end gap-2">
+            <div className="flex flex-shrink-0 flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => profileInputRef.current?.click()}
+                disabled={profileLoading}
+                className="h-9 rounded-lg border border-border-primary bg-bg-primary px-3.5 text-[12px] font-semibold text-text-secondary transition-colors duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {profileImageUrl ? 'Change photo' : 'Upload photo'}
+              </button>
               {profileImageUrl && (
                 <button
                   type="button"
                   onClick={handleRemoveProfileImage}
                   disabled={profileLoading}
                   aria-label="Remove profile picture"
-                  title="Remove profile picture"
-                  className="flex h-9 w-9 items-center justify-center rounded-full border border-border-primary bg-bg-primary text-text-muted transition-colors duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-blue/35 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-9 rounded-lg border border-border-primary bg-bg-primary px-3.5 text-[12px] font-semibold text-text-tertiary transition-colors duration-150 hover:border-accent-red/30 hover:bg-accent-red/5 hover:text-accent-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-red/30 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  <Trash2 size={14} strokeWidth={2.25} />
+                  Remove
                 </button>
               )}
             </div>
           </div>
           {profileMessage && (
-            <div className={`mt-3 flex items-center gap-1.5 text-[11.5px] ${
+            <div role={profileMessage.type === 'error' ? 'alert' : 'status'} className={`mt-3 flex items-center gap-1.5 text-[11.5px] ${
               profileMessage.type === 'success' ? 'text-text-secondary' : 'text-accent-red'
             }`}>
               {profileMessage.type === 'success'
@@ -270,11 +277,13 @@ export function DataTab() {
             </div>
           )}
         </div>
-      </div>
+      </SettingsSection>
 
-      <div>
-        <SectionLabel>Security</SectionLabel>
-        <div className="overflow-hidden rounded-2xl border border-border-primary bg-bg-secondary">
+      <SettingsSection
+        title="Security"
+        description="Update the password used to sign in to this account."
+      >
+        <div className={settingsPanelClass}>
           <div className="flex flex-col gap-3 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3.5">
               <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-border-primary bg-bg-primary">
@@ -298,7 +307,7 @@ export function DataTab() {
                     setPasswordFormOpen(true)
                   }
                 }}
-                className="h-9 rounded-xl border border-border-primary bg-bg-primary px-3.5 text-[12px] font-semibold text-text-secondary transition-colors duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-active/35"
+                className="h-9 rounded-lg border border-border-primary bg-bg-primary px-3.5 text-[12px] font-semibold text-text-secondary transition-colors duration-150 hover:border-border-tertiary hover:bg-bg-secondary hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-active/35"
               >
                 {passwordFormOpen ? 'Cancel' : 'Change'}
               </button>
@@ -351,7 +360,7 @@ export function DataTab() {
                   {passwordMessage && (
                     <div className={`flex items-center gap-1.5 text-[11.5px] ${
                       passwordMessage.type === 'success' ? 'text-text-secondary' : 'text-accent-red'
-                    }`}>
+                    }`} role={passwordMessage.type === 'error' ? 'alert' : 'status'}>
                       {passwordMessage.type === 'success'
                         ? <CheckCircle2 size={13} strokeWidth={2.25} />
                         : <AlertCircle size={13} strokeWidth={2.25} />
@@ -363,7 +372,7 @@ export function DataTab() {
                 <button
                   type="submit"
                   disabled={passwordLoading}
-                  className="h-9 rounded-xl bg-text-primary px-4 text-[12px] font-semibold text-bg-primary transition-all duration-150 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-active/35 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="h-9 rounded-lg bg-text-primary px-4 text-[12px] font-semibold text-bg-primary transition-all duration-150 hover:opacity-90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-active/35 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {passwordLoading ? 'Updating...' : 'Update password'}
                 </button>
@@ -374,7 +383,7 @@ export function DataTab() {
           {!passwordFormOpen && passwordMessage && (
             <div className={`flex items-center gap-1.5 border-t border-border-primary px-4 py-3 text-[11.5px] ${
               passwordMessage.type === 'success' ? 'text-text-secondary' : 'text-accent-red'
-            }`}>
+            }`} role={passwordMessage.type === 'error' ? 'alert' : 'status'}>
               {passwordMessage.type === 'success'
                 ? <CheckCircle2 size={13} strokeWidth={2.25} />
                 : <AlertCircle size={13} strokeWidth={2.25} />
@@ -383,11 +392,13 @@ export function DataTab() {
             </div>
           )}
         </div>
-      </div>
+      </SettingsSection>
 
-      <div>
-        <SectionLabel>Task history</SectionLabel>
-        <div className="rounded-2xl border border-border-primary bg-bg-secondary px-4 py-3.5">
+      <SettingsSection
+        title="Task history"
+        description="Manage task data stored for this workspace."
+      >
+        <div className={`${settingsPanelClass} px-4 py-3.5`}>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex min-w-0 items-center gap-3.5">
               <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg border border-border-primary bg-bg-primary">
@@ -416,14 +427,14 @@ export function DataTab() {
                   confirmClear
                     ? 'border border-[var(--danger-solid)] bg-[var(--danger-solid)] text-text-on-accent hover:bg-[var(--danger-solid-hover)]'
                     : 'border border-[var(--danger-border)] bg-[var(--danger-bg)] text-[var(--danger-text)] hover:bg-[var(--danger-bg-hover)]'
-                } disabled:cursor-not-allowed disabled:opacity-60`}
+                  } focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-red/30 disabled:cursor-not-allowed disabled:opacity-60`}
               >
                 {isClearing ? 'Clearing...' : confirmClear ? 'Confirm delete' : 'Clear all'}
               </button>
             </div>
           </div>
         </div>
-      </div>
+      </SettingsSection>
     </div>
   )
 }

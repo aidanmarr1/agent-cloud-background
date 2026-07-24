@@ -110,7 +110,6 @@ export const TOOL_CREDIT_RATES: Record<string, number> = {
   browser_screenshot: 0,
   http_request: 0,
   read_document: 0,
-  youtube_transcript: 0,
   execute_command: 0,
   run_code: 0,
   create_file: 0,

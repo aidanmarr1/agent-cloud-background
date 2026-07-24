@@ -10,6 +10,7 @@
 
 import type { Logger } from './Logger'
 import { TOOL_RETRY_BASE_MS, TOOL_RETRY_MAX, TOOL_RETRY_MAX_DELAY_MS } from './config'
+import { isNonIdempotentToolCall } from './toolSafety'
 
 export interface RetryConfig {
   maxRetries: number
@@ -32,23 +33,9 @@ const TOOL_RETRY_CONFIGS: Record<string, Partial<RetryConfig>> = {
   web_search: { maxRetries: 0, baseDelayMs: 600 },
   browser_navigate: { maxRetries: 0, baseDelayMs: 750 },
   read_document: { maxRetries: 0, baseDelayMs: 500 },
-  youtube_transcript: { maxRetries: 0, baseDelayMs: 500 },
   http_request: { maxRetries: 0, baseDelayMs: 750 },
   image_search: { maxRetries: 0, baseDelayMs: 750 },
 }
-
-// Tools that should never be retried
-const NO_RETRY_TOOLS = new Set([
-  'create_file',     // Side effects — don't double-create
-  'edit_file',       // Side effects
-  'append_file',     // Side effects — don't double-append
-  'export_pdf',      // Side effects — don't double-write/export
-  'delete_file',     // Side effects
-  'browser_fill_form',
-  'browser_action_sequence',
-  'execute_command', // Side effects — could run twice
-  'run_code',        // Side effects
-])
 
 // Error patterns that indicate transient failures (worth retrying)
 const TRANSIENT_PATTERNS = [
@@ -96,9 +83,12 @@ export class ToolRetry {
   async execute(
     toolName: string,
     fn: () => Promise<unknown>,
+    signal?: AbortSignal,
+    args?: unknown,
   ): Promise<unknown> {
+    if (signal?.aborted) throw new Error('Tool execution aborted')
     // No retry for side-effect tools
-    if (NO_RETRY_TOOLS.has(toolName)) {
+    if (isNonIdempotentToolCall(toolName, args)) {
       return fn()
     }
 
@@ -106,6 +96,7 @@ export class ToolRetry {
     let lastError: Error | null = null
 
     for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+      if (signal?.aborted) throw new Error('Tool execution aborted')
       try {
         return await fn()
       } catch (error) {
@@ -141,7 +132,7 @@ export class ToolRetry {
           error: lastError.message,
         })
 
-        await new Promise(r => setTimeout(r, delay))
+        await this.waitForRetry(delay, signal)
       }
     }
 
@@ -152,8 +143,8 @@ export class ToolRetry {
    * Check if an error result (from a tool that returned instead of throwing)
    * should trigger a retry.
    */
-  shouldRetryResult(toolName: string, result: unknown): boolean {
-    if (NO_RETRY_TOOLS.has(toolName)) return false
+  shouldRetryResult(toolName: string, result: unknown, args?: unknown): boolean {
+    if (isNonIdempotentToolCall(toolName, args)) return false
 
     if (result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)) {
       const errorMsg = String((result as Record<string, unknown>).error)
@@ -184,5 +175,27 @@ export class ToolRetry {
     // Small symmetric jitter keeps retries from bunching without making them feel stalled.
     const jitter = capped * config.jitterFraction * (Math.random() * 2 - 1)
     return Math.max(100, Math.round(capped + jitter))
+  }
+
+  private waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs))
+    if (signal.aborted) return Promise.reject(new Error('Tool execution aborted'))
+
+    return new Promise<void>((resolve, reject) => {
+      let timeout: ReturnType<typeof setTimeout>
+      const cleanup = () => {
+        clearTimeout(timeout)
+        signal.removeEventListener('abort', onAbort)
+      }
+      const onAbort = () => {
+        cleanup()
+        reject(new Error('Tool execution aborted'))
+      }
+      timeout = setTimeout(() => {
+        cleanup()
+        resolve()
+      }, delayMs)
+      signal.addEventListener('abort', onAbort, { once: true })
+    })
   }
 }

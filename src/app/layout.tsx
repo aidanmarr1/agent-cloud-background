@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Script from "next/script";
 import { cookies } from "next/headers";
+import { Manrope } from "next/font/google";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -11,15 +12,19 @@ import { ChatStoreSync } from "@/components/chat/ChatStoreSync";
 import { AppFrame } from "@/components/layout/AppFrame";
 import { auth } from "@/auth";
 
+const manrope = Manrope({
+  subsets: ["latin"],
+  variable: "--font-manrope",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
   title: "Agent",
-  description: "Autonomous agent for research, coding, and creation",
+  description: "Your personal AI workspace for research, creation, and getting things done.",
   icons: {
-    icon: [
-      { url: "/logo.svg", type: "image/svg+xml" },
-    ],
-    shortcut: "/logo.svg",
-    apple: "/logo.svg",
+    icon: [{ url: "/icon.svg?v=robot-2", type: "image/svg+xml" }],
+    shortcut: ["/icon.svg?v=robot-2"],
+    apple: [{ url: "/icon.svg?v=robot-2" }],
   },
 };
 
@@ -153,13 +158,13 @@ export default async function RootLayout({
         />
       </head>
       <body
-        className="antialiased bg-bg-primary text-text-primary min-h-screen flex"
+        className={`${manrope.variable} antialiased bg-bg-primary text-text-primary min-h-screen flex`}
       >
         <ThemeProvider>
           <AuthSessionProvider session={session}>
             <a
               href="#main-content"
-              className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:px-4 focus:py-2 focus:bg-accent-blue focus:text-text-on-accent focus:rounded-lg focus:text-sm"
+              className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-[200] focus:px-4 focus:py-2 focus:bg-accent-blue focus:text-text-on-blue focus:rounded-lg focus:text-sm"
             >
               Skip to content
             </a>

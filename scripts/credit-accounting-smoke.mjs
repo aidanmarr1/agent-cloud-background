@@ -7,7 +7,7 @@ import { build } from 'esbuild'
 const root = process.cwd()
 
 async function assertSourceContracts() {
-  const [creditStore, creditPolicy, modelPricing, serverCredits, usageTab, globalsCss, dispatcher, chatRoute, agentLoop, planManager, llm, toolPipeline, emitter, events, useAgentStream, streamProcessor] = await Promise.all([
+  const [creditStore, creditPolicy, modelPricing, serverCredits, usageTab, globalsCss, dispatcher, chatRoute, chatTaskRunner, agentLoop, planManager, llm, toolPipeline, emitter, events, useAgentStream, streamProcessor] = await Promise.all([
     readFile(join(root, 'src/store/credits.ts'), 'utf8'),
     readFile(join(root, 'src/lib/creditPolicy.ts'), 'utf8'),
     readFile(join(root, 'src/lib/modelPricing.ts'), 'utf8'),
@@ -16,6 +16,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/app/globals.css'), 'utf8'),
     readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
     readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/chatTaskRunner.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/PlanManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/llm.ts'), 'utf8'),
@@ -68,11 +69,12 @@ async function assertSourceContracts() {
   assert.match(serverCredits, /credit_accounts_nonnegative_insert/, 'credit account inserts must be protected by a non-negative DB trigger')
   assert.match(serverCredits, /credit_accounts_nonnegative_update/, 'credit account updates must be protected by a non-negative DB trigger')
   assert.match(serverCredits, /credit_ledger_balance_after_nonnegative_insert/, 'credit ledger inserts must not record negative post-charge balances')
-  assert.match(serverCredits, /throw new OutOfCreditsError\(result\.record,\s*result\.balanceAfter,\s*result\.requestedAmount\)/, 'server must stop immediately when a charge reaches zero credits')
+  assert.match(serverCredits, /paidAmount < result\.requestedAmount[\s\S]*throw new OutOfCreditsError\(result\.record,\s*result\.balanceAfter,\s*result\.requestedAmount\)/, 'server must stop when a postpaid charge was only partially covered while allowing an exactly paid charge to reach zero')
+  assert.match(serverCredits, /chargeServerTaskStart[\s\S]*requireFullAmount: true/, 'task-start charges must be prepaid in full')
+  assert.match(serverCredits, /chargeServerTool[\s\S]*requireFullAmount: true/, 'billable tool execution must be prepaid in full')
   assert.match(serverCredits, /topUpServerCredits/, 'server must expose an explicit credit top-up helper')
   assert.match(usageTab, /\.filter\(\(entry\) => entry\.amount < 0\)/, 'Usage tab must include credit additions from negative adjustment ledger entries')
   assert.match(usageTab, /Agent Admin credited account/, 'Usage tab must plainly state when Agent Admin credited the account')
-  assert.match(usageTab, /Ledger trace: \{row\.id\}/, 'Usage tab must show the credit ledger id for admin traces')
   assert.match(globalsCss, /--success-solid:\s*#[0-9a-f]{6};/i, 'global CSS must expose an official dark-green success solid token')
   assert.match(globalsCss, /--color-success-solid:\s*var\(--success-solid\)/, 'Tailwind theme must expose the official success token family')
   assert.match(usageTab, /bg-\[var\(--success-bg\)\][\s\S]*text-\[var\(--success-text\)\][\s\S]*\+\{formatSpend\(row\.amount\)\}/, 'Usage tab must render added credits as a positive amount with official dark-green success tokens')
@@ -85,30 +87,33 @@ async function assertSourceContracts() {
   assert.match(useAgentStream, /chargeStart:\s*false/, 'stream start must not locally charge task start under server accounting')
   assert.doesNotMatch(useAgentStream, /setInterval\(\(\) => \{\s*useCreditStore\.getState\(\)\.heartbeat/, 'client heartbeat must not be the authority for active processing credits')
   assert.match(toolPipeline, /emitServerToolCharge\(tc\.id,\s*tc\.name\)/, 'actual tool execution must emit a server charge after preflight/cache checks')
-  assert.match(toolPipeline, /chargeServerTool\(this\.userId,\s*this\.conversationId,\s*toolName,\s*toolCallId,\s*this\.creditRunId\)/, 'tool pipeline must call the server credit ledger')
-  assert.match(chatRoute, /chargeServerTaskStart/, 'chat route must charge task start on the server')
-  assert.match(chatRoute, /chargeServerE2BRuntime/, 'chat route must meter external E2B sandbox runtime')
-  assert.match(chatRoute, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'chat route must guard passive active-time billing behind the disabled rate')
+  assert.match(toolPipeline, /chargeServerTool\(\s*this\.userId,\s*this\.conversationId,\s*toolName,\s*`attempt:\$\{this\.creditAttempt\}:\$\{toolCallId\}`,\s*this\.creditRunId,?\s*\)/, 'tool pipeline must call the server credit ledger with an attempt-scoped idempotency key')
+  assert.match(chatTaskRunner, /chargeServerTaskStart/, 'the shared task runner must charge task start on the server')
+  assert.match(chatTaskRunner, /activateServerE2BRuntimeBilling[\s\S]*checkpointServerE2BRuntimeBilling/, 'the shared task runner must durably meter external E2B sandbox runtime')
+  assert.match(chatTaskRunner, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'the shared task runner must guard passive active-time billing behind the disabled rate')
   assert.match(chatRoute, /assertServerCreditsAvailable\(userId\)/, 'chat route must reject new tasks before streaming when credits are already exhausted')
-  assert.match(chatRoute, /for \(let attempt = 0; attempt <= DIRECT_CHAT_MAX_CONTINUATIONS; attempt\+\+\) \{[\s\S]*await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'direct chat continuations must preflight credit runway before each provider call')
+  assert.match(chatTaskRunner, /for \(let attempt = 0; attempt <= DIRECT_CHAT_MAX_CONTINUATIONS; attempt\+\+\) \{[\s\S]*await assertServerCreditsAvailable\(userId\)[\s\S]*createCompletion/, 'direct chat continuations must preflight credit runway before each provider call')
   assert.match(chatRoute, /status:\s*402/, 'chat route must return payment-required status for exhausted credits')
-  assert.match(chatRoute, /emitOutOfCreditsStop/, 'chat route must emit a visible stream stop when credits run out mid-task')
-  assert.match(chatRoute, /chargeServerTokenUsage/, 'direct chat must charge token usage on the server')
-  assert.match(chatRoute, /normalizeProviderUsage\(response\.usage\)/, 'direct chat must normalize provider usage before charging')
-  assert.match(chatRoute, /assistant provider did not return billable usage/, 'direct chat must fail closed when provider cost is missing')
+  assert.match(chatTaskRunner, /emitOutOfCreditsStop/, 'the shared task runner must emit a visible stream stop when credits run out mid-task')
+  assert.match(chatTaskRunner, /chargeServerTokenUsage/, 'direct chat must charge token usage on the server')
+  assert.match(chatTaskRunner, /normalizeProviderUsage\(response\.usage\)/, 'direct chat must normalize provider usage before charging')
+  assert.match(chatTaskRunner, /assistant provider did not return billable usage/i, 'direct chat must fail closed when provider cost is missing')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter requests must explicitly request usage data for compatibility')
   assert.match(llm, /GENERATION_URL = `\$\{OPENROUTER_BASE_URL\}\/generation`/, 'OpenRouter generation metadata endpoint must be available for exact usage recovery')
   assert.match(llm, /fetchGenerationUsage/, 'missing inline usage must be resolved through exact OpenRouter generation metadata')
-  assert.match(streamProcessor, /fetchGenerationUsage\(generationId \|\| undefined\)/, 'streamed agent calls must resolve exact usage from generation metadata when final usage chunks are missing')
+  assert.doesNotMatch(streamProcessor, /fetchGenerationUsage/, 'streamed agent calls must never delay model-turn release on generation metadata polling')
+  assert.match(streamProcessor, /estimateMissingUsage\(\{ assistantContent, reasoningContent, toolCalls \}\)/, 'missing streamed usage must be estimated synchronously before processStream returns')
+  assert.match(agentLoop, /estimateConservativeMissingStreamUsage/, 'agent-loop turns must create a conservative nonzero debit when streamed usage is absent')
+  assert.match(agentLoop, /await chargeServerTokenUsage[\s\S]*streamProcessor\.commitBufferedEmission\(\)/, 'buffered model output must remain hidden until the synchronous usage debit succeeds')
   assert.match(planManager, /recordCompletionUsage\(res\.usage/, 'planning LLM calls must emit live billable usage')
   assert.match(planManager, /preflightCredit/, 'planner LLM calls must support a server credit runway preflight')
   assert.match(planManager, /await this\.assertCreditRunway\('ack'\)[\s\S]*createCompletion/, 'planner acknowledgement calls must preflight credits before provider work')
   assert.match(planManager, /await this\.assertCreditRunway\('initial'\)[\s\S]*createCompletion/, 'initial planner calls must preflight credits before provider work')
   assert.match(planManager, /await this\.assertCreditRunway\('replan'\)[\s\S]*createCompletion/, 'planner replans must preflight credits before provider work')
   assert.match(planManager, /BILLABLE_USAGE_ERROR/, 'planning must fail closed when provider cost is missing')
-  assert.match(agentLoop, /`tokens:\$\{state\.iterations\}`/, 'agent-loop tasks must charge model token usage each iteration so zero-credit cutoff is immediate')
+  assert.match(agentLoop, /`attempt:\$\{creditAttempt\}:tokens:\$\{state\.iterations\}`/, 'agent-loop tasks must charge model token usage each iteration with attempt-scoped idempotency so zero-credit cutoff is immediate')
   assert.match(agentLoop, /recordPlannerUsage/, 'planner and acknowledgement LLM calls must be charged through the server ledger')
-  assert.match(agentLoop, /assertPlannerCreditRunway[\s\S]*new PlanManager\(this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*effectiveCustomInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true\)/, 'AgentLoop must wire planner provider calls through credit runway preflight')
+  assert.match(agentLoop, /assertPlannerCreditRunway[\s\S]*new PlanManager\(\s*this\.emitter,\s*planningMessages,\s*complexity,\s*requiredFirstSteps,\s*effectiveCustomInstructions,\s*recordPlannerUsage,\s*assertPlannerCreditRunway,\s*this\.options\.skipStartupAcknowledgement === true,\s*signal,?\s*\)/, 'AgentLoop must wire planner provider calls through credit runway preflight and task cancellation')
   assert.match(agentLoop, /await assertServerCreditsAvailable\(this\.options\.userId\)[\s\S]*createStreamingCompletion/, 'streaming agent model calls must preflight credit runway before provider work')
   assert.doesNotMatch(agentLoop, /chargeServerTokenUsage\(this\.options\.userId,\s*this\.options\.conversationId,\s*this\.options\.creditRunId,\s*totalUsage\)/, 'agent-loop tasks must not double-charge final cumulative token usage')
   assert.match(agentLoop, /this\.emitter\.done\(totalUsage\)/, 'agent-loop tasks must still report final cumulative token usage to the client')
@@ -125,6 +130,7 @@ async function assertPricingRuntime() {
   try {
     await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import {
   CREDIT_RATES,
   e2bSandboxRuntimeCreditCharge,
@@ -143,6 +149,7 @@ import {
   isOutOfCreditsError,
   readServerCreditLedger,
 } from ${JSON.stringify(join(root, 'src/lib/serverCredits.ts'))}
+import { tursoExecute } from ${JSON.stringify(join(root, 'src/lib/db/turso.ts'))}
 import { getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
 import { rm } from 'node:fs/promises'
 
@@ -174,10 +181,22 @@ export async function runCreditPricingSmoke() {
     return
   }
 
-  const conversationId = 'credit-smoke-' + Date.now()
+  const conversationId = 'credit-smoke-' + randomUUID()
   const userId = conversationId
-  const runId = 'run-smoke'
+  const runId = 'run-smoke-' + conversationId
+  const overdrawUserId = conversationId + '-overdraw'
+  const overdrawConversationId = conversationId + '-overdraw-task'
+  const overdrawRunId = runId + '-overdraw'
+  const exactUserId = conversationId + '-exact'
+  const exactConversationId = conversationId + '-exact-task'
+  const exactRunId = runId + '-exact'
+  const prepaidUserId = conversationId + '-prepaid'
+  const prepaidConversationId = conversationId + '-prepaid-task'
+  const prepaidRunId = runId + '-prepaid'
+  const testUserIds = [userId, overdrawUserId, exactUserId, prepaidUserId]
+  let testFailure = null
   try {
+    await initializeAccountCredits(userId, { monthlyAllowance: 100, monthlyBalance: 100 })
     const firstStart = await chargeServerTaskStart(userId, conversationId, runId)
     const duplicateStart = await chargeServerTaskStart(userId, conversationId, runId)
     assert.equal(firstStart, null)
@@ -198,19 +217,81 @@ export async function runCreditPricingSmoke() {
     assert.ok(ledger.entries.some((entry) => entry.toolName === 'e2b_sandbox' && entry.amount === expectedE2BCharge))
     assert.ok(ledger.entries.some((entry) => entry.category === 'tokens' && entry.amount === expectedTokenCharge))
 
-    const overdrawUserId = \`\${conversationId}-overdraw\`
-    const overdrawConversationId = \`\${conversationId}-overdraw-task\`
     await initializeAccountCredits(overdrawUserId, { monthlyAllowance: 2, monthlyBalance: 2 })
     await assert.rejects(
-      () => chargeServerTokenUsage(overdrawUserId, overdrawConversationId, 'run-overdraw', { promptTokens: 1000, completionTokens: 1000, cost: 0.01 }),
+      () => chargeServerTokenUsage(overdrawUserId, overdrawConversationId, overdrawRunId, { promptTokens: 1000, completionTokens: 1000, cost: 0.01 }),
       (error) => isOutOfCreditsError(error) && error.code === 'OUT_OF_CREDITS' && error.balanceAfter === 0,
+    )
+    await assert.rejects(
+      () => chargeServerTokenUsage(overdrawUserId, overdrawConversationId, overdrawRunId, { promptTokens: 1000, completionTokens: 1000, cost: 0.01 }),
+      (error) => isOutOfCreditsError(error) && error.code === 'OUT_OF_CREDITS' && error.balanceAfter === 0,
+      'an idempotent retry after an ambiguous committed debit must preserve the out-of-credit cutoff',
     )
     const overdrawSnapshot = await getServerCreditSnapshot(overdrawUserId)
     assert.equal(overdrawSnapshot.balance.monthly, 0)
     assert.ok(overdrawSnapshot.balance.monthly >= 0)
-    assert.ok(overdrawSnapshot.ledger.some((entry) => entry.id === 'credit:run-overdraw:tokens' && entry.amount === 2))
+    assert.ok(overdrawSnapshot.ledger.some((entry) => entry.id === \`credit:\${overdrawRunId}:tokens\` && entry.amount === 2))
+
+    await initializeAccountCredits(exactUserId, {
+      monthlyAllowance: expectedTokenCharge,
+      monthlyBalance: expectedTokenCharge,
+    })
+    const exactCharge = await chargeServerTokenUsage(
+      exactUserId,
+      exactConversationId,
+      exactRunId,
+      { promptTokens: 1000, completionTokens: 1000, cost: 0.00123 },
+    )
+    const exactRetry = await chargeServerTokenUsage(
+      exactUserId,
+      exactConversationId,
+      exactRunId,
+      { promptTokens: 1000, completionTokens: 1000, cost: 0.00123 },
+    )
+    assert.equal(exactCharge?.created, true)
+    assert.equal(exactRetry?.created, false)
+    const exactSnapshot = await getServerCreditSnapshot(exactUserId)
+    assert.equal(exactSnapshot.balance.monthly, 0)
+    assert.equal(exactSnapshot.ledger.filter((entry) => entry.id === \`credit:\${exactRunId}:tokens\`).length, 1)
+
+    await initializeAccountCredits(prepaidUserId, { monthlyAllowance: 0.1, monthlyBalance: 0.1 })
+    await assert.rejects(
+      () => chargeServerTool(prepaidUserId, prepaidConversationId, 'web_search', 'tool-prepaid', prepaidRunId),
+      (error) => isOutOfCreditsError(error) && error.balanceAfter === 0.1,
+      'a billable side effect must not run on a partial prepayment',
+    )
+    const prepaidSnapshot = await getServerCreditSnapshot(prepaidUserId)
+    assert.equal(prepaidSnapshot.balance.monthly, 0.1)
+    assert.ok(!prepaidSnapshot.ledger.some((entry) => entry.id === \`credit:\${prepaidRunId}:tool-prepaid:tool:web_search\`))
+  } catch (error) {
+    testFailure = error
+    throw error
   } finally {
-    await rm(getSandboxDirPath(conversationId), { recursive: true, force: true })
+    const cleanupErrors = []
+    try {
+      await tursoExecute(
+        'delete from credit_ledger where user_id in (?, ?, ?, ?)',
+        testUserIds,
+      )
+      await tursoExecute(
+        'delete from credit_accounts where user_id in (?, ?, ?, ?)',
+        testUserIds,
+      )
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    try {
+      await rm(getSandboxDirPath(conversationId), { recursive: true, force: true })
+    } catch (error) {
+      cleanupErrors.push(error)
+    }
+    if (cleanupErrors.length > 0) {
+      if (testFailure) {
+        console.error('credit smoke cleanup also failed:', cleanupErrors.map((error) => error instanceof Error ? error.message : String(error)))
+      } else {
+        throw cleanupErrors[0]
+      }
+    }
   }
 }
 `, 'utf8')

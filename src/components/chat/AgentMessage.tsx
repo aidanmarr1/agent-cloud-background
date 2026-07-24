@@ -7,7 +7,6 @@ import { FollowUpSuggestions } from './FollowUpSuggestions'
 import { ThinkingView } from './ThinkingView'
 import { MessageActions } from './MessageActions'
 import { CompletionBanner } from './CompletionBanner'
-import Image from 'next/image'
 import { DocumentPreview } from './DocumentPreview'
 import { ImagePreview } from './ImagePreview'
 import { TaskGroupView } from './TaskGroupView'
@@ -15,6 +14,7 @@ import { TypingIndicator } from './TypingIndicator'
 import { MarkdownLite } from './MarkdownLite'
 import { splitTaskMessageContent } from '@/lib/stream/taskMessageContent'
 import { cleanThinkingTokens } from '@/lib/stream/cleaners'
+import { Bot } from '@/components/icons'
 
 interface AgentMessageProps {
   message: Message
@@ -27,13 +27,12 @@ interface AgentMessageProps {
 export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, conversationId }: AgentMessageProps) {
   const steps: TaskStepType[] = message.steps || []
   const taskGroups = Array.isArray(message.taskGroups) ? message.taskGroups : []
-  const activeGroups = taskGroups.filter(
-    (g) => {
-      const subtasks = Array.isArray(g.subtasks) ? g.subtasks : []
-      const narrations = Array.isArray(g.narrations) ? g.narrations : []
-      return g.status === 'running' || subtasks.length > 0 || narrations.length > 0 || g.synthesis
-    }
-  )
+  const visibleTaskGroups = taskGroups.filter((group) => group.status !== 'pending')
+  const currentRunningGroupId = [...visibleTaskGroups]
+    .sort((a, b) => a.index - b.index)
+    .reverse()
+    .find((group) => group.status === 'running')?.id
+  const visibleSteps = steps.filter((step) => step.status !== 'pending')
   const followUps = message.followUps || []
   const artifacts = message.artifacts || []
   const visibleArtifacts = artifacts.filter(a => (a.purpose ?? (a.deliverable === false ? 'support' : 'deliverable')) === 'deliverable')
@@ -78,6 +77,8 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
   const hasGroupError = hasGroups && taskGroups.some((g) => g.status === 'error' || g.status === 'incomplete')
   const allPlannedGroupsDone = hasGroups && taskGroups.every((g) => g.status === 'done')
   const showCompletion = allPlannedGroupsDone && !hasGroupError && !isStreaming
+  const completedGroupCount = taskGroups.filter((g) => g.status === 'done').length
+  const placeReasoningAfterAnswer = Boolean(finalContent) && showFinalContent && !isStreaming
 
   // Calculate total elapsed time for CompletionBanner
   const totalElapsed = (() => {
@@ -94,7 +95,10 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
   }, 0)
 
   return (
-    <div className="animate-slide-in-from-left group relative">
+    <article
+      className="animate-slide-in-from-left group relative min-w-0 [@media(hover:none)]:pt-3"
+      aria-label="Assistant response"
+    >
       {/* Message actions */}
       {(finalContent || acknowledgment) && (
         <MessageActions
@@ -104,111 +108,124 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
         />
       )}
 
-      {/* Agent header */}
-      <div className="flex items-center gap-2.5 mb-4">
-        <div className="w-7 h-7 rounded-lg overflow-hidden flex-shrink-0 border border-border-primary">
-          <Image src="/logo.svg" alt="" width={28} height={28} />
-        </div>
-        <span className="text-[13px] font-semibold text-text-primary tracking-[0]">Agent</span>
-        {message.timestamp && !isStreaming && (
-          <span className="text-[10.5px] text-text-muted tabular-nums">
-            {new Date(message.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+      <div className="w-full max-w-[860px]">
+        <div className="task-activity-row mb-4 flex h-7 items-center gap-1 text-text-primary" aria-hidden="true">
+          <span className="task-activity-marker flex h-5 w-5 flex-shrink-0 items-center justify-start text-text-secondary">
+            <Bot size={18} strokeWidth={1.9} />
           </span>
-        )}
-      </div>
+          <span className="text-[14px] font-semibold tracking-[-0.01em] [font-family:var(--font-display)]">Agent</span>
+        </div>
 
-      {/* Reasoning/Thinking visualization */}
-      {message.reasoning && (
-        <div className="ml-0 sm:ml-[42px]">
+        {/* Keep live reasoning close to active work; completed reasoning moves below the answer. */}
+        {message.reasoning && !placeReasoningAfterAnswer && (
           <ThinkingView
             reasoning={message.reasoning}
             isStreaming={!!isStreaming}
             hasContent={!!(finalContent || acknowledgment)}
           />
-        </div>
-      )}
+        )}
 
-      {/* Acknowledgment text — always visible above groups */}
-      {(hasGroups || hasSteps) && acknowledgment && (
-        <div className="ml-0 mb-2 chat-reading-text text-text-primary sm:ml-[42px]">
-          {acknowledgment}
-        </div>
-      )}
+        {/* Keep the opening acknowledgement with the work record, including after completion. */}
+        {(hasGroups || hasSteps) && acknowledgment && (
+          <div className="task-acknowledgment mb-3 max-w-[860px] chat-reading-text text-text-secondary">
+            {acknowledgment}
+          </div>
+        )}
 
-      {/* Task Groups */}
-      {hasGroups && (
-        <div className="ml-0 mb-3 space-y-1 sm:ml-[42px]">
-          {activeGroups.map((group) => (
-            <TaskGroupView key={group.id} group={group} />
-          ))}
-        </div>
-      )}
+        {/* Task history remains readable above the result instead of disappearing at completion. */}
+        {visibleTaskGroups.length > 0 && (
+          <section
+            className="mb-6 space-y-0.5"
+            aria-label={showCompletion ? 'Completed task history' : 'Task activity'}
+          >
+            {visibleTaskGroups.map((group) => (
+              <TaskGroupView
+                key={group.id}
+                group={group}
+                isCurrentGroup={group.id === currentRunningGroupId}
+              />
+            ))}
+          </section>
+        )}
 
-      {/* Legacy Steps (old conversations) */}
-      {!hasGroups && hasSteps && (
-        <div className="ml-0 mb-3 sm:ml-[42px]">
-          <div className="space-y-0.5">
-            {steps.map((step) => (
-              <TaskStep key={step.index} step={step} />
+        {/* Legacy Steps (old conversations) */}
+        {!hasGroups && visibleSteps.length > 0 && (
+          <div className="mb-6 space-y-0.5">
+            <div className="space-y-0.5">
+              {visibleSteps.map((step) => (
+                <TaskStep key={step.index} step={step} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Final content is the visual anchor of the response. */}
+        {showFinalContent && finalContent && (
+          <div className="max-w-[860px] markdown-content chat-reading-text text-text-primary [&>:first-child]:mt-0 [&>:last-child]:mb-0">
+            <MarkdownLite>{finalContent}</MarkdownLite>
+          </div>
+        )}
+
+        {/* Live activity indicator — shows immediately while the first agent turn is booting/planning. */}
+        {isStreaming && visibleTaskGroups.length === 0 && visibleSteps.length === 0 && (
+          <div className={finalContent ? 'mt-4' : ''}>
+            <TypingIndicator />
+          </div>
+        )}
+
+        {/* Document previews */}
+        {showFinalContent && documentArtifacts.length > 0 && (
+          <div className="mt-5 max-w-[860px] space-y-3">
+            {[...documentArtifacts].reverse().map((artifact) => (
+              <DocumentPreview key={artifact.id} artifact={artifact} conversationId={conversationId} />
             ))}
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Completion banner */}
-      {showCompletion && (
-        <div className="ml-0 sm:ml-[42px]">
+        {/* Image previews */}
+        {showFinalContent && imageArtifacts.length > 0 && (
+          <div className={imageArtifacts.length > 1
+            ? 'mt-5 grid max-w-[860px] grid-cols-1 gap-3 sm:grid-cols-2'
+            : 'mt-5 max-w-[860px] space-y-3'
+          }>
+            {[...imageArtifacts].reverse().map((artifact) => (
+              <ImagePreview key={artifact.id} artifact={artifact} compact={imageArtifacts.length > 1} />
+            ))}
+          </div>
+        )}
+
+        {/* Finished reasoning and execution metadata are available without preceding the result. */}
+        {message.reasoning && placeReasoningAfterAnswer && (
+          <ThinkingView
+            reasoning={message.reasoning}
+            isStreaming={false}
+            hasContent
+          />
+        )}
+
+        {showCompletion && (
           <CompletionBanner
-            completedSteps={taskGroups.filter((g) => g.status === 'done').length}
+            completedSteps={completedGroupCount}
             totalSteps={taskGroups.length}
             elapsedMs={totalElapsed}
             sourceCount={sourceCount}
             taskGroups={taskGroups}
           />
-        </div>
-      )}
+        )}
 
-      {/* Final content */}
-      {showFinalContent && finalContent && (
-        <div className="ml-0 mt-4 markdown-content chat-reading-text text-text-primary sm:ml-[42px]">
-          <MarkdownLite>{finalContent}</MarkdownLite>
-        </div>
-      )}
+        {/* Follow-up suggestions */}
+        {followUps.length > 0 && !isStreaming && onFollowUp && (
+          <div className="mt-1">
+            <FollowUpSuggestions suggestions={followUps} onSelect={onFollowUp} />
+          </div>
+        )}
 
-      {/* Live activity indicator — shows immediately while the first agent turn is booting/planning */}
-      {isStreaming && !hasGroups && !hasSteps && (
-        <div className="ml-0 mt-3 sm:ml-[42px]">
-          <TypingIndicator />
-        </div>
-      )}
-
-      {/* Document previews */}
-      {showFinalContent && documentArtifacts.length > 0 && (
-        <div className="ml-0 mt-4 space-y-3 sm:ml-[42px]">
-          {[...documentArtifacts].reverse().map((artifact) => (
-            <DocumentPreview key={artifact.id} artifact={artifact} conversationId={conversationId} />
-          ))}
-        </div>
-      )}
-
-      {/* Image previews */}
-      {showFinalContent && imageArtifacts.length > 0 && (
-        <div className={imageArtifacts.length > 1
-          ? 'ml-0 mt-4 grid grid-cols-1 gap-3 max-w-[760px] sm:ml-[42px] sm:grid-cols-2'
-          : 'ml-0 mt-4 space-y-3 sm:ml-[42px]'
-        }>
-          {[...imageArtifacts].reverse().map((artifact) => (
-            <ImagePreview key={artifact.id} artifact={artifact} compact={imageArtifacts.length > 1} />
-          ))}
-        </div>
-      )}
-
-      {/* Follow-up suggestions */}
-      {followUps.length > 0 && !isStreaming && onFollowUp && (
-        <div className="ml-0 sm:ml-[42px]">
-          <FollowUpSuggestions suggestions={followUps} onSelect={onFollowUp} />
-        </div>
-      )}
-    </div>
+        {message.timestamp && !isStreaming && !showCompletion && (
+          <div className="mt-3 text-[10px] tabular-nums text-text-muted opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">
+            {new Date(message.timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}
+          </div>
+        )}
+      </div>
+    </article>
   )
 }

@@ -61,7 +61,7 @@ export const WORK_SUMMARY_RECENT_ACTIONS = 6
 // --- Timeouts (ms) ---
 export const TIER_TIMEOUTS = {
   iterationTimeoutMs: IS_OLLAMA ? 600_000 : 12_000,    // Keep API turns from looking frozen
-  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 1_500,    // Fail forward quickly from invisible provider stalls without self-cancelling normal provider pauses
+  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 3_000,    // Allow ordinary provider jitter while the bounded iteration deadline still prevents frozen turns
   checkIntervalMs: 150,
   build: {
     contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 1_200,
@@ -96,7 +96,7 @@ export const PLAN_RETRY_BASE_MS = 350
 export const STREAM_MAX_RETRIES = 0
 export const STREAM_RETRY_BASE_MS = 650
 export const STREAM_RETRY_EXPONENT = 1.2
-export const STREAM_REQUEST_TIMEOUT_MS = 2_400
+export const STREAM_REQUEST_TIMEOUT_MS = 5_000
 export const STREAM_RETRY_MAX_DELAY_MS = 1_500
 
 // --- Semantic loop detection ---
@@ -277,13 +277,13 @@ export const PHASE_TOOL_FILTER: Record<string, string[]> = {
   ],
   build: [
     'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'delete_file', 'list_files',
-    'run_code',
+    'execute_command', 'run_code',
     'browser_screenshot', 'browser_scroll',
     'image_search',
   ],
   deliver: [
     'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'list_files',
-    'run_code',
+    'execute_command', 'run_code',
     'browser_screenshot', 'browser_scroll',
     'image_search',
   ],

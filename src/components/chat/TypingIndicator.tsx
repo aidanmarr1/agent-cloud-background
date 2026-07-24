@@ -13,6 +13,7 @@ const statusLabels: Record<Exclude<StreamingStatus, null>, string> = {
   writing: 'Thinking',
   running: 'Running',
   analyzing: 'Analyzing',
+  stopping: 'Stopping',
 }
 
 function statusLabel(status: Exclude<StreamingStatus, null>, elapsedMs: number): string {
@@ -44,9 +45,9 @@ export function TypingIndicator() {
       role="status"
       aria-live="polite"
     >
-      <div className="inline-flex max-w-full items-center gap-3 py-1.5 text-text-secondary transition-all duration-300 ease-[var(--ease-out-expo)]">
-        <span className="relative flex h-4 w-4 flex-shrink-0 items-center justify-center">
-          <span className="h-2.5 w-2.5 rounded-full bg-status-live" style={{ animation: 'pulse-dot 1.8s ease-in-out infinite' }} />
+      <div className="task-activity-row inline-flex max-w-full items-center gap-1 py-1.5 text-text-secondary transition-all duration-300 ease-[var(--ease-out-expo)]">
+        <span className="task-activity-marker relative flex h-5 w-5 flex-shrink-0 items-center justify-start">
+          <span className="h-2 w-2 rounded-full bg-status-live" style={{ animation: 'pulse-dot 1.8s ease-in-out infinite' }} />
         </span>
         <span className="inline-grid min-w-[9.5rem] overflow-hidden align-middle">
           <span

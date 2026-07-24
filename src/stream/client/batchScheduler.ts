@@ -29,6 +29,16 @@ export class BatchScheduler {
   }
 
   /**
+   * Schedule a coalesced action after every action currently queued. Replacing
+   * the key also moves it to the end, which is useful for durable stream
+   * cursors that must be committed after the UI updates they acknowledge.
+   */
+  scheduleLast(key: string, action: FlushCallback): void {
+    this.pending.delete(key)
+    this.schedule(key, action)
+  }
+
+  /**
    * Flush all pending actions immediately (used on cleanup/done).
    */
   flushSync(): void {

@@ -10,8 +10,8 @@ interface ThinkingViewProps {
 }
 
 export function ThinkingView({ reasoning, isStreaming, hasContent }: ThinkingViewProps) {
-  const [expanded, setExpanded] = useState(true)
-  const [autoCollapsed, setAutoCollapsed] = useState(false)
+  const [expanded, setExpanded] = useState(() => isStreaming && !hasContent)
+  const [autoCollapsed, setAutoCollapsed] = useState(() => hasContent || !isStreaming)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to bottom while streaming
@@ -35,57 +35,47 @@ export function ThinkingView({ reasoning, isStreaming, hasContent }: ThinkingVie
   if (!reasoning) return null
 
   const isActive = isStreaming && !hasContent
+  const lineCount = reasoning.split('\n').filter(Boolean).length
 
   return (
-    <div className="mb-3">
+    <div className={isActive ? 'mb-4' : 'mt-4'}>
       <button
+        type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex items-center gap-2 py-1.5 px-2.5 -mx-2 rounded-lg hover:bg-bg-secondary transition-all duration-150 group"
+        className="flex min-h-8 w-fit max-w-full items-center gap-2.5 py-1.5 text-left"
         aria-expanded={expanded}
         aria-label={isActive ? 'Thinking in progress, click to collapse' : 'Show reasoning'}
       >
-        <Brain
-          size={14}
-          className={`flex-shrink-0 transition-colors ${isActive ? 'text-accent-blue' : 'text-text-muted'}`}
-          strokeWidth={2}
-          style={isActive ? { animation: 'pulse-dot 2s ease-in-out infinite' } : undefined}
-        />
-        <span className={`text-[13px] [font-family:var(--font-display)] ${isActive ? 'text-text-secondary' : 'text-text-muted'}`}>
-          {isActive ? 'Thinking…' : 'Reasoning'}
+        <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
+          <Brain
+            size={14}
+            className={`transition-colors ${isActive ? 'text-accent-blue' : 'text-text-muted'}`}
+            strokeWidth={2}
+            style={isActive ? { animation: 'pulse-dot 2s ease-in-out infinite' } : undefined}
+          />
         </span>
-        {!isActive && reasoning && (
-          <>
-            <span className="w-1 h-1 rounded-full bg-text-muted/40" />
-            <span className="text-[11px] text-text-muted/80 tabular-nums">
-              {reasoning.split('\n').length} lines
-            </span>
-          </>
-        )}
+        <span className={`min-w-0 flex-1 truncate text-[12px] font-medium [font-family:var(--font-display)] ${isActive ? 'text-text-secondary' : 'text-text-muted'}`}>
+          {isActive ? 'Thinking through the request…' : 'Reasoning'}
+        </span>
+        {!isActive && <span className="text-[10px] tabular-nums text-text-muted">{lineCount} {lineCount === 1 ? 'line' : 'lines'}</span>}
         <ChevronDown
-          size={12}
-          className={`text-text-muted transition-transform duration-200 ml-0.5 ${expanded ? 'rotate-180' : ''}`}
+          size={11}
+          className={`flex-shrink-0 text-text-muted transition-transform duration-200 ${expanded ? 'rotate-180' : ''}`}
         />
       </button>
 
-      <div
-        className="overflow-hidden transition-all"
-        style={{
-          maxHeight: expanded ? 320 : 0,
-          opacity: expanded ? 1 : 0,
-          transitionDuration: '350ms',
-          transitionTimingFunction: 'cubic-bezier(0.22, 1, 0.36, 1)',
-          transitionProperty: 'max-height, opacity',
-        }}
-      >
-        <div
-          ref={scrollRef}
-          className="mt-2 max-h-[300px] overflow-y-auto rounded-2xl bg-bg-secondary border border-border-primary px-4 py-3.5"
-        >
-          <div className="text-[12px] text-text-tertiary font-mono whitespace-pre-line leading-relaxed break-words">
-            {reasoning}
-            {isActive && (
-              <span className="inline-block w-[6px] h-[14px] bg-bg-secondary ml-0.5 align-middle rounded-sm" style={{ animation: 'thinkingBlink 1.2s ease-in-out infinite' }} />
-            )}
+      <div className={`grid transition-[grid-template-rows,opacity] duration-300 ease-[var(--ease-out-expo)] ${expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0'}`}>
+        <div className="min-h-0 overflow-hidden">
+          <div
+            ref={scrollRef}
+            className="ml-[9px] max-h-[280px] overflow-y-auto border-l border-border-secondary px-4 py-2"
+          >
+            <div className="whitespace-pre-line break-words font-mono text-[11.5px] leading-[1.65] text-text-tertiary">
+              {reasoning}
+              {isActive && (
+                <span className="ml-1 inline-block h-[13px] w-[2px] rounded-sm bg-text-muted align-middle" style={{ animation: 'thinkingBlink 1.2s ease-in-out infinite' }} />
+              )}
+            </div>
           </div>
         </div>
       </div>

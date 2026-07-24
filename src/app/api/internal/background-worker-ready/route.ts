@@ -2,7 +2,12 @@ import { createHmac, timingSafeEqual } from 'crypto'
 import { NextRequest, NextResponse } from 'next/server'
 import { shouldUseExternalTaskWorker } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
-import { getRecentTaskWorkerHeartbeats, isLikelyLocalWorkerHostname, workerHeartbeatIsHosted } from '@/lib/agent/taskWorkerHeartbeat'
+import {
+  getRecentTaskWorkerHeartbeats,
+  isLikelyLocalWorkerHostname,
+  workerHeartbeatIsHosted,
+  workerHeartbeatMatchesCurrentProtocol,
+} from '@/lib/agent/taskWorkerHeartbeat'
 import { getTursoClient, getTursoSetupStatus } from '@/lib/db/turso'
 
 export const runtime = 'nodejs'
@@ -60,17 +65,21 @@ function envBoolExact(name: string, fallback = false): boolean {
 }
 
 function isCloudCapableWorker(worker: {
+  status?: string | null
   hostname?: string | null
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
+  orchestrationProtocolVersion?: string | null
   e2bApiKeyConfigured?: boolean | null
   e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
 
-  return worker.taskWorkerMode === 'external' &&
+  return workerHeartbeatMatchesCurrentProtocol(worker) &&
+    (worker.status === 'idle' || worker.status === 'running') &&
+    worker.taskWorkerMode === 'external' &&
     worker.sandboxProvider === 'e2b' &&
     worker.e2bApiKeyConfigured === true &&
     worker.e2bBrowserRuntimeConfigured === true &&
@@ -79,16 +88,20 @@ function isCloudCapableWorker(worker: {
 }
 
 function isE2BCapableWorker(worker: {
+  status?: string | null
   taskWorkerMode?: string | null
   sandboxProvider?: string | null
   deploymentVersion?: string | null
+  orchestrationProtocolVersion?: string | null
   e2bApiKeyConfigured?: boolean | null
   e2bBrowserRuntimeConfigured?: boolean | null
 }, expectedDeploymentVersion: string | null, requireDeploymentVersion: boolean): boolean {
   const versionMatches = !requireDeploymentVersion ||
     (!!expectedDeploymentVersion && worker.deploymentVersion === expectedDeploymentVersion)
 
-  return worker.taskWorkerMode === 'external' &&
+  return workerHeartbeatMatchesCurrentProtocol(worker) &&
+    (worker.status === 'idle' || worker.status === 'running') &&
+    worker.taskWorkerMode === 'external' &&
     worker.sandboxProvider === 'e2b' &&
     worker.e2bApiKeyConfigured === true &&
     worker.e2bBrowserRuntimeConfigured === true &&
@@ -156,6 +169,7 @@ export async function GET(request: NextRequest) {
     taskWorkerMode: string | null
     sandboxProvider: string | null
     deploymentVersion: string | null
+    orchestrationProtocolVersion: string | null
     e2bApiKeyConfigured: boolean
     e2bBrowserRuntimeConfigured: boolean
     e2bPauseOnTaskEnd: boolean
@@ -173,6 +187,7 @@ export async function GET(request: NextRequest) {
         taskWorkerMode: worker.taskWorkerMode,
         sandboxProvider: worker.sandboxProvider,
         deploymentVersion: worker.deploymentVersion,
+        orchestrationProtocolVersion: worker.orchestrationProtocolVersion,
         e2bApiKeyConfigured: worker.e2bApiKeyConfigured,
         e2bBrowserRuntimeConfigured: worker.e2bBrowserRuntimeConfigured,
         e2bPauseOnTaskEnd: worker.e2bPauseOnTaskEnd,

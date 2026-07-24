@@ -180,6 +180,42 @@ export function normalizeResearchUrl(rawUrl: string): string {
   }
 }
 
+export interface ResearchSearchCandidateCoverage {
+  knownCandidateCount: number
+  unopenedCandidateCount: number
+}
+
+/**
+ * Compare the current step's durable search-result ledger with URLs already
+ * opened during that step. Compact research uses this to distinguish "there
+ * are search results left to read" from "all known results are exhausted, so
+ * search for new evidence instead of rereading cached pages".
+ */
+export function researchSearchCandidateCoverage(input: {
+  stepIdx: number
+  searchResults: Array<{ stepIdx: number; url: string }>
+  visitedUrls: Iterable<string>
+}): ResearchSearchCandidateCoverage {
+  const knownCandidates = new Set(
+    input.searchResults
+      .filter(result => result.stepIdx === input.stepIdx && result.url.trim())
+      .map(result => normalizeResearchUrl(result.url)),
+  )
+  const visited = new Set(
+    [...input.visitedUrls]
+      .filter(url => url.trim())
+      .map(url => normalizeResearchUrl(url)),
+  )
+  let unopenedCandidateCount = 0
+  for (const candidate of knownCandidates) {
+    if (!visited.has(candidate)) unopenedCandidateCount += 1
+  }
+  return {
+    knownCandidateCount: knownCandidates.size,
+    unopenedCandidateCount,
+  }
+}
+
 export function researchDomainFromUrl(rawUrl: string | undefined): string | null {
   if (!rawUrl) return null
   try {

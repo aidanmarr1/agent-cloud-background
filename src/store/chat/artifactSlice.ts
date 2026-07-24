@@ -5,7 +5,11 @@ import { updateLastAssistantMessage } from './persistence'
 export interface ArtifactSlice {
   addArtifact: (convId: string, artifact: Artifact) => void
   addComputerPanelItem: (convId: string, item: ComputerPanelItem) => void
-  upsertComputerPanelItem: (convId: string, item: ComputerPanelItem) => void
+  upsertComputerPanelItem: (
+    convId: string,
+    item: ComputerPanelItem,
+    options?: { ephemeral?: boolean },
+  ) => void
   removeComputerPanelItem: (convId: string, itemId: string) => void
 }
 
@@ -41,13 +45,18 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set) => ({
     }))
   },
 
-  upsertComputerPanelItem: (convId, item) => {
+  upsertComputerPanelItem: (convId, item, options) => {
     set((state) => ({
       conversations: updateLastAssistantMessage(state.conversations, convId, (msg) => {
         const items = msg.computerPanelData || []
         const idx = items.findIndex(i => i.id === item.id)
         if (idx >= 0) {
           if (item.id === 'browser_live') {
+            if (options?.ephemeral) {
+              const updated = [...items]
+              updated[idx] = { ...item, timestamp: items[idx].timestamp }
+              return { ...msg, computerPanelData: updated }
+            }
             const updated = items.filter((_, i) => i !== idx)
             updated.push(item)
             return { ...msg, computerPanelData: updated }
@@ -57,7 +66,7 @@ export const createArtifactSlice: SliceCreator<ArtifactSlice> = (set) => ({
           return { ...msg, computerPanelData: updated }
         }
         return { ...msg, computerPanelData: [...items, item] }
-      }),
+      }, { touchUpdatedAt: options?.ephemeral !== true }),
     }))
   },
 

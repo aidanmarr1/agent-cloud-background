@@ -93,7 +93,7 @@ async function parseDocx(buffer: Buffer): Promise<string> {
   return result.value
 }
 
-export async function readDocument(source: string, conversationId?: string): Promise<DocumentResult> {
+export async function readDocument(source: string, conversationId?: string, signal?: AbortSignal): Promise<DocumentResult> {
   try {
     let buffer: Buffer
     let docType: 'pdf' | 'docx' | 'text'
@@ -112,6 +112,7 @@ export async function readDocument(source: string, conversationId?: string): Pro
 
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS)
+      const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
       try {
         // Manual redirect loop with per-hop SSRF re-validation. fetch's default
         // redirect handling does NOT re-check the host, so an attacker-controlled
@@ -121,7 +122,7 @@ export async function readDocument(source: string, conversationId?: string): Pro
         let res: Response | null = null
         for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
           res = await guardedFetch(currentUrl, {
-            signal: controller.signal,
+            signal: requestSignal,
             headers: { 'User-Agent': 'Mozilla/5.0' },
             redirect: 'manual',
             maxBytes: MAX_FILE_BYTES,

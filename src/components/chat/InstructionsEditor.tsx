@@ -131,7 +131,7 @@ export function InstructionsEditor({ open, onClose, conversationId }: Instructio
               ? 'Instructions that apply to all tasks…'
               : 'Instructions for this specific task…'
             }
-            className="flex-1 w-full min-h-[160px] max-h-[320px] bg-bg-secondary border border-border-primary rounded-2xl px-4 py-3.5 text-[13px] text-text-primary leading-relaxed placeholder:text-text-muted/80 placeholder:[font-family:var(--font-display)] resize-none outline-none hover:border-border-tertiary focus:border-border-primary transition-all duration-150"
+            className="flex-1 w-full min-h-[160px] max-h-[320px] bg-bg-secondary border border-border-primary rounded-2xl px-4 py-3.5 text-[13px] text-text-primary leading-relaxed placeholder:text-text-muted placeholder:[font-family:var(--font-display)] resize-none outline-none hover:border-border-tertiary focus:border-border-primary transition-all duration-150"
           />
         </div>
 
@@ -149,7 +149,7 @@ export function InstructionsEditor({ open, onClose, conversationId }: Instructio
             </button>
             <button
               onClick={handleSave}
-              className="px-4 h-9 rounded-lg text-[13px] font-semibold text-text-on-accent bg-accent-blue hover:opacity-90 transition-opacity"
+              className="px-4 h-9 rounded-lg text-[13px] font-semibold text-text-on-blue bg-accent-blue hover:opacity-90 transition-opacity"
             >
               Save
             </button>

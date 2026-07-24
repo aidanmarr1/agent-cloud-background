@@ -1,6 +1,6 @@
 'use client'
 
-import { ArrowRight } from '@/components/icons'
+import { ArrowRight, MessageSquare } from '@/components/icons'
 import { FollowUpSuggestion } from '@/types'
 
 interface FollowUpSuggestionsProps {
@@ -12,28 +12,29 @@ export function FollowUpSuggestions({ suggestions, onSelect }: FollowUpSuggestio
   if (!suggestions || suggestions.length === 0) return null
 
   return (
-    <div className="mt-7 animate-fade-in-up">
-      <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] mb-3">
-        Suggested follow-ups
-      </p>
-      <div className="space-y-1.5">
-        {suggestions.map((suggestion, i) => (
-          <button
-            key={i}
-            onClick={() => onSelect(suggestion.text)}
-            className="group w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-border-primary bg-bg-card hover:border-border-tertiary hover:bg-bg-secondary active:scale-[0.995] transition-all duration-150 text-left"
-          >
-            <span className="text-[13.5px] text-text-secondary group-hover:text-text-primary transition-colors leading-snug flex-1">
-              {suggestion.text}
-            </span>
-            <ArrowRight
-              size={14}
-              className="text-text-muted group-hover:text-accent-blue group-hover:translate-x-0.5 transition-all duration-200 flex-shrink-0"
-              strokeWidth={2.25}
-            />
-          </button>
-        ))}
-      </div>
+    <div className="mt-5 border-t border-border-secondary animate-fade-in-up" aria-label="Suggested follow-ups">
+      {suggestions.map((suggestion, i) => (
+        <button
+          type="button"
+          key={i}
+          onClick={() => onSelect(suggestion.text)}
+          className="group flex min-h-11 w-full items-center gap-2.5 border-b border-border-secondary px-0.5 py-2.5 text-left transition-colors duration-100 hover:bg-bg-secondary focus-visible:bg-bg-secondary"
+        >
+          <MessageSquare
+            size={14}
+            className="ml-0.5 flex-shrink-0 text-text-muted transition-colors duration-100 group-hover:text-text-secondary"
+            strokeWidth={1.9}
+          />
+          <span className="min-w-0 flex-1 text-[12.5px] leading-snug text-text-tertiary transition-colors duration-100 group-hover:text-text-primary">
+            {suggestion.text}
+          </span>
+          <ArrowRight
+            size={13}
+            className="mr-0.5 flex-shrink-0 text-text-muted transition-[color,transform] duration-150 group-hover:translate-x-0.5 group-hover:text-text-secondary"
+            strokeWidth={2.1}
+          />
+        </button>
+      ))}
     </div>
   )
 }

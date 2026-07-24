@@ -3,6 +3,7 @@ import type { ChatCompletionTool } from './llm'
 export interface ToolContext {
   conversationId?: string
   onTerminalOutput?: (stream: 'stdout' | 'stderr', data: string) => void
+  signal?: AbortSignal
 }
 
 const baseToolDefinitions: ChatCompletionTool[] = [
@@ -29,7 +30,6 @@ const baseToolDefinitions: ChatCompletionTool[] = [
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Image search query' },
-          count: { type: 'number', description: 'Number of images (1-5, default 5)' },
         },
         required: ['query'],
       },
@@ -141,28 +141,17 @@ const baseToolDefinitions: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
-      name: 'youtube_transcript',
-      description: 'Extract transcript from a YouTube video.',
+      name: 'read_document',
+      description: 'Extract PDF, DOCX, webpage, or text content from one concrete URL/workspace path. Pass the exact selected webpage or document address in the required url field.',
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: 'YouTube URL or video ID' },
+          url: {
+            type: 'string',
+            description: 'Exact full webpage/document URL from the selected search result, or a workspace file path',
+          },
         },
         required: ['url'],
-      },
-    },
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'read_document',
-      description: 'Read PDF, DOCX, or text from URL/workspace.',
-      parameters: {
-        type: 'object',
-        properties: {
-          source: { type: 'string', description: 'URL or file path' },
-        },
-        required: ['source'],
       },
     },
   },
@@ -275,7 +264,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_get_content',
-      description: 'Get rendered page text.',
+      description: 'Extract rendered text from the current webpage.',
       parameters: {
         type: 'object',
         properties: {},
@@ -453,11 +442,12 @@ const executionToolDefinitions: ChatCompletionTool[] = shouldExposeExecutionTool
 
 const TOOL_ACTION_LABEL_PARAMETER = {
   type: 'string',
-  description: 'Model-authored visible action pill text, 2-12 words. Start with a capital letter and do not end with a period. Describe the action purpose from task context; do not use a local template, tool name, raw query/source/path, or generic verb plus literal target.',
+  description: 'Model-authored visible action pill text, 2-12 words. Start with a capital letter and do not end with a period. Describe the action purpose from task context; match the wording pattern and specificity of recent labels that serve the same purpose. Do not use a fixed tool mapping, local template, tool name, raw query/source/path, or generic verb plus literal target.',
 }
 
 const TOOL_PLAN_STEP_INDEX_PARAMETER = {
   type: 'number',
+  minimum: 1,
   description: 'Active plan step, 1-based.',
 }
 

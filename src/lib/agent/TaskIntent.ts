@@ -11,6 +11,7 @@ export interface TaskIntent {
   wantsReport: boolean
   wantsInlineAnswer: boolean
   explicitSavedArtifact: boolean
+  requiresSavedArtifact: boolean
   wantsCitations: boolean
   wantsCurrentInfo: boolean
   wantsQuick: boolean
@@ -33,9 +34,20 @@ const BRIEF_NOUN_RE = /\b(?:write|draft|compose|prepare|create|make|produce|gene
 
 const NEGATED_ARTIFACT_RE = /\b(?:no|not|without)\s+(?:a\s+|an\s+)?(?:file|document|pdf|markdown|docx?|slides?|presentation|deck|spreadsheet|xlsx)\b/gi
 const NEGATED_ARTIFACT_ACTION_RE = /\b(?:don'?t|do\s+not)\s+(?:create|make|save|export|generate|write|return|produce)\s+(?:a\s+|an\s+)?(?:file|document|pdf|markdown|docx?|slides?|presentation|deck|spreadsheet|xlsx)\b/gi
-const ARTIFACT_NOUN_RE = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|word\s+doc(?:ument)?|pptx|xlsx|slides?|presentation|deck|website|web\s*app|code|script|component|spreadsheet|csv|notebook)\b/i
-const ARTIFACT_ACTION_RE = /\b(?:save|export|deliver|download|return|send)\b.{0,80}\b(?:file|pdf|markdown|document|docx?|word\s+doc(?:ument)?|slides?|presentation|deck|website|web\s*app|code|script|component|spreadsheet|csv|notebook)\b/i
-const CREATE_ARTIFACT_RE = /\b(?:create|make|generate|produce|build)\b.{0,80}\b(?:file|pdf|markdown\s+file|document|docx?|word\s+doc(?:ument)?|slides?|presentation|deck|website|web\s*app|code|script|component|spreadsheet|csv|notebook)\b/i
+// Bare mentions of code, scripts, components, websites or apps often describe
+// the subject of a question rather than a requested artifact ("explain how AI
+// models generate SVG code"). Require a creation/delivery verb for those
+// artifact types; keep only unambiguous file/format nouns in this shortcut.
+const ARTIFACT_NOUN_RE = /\b(?:pdf|\.md|markdown\s+file|md\s+file|docx?|word\s+doc(?:ument)?|pptx|xlsx|slides?|presentation|deck|spreadsheet|csv|notebook)\b/i
+const REQUEST_ACTION_PREFIX = String.raw`(?:^|[.!?;]\s*|\b(?:please|then|and|also|must|should|need(?:s)?\s+to|want(?:s)?\s+(?:you\s+)?to|can\s+you|could\s+you|would\s+you)\s+)`
+const ARTIFACT_ACTION_RE = new RegExp(
+  `${REQUEST_ACTION_PREFIX}(?:save|export|deliver|download|return|send)\\b.{0,80}\\b(?:file|pdf|markdown|document|docx?|word\\s+doc(?:ument)?|slides?|presentation|deck|website|web\\s*app|code|script|component|spreadsheet|csv|notebook)\\b`,
+  'i',
+)
+const CREATE_ARTIFACT_RE = new RegExp(
+  `${REQUEST_ACTION_PREFIX}(?:write|create|make|generate|produce|build|implement|develop)\\b.{0,80}\\b(?:file|pdf|markdown\\s+file|document|docx?|word\\s+doc(?:ument)?|slides?|presentation|deck|website|web\\s*app|code|script|component|spreadsheet|csv|notebook)\\b`,
+  'i',
+)
 const FORMAT_ARTIFACT_RE = /\b(?:as|in|to)\s+(?:a\s+|an\s+)?(?:pdf|markdown\s+file|md\s+file|docx?|word\s+doc(?:ument)?|pptx|slides?|presentation|deck|spreadsheet|xlsx|csv|notebook)\b/i
 
 function normalizedTaskText(messages: Array<{ role: string; content: string }>): string {
@@ -70,6 +82,9 @@ export function analyzeTaskIntent(messages: Array<{ role: string; content: strin
     ARTIFACT_NOUN_RE.test(artifactText)
   const defaultMarkdownReport = taskDefaultsToMarkdownDeliverable(rawText)
   const wantsInlineAnswer = INLINE_RE.test(text)
+  const requiresSavedArtifact =
+    explicitSavedArtifact ||
+    (!wantsQuick && !wantsInlineAnswer && defaultMarkdownReport)
   const isInlineReport = wantsReport && wantsInlineAnswer && !explicitSavedArtifact && !defaultMarkdownReport
   const isEvidenceHeavyReport = isInlineReport && (asksForResearch || wantsCitations || wantsCurrentInfo || wantsDeep)
   const isPlainInlineReport = isInlineReport && !isEvidenceHeavyReport
@@ -83,6 +98,7 @@ export function analyzeTaskIntent(messages: Array<{ role: string; content: strin
     wantsReport,
     wantsInlineAnswer,
     explicitSavedArtifact,
+    requiresSavedArtifact,
     wantsCitations,
     wantsCurrentInfo,
     wantsQuick,

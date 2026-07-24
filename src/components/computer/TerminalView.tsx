@@ -77,12 +77,12 @@ export function TerminalView({ result, streaming = false }: TerminalViewProps) {
 
       {/* Stderr */}
       {safeResult.stderr && (
-        <div className="bg-accent-red/5 rounded-2xl px-4 py-3.5 max-h-[200px] overflow-y-auto border border-accent-red/15">
+        <div className="max-h-[200px] overflow-y-auto rounded-2xl border border-[var(--danger-border)] bg-[var(--danger-bg)] px-4 py-3.5">
           <div className="flex items-center gap-1.5 mb-2">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent-red/70" />
-            <span className="text-[10.5px] text-accent-red/80 font-semibold uppercase tracking-wider">Needs attention</span>
+            <span className="h-1.5 w-1.5 rounded-full bg-[var(--danger-icon)]" />
+            <span className="text-[10.5px] font-semibold uppercase tracking-wider text-[var(--danger-text)]">Needs attention</span>
           </div>
-          <pre className="text-[11.5px] text-accent-red/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
+          <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-[var(--danger-text)]">
             {safeResult.stderr}
           </pre>
         </div>

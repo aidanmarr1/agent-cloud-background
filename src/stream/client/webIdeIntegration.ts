@@ -1,6 +1,6 @@
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
-import type { FileResult, ComputerPanelItem } from '@/types'
+import type { FileResult, ComputerPanelItem, Message } from '@/types'
 
 const MAX_FILE_CONTENT_ACCUM = 100_000
 const HTML_ENTRY_RE = /(^|\/)index\.html$/i
@@ -32,11 +32,36 @@ export class WebIdeHandler {
   private fileContentAccum: Record<string, string> = {}
   private filePathByEventId: Record<string, string> = {}
   private fileToolByEventId: Record<string, string> = {}
+  private fileInitialContentByEventId: Record<string, string> = {}
   private fileContentByPath: Record<string, string> = {}
-  private pendingWebIdeContent = ''
+  private pendingWebIdeContentByEventId: Record<string, string> = {}
+
+  private isActiveConversation(conversationId: string): boolean {
+    return useChatStore.getState().activeId === conversationId
+  }
+
+  hydrateFromMessage(message: Message): void {
+    for (const item of message.computerPanelData || []) {
+      if (item.type !== 'file') continue
+      const data = item.data as FileResult | undefined
+      if (!data?.path || typeof data.content !== 'string') continue
+
+      this.filePathByEventId[item.id] = data.path
+      this.fileContentAccum[item.id] = data.content
+      this.fileContentByPath[data.path] = data.content
+      this.fileToolByEventId[item.id] = data.action === 'appended'
+        ? 'append_file'
+        : data.action === 'edited'
+          ? 'edit_file'
+          : 'create_file'
+    }
+  }
 
   private getExistingFileContent(conversationId: string, filePath: string): string {
-    const streamingFile = useUIStore.getState().webIdeStreamingFile
+    const uiState = useUIStore.getState()
+    const streamingFile = uiState.webIdeConversationId === conversationId
+      ? uiState.webIdeStreamingFile
+      : null
     if (streamingFile?.path === filePath) return streamingFile.content
     if (this.fileContentByPath[filePath] !== undefined) return this.fileContentByPath[filePath]
 
@@ -74,6 +99,7 @@ export class WebIdeHandler {
     openPanel: () => void,
   ): void {
     const uiState = useUIStore.getState()
+    const isActiveConversation = this.isActiveConversation(conversationId)
     const entryFile = inferWebIdeEntryFile(filePath)
     const isAppend = toolName === 'append_file'
     const isEdit = toolName === 'edit_file'
@@ -84,18 +110,23 @@ export class WebIdeHandler {
     const action = isEdit ? 'edited' as const : isAppend ? 'appended' as const : 'created' as const
     const titleVerb = isEdit ? 'Editing' : isAppend ? 'Appending' : 'Writing'
 
-    if (entryFile && (!uiState.webIdeMode || uiState.webIdeEntryFile !== entryFile)) {
+    if (isActiveConversation && entryFile && (!uiState.webIdeMode || uiState.webIdeEntryFile !== entryFile)) {
       uiState.activateWebIde(conversationId, entryFile, { source: 'auto' })
     }
 
-    uiState.setWebIdeStreamingFile({ path: filePath, content: initialContent })
-    uiState.setWebIdeSelectedFile(filePath)
-    if (uiState.webIdeMode) {
+    if (isActiveConversation) {
+      uiState.setWebIdeStreamingFile({ path: filePath, content: initialContent })
+      uiState.setWebIdeSelectedFile(filePath)
+    }
+    if (isActiveConversation && uiState.webIdeMode) {
       uiState.setWebIdeActiveTab('code')
     }
 
     this.filePathByEventId[eventId] = filePath
     this.fileToolByEventId[eventId] = toolName || 'create_file'
+    if (this.fileInitialContentByEventId[eventId] === undefined) {
+      this.fileInitialContentByEventId[eventId] = initialContent
+    }
     this.fileContentAccum[eventId] = initialContent
     this.fileContentByPath[filePath] = initialContent
     upsertPanel(conversationId, {
@@ -116,7 +147,7 @@ export class WebIdeHandler {
     upsertPanel: (convId: string, item: ComputerPanelItem) => void,
   ): void {
     // Buffer content — flushed in batched callback via flushPendingWebIdeContent()
-    this.pendingWebIdeContent += content
+    this.pendingWebIdeContentByEventId[eventId] = (this.pendingWebIdeContentByEventId[eventId] || '') + content
 
     // Guard: initialize accumulator if delta arrives before start event
     if (this.fileContentAccum[eventId] === undefined) {
@@ -129,7 +160,11 @@ export class WebIdeHandler {
         this.fileContentAccum[eventId] = capStr(this.fileContentAccum[eventId], MAX_FILE_CONTENT_ACCUM)
       }
 
-      const filePath = this.filePathByEventId[eventId] || useUIStore.getState().webIdeStreamingFile?.path || ''
+      const uiState = useUIStore.getState()
+      const activeStreamingPath = this.isActiveConversation(conversationId) && uiState.webIdeConversationId === conversationId
+        ? uiState.webIdeStreamingFile?.path
+        : undefined
+      const filePath = this.filePathByEventId[eventId] || activeStreamingPath || ''
       const isAppend = this.fileToolByEventId[eventId] === 'append_file'
       const isEdit = this.fileToolByEventId[eventId] === 'edit_file'
       const action = isEdit ? 'edited' as const : isAppend ? 'appended' as const : 'created' as const
@@ -146,14 +181,46 @@ export class WebIdeHandler {
     }
   }
 
-  handleToolResult(eventId: string, eventName: string, eventResult: unknown): void {
+  handleToolResult(eventId: string, eventName: string, eventResult: unknown, conversationId: string): void {
     if (eventName !== 'create_file' && eventName !== 'append_file' && eventName !== 'edit_file') return
 
     const uiState = useUIStore.getState()
-    const result = eventResult as { path?: string; content?: string; nextWebsitePreviewUrl?: string }
+    const isActiveConversation = this.isActiveConversation(conversationId)
+    const isActiveWebIde = isActiveConversation && uiState.webIdeConversationId === conversationId
+    const result = eventResult as {
+      path?: string
+      content?: string
+      nextWebsitePreviewUrl?: string
+      error?: string
+      superseded?: boolean
+      discarded?: boolean
+    }
     const createdPath = result?.path || this.filePathByEventId[eventId] || ''
+    const abandoned =
+      result?.superseded === true ||
+      result?.discarded === true ||
+      (
+        typeof result?.error === 'string' &&
+        /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(result.error)
+      )
+
+    if (abandoned) {
+      const initialContent = this.fileInitialContentByEventId[eventId]
+      if (createdPath) {
+        if (initialContent !== undefined) {
+          this.fileContentByPath[createdPath] = initialContent
+        } else {
+          delete this.fileContentByPath[createdPath]
+        }
+      }
+      if (isActiveConversation && (!createdPath || uiState.webIdeStreamingFile?.path === createdPath)) {
+        uiState.setWebIdeStreamingFile(null)
+      }
+      return
+    }
+
     let previewUrlApplied = false
-    if (typeof result?.nextWebsitePreviewUrl === 'string' && result.nextWebsitePreviewUrl.trim()) {
+    if (isActiveWebIde && typeof result?.nextWebsitePreviewUrl === 'string' && result.nextWebsitePreviewUrl.trim()) {
       uiState.setWebIdePreviewUrl(result.nextWebsitePreviewUrl)
       uiState.incrementWebIdeRefresh()
       uiState.setWebIdeActiveTab('preview')
@@ -161,16 +228,16 @@ export class WebIdeHandler {
     }
     if (createdPath && typeof result?.content === 'string') {
       this.fileContentByPath[createdPath] = result.content
-      if (uiState.webIdeStreamingFile?.path === createdPath) {
+      if (isActiveConversation && uiState.webIdeStreamingFile?.path === createdPath) {
         uiState.setWebIdeStreamingFile({ path: createdPath, content: result.content })
       }
     } else if (createdPath && this.fileContentAccum[eventId] !== undefined) {
       this.fileContentByPath[createdPath] = this.fileContentAccum[eventId]
     }
-    if (!createdPath || uiState.webIdeStreamingFile?.path === createdPath) {
+    if (isActiveConversation && (!createdPath || uiState.webIdeStreamingFile?.path === createdPath)) {
       uiState.setWebIdeStreamingFile(null)
     }
-    if (uiState.webIdeMode) {
+    if (isActiveWebIde && uiState.webIdeMode) {
       const isEntryFile = createdPath === uiState.webIdeEntryFile
       if (!previewUrlApplied && isEntryFile) {
         uiState.incrementWebIdeRefresh()
@@ -182,24 +249,37 @@ export class WebIdeHandler {
   }
 
   /** Flush buffered WebIDE content in a single store update (called from batch scheduler) */
-  flushPendingWebIdeContent(): void {
-    if (this.pendingWebIdeContent) {
-      useUIStore.getState().appendWebIdeStreamingContent(this.pendingWebIdeContent)
-      this.pendingWebIdeContent = ''
+  flushPendingWebIdeContent(eventId: string, conversationId: string): void {
+    const content = this.pendingWebIdeContentByEventId[eventId]
+    delete this.pendingWebIdeContentByEventId[eventId]
+    if (!content || !this.isActiveConversation(conversationId)) return
+
+    const uiState = useUIStore.getState()
+    const filePath = this.filePathByEventId[eventId]
+    if (
+      uiState.webIdeStreamingFile?.path === filePath
+    ) {
+      uiState.appendWebIdeStreamingContent(content)
     }
   }
 
   deleteAccum(eventId: string): void {
     delete this.filePathByEventId[eventId]
     delete this.fileToolByEventId[eventId]
+    delete this.fileInitialContentByEventId[eventId]
     delete this.fileContentAccum[eventId]
+    delete this.pendingWebIdeContentByEventId[eventId]
   }
 
-  cleanup(): void {
+  cleanup(conversationId: string): void {
     this.fileContentAccum = {}
     this.filePathByEventId = {}
     this.fileToolByEventId = {}
-    this.pendingWebIdeContent = ''
-    useUIStore.getState().setWebIdeStreamingFile(null)
+    this.fileInitialContentByEventId = {}
+    this.pendingWebIdeContentByEventId = {}
+    if (this.isActiveConversation(conversationId)) {
+      const uiState = useUIStore.getState()
+      uiState.setWebIdeStreamingFile(null)
+    }
   }
 }

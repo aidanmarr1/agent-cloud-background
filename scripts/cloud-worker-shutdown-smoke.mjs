@@ -87,6 +87,9 @@ const {
   enqueueTaskJob,
   runClaimedTaskJob,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskJobs.ts', import.meta.url)))
+const { recordTaskWorkerHeartbeat } = await jiti.import(
+  fileURLToPath(new URL('../src/lib/agent/taskWorkerHeartbeat.ts', import.meta.url)),
+)
 
 const userId = `internal-background-smoke-${randomUUID()}`
 const conversationId = `internal-background-smoke-${randomUUID()}`
@@ -110,7 +113,17 @@ try {
     },
   })
 
-  const firstClaim = await claimNextTaskJob(`shutdown-smoke-stopping-worker-${queueName}`, 60_000)
+  const firstWorkerId = `shutdown-smoke-stopping-worker-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId: firstWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const firstClaim = await claimNextTaskJob(firstWorkerId, 60_000)
   if (!firstClaim || firstClaim.runId !== runId) {
     throw new Error(`Stopping worker did not claim the diagnostic job. Claimed: ${firstClaim?.runId || 'none'}`)
   }
@@ -141,7 +154,17 @@ try {
     throw new Error(`Expected stopping worker result to be requeued, got ${taskResult}`)
   }
 
-  const replacementClaim = await claimNextTaskJob(`shutdown-smoke-replacement-worker-${queueName}`, 60_000)
+  const replacementWorkerId = `shutdown-smoke-replacement-worker-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId: replacementWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const replacementClaim = await claimNextTaskJob(replacementWorkerId, 60_000)
   if (!replacementClaim || replacementClaim.runId !== runId) {
     throw new Error(`Replacement worker did not immediately reclaim the released diagnostic job. Claimed: ${replacementClaim?.runId || 'none'}`)
   }

@@ -82,6 +82,10 @@ const {
   getActiveTaskLeaseForUser,
   releaseActiveTaskLease,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/activeTasks.ts', import.meta.url)))
+const {
+  markTaskWorkerStopped,
+  recordTaskWorkerHeartbeat,
+} = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskWorkerHeartbeat.ts', import.meta.url)))
 
 const userId = `internal-background-smoke-${randomUUID()}`
 const conversationId = `internal-background-smoke-${randomUUID()}`
@@ -107,10 +111,32 @@ try {
     },
   })
 
-  const claim = await claimNextTaskJob(`cancel-smoke-dead-worker-${queueName}`, 60_000)
+  const deadWorkerId = `cancel-smoke-dead-worker-${queueName}`
+  const deadWorkerStartedAt = Date.now()
+  await recordTaskWorkerHeartbeat({
+    workerId: deadWorkerId,
+    startedAtMs: deadWorkerStartedAt,
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const claim = await claimNextTaskJob(deadWorkerId, 1)
   if (!claim || claim.runId !== runId) {
     throw new Error(`Diagnostic worker did not claim the job. Claimed: ${claim?.runId || 'none'}`)
   }
+  await recordTaskWorkerHeartbeat({
+    workerId: deadWorkerId,
+    startedAtMs: deadWorkerStartedAt,
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'running',
+    currentRunId: runId,
+    completedTasks: 0,
+  })
+  await markTaskWorkerStopped(deadWorkerId, deadWorkerStartedAt)
+  await new Promise((resolve) => setTimeout(resolve, 10))
 
   const cancelled = await cancelTaskJob(userId, runId)
   if (!cancelled) {
@@ -136,7 +162,17 @@ try {
     throw new Error('Replayed event stream did not include the terminal Task stopped error.')
   }
 
-  const replacementClaim = await claimNextTaskJob(`cancel-smoke-replacement-worker-${queueName}`, 60_000)
+  const replacementWorkerId = `cancel-smoke-replacement-worker-${queueName}`
+  await recordTaskWorkerHeartbeat({
+    workerId: replacementWorkerId,
+    startedAtMs: Date.now(),
+    pollMs: 100,
+    heartbeatMs: 15_000,
+    status: 'idle',
+    currentRunId: null,
+    completedTasks: 0,
+  })
+  const replacementClaim = await claimNextTaskJob(replacementWorkerId, 60_000)
   if (replacementClaim) {
     throw new Error(`Cancelled diagnostic job was claimable again by ${replacementClaim.workerId}.`)
   }

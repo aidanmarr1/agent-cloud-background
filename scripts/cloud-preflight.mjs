@@ -82,6 +82,7 @@ try {
   await runNpmScript('Worker stale-lease recovery smoke', 'cloud:worker-lease-smoke')
   await runNpmScript('Worker cancellation terminal-state smoke', 'cloud:worker-cancel-smoke')
   await runNpmScript('Worker graceful-shutdown handoff smoke', 'cloud:worker-shutdown-smoke')
+  await runNpmScript('Worker supervisor recovery smoke', 'cloud:worker-supervisor-smoke')
 
   if (deployedUrl) {
     await runNpmScript('Deployed worker readiness', 'cloud:worker-ready', deployedArgs)

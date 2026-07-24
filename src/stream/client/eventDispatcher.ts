@@ -1,7 +1,7 @@
 'use client'
 
 import { v4 as uuidv4 } from 'uuid'
-import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult, BrowseResult, BrowserResult, FileResult, ImageSearchPanelItem, TerminalResult, Artifact, ComputerPanelItem } from '@/types'
+import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult, BrowseResult, BrowserResult, FileResult, ImageSearchPanelItem, TerminalResult, Artifact, ComputerPanelItem, Message } from '@/types'
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useSettingsStore } from '@/store/settings'
@@ -16,7 +16,7 @@ import {
   isIncompleteBrowserClickActivity,
   isBrowserPreflightBlockResult,
 } from '@/lib/stream/constants'
-import { runtimeVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { playComplete, playError } from '@/lib/useSound'
 import { sendDesktopNotification } from '@/lib/notifications'
 import { useCreditStore } from '@/store/credits'
@@ -29,7 +29,7 @@ import { NarrationBuffer } from './narrationBuffer'
 import { mapToolResultToPanel, isBrowserTool } from './panelMapper'
 import { WebIdeHandler } from './webIdeIntegration'
 import { BatchScheduler } from './batchScheduler'
-import { extractTaskAcknowledgment } from '@/lib/stream/taskMessageContent'
+import { extractTaskAcknowledgment, splitTaskMessageContent } from '@/lib/stream/taskMessageContent'
 import { userErrorMessage } from '@/lib/errorMessages'
 
 const MAX_TERMINAL_STDOUT = 50_000
@@ -41,6 +41,13 @@ const TOOLS_BETWEEN_NARRATION_FLUSHES = MIN_TOOLS_BETWEEN_NARRATION_FLUSHES
 const SERVER_CREDIT_ACCOUNTING = true
 
 type ToolStartEvent = { id: string; name: string; args: Record<string, unknown> }
+type ProgressUpdateEvent = {
+  type: 'progress_update'
+  content: string
+  stepIndex?: number
+  afterToolId?: string
+  remainingVisibleActions?: number
+}
 
 function isDeferredBrowseToolStart(name: string): boolean {
   void name
@@ -153,6 +160,17 @@ function stableBrowserPanelData(data: BrowserResult, previous?: BrowserResult): 
   }
 }
 
+function latestBrowserPanelItem(conversationId: string): ComputerPanelItem | undefined {
+  const conversation = useChatStore.getState().conversations
+    .find(c => c.id === conversationId)
+
+  return [...(conversation?.messages || [])]
+    .reverse()
+    .filter(message => message.role === 'assistant')
+    .flatMap(message => [...(message.computerPanelData || [])].reverse())
+    .find(item => item.id === 'browser_live')
+}
+
 function isHiddenInternalToolResult(name: string, result: unknown): boolean {
   if (isInternalActivityTool(name)) return true
   if (!result || typeof result !== 'object') return false
@@ -160,6 +178,10 @@ function isHiddenInternalToolResult(name: string, result: unknown): boolean {
   if (typeof error !== 'string') return false
 
   return /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error)
+}
+
+function isSupersededToolResult(result: unknown): boolean {
+  return !!result && typeof result === 'object' && (result as { superseded?: unknown }).superseded === true
 }
 
 function shouldPreserveVisibleInternalToolResult(name: string): boolean {
@@ -203,9 +225,7 @@ function isComputerPanelTool(name: string): boolean {
 }
 
 function hasStreamingLiveBrowser(conversationId: string): boolean {
-  const latestPanelItems = useChatStore.getState().conversations
-    .find(c => c.id === conversationId)?.messages.slice(-1)[0]?.computerPanelData || []
-  return latestPanelItems.some(item => item.id === 'browser_live' && item.streaming)
+  return latestBrowserPanelItem(conversationId)?.streaming === true
 }
 
 function isCreditCutoffMessage(message: string): boolean {
@@ -226,7 +246,11 @@ export interface StoreActions {
   setFollowUps: (convId: string, suggestions: { text: string }[]) => void
   addArtifact: (convId: string, artifact: Artifact) => void
   addComputerPanelItem: (convId: string, item: ComputerPanelItem) => void
-  upsertComputerPanelItem: (convId: string, item: ComputerPanelItem) => void
+  upsertComputerPanelItem: (
+    convId: string,
+    item: ComputerPanelItem,
+    options?: { ephemeral?: boolean },
+  ) => void
   removeComputerPanelItem: (convId: string, itemId: string) => void
   setComputerPanelOpen: (open: boolean, options?: { source?: 'user' | 'auto' }) => void
   addToast: (msg: string, type?: 'error' | 'success' | 'info') => void
@@ -257,13 +281,67 @@ export class EventDispatcher {
 
   // --- Batching: coalesce rapid state updates into single frames ---
   private batch = new BatchScheduler()
-  private pendingText = ''        // Buffered text_delta content
-
   constructor(
     private conversationId: string,
     private actions: StoreActions,
     private setStreamError: (err: string | null) => void,
-  ) {}
+    initialMessage?: Message,
+  ) {
+    if (initialMessage) this.hydrateFromMessage(initialMessage)
+  }
+
+  private hydrateFromMessage(message: Message): void {
+    this.parsedSteps = Array.isArray(message.steps)
+      ? message.steps.map((step) => ({ ...step, items: [...(step.items || [])] }))
+      : []
+    this.parsedGroups = Array.isArray(message.taskGroups)
+      ? message.taskGroups.map((group) => ({
+          ...group,
+          subtasks: [...safeSubtasks(group)],
+          narrations: [...safeNarrations(group)],
+        }))
+      : []
+    this.planTextParsed = this.parsedGroups.length > 0
+    this.groupsActive = this.parsedGroups.length > 0
+
+    if (this.parsedGroups.length > 0) {
+      const runningIndex = this.parsedGroups.findIndex((group) => group.status === 'running')
+      const pendingIndex = this.parsedGroups.findIndex((group) => group.status === 'pending')
+      this.currentGroupIdx = runningIndex >= 0
+        ? runningIndex
+        : pendingIndex >= 0
+          ? pendingIndex
+          : this.parsedGroups.length - 1
+    }
+
+    const existingSubtasks = this.parsedGroups.flatMap((group) => safeSubtasks(group))
+    this.hasEmittedFirstMessage = existingSubtasks.length > 0
+    this.seenToolStartIds = new Set(existingSubtasks.map((subtask) => subtask.id))
+
+    const existingContent = normalizeMarkdownForDisplay(cleanThinkingTags(message.content || '')).trim()
+    const split = splitTaskMessageContent(existingContent, this.groupsActive)
+    const acknowledgment = cleanStartupAcknowledgmentText(split.acknowledgment)
+    if (acknowledgmentQuality(acknowledgment) >= 0) {
+      this.startupAcknowledgment = acknowledgment
+    }
+    this.postLastToolText = split.finalContent
+    this.webIde.hydrateFromMessage(message)
+    for (const item of message.computerPanelData || []) {
+      if (item.type !== 'terminal' || !item.id.endsWith('_live')) continue
+      const data = item.data as TerminalResult | undefined
+      if (data) this.terminalAccum[item.id] = { ...data }
+    }
+  }
+
+  private isActiveConversation(): boolean {
+    return useChatStore.getState().activeId === this.conversationId
+  }
+
+  private openComputerPanel(): void {
+    if (this.isActiveConversation()) {
+      this.actions.setComputerPanelOpen(true, { source: 'auto' })
+    }
+  }
 
   dispatch(event: SSEEvent): void {
     switch (event.type) {
@@ -275,6 +353,9 @@ export class EventDispatcher {
         break
       case 'text_delta':
         this.handleTextDelta(event.content)
+        break
+      case 'progress_update':
+        this.handleProgressUpdate(event)
         break
       case 'follow_ups':
         this.actions.setFollowUps(this.conversationId, event.suggestions)
@@ -301,7 +382,7 @@ export class EventDispatcher {
         this.webIde.handleFileContentStart(
           event.id, event.path, event.toolName, this.conversationId,
           this.actions.upsertComputerPanelItem,
-          () => this.actions.setComputerPanelOpen(true, { source: 'auto' }),
+          () => this.openComputerPanel(),
         )
         break
       case 'file_content_delta':
@@ -310,7 +391,7 @@ export class EventDispatcher {
           // Wrap in batch scheduler so rapid deltas don't freeze the UI
           (convId, item) => {
             this.batch.schedule(`file_delta_${event.id}`, () => {
-              this.webIde.flushPendingWebIdeContent()
+              this.webIde.flushPendingWebIdeContent(event.id, convId)
               this.actions.upsertComputerPanelItem(convId, item)
             })
           },
@@ -335,35 +416,84 @@ export class EventDispatcher {
   }
 
   private handleBrowserFrame(frame: string, timestamp: number): void {
-    const existingItems = useChatStore.getState().conversations
-      .find(c => c.id === this.conversationId)?.messages.slice(-1)[0]?.computerPanelData
-    const prevItem = existingItems?.find(i => i.id === 'browser_live')
+    const prevItem = latestBrowserPanelItem(this.conversationId)
     const prev = prevItem?.data as BrowserResult | undefined
 
-    this.actions.upsertComputerPanelItem(this.conversationId, {
-      id: 'browser_live',
-      type: 'browser',
-      title: prevItem?.title || 'Browser',
-      data: {
-        ...(prev || {
+    this.actions.upsertComputerPanelItem(
+      this.conversationId,
+      {
+        id: 'browser_live',
+        type: 'browser',
+        title: prevItem?.title || 'Browser',
+        data: {
+          ...(prev || {
+            success: true,
+            url: '',
+            title: '',
+            action: 'Browsing',
+          }),
           success: true,
-          url: '',
-          title: '',
-          action: 'Browsing',
-        }),
+          recoverable: undefined,
+          error: undefined,
+          screenshotPath: undefined,
+          screenshotUrl: undefined,
+          screenshotBase64: frame,
+          liveFrame: true,
+          liveFrameUpdatedAt: timestamp,
+        } as BrowserResult,
+        timestamp,
+        streaming: true,
+      },
+      { ephemeral: true },
+    )
+    this.openComputerPanel()
+  }
+
+  private settleLiveBrowserPanel(): void {
+    const previousItem = latestBrowserPanelItem(this.conversationId)
+    if (!previousItem) return
+    const previous = previousItem.data as BrowserResult
+
+    this.actions.upsertComputerPanelItem(
+      this.conversationId,
+      {
+        ...previousItem,
+        data: {
+          ...previous,
+          liveFrame: undefined,
+        },
+        streaming: false,
+        timestamp: Date.now(),
+      },
+      { ephemeral: true },
+    )
+  }
+
+  private settleHiddenComputerPanelItem(event: { id: string; name: string }): void {
+    const panelId = panelFocusIdForTool(event.name, event.id)
+    if (!isBrowserTool(event.name)) {
+      this.actions.removeComputerPanelItem(this.conversationId, panelId)
+      return
+    }
+
+    const previousItem = latestBrowserPanelItem(this.conversationId)
+    if (!previousItem) return
+
+    const previous = previousItem.data as BrowserResult
+    this.actions.upsertComputerPanelItem(this.conversationId, {
+      ...previousItem,
+      data: {
+        ...previous,
         success: true,
         recoverable: undefined,
         error: undefined,
-        screenshotPath: undefined,
-        screenshotUrl: undefined,
-        screenshotBase64: frame,
-        liveFrame: true,
-        liveFrameUpdatedAt: timestamp,
-      } as BrowserResult,
-      timestamp,
-      streaming: true,
+        // Keep the last valid pixels mounted, but do not label a stopped
+        // subscription as live. The next fresh browser_frame replaces them.
+        liveFrame: undefined,
+      },
+      timestamp: Date.now(),
+      streaming: false,
     })
-    this.actions.setComputerPanelOpen(true, { source: 'auto' })
   }
 
   hasTerminalEvent(): boolean {
@@ -378,7 +508,16 @@ export class EventDispatcher {
     return this.terminalErrorMessage
   }
 
+  flushPendingUpdates(): void {
+    this.batch.flushSync()
+  }
+
+  afterPendingUpdates(action: () => void): void {
+    this.batch.scheduleLast('stream_cursor', action)
+  }
+
   private setThinkingIfNoVisibleActionRunning(): void {
+    if (!this.isActiveConversation()) return
     const uiState = useUIStore.getState()
     if (!uiState.isStreaming) return
 
@@ -415,6 +554,55 @@ export class EventDispatcher {
       this.narrationBuf.append(content)
     }
     this.postLastToolText += content
+  }
+
+  private handleProgressUpdate(event: ProgressUpdateEvent): void {
+    if (!this.groupsActive || this.currentGroupIdx < 0) return
+
+    const narrationText = sanitizeNarrationText(event.content, {
+      maxSentences: 2,
+      maxLength: 300,
+      requireSignal: false,
+    })
+    if (!narrationText) return
+
+    const targetGroupIdx = this.progressUpdateGroupIndex(event.stepIndex)
+    const targetGroup = this.parsedGroups[targetGroupIdx]
+    if (!targetGroup) return
+
+    const targetSubtasks = safeSubtasks(targetGroup)
+    const afterToolIndex = event.afterToolId
+      ? targetSubtasks.findIndex((subtask) => subtask.id === event.afterToolId)
+      : -1
+    const targetPosition = afterToolIndex >= 0 ? afterToolIndex + 1 : targetSubtasks.length
+    const remainingVisibleActions = Number.isFinite(event.remainingVisibleActions)
+      ? Math.max(0, Math.floor(event.remainingVisibleActions as number))
+      : this.visibleActionsAfter(targetGroupIdx, targetPosition)
+
+    // This event has already passed the server's LLM-narration policy. Its
+    // placement metadata describes the frontier captured before the
+    // asynchronous narration request began, so a late response must not move
+    // into a newer plan group or jump past actions completed in the meantime.
+    this.discardNarrationBuffer()
+    this.addNarrationAt(targetGroupIdx, narrationText, targetPosition)
+    this.reconcileNarrationCadence(remainingVisibleActions)
+  }
+
+  private progressUpdateGroupIndex(stepIndex?: number): number {
+    if (Number.isInteger(stepIndex) && (stepIndex as number) >= 0) {
+      const groupIdx = this.parsedGroups.findIndex((group) => group.index === stepIndex)
+      if (groupIdx >= 0) return groupIdx
+      if ((stepIndex as number) < this.parsedGroups.length) return stepIndex as number
+    }
+    return this.currentGroupIdx
+  }
+
+  private visibleActionsAfter(groupIdx: number, position: number): number {
+    let count = Math.max(0, safeSubtasks(this.parsedGroups[groupIdx]).length - position)
+    for (let idx = groupIdx + 1; idx <= this.currentGroupIdx; idx++) {
+      count += safeSubtasks(this.parsedGroups[idx]).length
+    }
+    return count
   }
 
   private lastAssistantContent(): string {
@@ -476,7 +664,9 @@ export class EventDispatcher {
     this.groupsActive = true
     this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
     // The plan is visible; the model is now deciding the first concrete action.
-    useUIStore.getState().setStreamingStatus('thinking')
+    if (this.isActiveConversation()) {
+      useUIStore.getState().setStreamingStatus('thinking')
+    }
   }
 
   private prepareToolStart(event: ToolStartEvent): boolean {
@@ -512,8 +702,7 @@ export class EventDispatcher {
   private handleToolStart(event: ToolStartEvent): void {
     if (isInternalActivityTool(event.name)) return
     this.toolStartsById.set(event.id, event)
-    const strictActionLabel = strictActionLabelFromArgs(event.args)
-    const visibleActionLabel = strictActionLabel || runtimeVisibleActionLabel(event.name, event.args)
+    const visibleActionLabel = strictActionLabelFromArgs(event.args)
     if (!visibleActionLabel) return
 
     const isHiddenActivity = isIncompleteBrowserClickActivity({ toolName: event.name, label: visibleActionLabel })
@@ -526,7 +715,9 @@ export class EventDispatcher {
     if (isDeferredBrowseToolStart(event.name)) {
       this.prepareToolStart(event)
       this.deferredBrowseToolStarts.set(event.id, event)
-      useUIStore.getState().setStreamingStatus('analyzing')
+      if (this.isActiveConversation()) {
+        useUIStore.getState().setStreamingStatus('analyzing')
+      }
       return
     }
 
@@ -540,11 +731,11 @@ export class EventDispatcher {
       : tn === 'create_file' || tn === 'edit_file' || tn === 'append_file' || tn === 'export_pdf' ? 'coding' as const
       : 'analyzing' as const
     const uiState = useUIStore.getState()
-    uiState.setStreamingStatus(s)
+    if (this.isActiveConversation()) uiState.setStreamingStatus(s)
     const browserLiveActive = hasStreamingLiveBrowser(this.conversationId)
     const shouldFocusComputerPanel = isComputerPanelTool(event.name) &&
       (BROWSER_TOOLS.includes(event.name) || !browserLiveActive)
-    if (shouldFocusComputerPanel) {
+    if (shouldFocusComputerPanel && this.isActiveConversation()) {
       uiState.setComputerActiveTab('activity')
       uiState.setComputerPanelActiveItemId(panelFocusIdForTool(event.name, event.id))
     }
@@ -564,7 +755,7 @@ export class EventDispatcher {
         url: event.args.url as string | undefined,
         command: event.args.command as string | undefined,
         filePath: (event.args.path || event.args.output_path || event.args.source_path || event.args.directory) as string | undefined,
-        labelSource: strictActionLabel ? 'model' : 'system',
+        labelSource: 'model',
         status: 'running',
         startedAt: Date.now(),
       }
@@ -599,7 +790,7 @@ export class EventDispatcher {
         this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       }
       if (isComputerPanelTool(event.name)) {
-        this.actions.setComputerPanelOpen(true, { source: 'auto' })
+        this.openComputerPanel()
       }
 
       if ((event.name === 'create_file' || event.name === 'append_file' || event.name === 'edit_file') && event.args.path) {
@@ -609,27 +800,8 @@ export class EventDispatcher {
           event.name,
           this.conversationId,
           this.actions.upsertComputerPanelItem,
-          () => this.actions.setComputerPanelOpen(true, { source: 'auto' }),
+          () => this.openComputerPanel(),
         )
-      }
-
-      // Streaming previews for specific tools — use event.id so handleToolResult can upsert over them
-      if ((event.name === 'create_file' || event.name === 'append_file' || event.name === 'edit_file') && (event.args.content || event.args.new_string)) {
-        const filePath = event.args.path as string || ''
-        const fileName = filePath.split('/').pop() || 'file'
-        const fileContent = String(event.name === 'edit_file' ? event.args.new_string : event.args.content)
-        const isAppend = event.name === 'append_file'
-        const isEdit = event.name === 'edit_file'
-        const action = isEdit ? 'edited' as const : isAppend ? 'appended' as const : 'created' as const
-        const titleVerb = isEdit ? 'Editing' : isAppend ? 'Appending' : 'Writing'
-        this.actions.upsertComputerPanelItem(this.conversationId, {
-          id: event.id,
-          type: 'file',
-          title: `${titleVerb}: ${fileName}`,
-          data: { action, path: filePath, content: fileContent.slice(0, 5000) } as FileResult,
-          timestamp: Date.now(),
-          streaming: true,
-        })
       }
 
       if (event.name === 'export_pdf') {
@@ -664,34 +836,6 @@ export class EventDispatcher {
           type: 'image_search',
           title: query ? `Searching images: ${query}` : 'Image lookup in progress',
           data: [] as ImageSearchPanelItem[],
-          timestamp: Date.now(),
-          streaming: true,
-        })
-      }
-
-      // edit_file — show which file is being edited
-      if (event.name === 'edit_file') {
-        const filePath = (event.args.path as string) || ''
-        const fileName = filePath.split('/').pop() || 'file'
-        this.actions.upsertComputerPanelItem(this.conversationId, {
-          id: event.id,
-          type: 'file',
-          title: `Editing: ${fileName}`,
-          data: { action: 'edited' as const, path: filePath, content: '' } as FileResult,
-          timestamp: Date.now(),
-          streaming: true,
-        })
-      }
-
-      if (event.name === 'append_file') {
-        const filePath = (event.args.path as string) || ''
-        const fileName = filePath.split('/').pop() || 'file'
-        const fileContent = String(event.args.content || '')
-        this.actions.upsertComputerPanelItem(this.conversationId, {
-          id: event.id,
-          type: 'file',
-          title: `Appending: ${fileName}`,
-          data: { action: 'appended' as const, path: filePath, content: fileContent.slice(0, 5000) } as FileResult,
           timestamp: Date.now(),
           streaming: true,
         })
@@ -778,19 +922,6 @@ export class EventDispatcher {
         })
       }
 
-      // youtube_transcript
-      if (event.name === 'youtube_transcript') {
-        const url = (event.args.url as string) || ''
-        this.actions.upsertComputerPanelItem(this.conversationId, {
-          id: event.id,
-          type: 'browse',
-          title: 'Loading transcript...',
-          data: { title: 'YouTube Transcript', content: '', url } as BrowseResult,
-          timestamp: Date.now(),
-          streaming: true,
-        })
-      }
-
       // read_document
       if (event.name === 'read_document') {
         const source = (event.args.url as string) || (event.args.source as string) || ''
@@ -821,13 +952,12 @@ export class EventDispatcher {
 
       if (BROWSER_TOOLS.includes(event.name)) {
         const bUrl = (event.args.url as string) || ''
-        const existingItems = useChatStore.getState().conversations
-          .find(c => c.id === this.conversationId)?.messages.slice(-1)[0]?.computerPanelData
-        const prev = existingItems?.find(i => i.id === 'browser_live')?.data as BrowserResult | undefined
+        const previousBrowserItem = latestBrowserPanelItem(this.conversationId)
+        const prev = previousBrowserItem?.data as BrowserResult | undefined
         this.actions.upsertComputerPanelItem(this.conversationId, {
           id: 'browser_live',
           type: 'browser',
-          title: 'Browser',
+          title: previousBrowserItem?.title || 'Browser',
           data: {
             success: true,
             url: bUrl || prev?.url || '',
@@ -854,6 +984,15 @@ export class EventDispatcher {
     if (deferredStart) this.deferredBrowseToolStarts.delete(event.id)
     const startedEvent = deferredStart || this.toolStartsById.get(event.id)
 
+    if (isSupersededToolResult(event.result)) {
+      this.settleWebIdeTool(event)
+      this.settleHiddenComputerPanelItem(event)
+      delete this.terminalAccum[event.id + '_live']
+      this.removeHiddenTool(event.id)
+      this.setThinkingIfNoVisibleActionRunning()
+      return
+    }
+
     const visibleStartedRecovery = this.currentGroupIdx >= 0 &&
       shouldPreserveVisibleInternalToolResult(event.name) &&
       safeSubtasks(this.parsedGroups[this.currentGroupIdx]).some((subtask) => subtask.id === event.id)
@@ -865,14 +1004,16 @@ export class EventDispatcher {
       )
       this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
       this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
-      this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
+      this.settleWebIdeTool(event)
+      this.settleHiddenComputerPanelItem(event)
       this.toolStartsById.delete(event.id)
       this.setThinkingIfNoVisibleActionRunning()
       return
     }
 
     if (isHiddenInternalToolResult(event.name, event.result)) {
-      this.actions.removeComputerPanelItem(this.conversationId, panelFocusIdForTool(event.name, event.id))
+      this.settleWebIdeTool(event)
+      this.settleHiddenComputerPanelItem(event)
       this.removeHiddenTool(event.id)
       this.setThinkingIfNoVisibleActionRunning()
       return
@@ -914,10 +1055,10 @@ export class EventDispatcher {
     }
 
     if (isBrowserTool(event.name)) {
-      if (!isBrowserPreflightBlock) {
+      if (!isBrowserPreflightBlock && this.isActiveConversation()) {
         useUIStore.getState().setComputerActiveTab('activity')
       }
-      const previousBrowser = existingItems?.find(i => i.id === 'browser_live')?.data as BrowserResult | undefined
+      const previousBrowser = latestBrowserPanelItem(this.conversationId)?.data as BrowserResult | undefined
       const data = isBrowserPreflightBlock
         ? browserPanelDataForPreflightBlock(panelItem.data as BrowserResult)
         : panelItem.data
@@ -934,17 +1075,16 @@ export class EventDispatcher {
       this.actions.upsertComputerPanelItem(this.conversationId, panelItem)
     }
     if (!isBrowserPreflightBlock) {
-      if (isComputerPanelTool(event.name)) {
+      if (isComputerPanelTool(event.name) && this.isActiveConversation()) {
         const uiState = useUIStore.getState()
         uiState.setComputerActiveTab('activity')
         uiState.setComputerPanelActiveItemId(panelFocusIdForTool(event.name, event.id))
       }
-      this.actions.setComputerPanelOpen(true, { source: 'auto' })
+      this.openComputerPanel()
     }
 
     // WebIDE handling
-    this.webIde.handleToolResult(event.id, event.name, event.result)
-    this.webIde.deleteAccum(event.id)
+    this.settleWebIdeTool(event)
     delete this.terminalAccum[event.id + '_live']
 
     // TaskGroup: update subtask
@@ -955,8 +1095,8 @@ export class EventDispatcher {
         const groupSubtasks = safeSubtasks(group)
         const existingSubtask = groupSubtasks.find(s => s.id === event.id)
         const deferredLabel = startedEvent
-          ? (strictActionLabelFromArgs(startedEvent.args) || runtimeVisibleActionLabel(event.name, startedEvent.args))
-          : runtimeVisibleActionLabel(event.name, {}, panelItem.title)
+          ? strictActionLabelFromArgs(startedEvent.args)
+          : null
 
         let updatedSubtasks = groupSubtasks
         if (existingSubtask) {
@@ -974,7 +1114,7 @@ export class EventDispatcher {
             url: (startedEvent?.args.url || startedEvent?.args.source) as string | undefined,
             command: startedEvent?.args.command as string | undefined,
             filePath: (startedEvent?.args.path || startedEvent?.args.output_path || startedEvent?.args.source_path || startedEvent?.args.directory) as string | undefined,
-            labelSource: startedEvent && strictActionLabelFromArgs(startedEvent.args) ? 'model' : 'system',
+            labelSource: 'model',
             status: 'done',
             startedAt: Date.now(),
             result: effectiveResult as Subtask['result'],
@@ -1016,6 +1156,16 @@ export class EventDispatcher {
     const updatedSubtasks = groupSubtasks.filter((subtask) => subtask.id !== eventId)
     this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
     this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+  }
+
+  private settleWebIdeTool(event: { id: string; name: string; result: unknown }): void {
+    this.webIde.handleToolResult(
+      event.id,
+      event.name,
+      event.result,
+      this.conversationId,
+    )
+    this.webIde.deleteAccum(event.id)
   }
 
   private withPreservedFilePanelContent(
@@ -1161,7 +1311,7 @@ export class EventDispatcher {
       void useCreditStore.getState().syncFromServer({ force: true })
     }
     this.batch.flushSync()  // Flush batched updates before error handling
-    this.webIde.cleanup()
+    this.webIde.cleanup(this.conversationId)
     if (this.flushNarration()) this.pendingNarrationTools = []
     else {
       this.discardNarrationBuffer()
@@ -1169,6 +1319,7 @@ export class EventDispatcher {
     }
     this.markRunningGroups('error', safeMessage)
     this.terminalAccum = {}
+    this.settleLiveBrowserPanel()
     this.setStreamError(safeMessage)
     this.actions.addToast(safeMessage, 'error')
     playError()
@@ -1214,13 +1365,14 @@ export class EventDispatcher {
     if (usage && !SERVER_CREDIT_ACCOUNTING) {
       useCreditStore.getState().chargeTokens(this.conversationId, usage)
     }
-    this.webIde.cleanup()
+    this.webIde.cleanup(this.conversationId)
     if (this.flushNarration()) this.pendingNarrationTools = []
     else {
       this.discardNarrationBuffer()
       this.clearPendingNarrationTools(true)
     }
     this.terminalAccum = {}
+    this.settleLiveBrowserPanel()
 
     this.markRunningGroups('done')
 
@@ -1381,10 +1533,21 @@ export class EventDispatcher {
     if (!currentGroup) return false
     const currentPosition = this.narrationInsertionPosition(currentGroup, force)
     if (currentPosition === null) return false
+    const added = this.addNarrationAt(this.currentGroupIdx, narrationText, currentPosition)
+    if (added) {
+      this.reconcileNarrationCadence(Math.max(0, safeSubtasks(currentGroup).length - currentPosition))
+    }
+    return added
+  }
 
-    const currentNarrations = safeNarrations(currentGroup)
-    const currentSubtasks = safeSubtasks(currentGroup)
-    if (currentNarrations.some(narration => narration.position === currentPosition)) {
+  private addNarrationAt(groupIdx: number, narrationText: string, position: number): boolean {
+    const targetGroup = this.parsedGroups[groupIdx]
+    if (!targetGroup) return false
+
+    const targetNarrations = safeNarrations(targetGroup)
+    const targetSubtasks = safeSubtasks(targetGroup)
+    const safePosition = Math.max(0, Math.min(Math.floor(position), targetSubtasks.length))
+    if (targetNarrations.some(narration => narration.position === safePosition)) {
       return false
     }
 
@@ -1393,19 +1556,27 @@ export class EventDispatcher {
     if (dedupeKey && dedupeKey === lastKey) return false
 
     this.lastNarrationText = narrationText
-    this.pendingNarrationTools = []
-    this.actions.addGroupNarration(this.conversationId, this.currentGroupIdx, narrationText, currentPosition)
-    this.parsedGroups[this.currentGroupIdx] = {
-      ...currentGroup,
-      subtasks: currentSubtasks,
-      narrations: [...currentNarrations, {
+    this.actions.addGroupNarration(this.conversationId, groupIdx, narrationText, safePosition)
+    this.parsedGroups[groupIdx] = {
+      ...targetGroup,
+      subtasks: targetSubtasks,
+      narrations: [...targetNarrations, {
         id: 'local_' + Date.now(),
         text: narrationText,
-        position: currentPosition,
+        position: safePosition,
       }],
     }
-    this.toolsSinceLastNarration = Math.max(0, currentSubtasks.length - currentPosition)
     return true
+  }
+
+  private reconcileNarrationCadence(remainingVisibleActions: number): void {
+    const remaining = Number.isFinite(remainingVisibleActions)
+      ? Math.max(0, Math.floor(remainingVisibleActions))
+      : 0
+    this.toolsSinceLastNarration = remaining
+    this.pendingNarrationTools = remaining > 0
+      ? this.pendingNarrationTools.slice(-remaining)
+      : []
   }
 
   private flushNarration(force = false): boolean {
@@ -1433,7 +1604,7 @@ export class EventDispatcher {
     const safeMessage = message ? userErrorMessage(message, 'The task stopped before it finished. Please try again.') : undefined
     if (status === 'error' && safeMessage) this.terminalErrorMessage = safeMessage
     this.batch.flushSync()  // Flush batched updates before abort
-    this.webIde.cleanup()
+    this.webIde.cleanup(this.conversationId)
     if (this.flushNarration()) this.pendingNarrationTools = []
     else {
       this.discardNarrationBuffer()
@@ -1441,5 +1612,6 @@ export class EventDispatcher {
     }
     this.markRunningGroups(status === 'done' ? 'done' : 'error', safeMessage)
     this.terminalAccum = {}
+    this.settleLiveBrowserPanel()
   }
 }

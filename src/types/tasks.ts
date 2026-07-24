@@ -12,6 +12,8 @@ export interface TaskStep {
 
 export interface StepAction {
   type: 'search' | 'browse'
+  /** Historic model-authored label, when one was persisted by the old task stream. */
+  label?: string
   query?: string
   url?: string
   result?: SearchResult[] | BrowseResult
@@ -43,7 +45,7 @@ export interface TaskGroup {
   startedAt?: number
 }
 
-export type SubtaskType = 'search' | 'browse' | 'terminal' | 'create_file' | 'read_file' | 'read_skill' | 'delete_file' | 'list_files' | 'edit_file' | 'append_file' | 'export_pdf' | 'youtube_transcript' | 'read_document' | 'http_request' | 'run_code' | 'browser'
+export type SubtaskType = 'search' | 'image_search' | 'browse' | 'terminal' | 'create_file' | 'read_file' | 'read_skill' | 'delete_file' | 'list_files' | 'edit_file' | 'append_file' | 'export_pdf' | 'read_document' | 'http_request' | 'run_code' | 'browser'
 
 export interface Subtask {
   id: string
