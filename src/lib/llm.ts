@@ -1,16 +1,11 @@
 import {
-  DEFAULT_DEEPSEEK_MODEL,
   DEFAULT_OPENROUTER_MODEL,
   estimateUsageCost,
 } from '@/lib/modelPricing'
-import { ensureJsonToolMessageContent } from '@/lib/agent/ToolMessageSerialization'
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const GENERATION_URL = `${OPENROUTER_BASE_URL}/generation`
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
 const ASSISTANT_LOG_LABEL = 'Agent'
-
-type AssistantProvider = 'deepseek' | 'openrouter'
 
 function trimmedEnv(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
@@ -25,27 +20,12 @@ function booleanEnv(value: string | undefined, fallback: boolean): boolean {
   return fallback
 }
 
-function normalizeProvider(value: string | undefined): AssistantProvider {
-  const normalized = (value || '').trim().toLowerCase()
-  if (normalized === 'openrouter') return 'openrouter'
-  if (normalized === 'deepseek') return 'deepseek'
-  return trimmedEnv(process.env.DEEPSEEK_API_KEY) ? 'deepseek' : 'openrouter'
-}
-
-export const ASSISTANT_PROVIDER = normalizeProvider(process.env.LLM_PROVIDER || process.env.ASSISTANT_PROVIDER)
-export const ASSISTANT_SUPPORTS_IMAGE_INPUT = ASSISTANT_PROVIDER !== 'deepseek'
-
-function defaultModelForProvider(provider: AssistantProvider): string {
-  return provider === 'deepseek' ? DEFAULT_DEEPSEEK_MODEL : DEFAULT_OPENROUTER_MODEL
-}
-
-function modelEnvForProvider(provider: AssistantProvider): string | undefined {
-  return provider === 'deepseek'
-    ? trimmedEnv(process.env.DEEPSEEK_MODEL)
-    : trimmedEnv(process.env.OPENROUTER_MODEL)
-}
-
-export const DEFAULT_MODEL = modelEnvForProvider(ASSISTANT_PROVIDER) || defaultModelForProvider(ASSISTANT_PROVIDER)
+// Keep the provider/model boundary explicit. Individual requests, stale
+// worker environments, and client-supplied model names cannot silently route
+// tasks back to another provider.
+export const ASSISTANT_PROVIDER = 'openrouter' as const
+export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
+export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 
 type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -59,25 +39,22 @@ function normalizeReasoningEffort(value: string | undefined, fallback: Reasoning
   return fallback
 }
 
-function reasoningEnvForProvider(provider: AssistantProvider): string | undefined {
-  return provider === 'deepseek'
-    ? trimmedEnv(process.env.DEEPSEEK_REASONING_EFFORT)
-    : trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT)
-}
-
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
-  reasoningEnvForProvider(ASSISTANT_PROVIDER),
+  trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT),
   'minimal',
 )
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
 
+export type ChatContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string; detail?: string } }
+  | { type: 'file'; file: { filename?: string; file_data: string } }
+  | { type: 'input_audio'; input_audio: { data: string; format: string } }
+  | { type: 'video_url'; video_url: { url: string } }
+
 export type ChatMessageParam = {
   role: string
-  content?: string | null | Array<{
-    type: string
-    text?: string
-    image_url?: { url: string; detail?: string }
-  }>
+  content?: string | null | ChatContentPart[]
   name?: string
   tool_call_id?: string
   tool_calls?: Array<{
@@ -115,6 +92,10 @@ export type ChatCompletionParams = {
     max_tokens?: number
     exclude?: boolean
     enabled?: boolean
+  }
+  provider?: {
+    sort?: 'throughput' | 'price' | 'latency'
+    require_parameters?: boolean
   }
   requestTimeoutMs?: number
   retryMaxAttempts?: number
@@ -286,9 +267,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const MAX_ERROR_BODY_CHARS = 2000
 
 function getAssistantApiKey(): string {
-  const apiKey = ASSISTANT_PROVIDER === 'deepseek'
-    ? trimmedEnv(process.env.DEEPSEEK_API_KEY)
-    : trimmedEnv(process.env.OPENROUTER_API_KEY)
+  const apiKey = trimmedEnv(process.env.OPENROUTER_API_KEY)
   if (!apiKey) {
     throw new Error('Missing assistant service credentials.')
   }
@@ -296,9 +275,7 @@ function getAssistantApiKey(): string {
 }
 
 function chatCompletionsUrl(): string {
-  return ASSISTANT_PROVIDER === 'deepseek'
-    ? `${DEEPSEEK_BASE_URL}/chat/completions`
-    : `${OPENROUTER_BASE_URL}/chat/completions`
+  return `${OPENROUTER_BASE_URL}/chat/completions`
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -314,10 +291,6 @@ function redactSecrets(text: string): string {
   const openRouterKey = process.env.OPENROUTER_API_KEY
   if (openRouterKey) {
     redacted = redacted.split(openRouterKey).join('[redacted-assistant-key]')
-  }
-  const deepSeekKey = process.env.DEEPSEEK_API_KEY
-  if (deepSeekKey) {
-    redacted = redacted.split(deepSeekKey).join('[redacted-assistant-key]')
   }
   const serperKey = process.env.SERPER_API_KEY
   if (serperKey) {
@@ -517,7 +490,6 @@ export async function fetchGenerationUsage(
   id: string | undefined,
   signal?: AbortSignal,
 ): Promise<ChatCompletionUsage | null> {
-  if (ASSISTANT_PROVIDER !== 'openrouter') return null
   const generationId = typeof id === 'string' ? id.trim() : ''
   if (!generationId) return null
 
@@ -569,65 +541,15 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
   }
 }
 
-function textOnlyMessages(messages: ChatMessageParam[]): ChatMessageParam[] {
-  if (ASSISTANT_SUPPORTS_IMAGE_INPUT) return messages
-  return messages.map((message) => {
-    if (!Array.isArray(message.content)) return message
-    const content = message.content
-      .map((part) => {
-        if (part.type === 'text') return part.text || ''
-        if (part.type === 'image_url') {
-          return '[Image payload omitted: the active DeepSeek API route accepts text and tools, not direct image input. Use extracted text, page content, interactive element labels, or ask the user for a description if the image itself is required.]'
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join('\n\n')
-      .trim()
-    return {
-      ...message,
-      content: content || '[Non-text message content omitted for the active text-only model route.]',
-    }
-  })
-}
-
-function jsonSafeToolMessages(messages: ChatMessageParam[]): ChatMessageParam[] {
-  if (ASSISTANT_PROVIDER !== 'deepseek') return messages
-  return messages.map((message) => {
-    if (message.role !== 'tool' || typeof message.content !== 'string') return message
-    // Keep this invariant beside provider shaping: DeepSeek receives one
-    // complete JSON value for every tool row, including historical rows.
-    const normalized = ensureJsonToolMessageContent(message.content)
-    return normalized === message.content ? message : { ...message, content: normalized }
-  })
-}
-
-function withoutDeepSeekReasoningHistory(messages: ChatMessageParam[]): ChatMessageParam[] {
-  if (ASSISTANT_PROVIDER !== 'deepseek') return messages
-  return messages.map((message) => {
-    if (message.role !== 'assistant' || !('reasoning_content' in message)) return message
-    const { reasoning_content: _reasoningContent, ...nonThinkingMessage } = message
-    return nonThinkingMessage
-  })
-}
-
 function providerReasoningPayload(
   reasoning: ChatCompletionParams['reasoning'],
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  if (ASSISTANT_PROVIDER !== 'deepseek') {
-    return {
-      reasoning: reasoning ?? {
-        effort: DEFAULT_REASONING_EFFORT,
-        exclude: DEFAULT_REASONING_EXCLUDE,
-      },
-    }
+  return {
+    reasoning: reasoning ?? {
+      effort: DEFAULT_REASONING_EFFORT,
+      exclude: DEFAULT_REASONING_EXCLUDE,
+    },
   }
-
-  // DeepSeek maps "minimal", "low", and "medium" effort upward to "high".
-  // Its only lower-latency mode is the explicit non-thinking model selected by
-  // this toggle. Hard-pin it at the provider boundary so no individual request
-  // path or environment drift can silently re-enable hidden reasoning.
-  return { thinking: { type: 'disabled' } }
 }
 
 function withPinnedModel(
@@ -653,16 +575,13 @@ function withPinnedModel(
   const contextualMessages = includeTemporalContext === false
     ? messages
     : withCurrentTemporalContext(messages)
-  const providerMessages = withoutDeepSeekReasoningHistory(
-    jsonSafeToolMessages(textOnlyMessages(contextualMessages)),
-  )
-
   return {
     ...rest,
-    messages: providerMessages,
+    messages: contextualMessages,
     model: DEFAULT_MODEL,
     stream,
-    ...(ASSISTANT_PROVIDER === 'openrouter' ? { usage: { include: true } } : {}),
+    usage: { include: true },
+    provider: { sort: 'throughput' },
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning),

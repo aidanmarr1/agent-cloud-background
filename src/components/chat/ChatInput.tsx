@@ -496,7 +496,8 @@ export function ChatInput({
     prevHasValueRef.current = hasValue
   }, [hasValue])
 
-  // Paste text only; image uploads are intentionally not supported.
+  // Preserve ordinary text paste behaviour; files can be attached with the
+  // picker or drag-and-drop without intercepting clipboard text.
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const pastedText = e.clipboardData?.getData('text')
     if (!pastedText) return

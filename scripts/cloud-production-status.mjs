@@ -180,7 +180,7 @@ const local = {
   signedReadinessSecret: envPresent('AGENT_INTERNAL_HEALTH_SECRET') || envPresent('AUTH_SECRET'),
   e2bApiKey: envPresent('E2B_API_KEY'),
   turso: envPresent('TURSO_DATABASE_URL') && envPresent('TURSO_AUTH_TOKEN'),
-  deepSeek: envPresent('DEEPSEEK_API_KEY'),
+  openRouter: envPresent('OPENROUTER_API_KEY'),
   deploymentVersion: envPresent('AGENT_DEPLOYMENT_VERSION'),
   deploymentVersionRequired: envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION'),
 }
@@ -223,7 +223,7 @@ console.log('Secret values are never printed.')
 console.log('\nLocal prerequisites')
 printLine(local.signedReadinessSecret, 'signed readiness secret is available locally')
 printLine(local.turso, 'Turso queue credentials are available locally')
-printLine(local.deepSeek, 'DeepSeek API key is available locally')
+printLine(local.openRouter, 'OpenRouter API key is available locally')
 printLine(local.e2bApiKey, 'E2B_API_KEY is available locally')
 if (local.deploymentVersionRequired) {
   printLine(local.deploymentVersion, 'AGENT_DEPLOYMENT_VERSION is set because worker version matching is required locally')

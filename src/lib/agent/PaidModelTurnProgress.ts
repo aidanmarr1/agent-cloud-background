@@ -16,7 +16,7 @@ export type PaidModelTurnProgressDecision =
     }
   | {
       kind: 'allow_recovery'
-      consecutiveNoProgressTurns: 1
+      consecutiveNoProgressTurns: number
       consecutiveInternalRecoveryTurns: number
     }
   | {
@@ -27,6 +27,7 @@ export type PaidModelTurnProgressDecision =
     }
 
 export const MAX_CONSECUTIVE_PAID_INTERNAL_RECOVERY_TURNS = 2
+export const MAX_CONSECUTIVE_PAID_NO_PROGRESS_TURNS = 2
 
 export function paidModelTurnMadeProgress(
   turn: PaidModelTurnProgressSnapshot,
@@ -68,17 +69,17 @@ export function decidePaidModelTurnProgress(
     }
   }
 
-  if (consecutiveNoProgressTurns < 1) {
+  if (consecutiveNoProgressTurns < MAX_CONSECUTIVE_PAID_NO_PROGRESS_TURNS) {
     return {
       kind: 'allow_recovery',
-      consecutiveNoProgressTurns: 1,
+      consecutiveNoProgressTurns: consecutiveNoProgressTurns + 1,
       consecutiveInternalRecoveryTurns,
     }
   }
 
   return {
     kind: 'stop',
-    consecutiveNoProgressTurns: 1,
+    consecutiveNoProgressTurns,
     consecutiveInternalRecoveryTurns,
     reason: 'generic_no_progress',
   }

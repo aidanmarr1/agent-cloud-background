@@ -11,6 +11,7 @@ import {
   createCompletion,
   createStreamingCompletion,
   type ChatCompletionResponse,
+  type ChatContentPart,
   type ChatCompletionTool,
   type ChatMessageParam,
   type StreamingChatCompletionChunk,
@@ -244,9 +245,6 @@ function assistantHistoryMessageForStreamResult(
   const message: Record<string, unknown> = {
     role: 'assistant',
     content: content || null,
-  }
-  if (ASSISTANT_PROVIDER === 'deepseek' && result.reasoningContent) {
-    message.reasoning_content = result.reasoningContent
   }
   return message as ChatMessageParam
 }
@@ -974,11 +972,14 @@ function taskNeedsSavedFinalArtifact(
   messages: Array<{ role: string; content: string }>,
 ): boolean {
   const userText = state.originalUserRequest || effectiveTaskRequest(messages)
-  if (originalRequestPrefersInlineBrief(userText)) return false
+  const intent = analyzeTaskIntent([{ role: 'user', content: userText }])
+  if ((intent.wantsQuick || intent.wantsInlineAnswer || originalRequestPrefersInlineBrief(userText)) && !intent.explicitSavedArtifact) {
+    return false
+  }
   return state.buildTask ||
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'creative' ||
-    explicitSavedFinalArtifactRequested(userText)
+    intent.requiresSavedArtifact
 }
 
 function isBriefInlineDirectAnswerTask(
@@ -1104,6 +1105,7 @@ function shouldCompleteFinalInlineAnswerTurn(
 }
 
 const MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS = 2
+const MAX_FINAL_SAVED_DELIVERABLE_RECOVERY_ATTEMPTS = 2
 
 function scheduleFinalInlineAnswerRecovery(
   state: AgentStateData,
@@ -1132,6 +1134,32 @@ function scheduleFinalInlineAnswerRecovery(
   state.lastModelErrorForUser = null
   state.deadlineFinalizationStarted = false
   state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
+  return true
+}
+
+function scheduleFinalSavedDeliverableRecovery(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const planLength = state.currentPlanItems?.length || 0
+  if (planLength === 0 || !taskNeedsSavedFinalArtifact(state, messages)) return false
+  if (state.currentStepIdx < planLength - 1 || hasSavedFinalDeliverableCandidate(state)) return false
+  if (state.finalSavedDeliverableRecoveryAttempts >= MAX_FINAL_SAVED_DELIVERABLE_RECOVERY_ATTEMPTS) return false
+
+  state.finalSavedDeliverableRecoveryAttempts += 1
+  state.currentStepIdx = planLength - 1
+  updatePhase(state)
+  state.forceTextNextIteration = false
+  state.phaseEndNarrationPending = false
+  state.consecutiveNoToolCalls = 0
+  state.consecutiveNullStreams = 0
+  state.toolJsonRecoveryCount = 0
+  state.suppressedResearchToolName = null
+  state.recentToolCalls = []
+  state.recentToolSequence = []
+  state.lastModelErrorForUser = null
+  state.deadlineFinalizationStarted = false
+  state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 3)
   return true
 }
 
@@ -1270,6 +1298,7 @@ function finalInlineAnswerPrompt(state: AgentStateData): string {
     'Do not write a status update, plan, tool label, action label, or permission question.',
     'Use the gathered evidence; if evidence is thin, answer with a brief caveat rather than searching, planning, or narrating.',
     'If the user explicitly asked for an inline report/no-file answer, write the actual report with concrete substance and stop.',
+    'When the answer is longer than a few sentences, use natural Markdown structure: a clear heading, short sections or bullets where useful, and readable paragraphs. Never output one merged wall of text, repeat the title inside a paragraph, or stop mid-sentence.',
   ].filter(Boolean).join(' ')
 }
 
@@ -1331,7 +1360,8 @@ function finalSavedDeliverableTextPrompt(state: AgentStateData): string {
     'Start with a clear Markdown title and the useful content itself.',
     'Do not write a status update, source count, plan, permission question, tool label, action label, or note about attaching/saving a file.',
     'The app will save this exact Markdown content as the deliverable after you finish writing it.',
-    'Use the gathered evidence and be concise, but include enough substance for the task.',
+    'Use the gathered evidence and include enough substance for the task.',
+    'Structure the Markdown cleanly with one title, useful section headings, short readable paragraphs, and bullets or a table where they improve clarity. For research reports, include an executive summary, conclusions, and a references section with source URLs when available. Never merge headings into body text, duplicate passages, or stop mid-sentence.',
   ].filter(Boolean).join(' ')
 }
 
@@ -1947,6 +1977,66 @@ function visualImageUploadedAttachments(messages: AgentLoopOptions['messages']):
   )
 }
 
+function nativeMultimodalUploadedAttachments(messages: AgentLoopOptions['messages']): AgentAttachment[] {
+  return uploadedAttachments(messages).filter((attachment) => (
+    !!attachment.content &&
+    attachment.contentEncoding === 'data-url' &&
+    (
+      attachment.type.startsWith('image/') ||
+      attachment.type.startsWith('audio/') ||
+      attachment.type.startsWith('video/') ||
+      attachment.type === 'application/pdf'
+    )
+  ))
+}
+
+function dataUrlBase64Payload(dataUrl: string): string {
+  const separator = dataUrl.indexOf(',')
+  return separator >= 0 ? dataUrl.slice(separator + 1) : dataUrl
+}
+
+function audioFormatForAttachment(attachment: AgentAttachment): string {
+  const extension = attachment.name.split('.').pop()?.toLowerCase()
+  if (extension && /^[a-z0-9]{2,8}$/.test(extension)) return extension
+  return attachment.type.split('/')[1]?.split(';')[0] || 'wav'
+}
+
+function nativeAttachmentContentPart(attachment: AgentAttachment): ChatContentPart | null {
+  const content = attachment.content
+  if (!content || attachment.contentEncoding !== 'data-url') return null
+  if (attachment.type.startsWith('image/')) {
+    return {
+      type: 'image_url',
+      image_url: { url: content, detail: 'high' },
+    }
+  }
+  if (attachment.type === 'application/pdf') {
+    return {
+      type: 'file',
+      file: {
+        filename: attachment.name,
+        file_data: content,
+      },
+    }
+  }
+  if (attachment.type.startsWith('audio/')) {
+    return {
+      type: 'input_audio',
+      input_audio: {
+        data: dataUrlBase64Payload(content),
+        format: audioFormatForAttachment(attachment),
+      },
+    }
+  }
+  if (attachment.type.startsWith('video/')) {
+    return {
+      type: 'video_url',
+      video_url: { url: content },
+    }
+  }
+  return null
+}
+
 function uploadedAttachmentNames(messages: AgentLoopOptions['messages']): string[] {
   return [...new Set(uploadedAttachments(messages).map((attachment) => attachment.name).filter(Boolean))]
 }
@@ -1955,6 +2045,9 @@ function describeAttachmentForContext(attachment: AgentAttachment): string {
   const size = attachment.size > 0 ? `, ${Math.round(attachment.size / 1024)} KB` : ''
   const sandboxPath = attachment.sandboxPath ? `, sandbox path: ${attachment.sandboxPath}` : ''
   if (attachment.type.startsWith('image/')) return `Image: ${attachment.name} (${attachment.type}${size})`
+  if (attachment.type.startsWith('audio/')) return `Audio: ${attachment.name} (${attachment.type}${size}${sandboxPath})`
+  if (attachment.type.startsWith('video/')) return `Video: ${attachment.name} (${attachment.type}${size}${sandboxPath})`
+  if (attachment.type === 'application/pdf') return `PDF: ${attachment.name} (${attachment.type}${size}${sandboxPath})`
   if (attachment.type === SKILL_ATTACHMENT_TYPE) return `Selected skill file: ${attachment.name}${size ? ` (${Math.round(attachment.size / 1024)} KB)` : ''}`
   return `Attached file: ${attachment.name} (${attachment.type || 'unknown type'}${size}${sandboxPath})`
 }
@@ -1990,12 +2083,17 @@ function attachmentContextForPlanning(message: AgentLoopOptions['messages'][numb
         ? `${content.slice(0, MAX_PLANNING_ATTACHMENT_CHARS)}\n... [truncated from ${content.length} characters]`
         : content
       sections.push(`--- Uploaded attachment text: ${attachment.name} ---\n${excerpt}\n--- End uploaded attachment text: ${attachment.name} ---`)
-    } else if (attachment.type.startsWith('image/')) {
+    } else if (
+      attachment.type.startsWith('image/') ||
+      attachment.type.startsWith('audio/') ||
+      attachment.type.startsWith('video/') ||
+      attachment.type === 'application/pdf'
+    ) {
       sections.push(ASSISTANT_SUPPORTS_IMAGE_INPUT
         ? [
-            `Image attachment ${attachment.name} is already available as high-detail visual input at runtime.`,
-            'For image questions, inspect the uploaded image directly from the visual input.',
-            'Do not create browser/open/current-view/extract-text/read_file/web_search steps for the uploaded image filename.',
+            `Attachment ${attachment.name} is already available as native multimodal input at runtime.`,
+            'Inspect the uploaded content directly.',
+            'Do not create browser/open/current-view/read_file/web_search steps for its filename.',
           ].join(' ')
         : [
             `Image attachment ${attachment.name} was uploaded, but the active model route does not accept direct image input.`,
@@ -2063,6 +2161,7 @@ function requiredAttachmentPlanSteps(messages: AgentLoopOptions['messages']): Re
   const readableName = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2} more` : '')
   const firstReadable = readableUploadedAttachments(messages)[0]
   const hasVisualImages = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
+  const hasNativeMultimodal = nativeMultimodalUploadedAttachments(messages).length > 0
   const hasTextOnlyImages = !ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
   const hasSandboxUploads = attachments.some(attachment => !!attachment.sandboxPath)
   const contentPreview = firstReadable?.content
@@ -2071,12 +2170,14 @@ function requiredAttachmentPlanSteps(messages: AgentLoopOptions['messages']): Re
       ? 'Uploaded image visual content is available as high-detail model input. No browser opening, current-view extraction, or filename search is required.'
       : hasTextOnlyImages
         ? 'Uploaded image metadata was loaded, but this model route cannot inspect the image pixels directly.'
+    : hasNativeMultimodal
+      ? 'Uploaded image, PDF, audio, or video content is available as native multimodal model input.'
       : 'Uploaded attachment metadata was loaded, but no extracted text was available in context.'
   const titlePrefix = hasVisualImages
     ? `Visually inspect uploaded image${names.length === 1 ? '' : 's'}`
     : `Read uploaded attachment${names.length === 1 ? '' : 's'}`
-  const scope = hasVisualImages
-    ? 'Runtime preflight only: uploaded image bytes are already loaded as high-detail visual input in the model context. Inspect the attached image directly from that visual input. Do not plan browser/open/current-view/extract-text/read_file/web_search steps for the image filename. Use web/browsing only if the user explicitly asks for outside/current information beyond the image.'
+  const scope = hasNativeMultimodal
+    ? 'Runtime preflight only: uploaded image, PDF, audio, or video bytes are already loaded as native multimodal input in the model context. Inspect the attached content directly. Do not plan browser/open/current-view/read_file/web_search steps for its filename. Use web/browsing only if the user explicitly asks for outside/current information beyond the attachment.'
     : hasTextOnlyImages
       ? 'Runtime preflight only: uploaded image metadata is loaded, but the active model route cannot inspect image pixels directly. Use extracted text/metadata if present; otherwise report that direct image inspection is unavailable on this route. Do not web_search uploaded filenames unless the user explicitly asks for outside/current information.'
     : hasSandboxUploads
@@ -2112,7 +2213,7 @@ function requiredSkillPlanSteps(messages: AgentLoopOptions['messages']): Require
 
 export type AgentContextMessage = {
   role: string
-  content: string | Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }>
+  content: string | ChatContentPart[]
 }
 
 export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['messages']): AgentContextMessage[] {
@@ -2122,7 +2223,16 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
     }
 
     const hasUploadedAttachments = m.attachments.some(a => a.type !== SKILL_ATTACHMENT_TYPE)
-    const imageAttachments = m.attachments.filter(a => a.type.startsWith('image/') && a.content)
+    const nativeMultimodalAttachments = m.attachments.filter(a => (
+      a.contentEncoding === 'data-url' &&
+      !!a.content &&
+      (
+        a.type.startsWith('image/') ||
+        a.type.startsWith('audio/') ||
+        a.type.startsWith('video/') ||
+        a.type === 'application/pdf'
+      )
+    ))
     const textAttachments = m.attachments.filter(a =>
       !a.type.startsWith('image/') &&
       a.content &&
@@ -2157,27 +2267,25 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
       textContent += `\n\n--- ${label}: ${att.name} ---${instruction}\n${truncated}\n--- End of ${att.name} ---`
     }
 
-    if (imageAttachments.length > 0 && ASSISTANT_SUPPORTS_IMAGE_INPUT) {
-      textContent += '\n\nUse the attached image content below as visual input; do not claim the image was unavailable.'
-      const parts: Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }> = [
+    if (nativeMultimodalAttachments.length > 0 && ASSISTANT_SUPPORTS_IMAGE_INPUT) {
+      textContent += '\n\nUse the attached multimodal content below directly; do not claim the attachment was unavailable.'
+      const parts: ChatContentPart[] = [
         { type: 'text', text: textContent },
       ]
-      for (const att of imageAttachments) {
-        parts.push({
-          type: 'image_url',
-          image_url: { url: att.content!, detail: 'high' },
-        })
+      for (const att of nativeMultimodalAttachments) {
+        const part = nativeAttachmentContentPart(att)
+        if (part) parts.push(part)
       }
       return { role: m.role, content: parts }
     }
 
-    if (imageAttachments.length > 0) {
-      textContent += '\n\nUploaded image attachments are not supported on this route. Ask the user for a text description or a supported document/text file if visual interpretation is required.'
+    if (nativeMultimodalAttachments.length > 0) {
+      textContent += '\n\nThe current route could not inspect the uploaded multimodal bytes directly. Use the sandbox copy with an appropriate document or terminal tool.'
     }
 
     const metadataOnlyAttachments = m.attachments.filter(a =>
       a.type !== SKILL_ATTACHMENT_TYPE &&
-      !a.type.startsWith('image/') &&
+      !nativeMultimodalAttachments.includes(a) &&
       !isReadableAttachmentContent(a)
     )
     if (metadataOnlyAttachments.length > 0) {
@@ -2364,7 +2472,12 @@ function toolCallsNeedStartupReady(toolCalls: Map<number, ToolCallData>): boolea
 
 function messageText(content: ChatMessageParam['content']): string {
   if (typeof content === 'string') return content
-  if (Array.isArray(content)) return content.map(part => part.text || '').filter(Boolean).join('\n')
+  if (Array.isArray(content)) {
+    return content
+      .map(part => part.type === 'text' ? part.text : '')
+      .filter(Boolean)
+      .join('\n')
+  }
   return ''
 }
 
@@ -2376,47 +2489,6 @@ function latestUserMessageText(messages: ChatMessageParam[]): string {
     }
   }
   return ''
-}
-
-const NARRATION_STRUCTURAL_FORMS = [
-  'evidence → implication: lead with the newest concrete evidence, then state what it changes or clarifies',
-  'contrast → resolution: set two new findings against each other, then resolve the distinction or limitation',
-  'multi-signal synthesis: combine the latest independent signals into one conclusion without adding a forward-looking sentence',
-  'state change → verification: name the completed artifact or interface change, then the check that proves it works',
-  'constraint → pivot: name the exact blocker, then the different evidence or implementation route now replacing it',
-  'milestone → closure: close the resolved line of work with its newest concrete implication, without announcing a broader next phase',
-] as const
-
-function preferredNarrationStructure(
-  state: AgentStateData,
-  recentActions: string[],
-  recentToolEvidence: string[],
-): string {
-  const evidence = `${recentActions.join(' ')} ${recentToolEvidence.join(' ')}`.toLowerCase()
-  if (/\b(?:blocked|failed|error|unavailable|timeout|denied|missing)\b/.test(evidence)) {
-    return NARRATION_STRUCTURAL_FORMS[4]
-  }
-  if (
-    state.buildTask ||
-    /\b(?:creat|writ|edit|append|patch|build|render|screenshot|preview|test|verif|deploy|file|component|page|style)\w*\b/.test(evidence)
-  ) {
-    return NARRATION_STRUCTURAL_FORMS[3]
-  }
-  if (state.phaseEndNarrationPending) return NARRATION_STRUCTURAL_FORMS[5]
-  if (/\b(?:compar|versus|difference|whereas|however|trade-?off|benchmark)\w*\b/.test(evidence)) {
-    return NARRATION_STRUCTURAL_FORMS[1]
-  }
-
-  // Rotate among research-friendly forms so nearby updates do not collapse
-  // into one repeated "research confirms … next …" template. This remains a
-  // preference: the narration model may choose another form when it fits the
-  // evidence better.
-  const researchForms = [
-    NARRATION_STRUCTURAL_FORMS[0],
-    NARRATION_STRUCTURAL_FORMS[2],
-    NARRATION_STRUCTURAL_FORMS[1],
-  ]
-  return researchForms[(state.recentNarrations.length + state.currentStepIdx) % researchForms.length]
 }
 
 function recentNarrationToolEvidence(messages: ChatMessageParam[], limit = 3): string[] {
@@ -2441,9 +2513,6 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     .slice(-3)
     .map(item => `${item.title || item.url || item.tool}: ${item.detail}`)
   const previousNarrations = recentNarrationPromptExclusions(state)
-  const previousUsedForwardTransition = /(?:^|[.!?]\s+)(?:next|from here)\b|\b(?:i|we)(?:'|’)?ll\b|\b(?:i|we)\s+will\b/i
-    .test(previousNarrations.at(-1) || '')
-  const preferredStructure = preferredNarrationStructure(state, recentActions, recentToolEvidence)
 
   const context = [
     `User request: ${state.originalUserRequest || latestUserMessageText(allMessages) || 'not available'}`,
@@ -2454,11 +2523,8 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     currentFinding ? `Active-phase background — use only to interpret the new delta, never to repeat the running conclusion:\n- ${currentFinding}` : '',
     browserEvidence.length ? `Browser completion evidence:\n- ${browserEvidence.join('\n- ')}` : '',
     visualObservations.length ? `Recent browser/page observations:\n- ${visualObservations.join('\n- ')}` : '',
-    previousNarrations.length ? `Already shown — do not repeat, paraphrase, or reuse the same rhetorical shape:\n- ${previousNarrations.join('\n- ')}` : '',
-    previousUsedForwardTransition
-      ? 'Transition note: the most recent update already used a forward transition, so keep this update result-only.'
-      : 'Immediate-action note: this narration-only request has no selected next action. Keep it result-only; do not use "Next" or infer an action from the next plan phase.',
-    `Preferred structural form for this update, if it fits the evidence: ${preferredStructure}.`,
+    previousNarrations.length ? `Already shown — do not repeat or paraphrase these claims:\n- ${previousNarrations.join('\n- ')}` : '',
+    'This narration-only request has no selected next action. Keep it result-only; do not infer an action from the next plan phase.',
   ].filter(Boolean).join('\n\n')
 
   const narrationInstruction = [
@@ -2466,12 +2532,11 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
       ? 'FAST PHASE-END PROGRESS NARRATION ONLY.'
       : 'FAST PROGRESS NARRATION ONLY.',
     'Do not solve, plan, browse, search, write files, or call tools.',
-    'Write one natural Manus-style progress paragraph from the compact context only.',
+    'Write one natural progress update from the compact context only.',
     'Treat it as a progressive evidence trace: select the newest delta, not the cumulative task conclusion.',
-    'Use 1-2 complete sentences, 18-30 words preferred, hard cap 34 words / 240 characters.',
-    'Lead with the genuinely new result or progress.',
-    'Adapt the structure to the evidence. Vary grammatical subject, voice, rhythm, and sentence count; do not imitate either of the two most recent updates.',
-    'This asynchronous narration-only request has no selected next action, so keep it result-only. Do not use "Next", add a future-action sentence, or infer an action from the following plan phase.',
+    'Size the update to the evidence: one sentence for a clear finding, two when a contrast or implication matters, or a short paragraph for a dense milestone.',
+    'Lead with the genuinely new result or progress and choose the wording and structure freely. Do not force a stock opening or repeat the recent updates.',
+    'Because this asynchronous narration-only request has no selected next action, keep it result-only. Do not add a future-action sentence or infer an action from the following plan phase.',
     'No permission questions, internal step numbers, action counts, source dumps, vague sufficiency claims, or command fragments.',
     'Describe only user-visible findings, completed changes, or real blockers. Never mention providers, APIs, service names, quotas, rate limits, tools, tool results, payloads, JSON, parsing, truncation, confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
     state.phaseEndNarrationPending ? 'Put <next_step/> on its own final line after the paragraph.' : '',
@@ -2524,9 +2589,9 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   const alreadyShown = recentNarrationPromptExclusions(state, 8)
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
-    'Every available tool schema includes a required, non-empty progress_update. Put exactly one concise 1-2 sentence completed-result update in that field.',
+    'Every available tool schema includes a required, non-empty progress_update. Put one natural completed-result update in that field, sized to the newest evidence rather than a fixed template.',
     'The field must describe completed work, never only a future action, plan, promise, or command. Never repeat or paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'A second sentence beginning "Next, ..." is optional, never required, and never a template. When it fits naturally, place it after the completed finding and use it only when it names the exact concrete tool action this same response is starting immediately; never use it for a broader phase, a general shift in analysis, or planned later work.',
+    'A sentence beginning "Next, ..." is optional, never required, and never a template. Use it only when it names the exact concrete tool action this same response is starting immediately; never use it for a broader phase, a general shift in analysis, or planned later work.',
     'progress_update is display-only. Still complete every normal required tool argument and make the tool call without waiting for a separate narration turn.',
     newWork.length ? `New work:\n- ${newWork.join('\n- ')}` : 'State the newest concrete completed result from the active work; progress_update must not be empty.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
@@ -2613,7 +2678,19 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
     state.taskStrategy === 'research' ||
     state.taskStrategy === 'analysis' ||
     isResearchStepText(currentStepText(state))
-  return researchLike && hasCredibleResearchRecoveryPacket(state)
+  if (!researchLike) return false
+  if (hasCredibleResearchRecoveryPacket(state)) return true
+
+  // A normal research phase may already have a useful cross-source packet
+  // when one sibling source is blocked and the model then emits no next
+  // action. At the paid no-progress boundary, two successfully opened,
+  // distinct sources are enough to advance this ordinary phase rather than
+  // fail the entire task. Deep/wide work retains the stricter recovery floor.
+  const depth = researchDepthProfileForState(state)
+  if (depth.label === 'deep' || depth.label === 'wide') return false
+  return state.stepResearchCallCount >= 3 &&
+    state.stepVisitedUrls.size >= 2 &&
+    stepOpenedSourceDomains(state).size >= 2
 }
 
 function compactResearchBreadthSaturated(state: AgentStateData, depth: ReturnType<typeof researchDepthProfileForState>): boolean {
@@ -2922,6 +2999,7 @@ function compactFinalTextDeliverableMessages(state: AgentStateData, allMessages:
         'Start with the title and content; do not write status, plan, action labels, source counts, or attachment/save narration.',
         'The app will save this exact text into the requested Markdown file after your response.',
         'Use the supplied evidence. If evidence is limited, include a short caveat inside the deliverable instead of searching again.',
+        'Use one title, clear section headings, short readable paragraphs, and bullets or a table where they improve clarity. For a research report, include an executive summary, conclusions, and a references section with source URLs when available. Never merge a heading into body prose, duplicate the report inside itself, or end mid-sentence.',
       ].filter(Boolean).join(' '),
     },
     {
@@ -3956,6 +4034,37 @@ export class AgentLoop {
                   break
                 }
 
+                if (scheduleFinalSavedDeliverableRecovery(state, this.options.messages)) {
+                  consecutivePaidNoProgressTurns = 0
+                  consecutivePaidInternalRecoveryTurns = 0
+                  terminalReason = 'unknown'
+                  contextManager.push({
+                    role: 'system',
+                    content: [
+                      'FINAL SAVED OUTPUT RECOVERY: produce the requested deliverable now from the evidence already gathered.',
+                      'Begin with the concrete Markdown content or file action required by the active final step.',
+                      'Do not search again, write another status update, expose this recovery, or ask permission.',
+                    ].join(' '),
+                  } as ChatMessageParam)
+                  this.options.diagnostics?.({
+                    type: 'final_saved_deliverable_recovery',
+                    data: {
+                      iteration: priorTurn.iteration,
+                      step: state.currentStepIdx,
+                      attempt: state.finalSavedDeliverableRecoveryAttempts,
+                      trigger: progressDecision.reason,
+                    },
+                  })
+                  console.warn('[AgentDiagnostics] Redirected no-progress final phase into a bounded saved deliverable turn', {
+                    step: state.currentStepIdx,
+                    attempt: state.finalSavedDeliverableRecoveryAttempts,
+                    trigger: progressDecision.reason,
+                  })
+                  state.lastIterationEnd = Date.now()
+                  phase = 'STREAMING'
+                  break
+                }
+
                 if (canAdvanceResearchAfterPaidNoProgress(state)) {
                   const stepBeforeAdvance = state.currentStepIdx
                   const recoveryEvidence = {
@@ -4020,7 +4129,7 @@ export class AgentLoop {
                 state.lastModelErrorForUser =
                   progressDecision.reason === 'internal_recovery_cap'
                     ? 'The agent could not produce a valid concrete action after two bounded repair attempts. Please retry the task.'
-                    : 'The agent could not produce a concrete next action after one recovery attempt. Please retry the task.'
+                    : 'The agent could not continue this task after multiple action retries. Please retry the task.'
                 phase = 'ERROR'
                 break
               }
@@ -4722,9 +4831,6 @@ export class AgentLoop {
                     function: { name: tc.name, arguments: tc.arguments },
                   })),
                 }
-                if (ASSISTANT_PROVIDER === 'deepseek' && lastStreamResult.reasoningContent) {
-                  assistantMsg.reasoning_content = lastStreamResult.reasoningContent
-                }
                 contextManager.push(assistantMsg as unknown as ChatMessageParam)
                 for (const msg of toolPipeline.buildToolResultMessages(acceptedSiblingResults, state)) {
                   contextManager.push(msg as unknown as ChatMessageParam, 4)
@@ -4931,9 +5037,6 @@ export class AgentLoop {
                   type: 'function' as const,
                   function: { name: tc.name, arguments: tc.arguments },
                 })),
-              }
-              if (ASSISTANT_PROVIDER === 'deepseek' && lastStreamResult.reasoningContent) {
-                assistantMsg.reasoning_content = lastStreamResult.reasoningContent
               }
               contextManager.push(assistantMsg as unknown as ChatMessageParam)
             } else if (lastStreamResult.assistantContent) {
@@ -5951,7 +6054,7 @@ export class AgentLoop {
    */
   private preprocessMessages(
     messages: AgentLoopOptions['messages']
-  ): Array<{ role: string; content: string | Array<{ type: string; text?: string; image_url?: { url: string; detail?: string } }> }> {
+  ): Array<{ role: string; content: string | ChatContentPart[] }> {
     return preprocessMessagesForAgentContext(messages)
   }
 
@@ -6122,7 +6225,7 @@ export class AgentLoop {
         ...requestMessages,
         {
           role: 'system',
-          content: 'PHASE EVIDENCE READY: write one visible 18-30 word completed-result progress paragraph first, then put <next_step/> on its own final line. Do not call tools. Do not output only <next_step/>. Do not write future-only intent like "Next, I will..."; the paragraph must report a concrete finding from completed work.',
+          content: 'PHASE EVIDENCE READY: write one natural completed-result progress update first, then put <next_step/> on its own final line. Size the update to the newest evidence instead of a fixed template. Do not call tools, output only <next_step/>, or write future-only intent; the update must report a concrete finding from completed work.',
         } as ChatMessageParam,
       ]
     }

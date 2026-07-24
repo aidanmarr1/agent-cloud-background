@@ -31,6 +31,9 @@ function contentToText(content: unknown): string {
           const p = part as { type?: string; text?: string }
           if (p.type === 'text') return p.text || ''
           if (p.type === 'image_url') return '[image]'
+          if (p.type === 'file') return '[file]'
+          if (p.type === 'input_audio') return '[audio]'
+          if (p.type === 'video_url') return '[video]'
         }
         return ''
       })

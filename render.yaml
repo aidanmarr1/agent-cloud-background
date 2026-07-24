@@ -26,15 +26,7 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: deepseek
-      - key: DEEPSEEK_API_KEY
-        sync: false
-      - key: DEEPSEEK_MODEL
-        value: deepseek-v4-flash
-      - key: DEEPSEEK_REASONING_EFFORT
-        value: minimal
-      - key: DEEPSEEK_THINKING_ENABLED
-        value: "false"
+        value: openrouter
       - key: OPENROUTER_API_KEY
         sync: false
       - key: SERPER_API_KEY
@@ -42,7 +34,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.1-flash-lite
+        value: google/gemini-3.5-flash-lite:nitro
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -122,15 +114,7 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: deepseek
-      - key: DEEPSEEK_API_KEY
-        sync: false
-      - key: DEEPSEEK_MODEL
-        value: deepseek-v4-flash
-      - key: DEEPSEEK_REASONING_EFFORT
-        value: minimal
-      - key: DEEPSEEK_THINKING_ENABLED
-        value: "false"
+        value: openrouter
       - key: OPENROUTER_API_KEY
         sync: false
       - key: SERPER_API_KEY
@@ -138,7 +122,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.1-flash-lite
+        value: google/gemini-3.5-flash-lite:nitro
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE

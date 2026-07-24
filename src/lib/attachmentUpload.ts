@@ -8,7 +8,7 @@ interface UploadResponseAttachment {
   url: string
   persisted: true
   content?: string
-  contentEncoding?: 'text'
+  contentEncoding?: 'text' | 'data-url'
 }
 
 interface UploadResult {

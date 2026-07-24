@@ -101,13 +101,24 @@ const secondEmpty = decidePaidModelTurnProgress(
   firstEmpty.consecutiveInternalRecoveryTurns,
 )
 assert.deepEqual(secondEmpty, {
+  kind: 'allow_recovery',
+  consecutiveNoProgressTurns: 2,
+  consecutiveInternalRecoveryTurns: 0,
+})
+if (secondEmpty.kind !== 'stop') paidCalls += 1
+const thirdEmpty = decidePaidModelTurnProgress(
+  { ...emptyTurn, iteration: 3 },
+  0,
+  secondEmpty.consecutiveNoProgressTurns,
+  secondEmpty.consecutiveInternalRecoveryTurns,
+)
+assert.deepEqual(thirdEmpty, {
   kind: 'stop',
-  consecutiveNoProgressTurns: 1,
+  consecutiveNoProgressTurns: 2,
   consecutiveInternalRecoveryTurns: 0,
   reason: 'generic_no_progress',
 })
-if (secondEmpty.kind !== 'stop') paidCalls += 1
-assert.equal(paidCalls, 2, 'a second empty result must stop before a third paid model call')
+assert.equal(paidCalls, 3, 'two bounded action repairs must be allowed before a third empty result stops')
 
 // Exact regression for run 47e9c42c-136c-4d51-9c1d-8545e498a0f9:
 // turn 1 scheduled malformed web_search JSON repair, turn 2 scheduled a
@@ -199,11 +210,10 @@ const emptyAfterAsynchronousNarration = decidePaidModelTurnProgress(
   firstEmpty.consecutiveInternalRecoveryTurns,
 )
 assert.deepEqual(emptyAfterAsynchronousNarration, {
-  kind: 'stop',
-  consecutiveNoProgressTurns: 1,
+  kind: 'allow_recovery',
+  consecutiveNoProgressTurns: 2,
   consecutiveInternalRecoveryTurns: 0,
-  reason: 'generic_no_progress',
-}, 'one accepted narration must not permit an infinite narration-only loop')
+}, 'asynchronous narration must preserve no-progress debt while leaving the final bounded repair available')
 assert.deepEqual(
   malformedAfterNarration,
   {

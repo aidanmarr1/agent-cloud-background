@@ -60,12 +60,9 @@ TURSO_DATABASE_URL=...
 TURSO_AUTH_TOKEN=...
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemini-3.1-flash-lite
+OPENROUTER_MODEL=google/gemini-3.5-flash-lite:nitro
 OPENROUTER_REASONING_EFFORT=minimal
 OPENROUTER_REASONING_EXCLUDE=true
-DEEPSEEK_API_KEY=...
-DEEPSEEK_MODEL=deepseek-v4-flash
-DEEPSEEK_REASONING_EFFORT=high
 AUTH_SECRET=...
 AGENT_INTERNAL_HEALTH_SECRET=...
 AGENT_TASK_WORKER_MODE=external
@@ -398,7 +395,7 @@ Pricing changes, so verify these before adding a payment method. As of 2026-06-0
 
 - Web and worker hosting: about $14/month on [Render](https://render.com/pricing) if you run one Starter web service and one Starter background worker. Render lists Starter compute at $7/month each. If 512 MB is too tight, two Standard services are about $50/month.
 - Turso: likely $0 at low volume. [Turso's free tier](https://turso.tech/pricing) lists 5 GB storage, 500M monthly row reads, and 10M monthly row writes. Paid plans currently start at the Developer tier.
-- OpenRouter/Gemini 3.1 Flash Lite: depends on model usage. The default `.env.example` model, `google/gemini-3.1-flash-lite`, is listed at $0.25 per 1M input tokens, $0.025 per 1M cache-read input tokens, and $1.50 per 1M output tokens.
+- OpenRouter/Gemini 3.5 Flash Lite: depends on model usage. The pinned Nitro route, `google/gemini-3.5-flash-lite:nitro`, is priced at $0.30 per 1M input tokens and $2.50 per 1M output tokens at the time of this update. Check OpenRouter before changing customer pricing.
 - E2B: $0 base on Hobby, with a one-time $100 usage credit for new users. Pro is $150/month plus usage. E2B bills per second while a sandbox is running, and its current docs direct you to the usage calculator for exact CPU/RAM/runtime estimates.
 
 Illustrative E2B budgeting examples at roughly $0.12 per sandbox running hour:

@@ -85,6 +85,7 @@ export interface AgentStateData {
   phaseEndNarrationPending: boolean
   finalInlineAnswerDelivered: boolean
   finalInlineAnswerRecoveryAttempts: number
+  finalSavedDeliverableRecoveryAttempts: number
   exactExtractionGuardPending: boolean
   exactExtractionGuardPrompt: string | null
   exactExtractionGuardAttempts: number
@@ -386,6 +387,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     phaseEndNarrationPending: false,
     finalInlineAnswerDelivered: false,
     finalInlineAnswerRecoveryAttempts: 0,
+    finalSavedDeliverableRecoveryAttempts: 0,
     exactExtractionGuardPending: false,
     exactExtractionGuardPrompt: null,
     exactExtractionGuardAttempts: 0,

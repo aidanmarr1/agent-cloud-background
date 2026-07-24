@@ -46,7 +46,7 @@ export interface PublicAttachment {
   persisted: true
   createdAt: string
   content?: string
-  contentEncoding?: 'text'
+  contentEncoding?: 'text' | 'data-url'
 }
 
 type MessageAttachment = {
@@ -379,12 +379,30 @@ function shouldHydrateInline(record: AttachmentRecord): boolean {
   return record.kind === 'text' ||
     record.kind === 'archive' ||
     record.kind === 'skill' ||
+    record.mimeType.startsWith('image/') ||
+    record.mimeType.startsWith('audio/') ||
+    record.mimeType.startsWith('video/') ||
+    record.mimeType === 'application/pdf' ||
     isExtractableDocument(record.fileName, record.mimeType)
 }
 
-async function bodyToInlineContent(record: AttachmentRecord, body: Buffer): Promise<{ content: string; contentEncoding?: 'text' } | null> {
+async function bodyToInlineContent(record: AttachmentRecord, body: Buffer): Promise<{
+  content: string
+  contentEncoding?: 'text' | 'data-url'
+} | null> {
   if (record.kind === 'text' || record.kind === 'archive' || record.kind === 'skill') {
     return { content: body.toString('utf8'), contentEncoding: 'text' }
+  }
+  if (
+    record.mimeType.startsWith('image/') ||
+    record.mimeType.startsWith('audio/') ||
+    record.mimeType.startsWith('video/') ||
+    record.mimeType === 'application/pdf'
+  ) {
+    return {
+      content: `data:${record.mimeType};base64,${body.toString('base64')}`,
+      contentEncoding: 'data-url',
+    }
   }
 
   const { extractUploadedAttachmentText } = await import('@/lib/attachmentExtraction')

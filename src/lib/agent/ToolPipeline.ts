@@ -833,6 +833,12 @@ function phaseSemanticBlockReason(
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (state.taskStrategy === 'browse') return null
   if (toolName === 'read_file' || toolName === 'list_files') return null
+  // Research queries and source reads frequently contain vocabulary shared
+  // with adjacent plan phases. Token-similarity blocking misclassified valid
+  // active-step evidence gathering as future work and could leave the model
+  // with no executable action. The model-authored plan_step_index remains the
+  // phase contract, and the runtime already normalizes it to the active step.
+  if (RESEARCH_TOOLS.has(toolName)) return null
 
   const actionTokens = tokenizeQuery(visibleToolActionText(toolName, args))
   if (actionTokens.size < 3) return null

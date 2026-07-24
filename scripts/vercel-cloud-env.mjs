@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { delimiter, join, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
 const target = readArg('--target') || 'production'
@@ -15,11 +15,19 @@ const replaceDrift = args.includes('--replace-drift')
 const json = args.includes('--json')
 const configuredVercelCli = process.env.VERCEL_CLI?.trim() || ''
 const localVercelBin = resolve(process.cwd(), 'node_modules/.bin/vercel')
+const configuredPnpmBin = process.env.PNPM_BIN?.trim() || ''
+const pathPnpmBin = (process.env.PATH || '')
+  .split(delimiter)
+  .map((directory) => join(directory, 'pnpm'))
+  .find((candidate) => existsSync(candidate)) || ''
+const pnpmBin = configuredPnpmBin || pathPnpmBin
 const vercelCommand = configuredVercelCli
   ? { bin: configuredVercelCli, baseArgs: [], label: configuredVercelCli }
   : existsSync(localVercelBin)
     ? { bin: localVercelBin, baseArgs: [], label: localVercelBin }
-    : { bin: process.env.NPX_BIN?.trim() || 'npx', baseArgs: ['--yes', 'vercel'], label: 'npx --yes vercel' }
+    : pnpmBin
+      ? { bin: pnpmBin, baseArgs: ['dlx', 'vercel'], label: `${pnpmBin} dlx vercel` }
+      : { bin: process.env.NPX_BIN?.trim() || 'npx', baseArgs: ['--yes', 'vercel'], label: 'npx --yes vercel' }
 
 const CLOUD_ENV = [
   { name: 'AUTH_SECRET', source: 'local', required: true },
@@ -28,15 +36,11 @@ const CLOUD_ENV = [
   { name: 'AGENT_TRUST_PROXY_HEADERS', value: 'true' },
   { name: 'TURSO_DATABASE_URL', source: 'local', required: true },
   { name: 'TURSO_AUTH_TOKEN', source: 'local', required: true },
-  { name: 'LLM_PROVIDER', value: 'deepseek' },
-  { name: 'DEEPSEEK_API_KEY', source: 'local', required: true },
-  { name: 'DEEPSEEK_MODEL', value: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash' },
-  { name: 'DEEPSEEK_REASONING_EFFORT', value: process.env.DEEPSEEK_REASONING_EFFORT || 'minimal' },
-  { name: 'DEEPSEEK_THINKING_ENABLED', value: process.env.DEEPSEEK_THINKING_ENABLED || 'false' },
-  { name: 'OPENROUTER_API_KEY', source: 'local', required: false },
+  { name: 'LLM_PROVIDER', value: 'openrouter' },
+  { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
-  { name: 'OPENROUTER_MODEL', value: process.env.OPENROUTER_MODEL || 'google/gemini-3.1-flash-lite' },
+  { name: 'OPENROUTER_MODEL', value: 'google/gemini-3.5-flash-lite:nitro' },
   { name: 'OPENROUTER_REASONING_EFFORT', value: process.env.OPENROUTER_REASONING_EFFORT || 'minimal' },
   { name: 'OPENROUTER_REASONING_EXCLUDE', value: process.env.OPENROUTER_REASONING_EXCLUDE || 'true' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },

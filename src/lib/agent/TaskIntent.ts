@@ -28,7 +28,7 @@ const WRITING_RE = /\b(?:write|draft|compose|prepare|create|make|produce|generat
 const RESEARCH_RE = /\b(?:research|find\s*out|investigate|look\s*(?:it\s*)?up|web\s*search|search(?:es|ing)?|source|sources|cited?|citations?|references?|bibliography|evidence|compare|analy[sz]e|latest|current|recent|today|news|up[-\s]?to[-\s]?date|current\s+state|state\s+of|landscape|ecosystem|real[-\s]?world\s+applications?|use\s+cases?)\b/i
 const CITATION_RE = /\b(?:sources?|citations?|cited?|references?|bibliography|footnotes?|evidence-backed|source-backed)\b/i
 const CURRENT_RE = /\b(?:latest|current|recent|today|tonight|this\s+week|this\s+month|this\s+year|news|newest|up[-\s]?to[-\s]?date|202[4-9])\b/i
-const INLINE_RE = /\b(?:no file|no document|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|answer\s+(?:directly|in chat|here)|just\s+answer|inline)\b/i
+const INLINE_RE = /\b(?:no file|no document|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|(?:answer|tell|respond|reply)(?:\s+me)?\b.{0,80}\b(?:directly|in chat|here)|just\s+answer|inline)\b/i
 const REPORT_RE = /\b(?:report|write[-\s]?up|memo|overview)\b/i
 const BRIEF_NOUN_RE = /\b(?:write|draft|compose|prepare|create|make|produce|generate|give)\b.{0,50}\bbrief\b|\bbrief\s+(?:on|about|for)\b/i
 

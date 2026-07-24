@@ -1,37 +1,22 @@
-export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.1-flash-lite'
-
-export const DEEPSEEK_MODEL_PRICING = {
-  model: DEFAULT_DEEPSEEK_MODEL,
-  inputUsdPer1M: 0.14,
-  cacheHitInputUsdPer1M: 0.0028,
-  outputUsdPer1M: 0.28,
-  internalReasoningUsdPer1M: 0.28,
-  longContextThresholdTokens: 1_000_000,
-  longContextInputUsdPer1M: 0.14,
-  longContextOutputUsdPer1M: 0.28,
-  contextTokens: 1_000_000,
-  maxCompletionTokens: 384_000,
-  source: 'DeepSeek',
-} as const
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:nitro'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.25,
-  cacheHitInputUsdPer1M: 0.025,
-  outputUsdPer1M: 1.50,
-  internalReasoningUsdPer1M: 1.50,
-  longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.25,
-  longContextOutputUsdPer1M: 1.50,
-  contextTokens: 1_048_576,
+  inputUsdPer1M: 0.30,
+  cacheHitInputUsdPer1M: 0.30,
+  outputUsdPer1M: 2.50,
+  internalReasoningUsdPer1M: 2.50,
+  longContextThresholdTokens: 1_000_000,
+  longContextInputUsdPer1M: 0.30,
+  longContextOutputUsdPer1M: 2.50,
+  contextTokens: 1_000_000,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
 } as const
 
-export const DEFAULT_MODEL_PRICING = DEEPSEEK_MODEL_PRICING
+export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING
 
-export type ModelPricing = typeof DEEPSEEK_MODEL_PRICING | typeof OPENROUTER_MODEL_PRICING
+export type ModelPricing = typeof OPENROUTER_MODEL_PRICING
 
 function finiteNumber(value: unknown): number | null {
   const number = Number(value)
@@ -40,8 +25,9 @@ function finiteNumber(value: unknown): number | null {
 
 export function pricingForModel(model: string | undefined): ModelPricing {
   const normalized = (model || '').trim().toLowerCase()
-  if (normalized === DEFAULT_OPENROUTER_MODEL) return OPENROUTER_MODEL_PRICING
-  if (normalized === DEFAULT_DEEPSEEK_MODEL) return DEEPSEEK_MODEL_PRICING
+  const routeIndependentModel = normalized.replace(/:(?:nitro|exacto|free)$/, '')
+  const openRouterBaseModel = DEFAULT_OPENROUTER_MODEL.replace(/:(?:nitro|exacto|free)$/, '')
+  if (routeIndependentModel === openRouterBaseModel) return OPENROUTER_MODEL_PRICING
   return DEFAULT_MODEL_PRICING
 }
 

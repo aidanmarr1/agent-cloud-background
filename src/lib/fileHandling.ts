@@ -3,6 +3,7 @@ import type { FileAttachment, SavedSkill } from '@/types'
 export const MAX_FILE_SIZE = 10 * 1024 * 1024
 export const MAX_DOCUMENT_SIZE = 25 * 1024 * 1024
 export const MAX_IMAGE_SIZE = 10 * 1024 * 1024
+export const MAX_MEDIA_SIZE = 25 * 1024 * 1024
 export const MAX_IMPORTED_SKILL_CHARS = 120_000
 export const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 export const ARCHIVE_ATTACHMENT_TYPE = 'application/vnd.agent.archive-text'
@@ -76,6 +77,7 @@ const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
   jpeg: 'image/jpeg',
   webp: 'image/webp',
   gif: 'image/gif',
+  avif: 'image/avif',
 }
 
 const DOCUMENT_MIME_TYPES = new Set([
@@ -91,10 +93,13 @@ const DOCUMENT_MIME_BY_EXTENSION: Record<string, string> = {
 }
 
 export const TEXT_ACCEPT = '.txt,.md,.markdown,.skill,.csv,.json,.xml,.yaml,.yml,.html,.css,.js,.mjs,.cjs,.ts,.jsx,.tsx,.py,.rb,.go,.rs,.java,.kt,.swift,.c,.cpp,.cc,.h,.hpp,.sh,.sql,.toml,.ini,.cfg,.env,.log,.diff,.patch'
-export const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif'
+export const IMAGE_ACCEPT = 'image/*,.png,.jpg,.jpeg,.webp,.gif,.avif'
 export const DOCUMENT_ACCEPT = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.presentationml.presentation,.docx,.pptx'
 export const ARCHIVE_ACCEPT = '.zip,application/zip,application/x-zip-compressed'
-export const FILE_ACCEPT = `${TEXT_ACCEPT},${DOCUMENT_ACCEPT}`
+// An empty accept filter deliberately lets the operating-system picker show
+// every file. Native multimodal formats are sent to the model; all other
+// formats remain available at an isolated sandbox path for tool inspection.
+export const FILE_ACCEPT = ''
 export const SKILL_IMPORT_ACCEPT = '.skill,.md,.markdown,.txt,.zip,application/zip,application/x-zip-compressed'
 
 interface TextEntry {
@@ -158,14 +163,7 @@ export function isDocumentFile(file: File): boolean {
 }
 
 export function isAllowedUserUpload(fileName: string, mimeType: string): boolean {
-  const normalizedType = mimeType.split(';')[0].trim().toLowerCase()
-  const ext = getFileExtension(fileName)
-  return TEXT_MIME_TYPES.has(normalizedType) ||
-    TEXT_EXTENSIONS.has(ext) ||
-    DOCUMENT_MIME_TYPES.has(normalizedType) ||
-    DOCUMENT_EXTENSIONS.has(ext) ||
-    normalizedType === SKILL_ATTACHMENT_TYPE ||
-    normalizedType === ARCHIVE_ATTACHMENT_TYPE
+  return fileName.trim().length > 0 && mimeType.trim().length > 0
 }
 
 export function getImageMimeType(file: File): string | null {
@@ -179,6 +177,18 @@ export function normalizeImageDataUrl(dataUrl: string, mimeType: string): string
 
 export function isImageFile(file: File): boolean {
   return getImageMimeType(file) !== null
+}
+
+export function isPdfFile(file: File): boolean {
+  return file.type === 'application/pdf' || getFileExtension(file.name) === 'pdf'
+}
+
+export function isAudioFile(file: File): boolean {
+  return file.type.startsWith('audio/')
+}
+
+export function isVideoFile(file: File): boolean {
+  return file.type.startsWith('video/')
 }
 
 export function formatBytes(bytes: number): string {
@@ -681,7 +691,7 @@ export async function processFilesForAttachments(files: FileList | File[]): Prom
   for (const file of list) {
     try {
       if (!isAllowedUserUpload(file.name, file.type || 'application/octet-stream')) {
-        errors.push(`Unsupported upload "${file.name}". Use .docx, .pptx, or text files only.`)
+        errors.push(`Could not identify "${file.name}".`)
       } else if (isTextFile(file)) {
         if (file.size > MAX_FILE_SIZE) {
           errors.push(`File "${file.name}" too large (max ${formatBytes(MAX_FILE_SIZE)})`)
@@ -694,6 +704,23 @@ export async function processFilesForAttachments(files: FileList | File[]): Prom
           size: file.size,
           content,
         })
+      } else if (isImageFile(file)) {
+        if (file.size > MAX_IMAGE_SIZE) {
+          errors.push(`Image "${file.name}" too large (max ${formatBytes(MAX_IMAGE_SIZE)})`)
+          continue
+        }
+        const mimeType = getImageMimeType(file) || file.type || 'image/jpeg'
+        const image = await createImageAttachmentContent(file, mimeType)
+        attachments.push({
+          name: file.name,
+          type: image.type,
+          size: file.size,
+          content: image.content,
+          contentEncoding: 'data-url',
+        })
+        if (image.compressed) {
+          warnings.push(`Optimized "${file.name}" for visual analysis.`)
+        }
       } else if (isDocumentFile(file)) {
         const documentType = getDocumentMimeType(file) || file.type || 'application/octet-stream'
         if (file.size > MAX_DOCUMENT_SIZE) {
@@ -707,8 +734,36 @@ export async function processFilesForAttachments(files: FileList | File[]): Prom
           content: await readFileAsDataURL(file),
           contentEncoding: 'data-url',
         })
+      } else if (isPdfFile(file) || isAudioFile(file) || isVideoFile(file) || isArchiveFile(file)) {
+        if (file.size > MAX_MEDIA_SIZE) {
+          errors.push(`File "${file.name}" too large (max ${formatBytes(MAX_MEDIA_SIZE)})`)
+          continue
+        }
+        attachments.push({
+          name: file.name,
+          type: file.type || (
+            isPdfFile(file)
+              ? 'application/pdf'
+              : isArchiveFile(file)
+                ? 'application/zip'
+                : 'application/octet-stream'
+          ),
+          size: file.size,
+          content: await readFileAsDataURL(file),
+          contentEncoding: 'data-url',
+        })
       } else {
-        errors.push(`Unsupported file type: ${file.name}`)
+        if (file.size > MAX_MEDIA_SIZE) {
+          errors.push(`File "${file.name}" too large (max ${formatBytes(MAX_MEDIA_SIZE)})`)
+          continue
+        }
+        attachments.push({
+          name: file.name,
+          type: file.type || 'application/octet-stream',
+          size: file.size,
+          content: await readFileAsDataURL(file),
+          contentEncoding: 'data-url',
+        })
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to read file'

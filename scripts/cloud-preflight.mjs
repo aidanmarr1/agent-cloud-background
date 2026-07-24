@@ -6,8 +6,22 @@ import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
 const root = fileURLToPath(rootUrl)
-const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const args = process.argv.slice(2)
+const scriptFiles = {
+  'cloud:smoke': 'scripts/cloud-background-contract-smoke.mjs',
+  'cloud:reconnect-smoke': 'scripts/cloud-background-reconnect-smoke.mjs',
+  'cloud:render-smoke': 'scripts/render-blueprint-smoke.mjs',
+  'cloud:worker-template-smoke': 'scripts/render-worker-env-smoke.mjs',
+  'cloud:check': 'scripts/cloud-readiness.mjs',
+  'cloud:event-smoke': 'scripts/cloud-event-replay-smoke.mjs',
+  'cloud:task-start-smoke': 'scripts/cloud-task-start-persistence-smoke.mjs',
+  'cloud:worker-lease-smoke': 'scripts/cloud-worker-lease-smoke.mjs',
+  'cloud:worker-cancel-smoke': 'scripts/cloud-worker-cancel-smoke.mjs',
+  'cloud:worker-shutdown-smoke': 'scripts/cloud-worker-shutdown-smoke.mjs',
+  'cloud:worker-supervisor-smoke': 'scripts/task-worker-supervisor-smoke.mjs',
+  'cloud:worker-ready': 'scripts/prod-background-worker-ready.mjs',
+  'cloud:worker-smoke': 'scripts/prod-background-worker-smoke.mjs',
+}
 
 loadLocalEnvFiles(rootUrl)
 
@@ -20,17 +34,24 @@ function readArg(name) {
 }
 
 function formatCommand(scriptName, scriptArgs = []) {
-  const parts = ['npm', 'run', scriptName]
-  if (scriptArgs.length > 0) parts.push('--', ...scriptArgs)
+  const parts = ['node', scriptFiles[scriptName] || scriptName, ...scriptArgs]
   return parts.map((part) => (/[\s"'$]/.test(part) ? JSON.stringify(part) : part)).join(' ')
 }
 
 function runNpmScript(label, scriptName, scriptArgs = []) {
   return new Promise((resolve, reject) => {
+    const scriptFile = scriptFiles[scriptName]
+    if (!scriptFile) {
+      reject(new Error(`No direct script mapping exists for ${scriptName}`))
+      return
+    }
+
     console.log(`\n==> ${label}`)
     console.log(`$ ${formatCommand(scriptName, scriptArgs)}`)
 
-    const child = spawn(npmBin, ['run', scriptName, ...(scriptArgs.length > 0 ? ['--', ...scriptArgs] : [])], {
+    // Execute with the same Node runtime as the preflight itself. This keeps
+    // verification portable in hosts that provide Node without an npm binary.
+    const child = spawn(process.execPath, [scriptFile, ...scriptArgs], {
       cwd: root,
       env: process.env,
       stdio: 'inherit',

@@ -47,7 +47,7 @@ const bundlePath = join(workDir, 'runner.mjs')
 try {
   await writeFile(runnerPath, `
 import { AgentLoop } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
-import { DEFAULT_DEEPSEEK_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
+import { DEFAULT_OPENROUTER_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
 
 type EventRecord = { type: string; [key: string]: unknown }
 
@@ -108,7 +108,7 @@ async function runSmoke() {
       messages: [
         { role: 'user', content: ${JSON.stringify(smokePrompt)} },
       ],
-      model: process.env.DEEPSEEK_MODEL || DEFAULT_DEEPSEEK_MODEL,
+      model: DEFAULT_OPENROUTER_MODEL,
       conversationId: ${JSON.stringify(smokeConversationId)},
       signal: controller.signal,
     })

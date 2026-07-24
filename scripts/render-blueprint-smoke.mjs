@@ -117,20 +117,18 @@ assert.equal(web.healthCheckPath, '/api/health', 'web service must use the publi
 assert.ok(Number(worker.maxShutdownDelaySeconds) >= 300, 'worker service should use a long shutdown window for graceful handoff')
 
 for (const service of [web, worker]) {
-  for (const key of ['AUTH_SECRET', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'DEEPSEEK_API_KEY', 'E2B_API_KEY']) {
+  for (const key of ['AUTH_SECRET', 'TURSO_DATABASE_URL', 'TURSO_AUTH_TOKEN', 'OPENROUTER_API_KEY', 'E2B_API_KEY']) {
     requireSecret(service, key)
   }
   requireValue(service, 'NODE_VERSION', '22')
   requireValue(service, 'NODE_ENV', 'production')
   requireValue(service, 'AUTH_TRUST_HOST', 'true')
   requireValue(service, 'AGENT_TRUST_PROXY_HEADERS', 'true')
-  requireValue(service, 'LLM_PROVIDER', 'deepseek')
-  requireValue(service, 'DEEPSEEK_MODEL', 'deepseek-v4-flash')
-  requireValue(service, 'DEEPSEEK_REASONING_EFFORT', 'minimal')
-  requireValue(service, 'DEEPSEEK_THINKING_ENABLED', 'false')
-  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.1-flash-lite')
+  requireValue(service, 'LLM_PROVIDER', 'openrouter')
+  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.5-flash-lite:nitro')
   requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
+  assert.equal(service.env.has('DEEPSEEK_API_KEY'), false, `${service.name} must not define a DeepSeek credential`)
   requireValue(service, 'AGENT_STORAGE_DRIVER', 'turso')
   requireValue(service, 'AGENT_TASK_WORKER_MODE', 'external')
   requireValue(service, 'AGENT_TASK_QUEUE_NAME', 'production')

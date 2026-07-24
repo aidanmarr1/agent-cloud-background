@@ -79,10 +79,10 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const cadenceNarrationInMainTurn = false/, 'ordinary action calls must not depend on a provider-specific narration tool field')
   assert.match(agentLoop, /Lead with the genuinely new result or progress/, 'sidecar narration must lead with the newest completed result')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'sidecar narration must not be seeded with a broad next-plan-phase cue')
-  assert.match(agentLoop, /this narration-only request has no selected next action[\s\S]*Keep it result-only[\s\S]*do not use "Next"/, 'sidecar narration must stay result-only when no immediate action is actually beginning')
-  assert.match(agentLoop, /the most recent update already used a forward transition[\s\S]*keep this update result-only/, 'sidecar narration must avoid repetitive consecutive Next transitions')
-  assert.match(agentLoop, /asynchronous narration-only request has no selected next action[\s\S]*keep it result-only/, 'sidecar system instruction must not invent a future transition')
-  assert.match(narrationMemory, /A second sentence beginning "Next, \.\.\." is optional, never required, and never a template[\s\S]*after the completed finding[\s\S]*exact concrete action this same tool-call response is beginning immediately/, 'native cadence schema must preserve natural optional Next phrasing for the action beginning in the same response')
+  assert.match(agentLoop, /This narration-only request has no selected next action\. Keep it result-only; do not infer an action from the next plan phase/, 'sidecar narration must stay result-only when no immediate action is actually beginning')
+  assert.match(agentLoop, /Do not force a stock opening or repeat the recent updates/, 'sidecar narration must avoid repetitive structural templates')
+  assert.match(agentLoop, /asynchronous narration-only request has no selected next action[\s\S]*keep it result-only/i, 'sidecar system instruction must not invent a future transition')
+  assert.match(narrationMemory, /A sentence beginning "Next, \.\.\." is optional and only valid when it names the exact concrete action this same tool-call response begins immediately; never use it for a broader phase or vague later work/, 'native cadence schema must preserve natural optional Next phrasing for the action beginning in the same response')
   assert.match(agentLoop, /const settleNarrationSidecar = async[\s\S]*await settleNarrationSidecar\(\)[\s\S]*const totalUsage/, 'terminal completion must not race an already-running narration debit/event')
   assert.match(agentLoop, /narrationIntentEpoch \+= 1[\s\S]*narrationSidecarAbortController\?\.abort/, 'a newer live directive must supersede an obsolete in-flight narration')
   assert.match(dispatcher, /case 'progress_update':[\s\S]*handleProgressUpdate\(event\)/, 'client must route the complete explicit progress event with placement metadata')
@@ -112,15 +112,14 @@ async function assertSourceContracts() {
   assert.match(config, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 3_000/, 'API inactivity timeout must tolerate normal provider jitter while the iteration watchdog bounds frozen turns')
   assert.match(config, /checkIntervalMs:\s*150/, 'stream inactivity checks should run quickly enough to keep thinking state honest')
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'agent prompt must enforce the exact 3-4 action narration window')
-  assert.match(prompts, /never fewer than 15 words/, 'agent prompt must forbid too-short progress narration')
-  assert.match(prompts, /1-2 complete sentences/, 'agent prompt must define short paragraph cadence')
+  assert.doesNotMatch(prompts, /never fewer than 15 words|exactly \d+(?:-\d+)? words/, 'agent prompt must not impose a rigid narration length template')
+  assert.match(prompts, /one sentence can carry a clear finding, two can resolve a contrast or explain an implication, and a short paragraph can summarize a genuinely dense milestone/, 'agent prompt must let evidence determine narration length')
   assert.match(prompts, /optional, never required, and never a template/, 'agent prompt must make Next natural and optional without a frequency quota')
   assert.match(prompts, /result-first/, 'agent prompt must request result-first evidence narration')
   assert.match(prompts, /progressive evidence trace/, 'agent prompt must advance the newest evidence instead of paraphrasing a running summary')
-  assert.match(prompts, /new evidence followed by its implication/, 'agent prompt must provide multiple evidence-shaped rhetorical forms')
-  assert.match(prompts, /Vary the grammatical subject, voice, rhythm, and sentence count/, 'agent prompt must vary structure rather than only swapping opening verbs')
+  assert.match(prompts, /newest factual delta since the preceding update/, 'agent prompt must anchor each update in genuinely new evidence')
+  assert.match(prompts, /Vary subject, voice, rhythm, and sentence count/, 'agent prompt must vary structure rather than only swapping opening verbs')
   assert.doesNotMatch(prompts, /minority case|uncommon/, 'agent prompt must not impose a frequency quota on natural Next transitions')
-  assert.match(prompts, /place it after a completed finding/, 'agent prompt must place an optional Next sentence after concrete progress')
   assert.match(prompts, /same response immediately begins the exact concrete action it names/, 'agent prompt must give Next its immediate-in-the-moment meaning')
   assert.match(prompts, /Never use it for a broader phase, a general shift in analysis, planned later work/, 'agent prompt must reject broad phase-transition Next narration')
   assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'agent prompt must make narration happen before the next action')
@@ -129,8 +128,8 @@ async function assertSourceContracts() {
   assert.match(prompts, /before <next_step\/> if the current phase is complete/, 'agent prompt must allow narration at the end of a phase before next_step')
   assert.match(prompts, /Phase-end narration is allowed and expected/, 'agent prompt must not wait for an extra tool call at phase end')
   assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
-  assert.match(agentLoop, /NARRATION_STRUCTURAL_FORMS/, 'compact narration must select among evidence-matched structural forms')
-  assert.match(agentLoop, /Preferred structural form for this update/, 'sidecar context must carry the selected rhetorical preference')
+  assert.doesNotMatch(agentLoop, /NARRATION_STRUCTURAL_FORMS|Preferred structural form for this update/, 'compact narration must not force a rotating template')
+  assert.match(agentLoop, /Size the update to the evidence:/, 'sidecar context must let evidence determine update length and form')
   assert.match(agentLoop, /newest delta, not the cumulative task conclusion/, 'sidecar must reject repetitive cumulative summaries')
   assert.match(agentLoop, /temperature:\s*0\.55/, 'fast narration sidecar must retain enough variation to avoid one repeated template')
   assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
@@ -303,8 +302,8 @@ export function runNarrationSmoke() {
   assert.equal(acceptProgressNarration(structureState, evidenceTransitionTwo, { requireSignal: false }).status, 'accepted')
   assert.equal(
     reviewProgressNarration(structureState, evidenceTransitionThree, { requireSignal: false }).status,
-    'duplicate',
-    'a third consecutive narration with the same rhetorical skeleton must be rejected even when its facts differ',
+    'accepted',
+    'distinct factual progress must remain valid even when natural prose happens to share a rhetorical shape',
   )
 
   assert.equal(sanitizeNarrationText('Click the "Update" button to confirm the prompt.'), null)

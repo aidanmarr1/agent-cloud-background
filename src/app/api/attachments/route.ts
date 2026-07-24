@@ -80,13 +80,13 @@ export async function POST(request: Request) {
     return jsonResponse({ error: 'Upload is larger than 50 MB.' }, { status: 413 })
   }
 
-  const attachments: Array<PublicAttachment & { content?: string; contentEncoding?: 'text' }> = []
+  const attachments: Array<PublicAttachment & { content?: string; contentEncoding?: 'text' | 'data-url' }> = []
   for (const file of files) {
     if (file.size > MAX_ATTACHMENT_BYTES) {
       return jsonResponse({ error: `"${file.name}" is larger than 25 MB.` }, { status: 413 })
     }
     if (!isAllowedUserUpload(file.name, file.type || 'application/octet-stream')) {
-      return jsonResponse({ error: 'Only .docx, .pptx, and text files can be uploaded. Images are not supported.' }, { status: 415 })
+      return jsonResponse({ error: 'This file could not be identified.' }, { status: 415 })
     }
     const body = Buffer.from(await file.arrayBuffer())
     const record = await createStoredAttachment({
@@ -97,7 +97,7 @@ export async function POST(request: Request) {
       mimeType: file.type || 'application/octet-stream',
       body,
     })
-    const publicAttachment: PublicAttachment & { content?: string; contentEncoding?: 'text' } = toPublicAttachment(record)
+    const publicAttachment: PublicAttachment & { content?: string; contentEncoding?: 'text' | 'data-url' } = toPublicAttachment(record)
     const extracted = await extractUploadedAttachmentText({
       fileName: file.name,
       mimeType: file.type || 'application/octet-stream',

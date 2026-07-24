@@ -88,7 +88,7 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
           properties: {
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Write 1-2 concise complete sentences advancing the user-visible evidence trace. Lead with the newest completed result. A second sentence beginning "Next, ..." is optional, never required, and never a template. When it fits naturally, place it after the completed finding and use it only when it names the exact concrete action this same tool-call response is beginning immediately. Never use Next for a broader phase, a general shift in analysis, planned later work, or a vague future focus. Match the structure to the evidence (implication, contrast, synthesis, verified state, or blocker/pivot) and avoid the rhetorical shape of recent updates. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, or raw tool failures. Never write only a future action, plan, promise, tool accounting, empty string, cumulative-summary paraphrase, or generic Next sentence. This field is display-only and is removed before tool execution.',
+              description: 'Required cadence field. Write one natural completed-result update advancing the user-visible evidence trace. Size it to the newest evidence: a sentence for one clear result, two when a contrast or implication matters, or a short paragraph for a dense milestone. Choose the wording and structure freely without repeating recent claims. A sentence beginning "Next, ..." is optional and only valid when it names the exact concrete action this same tool-call response begins immediately; never use it for a broader phase or vague later work. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, or raw tool failures. Never write only a future action, plan, promise, tool accounting, empty string, cumulative-summary paraphrase, or generic Next sentence. This field is display-only and is removed before tool execution.',
               minLength: 1,
               maxLength: 300,
             },
@@ -288,21 +288,6 @@ export function reviewProgressNarration(
     }
     if (!hasNovelNumber(text, previous.text) && narrationSimilarity(text, previous.text) >= 0.64) {
       return { status: 'duplicate', text, duplicateOf: previous.text }
-    }
-  }
-
-  const recentStructures = state.recentNarrations
-    .slice(-2)
-    .map(previous => narrationStructureSignature(previous.text))
-  const candidateStructure = narrationStructureSignature(text)
-  if (
-    recentStructures.length === 2 &&
-    recentStructures.every(structure => structure === candidateStructure)
-  ) {
-    return {
-      status: 'duplicate',
-      text,
-      duplicateOf: state.recentNarrations.at(-1)?.text || text,
     }
   }
 

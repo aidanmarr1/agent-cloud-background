@@ -76,7 +76,7 @@ export function auditAgentCompletion(
     missing.push(`${unresolvedSteps.join(', ')} did not complete`)
   }
 
-  if (!completedInlineAnswer && requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
+  if (requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
     missing.push('no successful final deliverable artifact was saved')
   }
 
@@ -84,7 +84,7 @@ export function auditAgentCompletion(
     missing.push(MISSING_FINAL_INLINE_ANSWER)
   }
 
-  if (!completedInlineAnswer && requiresFinalDeliverable(state) && hasFinalDeliverable(state) && !state.deliverableVerificationDone) {
+  if (requiresFinalDeliverable(state) && hasFinalDeliverable(state) && !state.deliverableVerificationDone) {
     missing.push('the final deliverable was saved but did not pass completion verification')
   }
 
