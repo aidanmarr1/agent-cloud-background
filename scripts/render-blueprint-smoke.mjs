@@ -125,7 +125,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'AUTH_TRUST_HOST', 'true')
   requireValue(service, 'AGENT_TRUST_PROXY_HEADERS', 'true')
   requireValue(service, 'LLM_PROVIDER', 'openrouter')
-  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.5-flash-lite:nitro')
+  requireValue(service, 'OPENROUTER_MODEL', 'google/gemini-3.6-flash:nitro')
   requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
   assert.equal(service.env.has('DEEPSEEK_API_KEY'), false, `${service.name} must not define a DeepSeek credential`)
