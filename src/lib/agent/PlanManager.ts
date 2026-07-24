@@ -29,6 +29,7 @@ import {
 } from './taskConstraints'
 import { humanTopicLabel, requestSubject } from './taskText'
 import { analyzeTaskIntent } from './TaskIntent'
+import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 import { researchDepthProfileForState } from './ResearchDepth'
 import {
@@ -476,7 +477,7 @@ function nonDeliverableStepGuidance(
 
   const noteGuidance = ''
   const depth = researchDepthProfileForState(state)
-  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Current depth profile: ${depth.label}; this phase should usually reach about ${depth.requiredCalls} research actions and ${depth.requiredSourceBreadth} distinct source domains unless the user explicitly limited scope or real blockers make that impossible.\n- Tool caps are ceilings, never targets. Do not try to use all available searches/extractions; stop as soon as the phase has the evidence packet its scope requires.\n- Use enough strong source actions to satisfy the request's actual depth. Prefer web_search plus read_document/http extraction for normal research pages; use browser_navigate only when rendered state, screenshots, interaction, or page scripts are needed.\n- Add source actions for comparison coverage, current claims, contradictions, named entities, or evidence gaps; stop when the phase has a credible evidence packet, not when an arbitrary small count is reached.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only when rendering matters.'}${noteGuidance}\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
+  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Current depth profile: ${depth.label}; this phase should usually reach about ${depth.requiredCalls} research actions and ${depth.requiredSourceBreadth} distinct source domains unless the user explicitly limited scope or real blockers make that impossible.\n- Tool caps are ceilings, never targets. Do not try to use all available searches/extractions; stop as soon as the phase has the evidence packet its scope requires.\n- Use enough strong source actions to satisfy the request's actual depth. Prefer web_search plus read_document/http extraction for normal research pages; use browser_navigate only when rendered state, screenshots, interaction, or page scripts are needed.\n- Add source actions for comparison coverage, current claims, contradictions, named entities, or evidence gaps; stop when the phase has a credible evidence packet, not when an arbitrary small count is reached.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only when rendering matters.'}${noteGuidance}\n- Keep response text to one concise, progressive finding for this phase. Do not draft, paste, or rehearse the full final report during research; the final deliverable step owns the complete synthesis.\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
 }
 
 function planAwareIterationFloor(
@@ -968,16 +969,9 @@ Requirements:
     const resolvedPlan = state.planItems as string[] | null
     const resolvedScopes = state.planScopes as (string | null)[] | null
     if (resolvedPlan && resolvedPlan.length > 0) {
-      const taskIntent = analyzeTaskIntent(this.messages)
-      const quickInlineAnswer = taskIntent.wantsQuick &&
-        !taskIntent.explicitSavedArtifact &&
-        !taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages))
-      const singleStepNeedsSavedArtifact = !quickInlineAnswer && (
-        taskIntent.explicitSavedArtifact ||
-        taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages)) ||
-        state.buildTask ||
-        state.taskStrategy === 'build' ||
-        state.taskStrategy === 'creative'
+      const singleStepNeedsSavedArtifact = taskRequiresSavedFinalArtifact(
+        state,
+        effectiveTaskRequest(this.messages),
       )
       const isFirstStepDeliverable = resolvedPlan.length === 1 && singleStepNeedsSavedArtifact
       const imageOnlyStep = resolvedPlan.length === 1 &&
@@ -991,7 +985,16 @@ Requirements:
         : nonDeliverableStepGuidance(state, resolvedPlan[0], this.taskComplexity)
       const msg = {
         role: 'system',
-        content: buildStepMessage(resolvedPlan, 0, this.withCustomInstructionGuidance(stepGuidance), undefined, this.taskComplexity, state.taskStrategy, resolvedScopes?.[0] ?? undefined),
+        content: buildStepMessage(
+          resolvedPlan,
+          0,
+          this.withCustomInstructionGuidance(stepGuidance),
+          undefined,
+          this.taskComplexity,
+          state.taskStrategy,
+          resolvedScopes?.[0] ?? undefined,
+          singleStepNeedsSavedArtifact,
+        ),
       }
       state.currentPlanItems = resolvedPlan
       state.currentPlanScopes = resolvedScopes
@@ -1125,13 +1128,10 @@ Requirements:
     }
     const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
     const sg = state.strategyConfig?.stepGuidance
-    const taskIntent = analyzeTaskIntent(this.messages)
-    const lastStepNeedsSavedArtifact =
-      taskIntent.explicitSavedArtifact ||
-      taskDefaultsToMarkdownDeliverable(effectiveTaskRequest(this.messages)) ||
-      state.buildTask ||
-      state.taskStrategy === 'build' ||
-      state.taskStrategy === 'creative'
+    const lastStepNeedsSavedArtifact = taskRequiresSavedFinalArtifact(
+      state,
+      effectiveTaskRequest(this.messages),
+    )
     const stepHint = isLastStep
       ? lastStepNeedsSavedArtifact
         ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file and append_file for large output. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
@@ -1147,6 +1147,7 @@ Requirements:
         this.taskComplexity,
         state.taskStrategy,
         state.currentPlanScopes?.[state.currentStepIdx] ?? undefined,
+        lastStepNeedsSavedArtifact,
       ),
     }
   }

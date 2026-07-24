@@ -1,6 +1,5 @@
 import type { AgentStateData } from './AgentState'
-import { analyzeTaskIntent } from './TaskIntent'
-import { explicitlyRequestsInlineAnswer, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 
 export interface CompletionAuditResult {
   complete: boolean
@@ -16,34 +15,9 @@ function hasFinalDeliverable(state: AgentStateData): boolean {
     state.emittedImageArtifacts.size > 0
 }
 
-function currentTaskText(state: AgentStateData): string {
-  return [
-    state.originalUserRequest || '',
-    ...(state.currentPlanItems || []),
-    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
-    ...state.createdFiles,
-  ].join(' ')
-}
-
 function requiresFinalDeliverable(state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
-  if (state.taskStrategy === 'browse') return false
-  const userRequest = state.originalUserRequest || ''
-  const taskIntent = analyzeTaskIntent([{ role: 'user', content: userRequest }])
-  const taskText = currentTaskText(state)
-  const plannedIntent = analyzeTaskIntent([{ role: 'user', content: taskText }])
-  return state.buildTask ||
-    state.taskStrategy === 'build' ||
-    state.taskStrategy === 'code' ||
-    state.taskStrategy === 'creative' ||
-    taskIntent.requiresSavedArtifact ||
-    (
-      !explicitlyRequestsInlineAnswer(userRequest) &&
-      (
-        plannedIntent.explicitSavedArtifact ||
-        taskDefaultsToMarkdownDeliverable(taskText)
-      )
-    )
+  return taskRequiresSavedFinalArtifact(state)
 }
 
 function requiresFinalInlineAnswer(state: AgentStateData): boolean {
@@ -57,6 +31,15 @@ function requiresFinalInlineAnswer(state: AgentStateData): boolean {
 function isWebsiteLike(state: AgentStateData): boolean {
   if (!state.buildTask && state.taskStrategy !== 'build' && state.taskStrategy !== 'code') return false
   return /\b(next\.?js|website|web\s*site|webpage|landing page|site|page\.tsx|layout\.tsx|globals\.css|responsive|preview|localhost)\b/i.test(currentTaskText(state))
+}
+
+function currentTaskText(state: AgentStateData): string {
+  return [
+    state.originalUserRequest || '',
+    ...(state.currentPlanItems || []),
+    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
+    ...state.createdFiles,
+  ].join(' ')
 }
 
 function unresolvedStepSummaries(state: AgentStateData): string[] {

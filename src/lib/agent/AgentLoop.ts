@@ -115,6 +115,7 @@ import { OutputVerifier } from './OutputVerifier'
 import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from './CompletionAudit'
 import { shouldDefaultFrontendToNextTsx } from './frontendDefaults'
 import { analyzeTaskIntent } from './TaskIntent'
+import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 import { isWebsiteEntryPath } from '@/lib/localWebsiteServer'
 import { getNextWebsiteProjectStatus } from '@/lib/tsxWebsitePreview'
 import { OUT_OF_CREDITS_MESSAGE, type CreditTokenUsage } from '@/lib/creditPolicy'
@@ -961,29 +962,11 @@ function taskWantsPdfArtifact(
   return /\b(?:pdf|export)\b/i.test(`${currentToolIntentText(state)} ${userText}`)
 }
 
-function explicitSavedFinalArtifactRequested(text: string): boolean {
-  return analyzeTaskIntent([{ role: 'user', content: text }]).requiresSavedArtifact
-}
-
-function originalRequestPrefersInlineBrief(text: string): boolean {
-  if (!text) return false
-  if (explicitSavedFinalArtifactRequested(text)) return false
-  return /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast|one[-\s]?sentence|two[-\s]?sentence|in\s+(?:one|two|three|four|five|\d+)\s+sentences?)\b/i.test(text)
-}
-
 function taskNeedsSavedFinalArtifact(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
-  const userText = state.originalUserRequest || effectiveTaskRequest(messages)
-  const intent = analyzeTaskIntent([{ role: 'user', content: userText }])
-  if ((intent.wantsQuick || intent.wantsInlineAnswer || originalRequestPrefersInlineBrief(userText)) && !intent.explicitSavedArtifact) {
-    return false
-  }
-  return state.buildTask ||
-    state.taskStrategy === 'build' ||
-    state.taskStrategy === 'creative' ||
-    intent.requiresSavedArtifact
+  return taskRequiresSavedFinalArtifact(state, effectiveTaskRequest(messages))
 }
 
 function isBriefInlineDirectAnswerTask(

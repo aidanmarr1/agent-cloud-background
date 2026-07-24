@@ -42,6 +42,7 @@ import {
   researchDepthProfileForState,
 } from './ResearchDepth'
 import { analyzeTaskIntent } from './TaskIntent'
+import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 
 export type PolicyActionType = 'inject_message' | 'step_advance' | 'terminate' | 'continue_loop'
 
@@ -92,6 +93,7 @@ function stepMsg(state: AgentStateData, extra?: string): string {
     state.taskComplexity,
     state.taskStrategy,
     state.currentPlanScopes?.[state.currentStepIdx] ?? undefined,
+    taskRequiresSavedFinalArtifact(state),
   )
 }
 
@@ -338,13 +340,7 @@ function finalDeliverableRequired(state: AgentStateData): boolean {
   if (isBrowserActionTask(state)) return false
   if (currentStepWantsImageArtifact(state)) return false
   if (isFixedWebSearchInlineAnswerState(state)) return false
-  const userRequest = state.originalUserRequest || ''
-  const taskIntent = analyzeTaskIntent([{ role: 'user', content: userRequest }])
-  return state.buildTask ||
-    state.taskStrategy === 'build' ||
-    state.taskStrategy === 'code' ||
-    state.taskStrategy === 'creative' ||
-    taskIntent.requiresSavedArtifact
+  return taskRequiresSavedFinalArtifact(state)
 }
 
 function isFinalInlineAnswerStep(state: AgentStateData): boolean {

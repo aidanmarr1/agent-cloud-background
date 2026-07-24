@@ -355,9 +355,13 @@ export function taskDefaultsToMarkdownDeliverable(text: string | null | undefine
   if (explicitlyRequestsInlineAnswer(text)) return false
   const explicitArtifact = requestsMarkdownDeliverable(text) || FILE_DELIVERABLE_PATTERN.test(text)
   const reportDefault = REPORT_MARKDOWN_DEFAULT_PATTERN.test(text)
+  const taskLevelBrevityText = text.replace(
+    /\b(?:short|brief|concise|succinct|small|tiny)\s+(?:executive\s+)?summary\b/gi,
+    ' ',
+  )
   if (
     !explicitArtifact &&
-    /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast|one[-\s]?sentence|two[-\s]?sentence|in\s+(?:one|two|three|four|five|\d+)\s+sentences?)\b/i.test(text)
+    /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple|small|tiny|fast|one[-\s]?sentence|two[-\s]?sentence|in\s+(?:one|two|three|four|five|\d+)\s+sentences?)\b/i.test(taskLevelBrevityText)
   ) {
     return false
   }

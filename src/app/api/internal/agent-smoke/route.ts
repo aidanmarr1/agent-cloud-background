@@ -174,6 +174,9 @@ export async function GET(request: NextRequest) {
       .filter(event => event.type === 'plan')
       .map(event => event.items)
     const browserFrames = events.filter(event => event.type === 'browser_frame').length
+    const artifacts = events
+      .filter(event => event.type === 'artifact_created')
+      .map(event => String(event.artifactPreview || ''))
     const firstTextMs = events.find(event => event.type === 'text_delta')?.elapsedMs ?? null
     const planMs = events.find(event => event.type === 'plan')?.elapsedMs ?? null
     const firstToolMs = events.find(event => event.type === 'tool_start')?.elapsedMs ?? null
@@ -200,6 +203,7 @@ export async function GET(request: NextRequest) {
       firstToolMs,
       eventCount: events.length,
       browserFrames,
+      artifacts,
       plan: plans[0] || null,
       toolStarts,
       errors,

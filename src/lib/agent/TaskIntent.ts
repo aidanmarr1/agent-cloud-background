@@ -68,7 +68,11 @@ export function analyzeTaskIntent(messages: Array<{ role: string; content: strin
   const text = rawText.toLowerCase()
   const artifactText = artifactPositiveText(text)
 
-  const wantsQuick = QUICK_RE.test(text)
+  const taskLevelBrevityText = text.replace(
+    /\b(?:short|brief|concise|succinct|small|tiny)\s+(?:executive\s+)?summary\b/gi,
+    ' ',
+  )
+  const wantsQuick = QUICK_RE.test(taskLevelBrevityText)
   const wantsDeep = DEEP_RE.test(text)
   const asksForWriting = WRITING_RE.test(text)
   const wantsReport = REPORT_RE.test(text) || BRIEF_NOUN_RE.test(text)

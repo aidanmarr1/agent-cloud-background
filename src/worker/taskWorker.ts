@@ -301,8 +301,23 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     console.log('[TaskWorker] Ready', { workerId, queueName })
 
     let idlePollMs = pollMs
+    let consecutiveClaimFailures = 0
     while (!stopping) {
-      const claim = await claimNextTaskJob(workerId)
+      let claim: Awaited<ReturnType<typeof claimNextTaskJob>>
+      try {
+        claim = await claimNextTaskJob(workerId)
+        consecutiveClaimFailures = 0
+      } catch (error) {
+        consecutiveClaimFailures += 1
+        console.error('[TaskWorker] Queue claim attempt failed', {
+          consecutiveClaimFailures,
+          error: workerErrorMessage(error),
+        })
+        if (consecutiveClaimFailures >= 5) throw error
+        await sendHeartbeat('idle').catch(() => undefined)
+        await sleepUntilAbort(Math.min(maxIdlePollMs, pollMs * (2 ** consecutiveClaimFailures)), shutdownController.signal)
+        continue
+      }
       if (!claim) {
         if (options.once) break
         await sleepUntilAbort(idlePollMs, shutdownController.signal)

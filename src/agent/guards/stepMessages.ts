@@ -18,7 +18,16 @@ function finalStepWantsInlineAnswer(step: string, scope?: string): boolean {
     /\b(?:answer|respond|reply|summary|summarize|summarise|explain)\b/i.test(text)
 }
 
-export function buildStepMessage(planItems: string[], currentIdx: number, extra?: string, stepFindings?: Map<number, string>, complexity: number = 2, strategy: string = 'research', scope?: string): string {
+export function buildStepMessage(
+  planItems: string[],
+  currentIdx: number,
+  extra?: string,
+  stepFindings?: Map<number, string>,
+  complexity: number = 2,
+  strategy: string = 'research',
+  scope?: string,
+  savedFinalArtifactRequired?: boolean,
+): string {
   const progress = planItems
     .map((item, i) => {
       if (i < currentIdx) return `  [DONE] ${i + 1}. ${item}`
@@ -47,7 +56,12 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
   }
 
   const isLastStep = currentIdx === planItems.length - 1
-  const inlineFinalAnswer = isLastStep && finalStepWantsInlineAnswer(planItems[currentIdx] || '', scope)
+  const inlineFinalAnswer = isLastStep &&
+    savedFinalArtifactRequired !== true &&
+    (
+      savedFinalArtifactRequired === false ||
+      finalStepWantsInlineAnswer(planItems[currentIdx] || '', scope)
+    )
   const phaseBoundary = currentIdx > 0
     ? isLastStep
       ? inlineFinalAnswer
@@ -119,7 +133,7 @@ export function buildStepMessage(planItems: string[], currentIdx: number, extra?
     } else if (isBuildStrategy) {
       instruction = `Do only the specific asset/source gathering this build step requires. Prefer image_search for requested images/assets. Do NOT browse generic design best-practice articles, inspiration galleries, or template roundups unless the user explicitly asked for that research. Advance once the needed facts/assets are gathered.`
     } else {
-      instruction = `Research this step with the fewest strong source actions that satisfy it. Use web_search to discover candidates, then read/extract the strongest source pages before searching more. Extract dates, numbers, claims, technical details, caveats, and contradictions. For comparisons, cover each named entity before synthesizing. Report key findings in response text. Notes (.md) only AFTER real research.`
+      instruction = `Research this step with the fewest strong source actions that satisfy it. Use web_search to discover candidates, then read/extract the strongest source pages before searching more. Extract dates, numbers, claims, technical details, caveats, and contradictions. For comparisons, cover each named entity before synthesizing. Report one concise progressive finding in response text; do not draft or paste the full final report before the deliverable step. Notes (.md) only AFTER real research.`
     }
   }
 

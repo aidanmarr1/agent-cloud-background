@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const INLINE_RESEARCH_FLAG = '--expect-inline-research'
+const SAVED_REPORT_FLAG = '--expect-saved-report'
 const SELF_TEST_FLAG = '--self-test'
 const INLINE_RESEARCH_DISCOVERY_TOOLS = new Set(['web_search'])
 const INLINE_RESEARCH_EVIDENCE_TOOLS = new Set([
@@ -46,6 +47,35 @@ function inlineResearchContractFailures(body) {
   }
   if (finalText.length < 20) {
     failures.push('no substantive inline answer text was returned')
+  }
+
+  return failures
+}
+
+function savedReportContractFailures(body) {
+  const toolNames = Array.isArray(body?.toolStarts)
+    ? body.toolStarts
+      .map(entry => entry?.name)
+      .filter(name => typeof name === 'string')
+    : []
+  const artifacts = Array.isArray(body?.artifacts) ? body.artifacts : []
+  const failures = []
+
+  if (body?.ok !== true || body?.terminalStatus !== 'done') {
+    failures.push('agent run did not finish successfully')
+  }
+  if (!toolNames.some(name => FILE_OUTPUT_TOOLS.has(name))) {
+    failures.push('no saved-file tool was recorded')
+  }
+  if (artifacts.length === 0) {
+    failures.push('no successful deliverable artifact event was recorded')
+  }
+  const leakedFailure = [
+    body?.error,
+    ...(Array.isArray(body?.errors) ? body.errors : []),
+  ].some(value => /final_inline_answer_complete|no successful final deliverable/i.test(String(value || '')))
+  if (leakedFailure) {
+    failures.push('the run fell back to an inline completion despite requiring a saved report')
   }
 
   return failures
@@ -107,9 +137,11 @@ loadLocalEnv()
 const rawArgs = process.argv.slice(2)
 const selfTest = rawArgs.includes(SELF_TEST_FLAG)
 const expectInlineResearch = rawArgs.includes(INLINE_RESEARCH_FLAG)
+const expectSavedReport = rawArgs.includes(SAVED_REPORT_FLAG)
 const positionalArgs = rawArgs.filter(arg => (
   arg !== SELF_TEST_FLAG &&
-  arg !== INLINE_RESEARCH_FLAG
+  arg !== INLINE_RESEARCH_FLAG &&
+  arg !== SAVED_REPORT_FLAG
 ))
 
 if (selfTest) {
@@ -157,11 +189,13 @@ console.log(JSON.stringify({
 
 const contractFailures = expectInlineResearch
   ? inlineResearchContractFailures(parsedBody)
-  : []
+  : expectSavedReport
+    ? savedReportContractFailures(parsedBody)
+    : []
 
-if (expectInlineResearch) {
+if (expectInlineResearch || expectSavedReport) {
   console.log(JSON.stringify({
-    contract: 'inline-research',
+    contract: expectInlineResearch ? 'inline-research' : 'saved-report',
     ok: contractFailures.length === 0,
     failures: contractFailures,
   }, null, 2))

@@ -31,6 +31,7 @@ async function assertSourceContracts() {
     serverSync,
     agentConfig,
     taskConstraints,
+    deliverableContract,
   ] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
@@ -55,6 +56,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/store/chat/serverSync.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskConstraints.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/DeliverableContract.ts'), 'utf8'),
   ])
 
   const readNumberConst = (source, name) => {
@@ -100,7 +102,11 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /persistSandboxTaskFile/, 'created sandbox files must be persisted beyond the serverless tmp lifetime')
   assert.match(toolPipeline, /markTaskFileDeleted/, 'durable task-file records must track deletes')
   assert.doesNotMatch(completionAudit, /hasSavedRequestedMarkdownDeliverable/, 'completion audit must not let a markdown file bypass unfinished plan steps or report verification')
-  assert.match(completionAudit, /plannedIntent\.explicitSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(taskText\)/, 'completion audit must infer the requested artifact from the full task and final plan even if the original request field is incomplete')
+  assert.match(completionAudit, /taskRequiresSavedFinalArtifact\(state\)/, 'completion audit must use the shared saved-deliverable contract')
+  assert.match(agentLoop, /taskRequiresSavedFinalArtifact\(state,\s*effectiveTaskRequest\(messages\)\)/, 'the live loop must use the same saved-deliverable contract as completion audit')
+  assert.match(policyEngine, /return taskRequiresSavedFinalArtifact\(state\)/, 'policy completion must use the same saved-deliverable contract as the loop and final audit')
+  assert.doesNotMatch(policyEngine, /taskIntent\.requiresSavedArtifact\s*$/, 'policy completion must not keep an independent final-output classifier')
+  assert.match(deliverableContract, /userIntent\.wantsInlineAnswer \|\| userIntent\.wantsQuick[\s\S]*return false[\s\S]*userIntent\.requiresSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(taskText\)/, 'the shared contract must honor explicit inline/quick requests while preserving saved Markdown research defaults')
   assert.match(taskConstraints, /isFixedWebSearchInlineAnswerState/, 'task constraints must distinguish fixed-search inline answers from fixed-search markdown deliverables')
   assert.match(taskFiles, /create table if not exists task_files/, 'task file schema must create durable task-file records')
   assert.match(taskFiles, /primary key \(user_id, conversation_id, path\)/, 'task file records must be scoped per user and task path')
@@ -171,6 +177,7 @@ import assert from 'node:assert/strict'
 import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
 import { PolicyEngine } from ${JSON.stringify(join(root, 'src/lib/agent/PolicyEngine.ts'))}
+import { taskRequiresSavedFinalArtifact } from ${JSON.stringify(join(root, 'src/lib/agent/DeliverableContract.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -181,6 +188,35 @@ const timeouts = {
 }
 
 export function runCompletionAuditSmoke() {
+  const citedReportContract = createInitialState(false, timeouts)
+  citedReportContract.currentPlanItems = [
+    'Compare international trial evidence',
+    'Write comprehensive report with executive summary, citations, and source links',
+  ]
+  citedReportContract.currentPlanScopes = [null, 'Create the final cited report']
+  citedReportContract.currentStepIdx = 1
+  citedReportContract.taskStrategy = 'research'
+  citedReportContract.originalUserRequest =
+    'Research whether a four-day work week improves productivity and wellbeing. Present the findings as a well-structured report with citations, a short executive summary and links to all sources used.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(citedReportContract),
+    true,
+    'a cited research report must stay on the saved-artifact path before its final step',
+  )
+
+  const explicitInlineContract = createInitialState(false, timeouts)
+  explicitInlineContract.currentPlanItems = ['Research current evidence', 'Write report summary']
+  explicitInlineContract.currentPlanScopes = [null, null]
+  explicitInlineContract.currentStepIdx = 1
+  explicitInlineContract.taskStrategy = 'research'
+  explicitInlineContract.originalUserRequest =
+    'Quickly research the latest result and answer directly here in two sentences, no file.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(explicitInlineContract),
+    false,
+    'an explicit quick inline request must not become a file because of planner wording',
+  )
+
   const incompletePlan = createInitialState(false, timeouts)
   incompletePlan.currentPlanItems = ['Research', 'Write final report']
   incompletePlan.currentPlanScopes = [null, null]

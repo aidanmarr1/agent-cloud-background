@@ -1954,6 +1954,7 @@ export async function runLedgerSmoke() {
   assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('Quickly research about iPhone 17'), false)
   assert.equal(taskDefaultsToMarkdownDeliverable('Research report about iPhone 17'), true)
+  assert.equal(taskDefaultsToMarkdownDeliverable('Research current evidence and present a cited report with a short executive summary.'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('actually make a report in .md file'), true)
   assert.equal(taskDefaultsToMarkdownDeliverable('Research about iPhone 17 but answer here, no file'), false)
 

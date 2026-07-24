@@ -168,13 +168,13 @@ assert.match(
 )
 assert.match(
   planManager,
-  /quickInlineAnswer[\s\S]*singleStepNeedsSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable[\s\S]*isFirstStepDeliverable = resolvedPlan\.length === 1 && singleStepNeedsSavedArtifact/,
+  /singleStepNeedsSavedArtifact = taskRequiresSavedFinalArtifact\([\s\S]*isFirstStepDeliverable = resolvedPlan\.length === 1 && singleStepNeedsSavedArtifact/,
   'a one-step plan must only become a file-writing deliverable when the request actually needs a saved artifact',
 )
 assert.match(
   agentLoop,
-  /function explicitSavedFinalArtifactRequested\(text: string\)[\s\S]*analyzeTaskIntent\(\[\{ role: 'user', content: text \}\]\)\.requiresSavedArtifact/,
-  'the final-output decision must use the shared directive-aware intent classifier instead of a broad verb/object regex',
+  /function taskNeedsSavedFinalArtifact\([\s\S]*return taskRequiresSavedFinalArtifact\(state,\s*effectiveTaskRequest\(messages\)\)/,
+  'the final-output decision must use the shared directive-aware deliverable contract instead of a broad verb/object regex',
 )
 assert.match(
   config,
