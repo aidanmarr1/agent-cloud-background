@@ -300,6 +300,7 @@ const BUILD_STEP_PATTERN = /\b(?:build|create|code|implement|develop|design|writ
 const RESEARCH_STEP_PATTERN = /\b(?:research|gather|find|search|source|sources|collect|asset|assets|image|images|photo|photos|picture|pictures|reference|references|investigate|analy[sz]e|compare|evaluate|assess|impact|risk|policy|evidence|perspective|benefits?|problems?|browse|look\s*up)\b/i
 const SYNTHESIS_STEP_PATTERN = /\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i
 const SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|prepare|polish)\b/i
+const ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:analy[sz]e|cross[-\s]?reference|evaluate|compare|assess|interpret)\b/i
 const SOURCE_GATHERING_STEP_PATTERN = /\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look\s*up|current|latest|recent|news|reported|publicly|public|asset|assets|image|images|reference|references)\b/i
 
 export function isBuildStepText(text: string | undefined | null): boolean {
@@ -321,10 +322,27 @@ export function isSynthesisStepText(text: string | undefined | null): boolean {
  * so scope wording cannot accidentally force another research tool call.
  */
 export function isCurrentSynthesisStep(
-  state: Pick<AgentStateData, 'currentPlanItems' | 'currentPlanScopes' | 'currentStepIdx'>,
+  state: Pick<AgentStateData, 'currentPlanItems' | 'currentPlanScopes' | 'currentStepIdx'> &
+    Partial<Pick<AgentStateData, 'distinctSourceDomains' | 'visitedUrls' | 'stepFindings' | 'searchQueries'>>,
 ): boolean {
   const title = state.currentPlanItems?.[state.currentStepIdx] || ''
   if (SYNTHESIS_LEADING_STEP_PATTERN.test(title)) return true
+  if (
+    state.currentStepIdx > 0 &&
+    ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN.test(title)
+  ) {
+    const priorFindingCount = [...(state.stepFindings?.keys() || [])]
+      .filter(index => index < state.currentStepIdx)
+      .length
+    const openedSourceCount = state.visitedUrls?.size || 0
+    const sourceDomainCount = state.distinctSourceDomains?.size || 0
+    const searchCount = state.searchQueries?.size || 0
+    const hasReusableEvidence =
+      (openedSourceCount >= 3 && sourceDomainCount >= 3) ||
+      (priorFindingCount > 0 && openedSourceCount >= 2 && sourceDomainCount >= 2) ||
+      (priorFindingCount > 0 && searchCount >= 2 && sourceDomainCount >= 3)
+    if (hasReusableEvidence) return true
+  }
   return isSynthesisStepText(currentStepText(state))
 }
 

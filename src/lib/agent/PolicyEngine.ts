@@ -1,4 +1,4 @@
-import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, stepOpenedSourceDomains } from './AgentState'
+import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, isCurrentSynthesisStep, stepOpenedSourceDomains } from './AgentState'
 import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
 import {
@@ -132,6 +132,7 @@ function minToolCalls(state: AgentStateData): number {
 function isResearchLikeStep(state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (state.currentStepIdx === state.currentPlanItems.length - 1) return false
+  if (isCurrentSynthesisStep(state)) return false
   if (state.taskStrategy === 'browse' || state.taskStrategy === 'creative') return false
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
     return isResearchStepText(currentStepText(state))
@@ -436,6 +437,20 @@ function looksLikeSubstantialFinalInlineText(content: string): boolean {
   if (/\b(?:progress update|status update|final answer required|tool call contract|plan progress)\b/i.test(text)) return false
   return text.length >= 260 ||
     /[.!?)]\s*$/.test(text) ||
+    text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
+}
+
+function looksLikeSubstantiveSynthesisText(content: string): boolean {
+  const text = content.trim()
+  if (text.length < 100) return false
+  if (looksLikeProgressOrRecoveryOnly(text)) return false
+  if (/^(?:i(?:'|’)?ll|i will|let me|next,?\s+i(?:'|’)?ll|next,?\s+i will)\b/i.test(text)) return false
+  const sentences = text
+    .split(/[.!?]+/)
+    .map(sentence => sentence.trim())
+    .filter(sentence => sentence.length >= 20)
+  return sentences.length >= 2 ||
+    text.length >= 220 ||
     text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
 }
 
@@ -757,6 +772,9 @@ function websiteQaStatus(state: AgentStateData): string | null {
 function phaseStartGuidance(state: AgentStateData): string {
   if (isResearchLikeStep(state)) {
     return 'Start this phase from its own objective. Build a real evidence packet inside this phase: use targeted searches, open the strongest pages, extract concrete details, and fill mechanism/evidence/example/caveat gaps before advancing.'
+  }
+  if (isCurrentSynthesisStep(state)) {
+    return 'Analyze and cross-reference the evidence already gathered. Produce a substantive finding for this phase without restarting source collection, then advance to the deliverable.'
   }
   if (isWebsiteLikeTask(state)) {
     return 'Keep website work structured: build the complete runnable file set first, then use the dedicated local visual QA phase for preview inspection and targeted repairs.'
@@ -1781,6 +1799,49 @@ Then make your first tool call. Your plan will be remembered across iterations o
       // replies is what caused completed search steps to be marked blocked.
       const autoAdvanceThreshold = currentStepWebSearchLimit(state) !== null ? 1 : 2
       const researchDepth = researchDepthStatus(state)
+      if (!isLastStep && isCurrentSynthesisStep(state)) {
+        if (looksLikeSubstantiveSynthesisText(assistantContent)) {
+          advanceStep(
+            state,
+            `Synthesized prior evidence: ${assistantContent.replace(/\s+/g, ' ').trim().slice(0, 320)}`,
+          )
+          state.consecutiveNoToolCalls = 0
+          const isNowLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
+          return [
+            { type: 'step_advance' },
+            {
+              type: 'inject_message',
+              message: { role: 'assistant', content: assistantContent },
+            },
+            {
+              type: 'inject_message',
+              message: {
+                role: 'system',
+                content: stepMsg(state, isNowLastStep ? finalStepStartGuidance(state) : phaseStartGuidance(state)),
+              },
+              continueLoop: true,
+            },
+          ]
+        }
+        state.consecutiveNoToolCalls = 0
+        return [
+          {
+            type: 'inject_message',
+            message: { role: 'assistant', content: assistantContent || '' },
+          },
+          {
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(
+                state,
+                'SYNTHESIS PHASE: Analyze and cross-reference the evidence already gathered. Write a substantive conclusion for this phase now, then emit <next_step/>. Do not search for or open more sources unless this plan item explicitly asks for new evidence.',
+              ),
+            },
+            continueLoop: true,
+          },
+        ]
+      }
       if (
         !isLastStep &&
         isResearchLikeStep(state) &&
@@ -2781,6 +2842,37 @@ Then make your first tool call. Your plan will be remembered across iterations o
         return actions
       }
       const depth = researchDepthStatus(state)
+      if (!isCurrentLastStep && isCurrentSynthesisStep(state)) {
+        if (!looksLikeSubstantiveSynthesisText(assistantContent)) {
+          actions.push({
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(
+                state,
+                'This analysis step is not complete yet. Synthesize and cross-reference the evidence already gathered in a substantive result, then emit <next_step/>. Do not restart research or repeat source collection unless this plan item explicitly requests new evidence.',
+              ),
+            },
+            continueLoop: true,
+          })
+          return actions
+        }
+        advanceStep(
+          state,
+          `Synthesized prior evidence: ${assistantContent.replace(/\s+/g, ' ').trim().slice(0, 320)}`,
+        )
+        actions.push({ type: 'step_advance' })
+        const isNowLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
+        actions.push({
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: stepMsg(state, isNowLastStep ? finalStepStartGuidance(state) : phaseStartGuidance(state)),
+          },
+          continueLoop: true,
+        })
+        return actions
+      }
       if (!isCurrentLastStep && isResearchLikeStep(state) && !depth.complete) {
         const canAdvanceWithAvailableEvidence =
           hasStalledResearchEvidence(state) ||

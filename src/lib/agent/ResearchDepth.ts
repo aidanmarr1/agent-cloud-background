@@ -22,6 +22,31 @@ const CURRENT_RE = /\b(?:latest|current|recent|today|this\s+week|this\s+month|th
 const EVIDENCE_RE = /\b(?:source-backed|evidence-backed|sources?|citations?|cited?|references?|verified|verify|cross[-\s]?check|benchmark|data|numbers?|metrics?)\b/i
 const BROAD_SYNTHESIS_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 const MULTI_ANGLE_RE = /\b(?:history|founding|team|funding|leadership|product|customers?|adoption|traction|financial|hiring|partnerships?|competitive position|pricing|reviews?|market sentiment|strengths?|weaknesses?|risks?|opportunities?|applications?|use cases?|technolog(?:y|ies)|capabilities|trends?|impact|implications?|ecosystem|landscape)\b/gi
+const ANALYTICAL_PHASE_RE = /^\s*(?:analy[sz]e|cross[-\s]?reference|evaluate|compare|assess|interpret)\b/i
+const EXPLICIT_SOURCE_COUNT_RE = /\b(?:at\s+least|minimum(?:\s+of)?|use|compare|consult|review|from)?\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:credible|reliable|independent|primary|authoritative|quality|distinct|different)?\s*(?:web\s+)?sources?\b/i
+
+const SOURCE_COUNT_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+}
+
+function explicitSourceCount(text: string): number | null {
+  const match = text.match(EXPLICIT_SOURCE_COUNT_RE)
+  if (!match?.[1]) return null
+  const parsed = /^\d+$/.test(match[1])
+    ? Number.parseInt(match[1], 10)
+    : SOURCE_COUNT_WORDS[match[1].toLowerCase()]
+  if (!Number.isFinite(parsed)) return null
+  return Math.min(20, Math.max(1, parsed))
+}
 
 function plannedResearchPhaseCount(state: AgentStateData): number {
   const plan = state.currentPlanItems || state.planItems
@@ -29,6 +54,13 @@ function plannedResearchPhaseCount(state: AgentStateData): number {
   const nonFinal = plan.slice(0, -1)
   const explicitResearchCount = nonFinal.filter((title, index) => {
     const scope = state.currentPlanScopes?.[index] || state.planScopes?.[index] || ''
+    if (
+      index > 0 &&
+      ANALYTICAL_PHASE_RE.test(title) &&
+      !/\b(?:research|search|gather|collect|find|investigate|browse|read|extract|new sources?|additional sources?)\b/i.test(`${title} ${scope}`)
+    ) {
+      return false
+    }
     return /\b(?:research|source|evidence|market|technical|customer|competitor|risk|history|funding|pricing|review|adoption|trend|landscape|compare|analysis)\b/i.test(`${title} ${scope}`)
   }).length
   return Math.max(1, explicitResearchCount || nonFinal.length)
@@ -124,8 +156,8 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
     return { requiredCalls: 3, requiredSourceBreadth: 2, label: 'light' }
   }
 
-  let requiredCalls = baseCalls
-  let requiredSourceBreadth = baseBreadth
+  let requiredCalls: number = baseCalls
+  let requiredSourceBreadth: number = baseBreadth
   let label: ResearchDepthProfile['label'] = 'standard'
 
   if (DEEP_RE.test(text)) {
@@ -180,7 +212,17 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
     label = 'wide'
   }
 
-  const callCap = label === 'wide' ? 36 : label === 'deep' ? 30 : 22
+  const requestedSourceCount = explicitSourceCount(originalRequest)
+  if (requestedSourceCount !== null && label !== 'wide') {
+    // An explicit source count is a user-authored evidence floor, not an
+    // invitation to silently multiply it across every plan phase. Allow a
+    // search/discovery action plus the requested opened sources, with a small
+    // verification margin for blocked or unsuitable pages.
+    requiredSourceBreadth = requestedSourceCount
+    requiredCalls = Math.max(requestedSourceCount + 2, Math.ceil(requestedSourceCount * 1.35))
+  }
+
+  const callCap = label === 'wide' ? 22 : label === 'deep' ? 16 : 14
   const allocated = perPhaseDepthBudget(state, requiredCalls, requiredSourceBreadth, label, complexity)
   return {
     requiredCalls: Math.max(1, Math.min(callCap, allocated.calls)),

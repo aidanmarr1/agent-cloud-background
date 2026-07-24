@@ -29,6 +29,7 @@ import {
   satisfyWorkLedgerRequirement,
   currentStepText,
   isConcreteBuildStep,
+  isCurrentSynthesisStep,
   isResearchStepText,
 } from './AgentState'
 import { inferArtifactType, tryEncodeImageBase64, IMAGE_EXTENSIONS } from './guards'
@@ -1092,6 +1093,7 @@ function stepIsSynthesisOnly(state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (state.taskStrategy === 'browse') return false
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
+  if (isCurrentSynthesisStep(state)) return true
 
   const stepText = [
     state.currentPlanItems[state.currentStepIdx] || '',

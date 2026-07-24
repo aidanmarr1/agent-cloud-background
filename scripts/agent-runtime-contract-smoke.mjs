@@ -1586,6 +1586,7 @@ import {
   recordWorkLedgerVerification,
   recordWorkLedgerVisualObservation,
   isConcreteBuildStep,
+  isCurrentSynthesisStep,
   isResearchStepText,
   satisfyWorkLedgerRequirement,
   setWorkLedgerObjective,
@@ -1981,6 +1982,30 @@ export async function runLedgerSmoke() {
   assert.ok(normalResearchDepth.requiredCalls >= 5, 'normal research phases must keep a real evidence floor: ' + JSON.stringify(normalResearchDepth))
   assert.ok(normalResearchDepth.requiredSourceBreadth >= 3, 'normal research phases need several source domains: ' + JSON.stringify(normalResearchDepth))
 
+  const explicitFiveSourceDepth = researchDepthProfileForState(makeDepthState(
+    'Compare at least five credible sources and save a cited Markdown report.',
+    3,
+    ['Gather trial evidence', 'Analyze and cross-reference the evidence', 'Write the cited report'],
+    ['Open independent primary and academic sources', 'Compare outcomes, limitations, and claim quality', ''],
+  ))
+  assert.equal(explicitFiveSourceDepth.requiredSourceBreadth, 5, 'an explicit source floor must stay task-sized instead of being multiplied across plan phases: ' + JSON.stringify(explicitFiveSourceDepth))
+  assert.equal(explicitFiveSourceDepth.requiredCalls, 7, 'five requested sources should allow discovery plus five opened sources without driving a repeated-search loop: ' + JSON.stringify(explicitFiveSourceDepth))
+
+  const evidenceReuseState = createInitialState(false, timeouts)
+  evidenceReuseState.originalUserRequest = 'Compare at least five credible sources and save a cited Markdown report.'
+  evidenceReuseState.taskStrategy = 'research'
+  evidenceReuseState.currentPlanItems = ['Gather trial evidence', 'Analyze and cross-reference the evidence', 'Write the cited report']
+  evidenceReuseState.currentPlanScopes = ['Open independent sources', 'Compare outcomes and limitations across gathered evidence', '']
+  evidenceReuseState.currentStepIdx = 1
+  evidenceReuseState.stepFindings.set(0, 'Opened five independent sources and captured their findings.')
+  for (let index = 1; index <= 5; index++) {
+    evidenceReuseState.visitedUrls.add('https://source' + index + '.example/report')
+    evidenceReuseState.distinctSourceDomains.add('source' + index + '.example')
+  }
+  assert.equal(isCurrentSynthesisStep(evidenceReuseState), true, 'a later analysis phase with reusable task evidence must synthesize rather than restart full research')
+  updatePhase(evidenceReuseState)
+  assert.equal(evidenceReuseState.currentPhase, 'deliver', 'evidence-backed analysis phases must use synthesis routing instead of compact research routing')
+
   const deepReportDepth = researchDepthProfileForState(makeDepthState(
     'Conduct the deepest possible research on DevRev AI and produce a concise, visually rich Markdown report. Research history, founding team, funding, leadership, product evolution, AI capabilities, customer adoption, enterprise traction, financial indicators, hiring trends, partnerships, competitive position, pricing, reviews, market sentiment, technical strengths, weaknesses, risks and long term opportunities. Compare DevRev with Zendesk, Intercom, Salesforce, ServiceNow, Freshworks and Linear.',
     3,
@@ -2227,6 +2252,28 @@ export async function runLedgerSmoke() {
   assert.match(finalStepMessage, /must not continue prior research/, 'final step guidance must reject previous-phase research carryover')
 
   const policy = new PolicyEngine()
+  const synthesisAdvanceState = createInitialState(false, timeouts)
+  synthesisAdvanceState.originalUserRequest = 'Compare at least five credible sources and save a cited Markdown report.'
+  synthesisAdvanceState.taskStrategy = 'research'
+  synthesisAdvanceState.currentPlanItems = ['Gather trial evidence', 'Analyze and cross-reference the evidence', 'Write the cited report']
+  synthesisAdvanceState.currentPlanScopes = ['Open independent sources', 'Compare outcomes and limitations across gathered evidence', '']
+  synthesisAdvanceState.currentStepIdx = 1
+  synthesisAdvanceState.stepFindings.set(0, 'Five independent sources were opened and their findings captured.')
+  for (let index = 1; index <= 5; index++) {
+    synthesisAdvanceState.visitedUrls.add('https://evidence' + index + '.example/report')
+    synthesisAdvanceState.distinctSourceDomains.add('evidence' + index + '.example')
+  }
+  updatePhase(synthesisAdvanceState)
+  const synthesisAdvanceActions = policy.evaluate(
+    synthesisAdvanceState,
+    new Map(),
+    'Across the independent trials, employee wellbeing improves consistently, while productivity is usually maintained rather than uniformly increased. The strongest evidence comes from controlled multi-company trials; employer case studies support the direction of effect but carry selection and reporting bias.',
+    false,
+    30,
+  )
+  assert.equal(synthesisAdvanceState.currentStepIdx, 2, 'a substantive evidence-reuse analysis must advance directly to the report step')
+  assert.ok(synthesisAdvanceActions.some(action => action.type === 'step_advance'), 'analysis synthesis should advance without another search/read loop')
+
   const cadenceState = createInitialState(false, timeouts)
   cadenceState.currentPlanItems = ['Gather source evidence', 'Write final answer']
   cadenceState.currentStepIdx = 0
