@@ -379,6 +379,16 @@ assert.match(renderWorkerEnvScript, /RENDER_API_KEY/, 'Render worker env helper 
 assert.match(renderWorkerEnvScript, /\/services\/\$\{encodeURIComponent\(serviceId\)\}\/env-vars\/\$\{encodeURIComponent\(entry\.key\)\}/, 'Render worker env helper must update expected env vars individually')
 assert.match(renderWorkerEnvScript, /\/services\/\$\{encodeURIComponent\(serviceId\)\}\/deploys/, 'Render worker env helper must be able to trigger a worker deploy')
 assert.match(renderWorkerEnvScript, /Secret values are never printed/, 'Render worker env helper must not print secret values')
+assert.match(
+  renderWorkerEnvScript,
+  /\(looksSecret\(entry\.key\) && !entry\.templateValue\) \|\| entry\.key === 'AGENT_DEPLOYMENT_VERSION'/,
+  'Render worker env helper must use local values only for blank secret slots and deployment identity',
+)
+assert.match(
+  renderWorkerEnvScript,
+  /return entry\.templateValue/,
+  'Render worker env helper must keep checked-in public runtime configuration authoritative over stale local env values',
+)
 assert.match(renderWorkerEnvScript, /No Render background worker named/, 'Render worker env helper must explain when the Blueprint worker has not been created yet')
 assert.match(renderWorkerEnvScript, /--create-if-missing/, 'Render worker env helper must require an explicit opt-in before creating a missing worker service')
 assert.match(renderWorkerEnvScript, /type:\s*'background_worker'/, 'Render worker env helper must create a real Render background worker when explicitly requested')

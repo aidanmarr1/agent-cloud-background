@@ -65,8 +65,14 @@ function parseEnvTemplate(text) {
 }
 
 function valueForEntry(entry) {
-  const local = env(entry.key)
-  if (local) return local
+  // The checked-in worker template is the source of truth for public runtime
+  // configuration. Otherwise a stale developer .env can silently roll an old
+  // provider or model back into production during an env sync. Local values
+  // remain authoritative for secrets and the optional deployment identity.
+  if ((looksSecret(entry.key) && !entry.templateValue) || entry.key === 'AGENT_DEPLOYMENT_VERSION') {
+    const local = env(entry.key)
+    if (local) return local
+  }
   return entry.templateValue
 }
 
