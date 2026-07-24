@@ -893,6 +893,11 @@ function shouldAutosaveTextOnlyDraft(
 
   const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
   if (isLastStep) {
+    // A text-only confirmation after the model has already written the final
+    // artifact is not a second draft. Saving it as another deliverable leaves
+    // the verified file's plan step open and can turn a successful run into a
+    // paid no-progress failure.
+    if (hasSavedFinalDeliverableCandidate(state)) return false
     return text.length >= FINAL_AUTOSAVE_DRAFT_MIN_CHARS && taskNeedsSavedFinalArtifact(state, messages)
   }
 
@@ -3215,12 +3220,83 @@ export class AgentLoop {
     toolPipeline: ToolPipeline,
   ): Promise<Phase | null> {
     const { conversationId } = this.options
-    if (!conversationId || !shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
+    if (!conversationId) return null
+
+    const isLastStep = !!state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
+    const existingDeliverablePath = isLastStep && taskNeedsSavedFinalArtifact(state, this.options.messages)
+      ? latestSavedFinalDeliverablePath(state)
+      : null
+
+    // Gemini commonly writes, reads back, and then gives a natural confirmation
+    // in the same final phase. Re-verify the existing artifact at that boundary
+    // and close the plan instead of autosaving the confirmation as a second
+    // Markdown file or asking the model for another action.
+    if (existingDeliverablePath && state.currentPlanItems) {
+      try {
+        const verifiedFile = await readFileInSandbox(conversationId, existingDeliverablePath)
+        const originalRequest =
+          this.options.messages[this.options.messages.length - 1]?.content ||
+          state.originalUserRequest ||
+          ''
+        const verification = outputVerifier.verify(
+          verifiedFile.content || '',
+          existingDeliverablePath,
+          originalRequest,
+          state.taskStrategy,
+          workingMemory,
+          state.taskComplexity,
+        )
+
+        if (verification.passed) {
+          const stepIdxBefore = state.currentStepIdx
+          state.pendingDeliverableRevision = null
+          state.partialFileWriteRecoveryPending = null
+          state.partialFileWriteRecoveryNudged = false
+          state.deliverableVerificationDone = true
+          state.currentStepIdx = state.currentPlanItems.length
+          for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
+            this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+          }
+          console.log('[AgentDiagnostics] Existing saved deliverable verified after final text confirmation', {
+            path: existingDeliverablePath,
+            chars: verifiedFile.content?.length || 0,
+            step: stepIdxBefore,
+            totalSteps: state.currentPlanItems.length,
+          })
+          return 'COMPLETE'
+        }
+
+        if (state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
+          state.deliverableRevisionCount++
+          state.pendingDeliverableRevision = {
+            path: existingDeliverablePath,
+            failures: verification.failures,
+            suggestions: verification.suggestions,
+            createdAt: Date.now(),
+          }
+          state.deliverableVerificationDone = false
+          contextManager.push({
+            role: 'system',
+            content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${existingDeliverablePath}". Do not write another confirmation, create a second file, search again, or expose this verification step.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+          } as ChatMessageParam)
+          return 'STREAMING'
+        }
+      } catch (error) {
+        console.warn('[AgentDiagnostics] Existing saved deliverable could not be re-verified after final text', {
+          path: existingDeliverablePath,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+
+      // Never convert a final confirmation into a second autosaved artifact.
+      return null
+    }
+
+    if (!shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
 
     const content = cleanDraftContent(assistantContent)
     const path = autosaveDraftPath(state)
     const id = `autosave_${state.iterations}_${state.currentStepIdx}`
-    const isLastStep = !!state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
 
     this.emitter.toolStart(id, 'create_file', {
       path,
