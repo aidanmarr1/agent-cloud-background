@@ -793,7 +793,7 @@ async function assertSourceContracts() {
   assert.match(llm, /effort: DEFAULT_REASONING_EFFORT/, 'OpenRouter calls must include the configured reasoning effort by default')
   assert.match(llm, /exclude: DEFAULT_REASONING_EXCLUDE/, 'internal reasoning should be excluded from user-visible responses by default')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
-  assert.match(llm, /provider:\s*\{[\s\S]*?sort:\s*'throughput',[\s\S]*?require_parameters:\s*true,[\s\S]*?\}/, 'OpenRouter calls must prefer a fast Nitro provider that supports all requested parameters')
+  assert.match(llm, /provider:\s*\{\s*sort:\s*'throughput'\s*\}/, 'OpenRouter calls must prefer the fastest Nitro provider route')
   assert.match(llm, /estimateUsageCost/, 'OpenRouter token usage must be normalized into billable provider cost')
   assert.match(streamProcessor, /reasoningContent \+= String\(delta\.reasoning_content\)/, 'thinking-mode tool calls must preserve reasoning content internally for provider history')
   assert.match(llm, /ASSISTANT_LOG_LABEL\s*=\s*'Agent'/, 'provider/runtime internals must be redacted from logs')

@@ -18,8 +18,8 @@ assert.match(
 )
 assert.match(
   llmSource,
-  /provider:\s*\{[\s\S]*?sort:\s*'throughput',[\s\S]*?require_parameters:\s*true,[\s\S]*?\}/,
-  'every request must prefer a fast OpenRouter provider that supports all requested parameters',
+  /provider:\s*\{\s*sort:\s*'throughput'\s*\}/,
+  'every request must prefer the fastest OpenRouter provider',
 )
 assert.doesNotMatch(
   llmSource,
@@ -125,10 +125,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
     assert.equal(request.body.model, 'google/gemini-3.6-flash:nitro')
-    assert.deepEqual(request.body.provider, {
-      sort: 'throughput',
-      require_parameters: true,
-    })
+    assert.deepEqual(request.body.provider, { sort: 'throughput' })
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
