@@ -111,7 +111,7 @@ import { WorkingMemory } from './WorkingMemory'
 import { ReflectionEngine } from './ReflectionEngine'
 import { GoalTracker } from './GoalTracker'
 import { OutputVerifier } from './OutputVerifier'
-import { auditAgentCompletion } from './CompletionAudit'
+import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from './CompletionAudit'
 import { shouldDefaultFrontendToNextTsx } from './frontendDefaults'
 import { analyzeTaskIntent } from './TaskIntent'
 import { isWebsiteEntryPath } from '@/lib/localWebsiteServer'
@@ -1099,8 +1099,40 @@ function shouldCompleteFinalInlineAnswerTurn(
     /\blet me\b/i.test(text.slice(0, 240)) ||
     /\b(?:i|we)\s+(?:found|checked|searched|gathered|looked|reviewed)\b.{0,180}\b(?:but|so|next|instead)\b/i.test(text.slice(0, 260)) ||
     /\b(?:will|going to)\s+(?:research|gather|compare|summari[sz]e|investigate|check|look up|write|produce)\b/i.test(text.slice(0, 220))
-  if (startsLikeStatus && text.length < 240) return false
+  if (startsLikeStatus) return false
   return /[.!?)]\s*$/.test(text) || text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS
+}
+
+const MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS = 2
+
+function scheduleFinalInlineAnswerRecovery(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const planLength = state.currentPlanItems?.length || 0
+  if (planLength === 0 || state.taskStrategy === 'browse') return false
+  if (taskNeedsSavedFinalArtifact(state, messages)) return false
+  if (state.finalInlineAnswerDelivered) return false
+  const finalStepIdx = planLength - 1
+  if (state.currentStepIdx < finalStepIdx) return false
+  if (state.finalInlineAnswerRecoveryAttempts >= MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS) return false
+
+  state.finalInlineAnswerRecoveryAttempts += 1
+  state.currentStepIdx = finalStepIdx
+  updatePhase(state)
+  state.finalInlineAnswerDelivered = false
+  state.forceTextNextIteration = false
+  state.phaseEndNarrationPending = false
+  state.consecutiveNoToolCalls = 0
+  state.consecutiveNullStreams = 0
+  state.toolJsonRecoveryCount = 0
+  state.suppressedResearchToolName = null
+  state.recentToolCalls = []
+  state.recentToolSequence = []
+  state.lastModelErrorForUser = null
+  state.deadlineFinalizationStarted = false
+  state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
+  return true
 }
 
 function finalSavedDeliverableTurn(state: AgentStateData, messages: Array<{ role: string; content: string }>): boolean {
@@ -2441,7 +2473,7 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     'Adapt the structure to the evidence. Vary grammatical subject, voice, rhythm, and sentence count; do not imitate either of the two most recent updates.',
     'This asynchronous narration-only request has no selected next action, so keep it result-only. Do not use "Next", add a future-action sentence, or infer an action from the following plan phase.',
     'No permission questions, internal step numbers, action counts, source dumps, vague sufficiency claims, or command fragments.',
-    'Describe only user-visible findings, completed changes, or real blockers. Never mention tools, tool results, payloads, JSON, parsing, truncation, confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
+    'Describe only user-visible findings, completed changes, or real blockers. Never mention providers, APIs, service names, quotas, rate limits, tools, tool results, payloads, JSON, parsing, truncation, confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
     state.phaseEndNarrationPending ? 'Put <next_step/> on its own final line after the paragraph.' : '',
   ].filter(Boolean).join(' ')
 
@@ -2493,7 +2525,7 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
     'Every available tool schema includes a required, non-empty progress_update. Put exactly one concise 1-2 sentence completed-result update in that field.',
-    'The field must describe completed work, never only a future action, plan, promise, or command. Never repeat or paraphrase an already-shown update. Do not mention action/tool/search counts, internal steps, or ask permission to continue.',
+    'The field must describe completed work, never only a future action, plan, promise, or command. Never repeat or paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
     'A second sentence beginning "Next, ..." is optional, never required, and never a template. When it fits naturally, place it after the completed finding and use it only when it names the exact concrete tool action this same response is starting immediately; never use it for a broader phase, a general shift in analysis, or planned later work.',
     'progress_update is display-only. Still complete every normal required tool argument and make the tool call without waiting for a separate narration turn.',
     newWork.length ? `New work:\n- ${newWork.join('\n- ')}` : 'State the newest concrete completed result from the active work; progress_update must not be empty.',
@@ -3005,6 +3037,15 @@ function isDisplayContractRepairResult(result: ToolExecutionResult): boolean {
     /display contract repair needed before executing this action/i.test(value) ||
     /tool call was skipped because (?:it declared )?plan_step_index\b/i.test(value)
   )
+}
+
+function isSynthesisFinalizationRecoveryResult(result: ToolExecutionResult): boolean {
+  const value = result.result && typeof result.result === 'object'
+    ? (result.result as { error?: unknown }).error
+    : undefined
+  return typeof value === 'string' &&
+    /^INTERNAL_RECOVERY:/i.test(value) &&
+    /\b(?:final synthesis\/deliverable phase|for synthesizing, writing, or delivering)\b/i.test(value)
 }
 
 function displayContractRepairInstruction(state: AgentStateData, results: ToolExecutionResult[]): string {
@@ -3854,7 +3895,67 @@ export class AgentLoop {
               consecutivePaidNoProgressTurns = progressDecision.consecutiveNoProgressTurns
               consecutivePaidInternalRecoveryTurns = progressDecision.consecutiveInternalRecoveryTurns
 
+              if (progressDecision.kind === 'allow_recovery') {
+                const activeStep =
+                  state.currentPlanItems?.[state.currentStepIdx] ||
+                  'the active task'
+                state.forceTextNextIteration = false
+                state.phaseEndNarrationPending = false
+                state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                state.dynamicIterationLimit = Math.max(
+                  state.dynamicIterationLimit,
+                  state.iterations + 2,
+                )
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    'ACTION SELECTION REPAIR: The previous assistant turn produced neither an executable action nor a complete answer.',
+                    `Continue the active work "${activeStep}" now.`,
+                    'If this is the final answer phase, answer directly from the evidence already gathered.',
+                    'Otherwise make one materially new native tool call with complete strict arguments; do not repeat the preceding request, write a status update, expose this repair, or ask permission.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                this.options.diagnostics?.({
+                  type: 'paid_no_progress_recovery',
+                  data: {
+                    iteration: priorTurn.iteration,
+                    step: state.currentStepIdx,
+                    stepBefore: priorTurn.stepIdxBefore,
+                    visibleText: priorTurn.visibleText,
+                    acceptedToolCall: priorTurn.acceptedToolCall,
+                  },
+                })
+                console.warn('[AgentDiagnostics] Reissued one explicit model-driven action after a no-progress turn', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                })
+              }
+
               if (progressDecision.kind === 'stop') {
+                if (scheduleFinalInlineAnswerRecovery(state, this.options.messages)) {
+                  consecutivePaidNoProgressTurns = 0
+                  consecutivePaidInternalRecoveryTurns = 0
+                  terminalReason = 'unknown'
+                  state.lastIterationEnd = Date.now()
+                  this.options.diagnostics?.({
+                    type: 'final_inline_answer_recovery',
+                    data: {
+                      iteration: priorTurn.iteration,
+                      step: state.currentStepIdx,
+                      attempt: state.finalInlineAnswerRecoveryAttempts,
+                      trigger: progressDecision.reason,
+                    },
+                  })
+                  console.warn('[AgentDiagnostics] Redirected no-progress final phase into a bounded inline answer turn', {
+                    step: state.currentStepIdx,
+                    attempt: state.finalInlineAnswerRecoveryAttempts,
+                    trigger: progressDecision.reason,
+                  })
+                  phase = 'STREAMING'
+                  break
+                }
+
                 if (canAdvanceResearchAfterPaidNoProgress(state)) {
                   const stepBeforeAdvance = state.currentStepIdx
                   const recoveryEvidence = {
@@ -4417,6 +4518,7 @@ export class AgentLoop {
               }
               state.forceTextNextIteration = false
               state.phaseEndNarrationPending = false
+              state.finalInlineAnswerDelivered = true
               state.lastIterationEnd = Date.now()
               terminalReason = 'final_inline_answer_complete'
               for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
@@ -4737,6 +4839,49 @@ export class AgentLoop {
                 totalSteps: state.currentPlanItems?.length || 0,
                 attempts: state.displayContractRepairAttempts,
                 tool: lastToolResults[0]?.tc.name,
+              })
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
+
+            if (
+              lastToolResults.length > 0 &&
+              lastToolResults.every(isSynthesisFinalizationRecoveryResult)
+            ) {
+              const planLength = state.currentPlanItems?.length || 0
+              if (planLength > 0) {
+                state.currentStepIdx = planLength - 1
+                updatePhase(state)
+              }
+              state.forceTextNextIteration = false
+              state.phaseEndNarrationPending = false
+              state.consecutiveNoToolCalls = 0
+              state.consecutiveNullStreams = 0
+              state.recentToolCalls = []
+              state.recentToolSequence = []
+              state.lastModelErrorForUser = null
+              pendingPaidTurnProgress = null
+              consecutivePaidNoProgressTurns = 0
+              consecutivePaidInternalRecoveryTurns = 0
+
+              const inlineRecoveryScheduled = scheduleFinalInlineAnswerRecovery(
+                state,
+                this.options.messages,
+              )
+              if (!inlineRecoveryScheduled && taskNeedsSavedFinalArtifact(state, this.options.messages)) {
+                contextManager.push({
+                  role: 'system',
+                  content: 'FINALIZATION TURN: use the evidence already gathered and produce the requested saved deliverable now. Do not call research, search, browsing, or source-extraction tools. Make the concrete file action required by the active final step.',
+                } as ChatMessageParam)
+                state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
+              }
+
+              console.warn('[AgentDiagnostics] Redirected blocked synthesis research directly into finalization', {
+                step: state.currentStepIdx,
+                totalSteps: planLength,
+                mode: inlineRecoveryScheduled ? 'inline' : 'saved',
+                blockedTools: lastToolResults.map(result => result.tc.name),
               })
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -5615,6 +5760,8 @@ export class AgentLoop {
           state.forceTextNextIteration = false
           state.phaseEndNarrationPending = false
           state.forcedNarrationRepairAttempts = 0
+          state.finalInlineAnswerDelivered = false
+          state.finalInlineAnswerRecoveryAttempts = 0
           state.consecutiveNoToolCalls = 0
           state.deliverableVerificationDone = false
           if (state.currentPlanItems?.length && state.currentStepIdx >= state.currentPlanItems.length) {
@@ -5622,6 +5769,28 @@ export class AgentLoop {
             updatePhase(state)
             if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
           }
+          phase = 'STREAMING'
+          continue
+        }
+
+        const preFinalCompletionAudit = auditAgentCompletion(state, terminalReason)
+        const recoverableMissingInlineAnswer =
+          preFinalCompletionAudit.missing.includes(MISSING_FINAL_INLINE_ANSWER) &&
+          preFinalCompletionAudit.missing.every(missing =>
+            missing === MISSING_FINAL_INLINE_ANSWER ||
+            missing === 'the iteration limit was reached before a verified completion state',
+          )
+        if (
+          recoverableMissingInlineAnswer &&
+          scheduleFinalInlineAnswerRecovery(state, this.options.messages)
+        ) {
+          terminalReason = 'unknown'
+          state.lastIterationEnd = Date.now()
+          console.warn('[AgentDiagnostics] Completion audit reopened a missing final inline answer', {
+            step: state.currentStepIdx,
+            attempt: state.finalInlineAnswerRecoveryAttempts,
+            previousReason: preFinalCompletionAudit.reason,
+          })
           phase = 'STREAMING'
           continue
         }
@@ -5639,7 +5808,7 @@ export class AgentLoop {
           totalTokens: cumulativeInputTokens + cumulativeOutputTokens,
           cost: cumulativeCost,
         }
-        const completionAudit = auditAgentCompletion(state, terminalReason)
+        const completionAudit = preFinalCompletionAudit
         log.info(`COMPLETE: iterations=${state.iterations}, step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0}`)
         console.log(`[COST TOTAL] iterations=${state.iterations} inputTokens=${cumulativeInputTokens} outputTokens=${cumulativeOutputTokens} providerCost=$${cumulativeCost.toFixed(6)}`)
 
@@ -6896,13 +7065,14 @@ export class AgentLoop {
     if (isNudgeableTimeout(error)) {
       if (finalInlineAnswerTurn(state, this.options.messages)) {
         const partialContent = error.partialContent || ''
-        if (partialContent.trim().length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS) {
+        if (shouldCompleteFinalInlineAnswerTurn(state, this.options.messages, partialContent)) {
           contextManager.push({ role: 'assistant', content: partialContent } as ChatMessageParam)
           if (state.currentPlanItems) {
             state.currentStepIdx = state.currentPlanItems.length
           }
           state.forceTextNextIteration = false
           state.phaseEndNarrationPending = false
+          state.finalInlineAnswerDelivered = true
           state.lastIterationEnd = Date.now()
           return 'COMPLETE'
         }

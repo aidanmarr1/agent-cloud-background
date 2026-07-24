@@ -8,6 +8,8 @@ export interface CompletionAuditResult {
   message: string
 }
 
+export const MISSING_FINAL_INLINE_ANSWER = 'no substantive final inline answer was delivered'
+
 function hasFinalDeliverable(state: AgentStateData): boolean {
   return state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable') ||
     state.emittedImageArtifacts.size > 0
@@ -34,6 +36,14 @@ function requiresFinalDeliverable(state: AgentStateData): boolean {
     taskIntent.requiresSavedArtifact
 }
 
+function requiresFinalInlineAnswer(state: AgentStateData): boolean {
+  if (!state.currentPlanItems || state.currentPlanItems.length === 0) return false
+  if (state.taskStrategy === 'browse') return false
+  if (requiresFinalDeliverable(state)) return false
+  if (state.emittedImageArtifacts.size > 0) return false
+  return true
+}
+
 function isWebsiteLike(state: AgentStateData): boolean {
   if (!state.buildTask && state.taskStrategy !== 'build' && state.taskStrategy !== 'code') return false
   return /\b(next\.?js|website|web\s*site|webpage|landing page|site|page\.tsx|layout\.tsx|globals\.css|responsive|preview|localhost)\b/i.test(currentTaskText(state))
@@ -55,7 +65,7 @@ export function auditAgentCompletion(
 ): CompletionAuditResult {
   const missing: string[] = []
   const totalSteps = state.currentPlanItems?.length || 0
-  const completedInlineAnswer = /(?:^|_)inline_answer_complete$/.test(terminalReason)
+  const completedInlineAnswer = state.finalInlineAnswerDelivered
 
   if (totalSteps > 0 && state.currentStepIdx < totalSteps) {
     missing.push(`only ${state.currentStepIdx} of ${totalSteps} plan steps were completed`)
@@ -68,6 +78,10 @@ export function auditAgentCompletion(
 
   if (!completedInlineAnswer && requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
     missing.push('no successful final deliverable artifact was saved')
+  }
+
+  if (requiresFinalInlineAnswer(state) && !completedInlineAnswer) {
+    missing.push(MISSING_FINAL_INLINE_ANSWER)
   }
 
   if (!completedInlineAnswer && requiresFinalDeliverable(state) && hasFinalDeliverable(state) && !state.deliverableVerificationDone) {

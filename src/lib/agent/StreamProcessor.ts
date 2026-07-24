@@ -94,6 +94,10 @@ const DISPLAY_OPERATIONAL_COMMAND_SENTENCE_RE =
   /(?:^|(?<=[.!?]\s))\s*(?:extract|read|review|open|search|gather|scroll|find|get|try|check|verify|compare|continue|use|visit|fetch|inspect|navigate)\b[^.!?\n]*(?:content|details|page|source|sources|docs?|documentation|article|blog|post|guide|paper|report|website|url|pricing|features?|query|results?|information|evidence|benchmarks?|next|instead)\b[^.!?\n]*(?:[.!?]|$)/gi
 const DISPLAY_SPECULATIVE_SOURCE_SENTENCE_RE =
   /(?:^|(?<=[.!?]\s))\s*(?:(?:the|this|that|an?|our|their)\s+)?(?:[A-Za-z0-9'’.-]+\s+){0,6}(?:source|article|blog|post|guide|paper|report|documentation|website|page)\b[^.!?\n]{0,180}\b(?:likely|probably|perhaps|may|might|could|should|is expected to)\b[^.!?\n]{0,120}\b(?:contain(?:s|ed)?|provid(?:e|es|ed)|explain(?:s|ed)?|detail(?:s|ed)?|show(?:s|ed)?|cover(?:s|ed)?|offer(?:s|ed)?|include(?:s|d)?)\b[^.!?\n]*(?:[.!?]|$)/gi
+const DISPLAY_INTERNAL_PROVIDER_RECOVERY_START_RE =
+  /(?:^|(?<=[.!?]\s))\s*(?:the\s+)?(?:(?:free\s+)?(?:serper|tavily|firecrawl|openrouter|deepseek|browserless|e2b)(?:\s+api)?|(?:search|model|tool|browser|extraction)\s+(?:api|provider)|provider\s+(?:api|request|response))\b/i
+const DISPLAY_INTERNAL_PROVIDER_RECOVERY_SENTENCE_RE =
+  /(?:^|(?<=[.!?]\s))\s*[^.!?\n]{0,80}\b(?:(?:free\s+)?(?:serper|tavily|firecrawl|openrouter|deepseek|browserless|e2b)(?:\s+api)?|(?:search|model|tool|browser|extraction)\s+(?:api|provider)|provider\s+(?:api|request|response))\b[^.!?\n]{0,160}\b(?:block(?:ed|ing)?|fail(?:ed|ure)?|reject(?:ed|ion)?|tim(?:ed?\s*out|eout)|rate[-\s]?limit(?:ed|ing)?|quota|unavailable|error)\b[^.!?\n]*(?:[.!?]|$)/gi
 
 function normalizeUsage(raw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }): StreamUsage | null {
   if (!Number.isFinite(raw.prompt_tokens) || !Number.isFinite(raw.completion_tokens) || !Number.isFinite(raw.cost)) return null
@@ -463,7 +467,19 @@ function recordVisibleToolStartForNarration(
 function splitCleanVisibleAssistantText(text: string): { text: string; hold: string } {
   const prepared = stripInternalPolicyScaffolding(stripPlanMarkers(text))
   const tailMatch = prepared.match(DISPLAY_FUTURE_ACTION_TAIL_RE)
-  const tailIndex = tailMatch?.index
+  const providerRecoveryStart = DISPLAY_INTERNAL_PROVIDER_RECOVERY_START_RE.exec(prepared)
+  const providerRecoveryTailIndex =
+    providerRecoveryStart?.index !== undefined &&
+    !/[.!?](?:\s|$)/.test(prepared.slice(providerRecoveryStart.index))
+      ? providerRecoveryStart.index
+      : undefined
+  const candidateTailIndexes = [
+    tailMatch?.index,
+    providerRecoveryTailIndex,
+  ].filter((value): value is number => value !== undefined)
+  const tailIndex = candidateTailIndexes.length > 0
+    ? Math.min(...candidateTailIndexes)
+    : undefined
   const hold = tailIndex !== undefined ? prepared.slice(tailIndex) : ''
   const ready = tailIndex !== undefined ? prepared.slice(0, tailIndex) : prepared
   const cleaned = ready
@@ -471,6 +487,7 @@ function splitCleanVisibleAssistantText(text: string): { text: string; hold: str
     .replace(DISPLAY_INTERNAL_TASK_REFLECTION_RE, ' ')
     .replace(DISPLAY_OPERATIONAL_COMMAND_SENTENCE_RE, ' ')
     .replace(DISPLAY_SPECULATIVE_SOURCE_SENTENCE_RE, ' ')
+    .replace(DISPLAY_INTERNAL_PROVIDER_RECOVERY_SENTENCE_RE, ' ')
   return { text: cleaned.trim() ? cleaned : '', hold }
 }
 
@@ -628,6 +645,10 @@ export class StreamProcessor {
     }
 
     const emitProvisionalToolStart = (index: number, toolCall: ToolCallData): void => {
+      // One model tool-call ID maps to one visible action. Streaming may add
+      // optional arguments later, but the UI already owns the action and file
+      // content has a dedicated delta lane for live updates.
+      if (toolCall.provisionalStartEmitted) return
       const earlyArgs = buildEarlyToolArgs(toolCall.name, toolCall.arguments)
       addProvisionalRuntimeDisplayContract(earlyArgs, state)
       const currentStepPreview = isCurrentPlanStepPreview(earlyArgs, state)
@@ -638,9 +659,6 @@ export class StreamProcessor {
       emittedToolStarts.set(index, signature)
       const newlyCountedVisibleAction = recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
       toolCall.provisionalStartEmitted = true
-      // The same streamed tool can legitimately upsert its provisional pill as
-      // optional stable arguments arrive. Cadence counts accepted tool IDs, not
-      // UI revisions of the same action.
       if (cadenceProgressUpdate && newlyCountedVisibleAction) cadenceProgressVisibleActionsAfter += 1
       // Current-step file writes need to become visible while the model is
       // still generating their arguments. Their provisional start args are

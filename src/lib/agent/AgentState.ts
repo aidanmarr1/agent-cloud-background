@@ -83,6 +83,8 @@ export interface AgentStateData {
   forceTextNextIteration: boolean
   forcedNarrationRepairAttempts: number
   phaseEndNarrationPending: boolean
+  finalInlineAnswerDelivered: boolean
+  finalInlineAnswerRecoveryAttempts: number
   exactExtractionGuardPending: boolean
   exactExtractionGuardPrompt: string | null
   exactExtractionGuardAttempts: number
@@ -382,6 +384,8 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     forceTextNextIteration: false,
     forcedNarrationRepairAttempts: 0,
     phaseEndNarrationPending: false,
+    finalInlineAnswerDelivered: false,
+    finalInlineAnswerRecoveryAttempts: 0,
     exactExtractionGuardPending: false,
     exactExtractionGuardPrompt: null,
     exactExtractionGuardAttempts: 0,

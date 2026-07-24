@@ -6,10 +6,11 @@ const DSML_TOOL_CALL_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*tool_
 const DSML_INVOKE_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*invoke\b[^>]*>[\s\S]*?<\/\s*${DSML_MARKER}\s*invoke\s*>`, 'gi')
 const DSML_PARAMETER_BLOCK_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*parameter\b[^>]*>[\s\S]*?<\/\s*${DSML_MARKER}\s*parameter\s*>`, 'gi')
 const DSML_TAG_RE = new RegExp(String.raw`<\/?\s*${DSML_MARKER}\s*(?:tool_calls|invoke|parameter)\b[^>]*>`, 'gi')
-const INTERNAL_POLICY_LINE_RE = /^\s*(?:[*_`#>\-\s]*)?(?:INTERNAL_RECOVERY|FINAL_STEP_REDIRECT|BROWSER_ACTION_PREFLIGHT_BLOCKED|BLOCKED|FINAL ANSWER REQUIRED|FINAL SYNTHESIS TOOL REQUIRED|PHASE-END NARRATION REQUIRED|NARRATION REQUIRED BEFORE NEXT ACTION|NARRATION REQUIRED NOW|NARRATION CADENCE STATE|NARRATION DUE|PLAN PROGRESS|FINAL PHASE SWITCH|PHASE SWITCH|TOOL CALL CONTRACT|TOOL HEALTH|FINDINGS|FOCUS|AVOID|MODE|Plan step index|Action label|Your plan for this step|Deliverable step)\b[^\n\r]*$/gim
+const INTERNAL_POLICY_LINE_RE = /^\s*(?:[*_`#>\-\s]*)?(?:INTERNAL_RECOVERY|ACTION SELECTION REPAIR|FINAL_STEP_REDIRECT|BROWSER_ACTION_PREFLIGHT_BLOCKED|BLOCKED|FINAL ANSWER REQUIRED|FINAL SYNTHESIS TOOL REQUIRED|PHASE-END NARRATION REQUIRED|NARRATION REQUIRED BEFORE NEXT ACTION|NARRATION REQUIRED NOW|NARRATION CADENCE STATE|NARRATION DUE|PLAN PROGRESS|FINAL PHASE SWITCH|PHASE SWITCH|TOOL CALL CONTRACT|TOOL HEALTH|FINDINGS|FOCUS|AVOID|MODE|Plan step index|Action label|Your plan for this step|Deliverable step)\b[^\n\r]*$/gim
 const INTERNAL_STEP_LINE_RE = /^\s*(?:[*_`#>\-\s]*)?(?:Step\s+\d+\s*\/\s*\d+:\s*["“][^"”]+["”]|\[DONE\]\s*\d+\.|→\s*\[NOW\]\s*\d+\.|\[\s*\]\s*\d+\.)[^\n]*$/gim
 const FUTURE_ACTION_SENTENCE_RE = /(?:^|(?<=[.!?]\s))\s*(?:let me)\b[^.!?\n]*(?:[.!?]|$)/gi
 const INTERNAL_RUNTIME_NARRATION_RE = /\b(?:tool\s+(?:call|result|output|payload)|raw\s+(?:result|output|payload)|internal\s+(?:recovery|retry|state)|(?:backend|runtime)\s+(?:state|error|failure|retry|recovery|mechanic)|(?:parser|json)\s+(?:error|failure|payload|response)|cache\s+hit|cached\s+(?:result|response)|truncat(?:ed|ion)|mid[-\s]?string|incomplete\s+record|download\s+confirmation|placeholder\s+paths?|call\s+id|request\s+id)\b/i
+const INTERNAL_PROVIDER_NARRATION_RE = /(?:\b(?:(?:free\s+)?(?:serper|tavily|firecrawl|openrouter|deepseek|browserless|e2b)(?:\s+api)?|(?:search|model|tool|browser|extraction)\s+(?:api|provider)|provider\s+(?:api|request|response))\b[^.!?\n]{0,140}\b(?:block(?:ed|ing)?|fail(?:ed|ure)?|reject(?:ed|ion)?|tim(?:ed?\s*out|eout)|rate[-\s]?limit(?:ed|ing)?|quota|unavailable|error)\b|\b(?:block(?:ed|ing)?|fail(?:ed|ure)?|reject(?:ed|ion)?|tim(?:ed?\s*out|eout)|rate[-\s]?limit(?:ed|ing)?|quota|unavailable|error)\b[^.!?\n]{0,140}\b(?:(?:free\s+)?(?:serper|tavily|firecrawl|openrouter|deepseek|browserless|e2b)(?:\s+api)?|(?:search|model|tool|browser|extraction)\s+(?:api|provider)|provider\s+(?:api|request|response))\b)/i
 
 export function stripTextModeToolCallBlocks(
   text: string,
@@ -302,6 +303,7 @@ const OPERATIONAL_NARRATION_PATTERNS = [
   /^(?:let me|i(?:['’]ll| will| am going to| need to| should| can| have to))\s+(?:get|fetch|load)\b/i,
 ]
 const INTERNAL_GUARD_PATTERNS = [
+  /\bACTION SELECTION REPAIR:[^.?!]*(?:[.?!]|$)/gi,
   /\bFINAL_STEP_REDIRECT:[^.?!]*(?:[.?!]|$)/gi,
   /\bNavigation failed:\s*(?:HTTP\s*(?:4\d\d|5\d\d)|URL redirected|Page title|Page body)[^.?!]*(?:[.?!]|$)/gi,
   /⚠\s*ERROR PAGE DETECTED[\s\S]*?Use the recovery options in the tool content\.?/gi,
@@ -606,7 +608,8 @@ export function sanitizeNarrationText(
   if (
     isPlanLeakNarration(rawCleaned) ||
     isPhaseLeakNarration(rawCleaned) ||
-    INTERNAL_RUNTIME_NARRATION_RE.test(rawCleaned)
+    INTERNAL_RUNTIME_NARRATION_RE.test(rawCleaned) ||
+    INTERNAL_PROVIDER_NARRATION_RE.test(rawCleaned)
   ) return null
 
   const cleaned = stripNarrationArtifacts(text)

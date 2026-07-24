@@ -73,6 +73,8 @@ async function assertSourceContracts() {
   const hardStopBuffer = readNumberConst(agentConfig, 'AGENT_DEADLINE_HARD_STOP_BUFFER_MS')
 
   assert.match(agentLoop, /auditAgentCompletion\(state,\s*terminalReason\)/, 'AgentLoop must audit before emitting final done')
+  assert.match(agentLoop, /scheduleFinalInlineAnswerRecovery/, 'AgentLoop must reopen a missing final inline answer instead of reporting false completion')
+  assert.match(agentLoop, /isSynthesisFinalizationRecoveryResult/, 'blocked synthesis research must redirect immediately into finalization')
   assert.match(agentLoop, /FINAL_DELIVERABLE_WRITE_TOOLS = new Set\(\['create_file', 'append_file', 'edit_file', 'export_pdf'\]\)/, 'final deliverable completion must recognize edit_file and export_pdf updates')
   assert.match(agentLoop, /deliverableContentForVerification/, 'deliverable verification must read the full current file, not only the latest append chunk')
   assert.match(agentLoop, /pendingDeliverableRevision/, 'failed deliverable verification must leave a concrete pending revision target')
@@ -81,7 +83,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /partialWriteIncomplete/, 'recovered partial file writes must keep the loop alive for append/edit completion')
   assert.match(agentLoop, /isLeanFinalSynthesisStep\(state\) && isFixedWebSearchInlineAnswerState\(state\)[\s\S]*?activeTools = \[\]/, 'fixed-search answer tasks must not be forced into file-tool finalization')
   assert.match(agentLoop, /Do not create, mention, attach, or claim any file, report, artifact, or deliverable/, 'fixed-search inline answer turns must not claim nonexistent files')
-  assert.match(policyEngine, /isFixedWebSearchInlineAnswerState\(state\) && looksLikeCompleteInlineAnswer/, 'fixed-search answer tasks must be allowed to terminate from a complete inline answer')
+  assert.match(policyEngine, /isFixedWebSearchInlineAnswerState\(state\) && shouldAcceptFinalInlineText/, 'fixed-search answer tasks must be allowed to terminate from a complete inline answer')
   assert.match(policyEngine, /finalStepStartGuidance/, 'final-step transition guidance must distinguish inline answers from saved deliverables')
   assert.match(agentLoop, /stepAdvanceStatusFor\(state,\s*i\)/, 'AgentLoop must propagate incomplete step status to the UI')
   assert.match(agentLoop, /Completion audit failed/, 'failed completion audits must be logged')
@@ -163,7 +165,7 @@ async function assertCompletionRuntime() {
     await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
 import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
-import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
+import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
 import { PolicyEngine } from ${JSON.stringify(join(root, 'src/lib/agent/PolicyEngine.ts'))}
 
 const timeouts = {
@@ -240,10 +242,12 @@ export function runCompletionAuditSmoke() {
   inlineCodeExplanation.originalUserRequest =
     'Find one current credible source explaining how AI models generate SVG code, then give a concise two-sentence summary.'
   inlineCodeExplanation.currentStepIdx = 2
+  inlineCodeExplanation.finalInlineAnswerDelivered = true
   audit = auditAgentCompletion(inlineCodeExplanation, 'inline_answer_complete')
   assert.equal(audit.complete, true, 'a code-related research question must remain an inline answer')
 
   inlineCodeExplanation.currentStepIdx = 1
+  inlineCodeExplanation.finalInlineAnswerDelivered = false
   const policyActions = new PolicyEngine().evaluate(
     inlineCodeExplanation,
     new Map(),
@@ -255,6 +259,36 @@ export function runCompletionAuditSmoke() {
     policyActions.some(action => action.type === 'terminate' && action.reason === 'inline_answer_complete'),
     true,
     'final-step policy must accept the inline SVG explanation instead of forcing a file',
+  )
+  assert.equal(inlineCodeExplanation.finalInlineAnswerDelivered, true)
+
+  const missingInlineAnswer = createInitialState(false, timeouts)
+  missingInlineAnswer.currentPlanItems = ['Research current evidence', 'Answer the user']
+  missingInlineAnswer.currentPlanScopes = [null, null]
+  missingInlineAnswer.currentStepIdx = 2
+  missingInlineAnswer.taskStrategy = 'research'
+  missingInlineAnswer.originalUserRequest = 'Research the newest iPhone and tell me the highest storage option in chat.'
+  audit = auditAgentCompletion(missingInlineAnswer, 'plan_complete')
+  assert.equal(audit.complete, false, 'plan completion alone must not substitute for a visible final answer')
+  assert.ok(audit.missing.includes(MISSING_FINAL_INLINE_ANSWER))
+
+  const statusOnly = createInitialState(false, timeouts)
+  statusOnly.currentPlanItems = ['Research current evidence', 'Answer the user']
+  statusOnly.currentPlanScopes = [null, null]
+  statusOnly.currentStepIdx = 1
+  statusOnly.taskStrategy = 'research'
+  statusOnly.originalUserRequest = 'Research the newest iPhone and tell me the highest storage option in chat.'
+  const statusActions = new PolicyEngine().evaluate(
+    statusOnly,
+    new Map(),
+    "I'll analyze the current Apple lineup and compare every storage and color configuration, then present the closest silver option once that research is complete.",
+    false,
+    40,
+  )
+  assert.equal(
+    statusActions.some(action => action.type === 'terminate'),
+    false,
+    'a future-tense acknowledgement must never be accepted as the final answer',
   )
 }
 `, 'utf8')

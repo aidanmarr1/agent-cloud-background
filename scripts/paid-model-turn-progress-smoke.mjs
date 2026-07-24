@@ -57,6 +57,11 @@ assert.match(
   /lastToolResults\.every\(isDisplayContractRepairResult\)[\s\S]{0,260}internalRecoveryScheduled = 'display_contract'/,
   'display and plan-step preflight repairs must mark their explicit retry before re-entering the paid model loop',
 )
+assert.match(
+  streamingCase,
+  /if \(progressDecision\.kind === 'allow_recovery'\)[\s\S]*?state\.consecutiveNoToolCalls = Math\.max\(1,[\s\S]*?ACTION SELECTION REPAIR/,
+  'the bounded generic recovery must explicitly repair action selection and require a concrete model action',
+)
 
 const workDir = await mkdtemp(join(root, 'scripts/.paid-model-turn-progress-smoke-'))
 const runnerPath = join(workDir, 'runner.ts')

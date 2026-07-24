@@ -1468,7 +1468,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /FINAL INLINE ANSWER ONLY/, 'compact final chat-answer context must forbid status/planning/tool chatter')
   assert.match(agentLoop, /function shouldCompleteFinalInlineAnswerTurn/, 'final inline answer turns must have a hard completion gate outside normal policy retry loops')
   assert.match(agentLoop, /final_inline_answer_complete/, 'substantial streamed final inline answers must terminate immediately instead of looping through more thinking')
-  assert.match(completionAudit, /completedInlineAnswer[\s\S]*inline_answer_complete[\s\S]*!completedInlineAnswer && requiresFinalDeliverable/, 'completion audit must not require a saved artifact after a valid inline chat answer')
+  assert.match(completionAudit, /const completedInlineAnswer = state\.finalInlineAnswerDelivered[\s\S]*!completedInlineAnswer && requiresFinalDeliverable/, 'completion audit must not require a saved artifact after a valid inline chat answer')
   assert.match(agentLoop, /function compactResearchBreadthSaturated[\s\S]*stepOpenedSourceDomains\(state\)\.size[\s\S]*distinctDomains >= depth\.requiredSourceBreadth/, 'compact research phases must require opened/read source breadth before saturation')
   assert.match(agentLoop, /function compactResearchNeedsOpenedSource[\s\S]*uniqueSearches >= 1[\s\S]*openedPages < usefulOpenedPages/, 'compact research must force a source read after one useful search packet')
   assert.match(agentLoop, /deep\|deeper\|deepest[\s\S]*return false[\s\S]*const brief = /, 'deep research with a concise final answer must not use the shallow brief-inline shortcut')

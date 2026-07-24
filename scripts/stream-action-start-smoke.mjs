@@ -13,7 +13,7 @@ try {
 import assert from 'node:assert/strict'
 import { StreamProcessor } from ${JSON.stringify(join(root, 'src/lib/agent/StreamProcessor.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
-import { acceptProgressNarration, beginNarrationCadenceAttempt } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
+import { acceptProgressNarration, beginNarrationCadenceAttempt, reviewProgressNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -135,6 +135,11 @@ async function* speculativeUnreadSourceChunks() {
 async function* completedSourceResultChunks() {
   yield { choices: [{ delta: { content: 'The Anthropic engineering ' } }] }
   yield { choices: [{ delta: { content: 'blog reports that its agent runtime uses parallel tool dispatch to reduce user-visible latency.' } }] }
+}
+
+async function* internalProviderRecoveryChunks() {
+  yield { choices: [{ delta: { content: 'The free Serper API ' } }] }
+  yield { choices: [{ delta: { content: "blocked the Apple search query, so I navigated directly to Apple's iPhone store page instead." } }] }
 }
 
 async function* validCadenceToolChunks() {
@@ -503,7 +508,32 @@ export async function runSmoke() {
   assert.match(completedResult.assistantContent, /blog reports that its agent runtime uses parallel tool dispatch/)
   assert.equal(completedResultEmitter.events.filter(e => e.type === 'text_delta').length, 1, 'a concrete completed-source result must remain visible')
 
+  const providerRecoveryEmitter = makeEmitter()
+  const providerRecoveryState = createInitialState(false, timeouts)
+  providerRecoveryState.currentPlanItems = ['Verify the current Apple configuration']
+  providerRecoveryState.currentStepIdx = 0
+  const providerRecoveryResult = await new StreamProcessor(providerRecoveryEmitter as any, timeouts)
+    .processStream(internalProviderRecoveryChunks() as any, providerRecoveryState)
+  assert.equal(
+    providerRecoveryEmitter.events.filter(event => event.type === 'text_delta').length,
+    0,
+    'fragmented provider/API recovery mechanics must be held and removed before reaching the UI',
+  )
+  assert.equal(
+    providerRecoveryResult.assistantContent.trim(),
+    '',
+    'internal provider/API recovery prose must not count as user-visible model progress',
+  )
+
   const cadenceText = 'The official benchmark reports a 2.1-second median agent startup, establishing a concrete latency baseline.'
+  assert.equal(
+    reviewProgressNarration(
+      'The free Serper API blocked the Apple search query, so I navigated directly to the store page instead.',
+      { requireSignal: false },
+    ).status,
+    'invalid',
+    'provider/API recovery details must never become visible narration',
+  )
   const validCadenceEmitter = makeEmitter()
   const validCadenceState = createInitialState(false, timeouts)
   validCadenceState.currentPlanItems = ['Verify current latency evidence']
@@ -531,7 +561,7 @@ export async function runSmoke() {
   upsertCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(upsertCadenceState), true)
   const upsertCadenceResult = await new StreamProcessor(upsertCadenceEmitter as any, timeouts).processStream(cadenceToolUpsertChunks() as any, upsertCadenceState, true)
-  assert.ok(upsertCadenceEmitter.events.filter(event => event.type === 'tool_start').length >= 1)
+  assert.equal(upsertCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'one streamed tool-call ID must create exactly one visible action')
   assert.equal(upsertCadenceResult.cadenceProgressVisibleActionsAfter, 1, 'provisional upserts for one tool ID must consume exactly one cadence action')
   assert.equal(acceptProgressNarration(upsertCadenceState, upsertCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: upsertCadenceResult.cadenceProgressVisibleActionsAfter, resetCadence: true }).status, 'accepted')
   assert.equal(upsertCadenceState.visibleToolActionsSinceLastNarration, 1, 'a same-tool upsert must not make the next narration arrive early')

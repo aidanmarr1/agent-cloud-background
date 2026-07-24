@@ -356,11 +356,10 @@ function isFinalInlineAnswerStep(state: AgentStateData): boolean {
 function shouldAcceptFinalInlineText(state: AgentStateData, content: string): boolean {
   if (!isFinalInlineAnswerStep(state)) return false
   const text = content.trim()
-  if (text.length < 40) return false
-  if (looksLikeFinalStatusUpdate(text) && text.length < 240) {
-    return false
-  }
-  return true
+  if (text.length < 60) return false
+  if (looksLikeFinalStatusUpdate(text) || looksLikeProgressOrRecoveryOnly(text)) return false
+  return /[.!?)]\s*$/.test(text) ||
+    text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
 }
 
 function looksLikeFinalStatusUpdate(content: string): boolean {
@@ -850,15 +849,10 @@ export class PolicyEngine {
       state.currentStepIdx === state.currentPlanItems.length - 1 &&
       !isBrowserActionTask(state) &&
       !finalDeliverableRequired(state) &&
-      (
-        shouldAcceptFinalInlineText(state, assistantContent) ||
-        looksLikeSubstantiveInlineAnswer(assistantContent) ||
-        looksLikeCompleteInlineAnswer(assistantContent) ||
-        looksLikeUsableFinalInlineAnswer(assistantContent) ||
-        looksLikeSubstantialFinalInlineText(assistantContent)
-      )
+      shouldAcceptFinalInlineText(state, assistantContent)
     ) {
       advanceStep(state, 'Answered inline in chat')
+      state.finalInlineAnswerDelivered = true
       state.consecutiveNoToolCalls = 0
       return [
         { type: 'step_advance' },
@@ -1681,17 +1675,12 @@ Then make your first tool call. Your plan will be remembered across iterations o
           isLastStep &&
           !isBrowserActionTask(state) &&
           (
-          (!finalDeliverableRequired(state) && (
-            shouldAcceptFinalInlineText(state, assistantContent) ||
-            looksLikeSubstantiveInlineAnswer(assistantContent) ||
-            looksLikeCompleteInlineAnswer(assistantContent) ||
-            looksLikeUsableFinalInlineAnswer(assistantContent) ||
-            looksLikeSubstantialFinalInlineText(assistantContent)
-          )) ||
-          (isFixedWebSearchInlineAnswerState(state) && looksLikeCompleteInlineAnswer(assistantContent))
+          (!finalDeliverableRequired(state) && shouldAcceptFinalInlineText(state, assistantContent)) ||
+          (isFixedWebSearchInlineAnswerState(state) && shouldAcceptFinalInlineText(state, assistantContent))
         )
       ) {
         advanceStep(state, 'Answered inline in chat')
+        state.finalInlineAnswerDelivered = true
         state.consecutiveNoToolCalls = 0
         return [
           { type: 'step_advance' },
