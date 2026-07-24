@@ -31,7 +31,10 @@ import { humanTopicLabel, requestSubject } from './taskText'
 import { analyzeTaskIntent } from './TaskIntent'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 import { researchDepthProfileForState } from './ResearchDepth'
-import { compactAdjacentSourceEvidencePhases } from './PlanNormalization'
+import {
+  compactAdjacentArtifactLifecyclePhases,
+  compactAdjacentSourceEvidencePhases,
+} from './PlanNormalization'
 
 export interface RequiredPlanStep {
   title: string
@@ -665,7 +668,7 @@ export class PlanManager {
       return typeof scope === 'string' && scope.trim() ? scope.trim() : null
     })
     const alignedScopes = this.alignScopesToTitles(titles, scopes)
-    const compacted = this.compactSourceEvidencePhasesForTask(titles, alignedScopes, state.taskStrategy)
+    const compacted = this.compactPlanPhasesForTask(titles, alignedScopes, state.taskStrategy)
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
 
@@ -1313,7 +1316,7 @@ Rules:
       ? arrays.scopes
       : enforcedTitles.map((_, index) => arrays.scopes[index] ?? null)
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
-    const compacted = this.compactSourceEvidencePhasesForTask(enforcedTitles, alignedScopes, mappedTaskType)
+    const compacted = this.compactPlanPhasesForTask(enforcedTitles, alignedScopes, mappedTaskType)
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     assertPlannerVisibleTextQuality(obj.ack, withRequired.titles, withRequired.scopes)
@@ -1581,20 +1584,26 @@ Generate an updated list of remaining steps (including a revised current step if
     return parseVisibleStepCountInstruction(this.customInstructions)
   }
 
-  private compactSourceEvidencePhasesForTask(
+  private compactPlanPhasesForTask(
     titles: string[],
     scopes: Array<string | null>,
     taskType: string | undefined,
   ): { titles: string[]; scopes: Array<string | null> } {
-    const eligibleResearchTask = taskType === 'research' || taskType === 'analysis'
-    if (!eligibleResearchTask) return { titles, scopes }
-
     const request = effectiveTaskRequest(this.messages)
     const fixedVisibleCount = this.customInstructionVisibleStepCount() ?? parseVisibleStepCountInstruction(request)
+    const preserveVisibleStepCount = fixedVisibleCount !== null
+    const eligibleResearchTask = taskType === 'research' || taskType === 'analysis'
     const explicitlySeparateSourcePhases = /\b(?:separate|distinct|individual)\s+(?:(?:source|research|evidence)[-\s]*)?(?:steps|phases)\b/i.test(request)
+    const explicitlySeparateArtifactPhases = /\b(?:separate|distinct|individual)\s+(?:(?:draft|save|verify|artifact|deliverable)[-\s]*)?(?:steps|phases)\b/i.test(request)
 
-    return compactAdjacentSourceEvidencePhases(titles, scopes, {
-      preserveVisibleStepCount: fixedVisibleCount !== null || explicitlySeparateSourcePhases,
+    const sourceCompacted = eligibleResearchTask
+      ? compactAdjacentSourceEvidencePhases(titles, scopes, {
+        preserveVisibleStepCount: preserveVisibleStepCount || explicitlySeparateSourcePhases,
+      })
+      : { titles, scopes }
+
+    return compactAdjacentArtifactLifecyclePhases(sourceCompacted.titles, sourceCompacted.scopes, {
+      preserveVisibleStepCount: preserveVisibleStepCount || explicitlySeparateArtifactPhases,
     })
   }
 

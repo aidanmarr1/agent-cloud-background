@@ -9,18 +9,18 @@ const planManagerSource = await readFile(join(root, 'src/lib/agent/PlanManager.t
 
 assert.match(
   planManagerSource,
-  /usePrecomputedPlan[\s\S]*compactSourceEvidencePhasesForTask\(titles, alignedScopes, state\.taskStrategy\)/,
-  'route-precomputed plans must pass through source-evidence phase compaction',
+  /usePrecomputedPlan[\s\S]*compactPlanPhasesForTask\(titles, alignedScopes, state\.taskStrategy\)/,
+  'route-precomputed plans must pass through plan phase compaction',
 )
 assert.match(
   planManagerSource,
-  /emitParsedPlan[\s\S]*compactSourceEvidencePhasesForTask\(enforcedTitles, alignedScopes, mappedTaskType\)/,
-  'model-authored plans must pass through source-evidence phase compaction',
+  /emitParsedPlan[\s\S]*compactPlanPhasesForTask\(enforcedTitles, alignedScopes, mappedTaskType\)/,
+  'model-authored plans must pass through plan phase compaction',
 )
 assert.match(
   planManagerSource,
-  /fixedVisibleCount !== null \|\| explicitlySeparateSourcePhases/,
-  'explicit visible counts and explicitly separate source phases must remain binding',
+  /preserveVisibleStepCount \|\| explicitlySeparateSourcePhases[\s\S]*preserveVisibleStepCount \|\| explicitlySeparateArtifactPhases/,
+  'explicit visible counts and explicitly separate source or artifact phases must remain binding',
 )
 
 const workDir = await mkdtemp(join(root, 'scripts/.plan-phase-compaction-smoke-'))
@@ -30,7 +30,10 @@ const bundlePath = join(workDir, 'runner.mjs')
 try {
   await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
-import { compactAdjacentSourceEvidencePhases } from ${JSON.stringify(join(root, 'src/lib/agent/PlanNormalization.ts'))}
+import {
+  compactAdjacentArtifactLifecyclePhases,
+  compactAdjacentSourceEvidencePhases,
+} from ${JSON.stringify(join(root, 'src/lib/agent/PlanNormalization.ts'))}
 
 const exactLivePlan = compactAdjacentSourceEvidencePhases(
   [
@@ -127,6 +130,42 @@ assert.deepEqual(
   ],
   'an explicitly fixed visible phase count must be preserved exactly',
 )
+
+const splitArtifactLifecycle = compactAdjacentArtifactLifecyclePhases(
+  [
+    'Draft gemini-36-deployment-check.md content',
+    'Save gemini-36-deployment-check.md to disk',
+    'Verify saved markdown file gemini-36-deployment-check.md',
+  ],
+  [null, null, null],
+)
+assert.deepEqual(
+  splitArtifactLifecycle.titles,
+  ['Create and verify gemini-36-deployment-check.md'],
+  'draft, save, and verify labels for one named artifact must become one executable phase',
+)
+assert.match(splitArtifactLifecycle.scopes[0] || '', /Complete one artifact lifecycle in this phase/)
+
+const unrelatedArtifacts = compactAdjacentArtifactLifecyclePhases(
+  [
+    'Draft deployment-guide.md',
+    'Save pricing-analysis.md',
+    'Verify deployment-guide.md',
+  ],
+  [null, null, null],
+)
+assert.equal(unrelatedArtifacts.titles.length, 3, 'separate artifact targets must remain separate')
+
+const fixedArtifactLifecycle = compactAdjacentArtifactLifecyclePhases(
+  [
+    'Draft deployment-guide.md',
+    'Save deployment-guide.md',
+    'Verify deployment-guide.md',
+  ],
+  [null, null, null],
+  { preserveVisibleStepCount: true },
+)
+assert.equal(fixedArtifactLifecycle.titles.length, 3, 'an explicit visible phase count must preserve artifact lifecycle labels')
 
 console.log('plan phase compaction smoke checks passed')
 `, 'utf8')

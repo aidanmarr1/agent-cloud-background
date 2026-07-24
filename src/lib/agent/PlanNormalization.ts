@@ -7,6 +7,10 @@ export interface SourceEvidenceCompactionOptions {
   preserveVisibleStepCount?: boolean
 }
 
+export interface ArtifactLifecycleCompactionOptions {
+  preserveVisibleStepCount?: boolean
+}
+
 const SOURCE_SET_PATTERN = /\b(?:(?:official|primary|credible|authoritative|reliable|current|selected|identified|chosen|found|collected)\s+)*(?:sources?|documents?|reports?|papers?|studies|pages?|references?|documentation)\b/i
 const SOURCE_DISCOVERY_ACTION_PATTERN = /\b(?:find|identify|locate|select|choose|gather|collect|search(?:\s+for)?|discover|compile)\b/i
 const SOURCE_EXTRACTION_ACTION_PATTERN = /\b(?:extract|read|review|open|pull|capture|record|inspect|analy[sz]e|summari[sz]e)\b/i
@@ -281,6 +285,112 @@ export function compactAdjacentSourceEvidencePhases(
 
     nextTitles.push(currentTitle)
     nextScopes.push(currentScope)
+  }
+
+  return { titles: nextTitles, scopes: nextScopes }
+}
+
+const ARTIFACT_AUTHORING_PATTERN = /\b(?:draft|write|author|compose|create|build|implement|develop|produce|generate|assemble|synthesi[sz]e|prepare|design|finali[sz]e|polish|revise|edit)\b/i
+const ARTIFACT_FOLLOWUP_PATTERN = /\b(?:save|persist|write|create|export|verify|validate|check|inspect|read|review|test|confirm)\b/i
+const ARTIFACT_FILE_PATTERN = /\b[\w.-]+\.(?:md|markdown|txt|pdf|docx?|html?|css|jsx?|tsx?|json|csv|xlsx?|pptx?|zip)\b/i
+const ARTIFACT_TOKEN_STOP_WORDS = new Set([
+  'and', 'artifact', 'check', 'complete', 'confirm', 'content', 'create', 'created',
+  'deliverable', 'document', 'draft', 'edit', 'export', 'file', 'final', 'finalize',
+  'finalise', 'generate', 'guide', 'implement', 'markdown', 'output', 'prepare',
+  'produce', 'read', 'report', 'review', 'save', 'saved', 'the', 'to', 'validate',
+  'verification', 'verify', 'write',
+])
+
+function artifactTargetTokens(title: string, scope: string | null | undefined): Set<string> {
+  return new Set(
+    phaseText(title, scope)
+      .toLowerCase()
+      .replace(/[^a-z0-9.-]+/g, ' ')
+      .split(/\s+/)
+      .map(token => token.trim())
+      .filter(token => token.length >= 3 && !ARTIFACT_TOKEN_STOP_WORDS.has(token)),
+  )
+}
+
+function artifactTargetsMatch(
+  firstTitle: string,
+  firstScope: string | null | undefined,
+  nextTitle: string,
+  nextScope: string | null | undefined,
+): boolean {
+  const firstText = phaseText(firstTitle, firstScope)
+  const nextText = phaseText(nextTitle, nextScope)
+  const firstFile = firstText.match(ARTIFACT_FILE_PATTERN)?.[0]?.toLowerCase()
+  const nextFile = nextText.match(ARTIFACT_FILE_PATTERN)?.[0]?.toLowerCase()
+  if (firstFile || nextFile) return !!firstFile && firstFile === nextFile
+
+  const firstTokens = artifactTargetTokens(firstTitle, firstScope)
+  const nextTokens = artifactTargetTokens(nextTitle, nextScope)
+  if (firstTokens.size === 0 || nextTokens.size === 0) return false
+  let shared = 0
+  for (const token of firstTokens) {
+    if (nextTokens.has(token)) shared += 1
+  }
+  return shared >= 1 && shared / Math.min(firstTokens.size, nextTokens.size) >= 0.5
+}
+
+function mergedArtifactLifecycleTitle(titles: string[], scopes: Array<string | null>): string {
+  const combined = titles.map((title, index) => phaseText(title, scopes[index])).join(' ')
+  const file = combined.match(ARTIFACT_FILE_PATTERN)?.[0]
+  if (file) return `Create and verify ${file}`
+  return `${stripTerminalPunctuation(titles[0])} and verify the saved deliverable`
+}
+
+/**
+ * Collapse a planner's adjacent draft/save/verify bookkeeping into one real
+ * deliverable phase. These labels describe one artifact lifecycle, not three
+ * independently completable goals, and keeping them separate can make a model
+ * verify a file while the runtime still believes it is only drafting.
+ */
+export function compactAdjacentArtifactLifecyclePhases(
+  titles: string[],
+  scopes: Array<string | null>,
+  options: ArtifactLifecycleCompactionOptions = {},
+): PlanPhaseCollection {
+  const normalizedScopes = titles.map((_, index) => scopes[index] ?? null)
+  if (options.preserveVisibleStepCount || titles.length < 2) {
+    return { titles: [...titles], scopes: normalizedScopes }
+  }
+
+  const nextTitles: string[] = []
+  const nextScopes: Array<string | null> = []
+
+  for (let index = 0; index < titles.length; index++) {
+    const currentTitle = titles[index]
+    const currentScope = normalizedScopes[index]
+    if (!ARTIFACT_AUTHORING_PATTERN.test(phaseText(currentTitle, currentScope))) {
+      nextTitles.push(currentTitle)
+      nextScopes.push(currentScope)
+      continue
+    }
+
+    let runEnd = index + 1
+    while (
+      runEnd < titles.length &&
+      ARTIFACT_FOLLOWUP_PATTERN.test(phaseText(titles[runEnd], normalizedScopes[runEnd])) &&
+      artifactTargetsMatch(currentTitle, currentScope, titles[runEnd], normalizedScopes[runEnd])
+    ) {
+      runEnd += 1
+    }
+
+    if (runEnd - index < 2) {
+      nextTitles.push(currentTitle)
+      nextScopes.push(currentScope)
+      continue
+    }
+
+    const runTitles = titles.slice(index, runEnd)
+    const runScopes = normalizedScopes.slice(index, runEnd)
+    nextTitles.push(mergedArtifactLifecycleTitle(runTitles, runScopes))
+    nextScopes.push(`Complete one artifact lifecycle in this phase: ${runTitles
+      .map((title, runIndex) => stripTerminalPunctuation(runScopes[runIndex] || title))
+      .join('; ')}.`)
+    index = runEnd - 1
   }
 
   return { titles: nextTitles, scopes: nextScopes }
