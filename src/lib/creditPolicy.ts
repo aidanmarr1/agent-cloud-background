@@ -25,7 +25,15 @@ export interface CreditLedgerEvent {
   source: 'server'
 }
 
-export const CREDITS_PER_USD = 1000
+// Keep the customer-facing scale comparable to the current Manus benchmark:
+// 4,000 credits for $20 (200 credits per retail dollar), with standard
+// 15–25 minute agent tasks landing in the low hundreds of credits. Provider
+// costs remain the source of truth; this multiplier converts those exact costs
+// into billable product credits while leaving room for hosted-worker overhead,
+// payment fees, failed-task refunds, and product margin.
+export const RETAIL_CREDITS_PER_USD = 200
+export const PROVIDER_COST_TO_RETAIL_MULTIPLIER = 30
+export const CREDITS_PER_USD = RETAIL_CREDITS_PER_USD * PROVIDER_COST_TO_RETAIL_MULTIPLIER
 export const TASK_START_CREDITS = 0
 // Runtime wall-clock time and task startup are not billable. Credits are
 // charged only from provider-reported billing usage or explicitly priced
@@ -33,7 +41,7 @@ export const TASK_START_CREDITS = 0
 export const ACTIVE_CREDITS_PER_MINUTE = 0
 
 // Public provider rates used to keep in-app credits anchored to real spend.
-// Current route: google/gemini-3.1-flash-lite on OpenRouter.
+// Current default route: DeepSeek V4 Flash.
 export const MODEL_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.inputUsdPer1M
 export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens
@@ -61,6 +69,8 @@ function usdToCredits(amountUsd: number): number {
 }
 
 export const CREDIT_RATES = {
+  retailCreditsPerUsd: RETAIL_CREDITS_PER_USD,
+  providerCostToRetailMultiplier: PROVIDER_COST_TO_RETAIL_MULTIPLIER,
   creditsPerUsd: CREDITS_PER_USD,
   model: DEFAULT_MODEL_PRICING.model,
   modelInputUsdPer1M: MODEL_INPUT_USD_PER_1M,

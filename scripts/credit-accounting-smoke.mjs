@@ -27,7 +27,9 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/StreamProcessor.ts'), 'utf8'),
   ])
 
-  assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*1000/, 'credit policy must define a stable credit-to-USD conversion')
+  assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
+  assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*30/, 'credit policy must preserve margin for hosted infrastructure and failed-task refunds')
+  assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
   assert.match(modelPricing, /DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4-flash'/, 'default model must be DeepSeek v4 Flash')
   assert.match(modelPricing, /inputUsdPer1M:\s*0\.14/, 'DeepSeek v4 Flash input pricing must match DeepSeek')
   assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.0028/, 'DeepSeek v4 Flash cache-read pricing must match DeepSeek')
@@ -154,17 +156,25 @@ import { getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.t
 import { rm } from 'node:fs/promises'
 
 export async function runCreditPricingSmoke() {
-  assert.equal(CREDIT_RATES.creditsPerUsd, 1000)
-  assert.equal(CREDIT_RATES.webSearchCredits, 0.3)
-  assert.equal(CREDIT_RATES.imageSearchCredits, 0.3)
+  assert.equal(CREDIT_RATES.retailCreditsPerUsd, 200)
+  assert.equal(CREDIT_RATES.providerCostToRetailMultiplier, 30)
+  assert.equal(CREDIT_RATES.creditsPerUsd, 6000)
+  assert.equal(CREDIT_RATES.webSearchCredits, 1.8)
+  assert.equal(CREDIT_RATES.imageSearchCredits, 1.8)
   assert.equal(CREDIT_RATES.browserStepCredits, 0)
   assert.equal(CREDIT_RATES.e2bDefaultVcpuCount, 2)
   assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 0.5)
   assert.equal(CREDIT_RATES.e2bSandboxUsdPerSecond, (2 * 0.000014) + (0.5 * 0.0000045))
-  assert.equal(CREDIT_RATES.inputTokenCreditsPer1K, roundCreditAmount(CREDIT_RATES.modelInputUsdPer1M))
-  assert.equal(CREDIT_RATES.outputTokenCreditsPer1K, roundCreditAmount(CREDIT_RATES.modelOutputUsdPer1M))
-  assert.equal(toolCreditCharge('web_search'), 0.3)
-  assert.equal(toolCreditCharge('image_search'), 0.3)
+  assert.equal(
+    CREDIT_RATES.inputTokenCreditsPer1K,
+    roundCreditAmount((CREDIT_RATES.modelInputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
+  )
+  assert.equal(
+    CREDIT_RATES.outputTokenCreditsPer1K,
+    roundCreditAmount((CREDIT_RATES.modelOutputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
+  )
+  assert.equal(toolCreditCharge('web_search'), 1.8)
+  assert.equal(toolCreditCharge('image_search'), 1.8)
   assert.equal(toolCreditCharge('browser_navigate'), 0)
   assert.equal(toolCreditCharge('browser_click_at'), 0)
   assert.equal(toolCreditCharge('browser_screenshot'), 0)
@@ -173,6 +183,12 @@ export async function runCreditPricingSmoke() {
   assert.equal(toolCreditCharge('unknown_local_tool'), 0)
   const expectedTokenCharge = roundCreditAmount(0.00123 * CREDIT_RATES.creditsPerUsd)
   const expectedE2BCharge = roundCreditAmount(CREDIT_RATES.e2bSandboxUsdPerSecond * CREDIT_RATES.creditsPerUsd * 120)
+  const standardAnalysisRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 15 * 60_000 })
+  const standardWebsiteRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 25 * 60_000 })
+  const complexAppRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 80 * 60_000 })
+  assert.ok(standardAnalysisRuntimeCharge >= 160 && standardAnalysisRuntimeCharge <= 170)
+  assert.ok(standardWebsiteRuntimeCharge >= 270 && standardWebsiteRuntimeCharge <= 280)
+  assert.ok(complexAppRuntimeCharge >= 870 && complexAppRuntimeCharge <= 880)
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
