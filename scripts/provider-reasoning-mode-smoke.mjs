@@ -94,6 +94,15 @@ const stream = await llm.createStreamingCompletion({
   reasoning: { effort: 'minimal', exclude: true },
 })
 for await (const _chunk of stream) {}
+await llm.createCompletion({
+  ...common,
+  messages: [
+    { role: 'user', content: 'Begin the task.' },
+    { role: 'assistant', content: 'I have gathered the first result.' },
+    { role: 'system', content: 'Continue with the next concrete action.' },
+  ],
+  max_tokens: 256,
+})
 process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 `
 
@@ -120,11 +129,11 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   const jsonStart = stdout.lastIndexOf(marker)
   assert.ok(jsonStart >= 0, 'probe must emit captured request JSON')
   const requests = JSON.parse(stdout.slice(jsonStart + marker.length))
-  assert.equal(requests.length, 3)
+  assert.equal(requests.length, 4)
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.6-flash:nitro')
+    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite:nitro')
     assert.deepEqual(request.body.provider, { sort: 'throughput' })
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
@@ -145,6 +154,24 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
   assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(
+    requests[3].body.messages.slice(-2),
+    [
+      { role: 'system', content: 'Continue with the next concrete action.' },
+      {
+        role: 'user',
+        content: 'Continue the active task from the context above and take the next concrete action.',
+      },
+    ],
+    'assistant-ended Gemini histories must retain their directives and append one provider-compatible user continuation',
+  )
+  assert.equal(
+    requests[3].body.messages.some(message =>
+      message.role === 'assistant' && message.content === 'I have gathered the first result.'
+    ),
+    true,
+    'provider compatibility must retain the original assistant history',
+  )
 
   console.log('OpenRouter Nitro provider mode smoke test passed')
 } finally {

@@ -150,6 +150,56 @@ assert.equal(
   'an explicit saved one-source report must not be forced to invent five citations',
 )
 
+const compactChecklistDetail = 'This implementation note explains the concrete action, why it matters, the evidence supporting it, the practical trade-off, and the verification signal the reader should check before proceeding.'
+const conciseStructuredGuide = [
+  '# Concise implementation guide',
+  '## Executive Summary',
+  compactChecklistDetail + ' The guide intentionally uses a checklist structure so the requested brief deliverable remains actionable rather than becoming an unnecessarily long essay.',
+  '## Preparation',
+  '- [ ] Confirm the current configuration and record the expected behavior. ' + compactChecklistDetail,
+  '- [ ] Capture one representative baseline before changing the system. ' + compactChecklistDetail,
+  '## Implementation',
+  '- [ ] Apply the smallest scoped configuration change first. ' + compactChecklistDetail,
+  '- [ ] Exercise the primary workflow with realistic input. ' + compactChecklistDetail,
+  '- [ ] Verify the visible result and the underlying persisted state. ' + compactChecklistDetail,
+  '## Validation',
+  '- [ ] Test the normal path, one boundary case, and one recovery path. ' + compactChecklistDetail,
+  '- [ ] Record the outcome and any remaining limitation for handoff. ' + compactChecklistDetail,
+  '## Conclusion',
+  compactChecklistDetail + ' The sequence is deliberately compact, but every section contains enough context to be executed and independently checked.',
+  '## References',
+  '[1] https://example.com/implementation-source',
+].join('\\n\\n')
+const conciseGuideVerification = verifier.verify(
+  conciseStructuredGuide,
+  'deliverables/concise-guide.md',
+  'Research one credible source and create a concise Markdown implementation guide with a short executive summary.',
+  'research',
+  null,
+  3,
+)
+assert.equal(
+  conciseGuideVerification.failures.some(failure =>
+    /outline|substantive paragraph/i.test(failure)
+  ),
+  false,
+  'a substantial concise checklist guide must not be rejected merely for using the requested compact structure',
+)
+
+const deepConciseVerification = verifier.verify(
+  conciseStructuredGuide,
+  'deliverables/deep-report.md',
+  'Write a comprehensive in-depth research report that ends with a concise executive summary.',
+  'research',
+  null,
+  5,
+)
+assert.equal(
+  deepConciseVerification.failures.some(failure => /word count/i.test(failure)),
+  true,
+  'the word concise in a deep-report request must not lower the comprehensive research floor',
+)
+
 const request = 'Research three current facts about AI agent execution speed from three official primary sources, compare them, and answer in four concise bullets with direct links.'
 assert.equal(requestedBriefInlineSourceCount(request), 3, 'the exact request must retain its explicit three-source floor')
 

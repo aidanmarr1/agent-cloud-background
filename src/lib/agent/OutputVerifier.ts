@@ -27,6 +27,30 @@ export interface VerificationResult {
 }
 
 export class OutputVerifier {
+  private isExplicitlyConciseDeliverableRequest(originalRequest: string, filePath: string): boolean {
+    return filePath.toLowerCase().endsWith('.md') &&
+      /\b(?:brief|quick|short|concise|succinct|one[-\s]?page|1[-\s]?page)\b/i.test(originalRequest)
+  }
+
+  private isDeepResearchRequest(originalRequest: string): boolean {
+    return /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|extensive|exhaustive)\b/i.test(originalRequest)
+  }
+
+  private compactDeliverableHasSubstance(content: string): boolean {
+    const headingCount = (content.match(/^#{1,3}\s+\S/gm) || []).length
+    const checklistItems = (content.match(/^\s*[-*]\s+\[[ xX]\]\s+\S.+$/gm) || []).length
+    const informativeBlocks = content.split(/\n\s*\n/).filter(block => {
+      const withoutMarkdown = block
+        .replace(/^\s*#{1,6}\s+/gm, '')
+        .replace(/^\s*[-*]\s+(?:\[[ xX]\]\s*)?/gm, '')
+        .trim()
+      const words = withoutMarkdown.split(/\s+/).filter(Boolean).length
+      return words >= 18
+    }).length
+
+    return headingCount >= 4 && (checklistItems >= 5 || informativeBlocks >= 6)
+  }
+
   verify(
     fileContent: string,
     filePath: string,
@@ -38,6 +62,9 @@ export class OutputVerifier {
     const failures: string[] = []
     const suggestions: string[] = []
     let score = 1.0
+    const conciseStructuredDeliverable =
+      this.isExplicitlyConciseDeliverableRequest(originalRequest, filePath) &&
+      this.compactDeliverableHasSubstance(fileContent)
 
     // --- Universal checks ---
 
@@ -59,7 +86,11 @@ export class OutputVerifier {
     // Outline-only detection
     const lines = fileContent.split('\n').filter(l => l.trim().length > 0)
     const headingOrBulletLines = lines.filter(l => /^\s*[#\-*•]/.test(l)).length
-    if (lines.length > 5 && headingOrBulletLines / lines.length > OUTLINE_ONLY_THRESHOLD) {
+    if (
+      lines.length > 5 &&
+      headingOrBulletLines / lines.length > OUTLINE_ONLY_THRESHOLD &&
+      !conciseStructuredDeliverable
+    ) {
       failures.push(`Content appears to be an outline (${Math.round(headingOrBulletLines / lines.length * 100)}% headings/bullets) — write substantive paragraphs`)
       score -= 0.3
     }
@@ -164,7 +195,13 @@ export class OutputVerifier {
       const pWords = p.split(/\s+/).filter(w => w.length > 0).length
       return pWords >= 50
     })
-    if (paragraphs.length < RESEARCH_MIN_PARAGRAPHS) {
+    if (
+      paragraphs.length < RESEARCH_MIN_PARAGRAPHS &&
+      !(
+        this.isExplicitlyConciseDeliverableRequest(originalRequest, filePath) &&
+        this.compactDeliverableHasSubstance(content)
+      )
+    ) {
       failures.push(`Only ${paragraphs.length} substantive paragraph(s), minimum ${RESEARCH_MIN_PARAGRAPHS}`)
       suggestions.push('Develop each section into full paragraphs with analysis')
     }
@@ -204,7 +241,10 @@ export class OutputVerifier {
       }
     }
 
-    if (/\b(?:brief|quick|short|concise|summary|summarise|summarize|one[-\s]?page|1[-\s]?page)\b/.test(request)) {
+    if (
+      /\b(?:brief|quick|short|concise|summary|summarise|summarize|one[-\s]?page|1[-\s]?page)\b/.test(request) &&
+      !this.isDeepResearchRequest(originalRequest)
+    ) {
       const savedResearchReport = filePath.toLowerCase().endsWith('.md') && taskDefaultsToMarkdownDeliverable(originalRequest)
       return savedResearchReport ? 400 : 180
     }

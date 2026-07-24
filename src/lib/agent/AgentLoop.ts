@@ -320,7 +320,6 @@ const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 // for one complete action envelope (or the bounded three-source read batch).
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const NO_THINKING_REASONING = { enabled: false as const, exclude: true }
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
@@ -3844,7 +3843,9 @@ export class AgentLoop {
             // the update factual.
             temperature: 0.55,
             max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
-            reasoning: NO_THINKING_REASONING,
+            // Gemini 3.5 Flash Lite requires reasoning on every request. Use
+            // its lowest supported effort and keep it out of the visible text.
+            reasoning: MINIMAL_THINKING_REASONING,
             includeTemporalContext: false,
             requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,
             retryMaxAttempts: 0,
@@ -4385,6 +4386,13 @@ export class AgentLoop {
                     break
                   }
                   const stepBeforeAdvance = state.currentStepIdx
+                  const completedEvidence = {
+                    researchCalls: state.stepResearchCallCount,
+                    sourceBreadth: Math.max(
+                      state.stepVisitedUrls.size,
+                      stepOpenedSourceDomains(state).size,
+                    ),
+                  }
                   const advanceMsg = planManager.handleStepAdvance(state)
                   if (state.currentStepIdx > stepBeforeAdvance) {
                     contextManager.compactForStepTransition(state)
@@ -4405,8 +4413,7 @@ export class AgentLoop {
                   console.log('[AgentDiagnostics] Model-start timeout advanced compact research phase from gathered evidence', {
                     step: state.currentStepIdx,
                     totalSteps: state.currentPlanItems.length,
-                    researchCalls: state.stepResearchCallCount,
-                    sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                    ...completedEvidence,
                   })
                   phase = 'STREAMING'
                   break
@@ -4749,6 +4756,13 @@ export class AgentLoop {
                   break
                 }
                 const stepBeforeAdvance = state.currentStepIdx
+                const completedEvidence = {
+                  researchCalls: state.stepResearchCallCount,
+                  sourceBreadth: Math.max(
+                    state.stepVisitedUrls.size,
+                    stepOpenedSourceDomains(state).size,
+                  ),
+                }
                 if (lastStreamResult.assistantContent && shouldKeepAssistantInjection(lastStreamResult.assistantContent)) {
                   contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
                 }
@@ -4768,8 +4782,7 @@ export class AgentLoop {
                 console.log('[AgentDiagnostics] Compact research evidence complete; advanced immediately after text-only turn', {
                   step: state.currentStepIdx,
                   totalSteps: state.currentPlanItems.length,
-                  researchCalls: state.stepResearchCallCount,
-                  sourceBreadth: Math.max(state.stepVisitedUrls.size, stepOpenedSourceDomains(state).size),
+                  ...completedEvidence,
                 })
                 state.lastIterationEnd = Date.now()
                 phase = 'STREAMING'
@@ -6821,7 +6834,7 @@ export class AgentLoop {
               ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
-          ? { reasoning: NO_THINKING_REASONING }
+          ? { reasoning: MINIMAL_THINKING_REASONING }
           : isFinalInlineAnswerTurn
             ? { reasoning: MINIMAL_THINKING_REASONING }
             : isFinalSavedDeliverableTurn

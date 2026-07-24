@@ -71,7 +71,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const launchNarrationSidecarIfDue[\s\S]*beginNarrationCadenceAttempt\(state\)[\s\S]*createCompletion\(/, 'cadence must use its own compact LLM lane')
   assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll\([\s\S]*launchNarrationSidecarIfDue\(\)/, 'narration must launch after completed actions without delaying tool execution')
   assert.match(agentLoop, /narrationSidecarPromise[\s\S]*if \(narrationSidecarPromise\) return/, 'only one asynchronous narration request may run at a time')
-  assert.match(agentLoop, /reasoning:\s*NO_THINKING_REASONING[\s\S]*requestTimeoutMs:\s*NARRATION_SIDECAR_REQUEST_TIMEOUT_MS[\s\S]*retryMaxAttempts:\s*0/, 'the narration lane must be a fast bounded non-thinking request')
+  assert.match(agentLoop, /reasoning:\s*MINIMAL_THINKING_REASONING[\s\S]*requestTimeoutMs:\s*NARRATION_SIDECAR_REQUEST_TIMEOUT_MS[\s\S]*retryMaxAttempts:\s*0/, 'the narration lane must use Gemini 3.5 Flash Lite’s lowest supported reasoning effort in a fast bounded request')
   assert.match(agentLoop, /remainingVisibleActions[\s\S]*visibleToolActionsSinceLastNarration - visibleActionFrontier[\s\S]*resetCadence:\s*true/, 'actions completed during narration generation must remain in the next cadence window')
   assert.match(agentLoop, /workLogFrontier[\s\S]*recordStepIdx[\s\S]*recordIteration/, 'asynchronous narration must retain its captured evidence frontier')
   assert.match(agentLoop, /this\.emitter\.progressUpdate\(review\.text,\s*\{[\s\S]*stepIndex:\s*recordStepIdx,[\s\S]*afterToolId,[\s\S]*remainingVisibleActions,[\s\S]*\}\)/, 'accepted LLM narration must carry its captured action frontier in the explicit progress event')

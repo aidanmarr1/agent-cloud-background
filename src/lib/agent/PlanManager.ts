@@ -85,7 +85,9 @@ const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_OVERALL_DEADLINE_MS = 16_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-const PLANNER_ACK_REASONING = { enabled: false as const, exclude: true }
+// Gemini 3.5 Flash Lite requires reasoning. Minimal is the provider-supported
+// floor, and exclusion keeps the acknowledgement concise and user-facing.
+const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
