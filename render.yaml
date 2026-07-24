@@ -34,7 +34,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.5-flash-lite:nitro
+        value: google/gemini-3.6-flash:nitro
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -122,7 +122,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.5-flash-lite:nitro
+        value: google/gemini-3.6-flash:nitro
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE

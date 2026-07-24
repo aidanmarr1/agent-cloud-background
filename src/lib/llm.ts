@@ -581,7 +581,14 @@ function withPinnedModel(
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
-    provider: { sort: 'throughput' },
+    provider: {
+      sort: 'throughput',
+      // Nitro should still be restricted to endpoints that implement every
+      // requested parameter. Otherwise a fast provider may silently ignore
+      // required tool choice or reasoning controls and return an empty action
+      // turn in the middle of an agent loop.
+      require_parameters: true,
+    },
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning),

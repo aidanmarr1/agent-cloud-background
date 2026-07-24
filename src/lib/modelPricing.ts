@@ -1,14 +1,14 @@
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:nitro'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.6-flash:nitro'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.30,
-  cacheHitInputUsdPer1M: 0.30,
-  outputUsdPer1M: 2.50,
-  internalReasoningUsdPer1M: 2.50,
+  inputUsdPer1M: 1.50,
+  cacheHitInputUsdPer1M: 0.15,
+  outputUsdPer1M: 7.50,
+  internalReasoningUsdPer1M: 7.50,
   longContextThresholdTokens: 1_000_000,
-  longContextInputUsdPer1M: 0.30,
-  longContextOutputUsdPer1M: 2.50,
+  longContextInputUsdPer1M: 1.50,
+  longContextOutputUsdPer1M: 7.50,
   contextTokens: 1_000_000,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
