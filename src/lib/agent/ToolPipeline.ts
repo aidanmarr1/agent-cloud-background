@@ -826,6 +826,21 @@ function hasOnlyFutureTopicFamily(actionFamilies: Set<string>, currentFamilies: 
   return overlapsFuture
 }
 
+const ARTIFACT_MUTATION_TOOLS = new Set([
+  'create_file',
+  'append_file',
+  'edit_file',
+  'export_pdf',
+])
+
+function activeStepAuthorizesArtifactMutation(state: AgentStateData): boolean {
+  const currentTitle = state.currentPlanItems?.[state.currentStepIdx] || ''
+  const currentScope = state.currentPlanScopes?.[state.currentStepIdx] || ''
+  return /\b(?:draft|write|author|compose|create|build|implement|develop|save|produce|generate|assemble|synthesi[sz]e|prepare|design|finali[sz]e|polish|revise|edit|export|deliver)\b/i.test(
+    `${currentTitle} ${currentScope}`,
+  )
+}
+
 function phaseSemanticBlockReason(
   toolName: string,
   args: Record<string, unknown>,
@@ -840,6 +855,13 @@ function phaseSemanticBlockReason(
   // with no executable action. The model-authored plan_step_index remains the
   // phase contract, and the runtime already normalizes it to the active step.
   if (RESEARCH_TOOLS.has(toolName)) return null
+  // Plans often separate drafting, saving, and verifying a deliverable. A file
+  // created during the drafting phase naturally shares vocabulary with the
+  // later verification phase, so token similarity alone must not reject the
+  // actual artifact write. Verification remains distinct because read/list
+  // tools are handled separately and later-step mutations are still guarded
+  // when the active phase does not explicitly authorize authoring.
+  if (ARTIFACT_MUTATION_TOOLS.has(toolName) && activeStepAuthorizesArtifactMutation(state)) return null
 
   const actionTokens = tokenizeQuery(visibleToolActionText(toolName, args))
   if (actionTokens.size < 3) return null

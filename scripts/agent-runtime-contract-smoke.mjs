@@ -1336,6 +1336,8 @@ async function assertSourceContracts() {
   assert.match(goalTracker, /shallow search snippets can tick off the plan/, 'goal completion must require opened source evidence for complex research phases')
   assert.match(policyEngine, /Build a real evidence packet inside this phase/, 'phase guidance must push more work inside each phase instead of adding more phases')
   assert.match(toolPipeline, /topicFamiliesFor/, 'phase semantic guard must detect future-topic family drift')
+  assert.match(toolPipeline, /ARTIFACT_MUTATION_TOOLS[\s\S]*activeStepAuthorizesArtifactMutation[\s\S]*phaseSemanticBlockReason/, 'phase safety must distinguish active authoring from later verification vocabulary')
+  assert.match(toolPipeline, /ARTIFACT_MUTATION_TOOLS\.has\(toolName\) && activeStepAuthorizesArtifactMutation\(state\)/, 'an explicitly authoring plan phase must allow its requested file mutation')
   assert.match(agentConfig, /MIN_ITERATION_DELAY_MS = 0/, 'agent loop should not add a sluggish fixed inter-iteration delay')
   assert.match(agentConfig, /PLAN_STARTUP_DELAY_MS = 0/, 'planner startup should not wait before requesting the task plan')
   assert.match(agentConfig, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 12_000/, 'normal model turns should not create minute-scale frozen UI gaps')
