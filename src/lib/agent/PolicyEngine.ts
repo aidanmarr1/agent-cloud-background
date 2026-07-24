@@ -766,12 +766,23 @@ function phaseStartGuidance(state: AgentStateData): string {
 
 function isSubstantiveResearchRequest(state: AgentStateData): boolean {
   if (!isResearchLikeStep(state)) return false
+  const intent = analyzeTaskIntent([{
+    role: 'user',
+    content: state.originalUserRequest || '',
+  }])
+  const depthProfile = researchDepthProfileForState(state)
   const text = [
     state.originalUserRequest || '',
     state.currentPlanItems?.[state.currentStepIdx] || '',
     state.currentPlanScopes?.[state.currentStepIdx] || '',
   ].join(' ')
-  return SUBSTANTIVE_RESEARCH_RE.test(text)
+  return intent.requiresSavedArtifact ||
+    intent.wantsDeep ||
+    intent.wantsCitations ||
+    intent.isEvidenceHeavyReport ||
+    depthProfile.label === 'deep' ||
+    depthProfile.label === 'wide' ||
+    SUBSTANTIVE_RESEARCH_RE.test(text)
 }
 
 function researchZeroToolRecoveryGuidance(state: AgentStateData): string {
@@ -2632,6 +2643,73 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
     if (stepAdvancedThisIteration) {
       const isCurrentLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
+
+      // A model-authored <next_step/> is only a request to advance. It must
+      // never check off the synthesis/delivery step before the requested
+      // output exists. This guard deliberately runs before every generic
+      // advancement path so an empty or premature final turn cannot make the
+      // task look complete in the UI.
+      if (isCurrentLastStep && finalDeliverableRequired(state)) {
+        const finalDeliverable = latestFinalDeliverableCandidate(state)
+        if (!finalDeliverable) {
+          state.consecutiveNoToolCalls = 0
+          return [{
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(
+                state,
+                `${finalStepStartGuidance(state)} The final step is still pending because no successful deliverable file exists. Do not emit <next_step/> until the file has been created and verified.`,
+              ),
+            },
+            continueLoop: true,
+          }]
+        }
+        if (!state.deliverableVerificationDone) {
+          state.consecutiveNoToolCalls = 0
+          return [{
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(state, pendingDeliverableRevisionGuidance(state, finalDeliverable.path)),
+            },
+            continueLoop: true,
+          }]
+        }
+
+        advanceStep(state, `Saved and verified final deliverable: ${finalDeliverable.path}`)
+        state.consecutiveNoToolCalls = 0
+        return [
+          { type: 'step_advance' },
+          { type: 'terminate', reason: 'deliverable_created' },
+        ]
+      }
+
+      if (
+        isCurrentLastStep &&
+        !finalDeliverableRequired(state) &&
+        !shouldAcceptFinalInlineText(state, assistantContent)
+      ) {
+        state.consecutiveNoToolCalls = 0
+        return [{
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: finalInlineAnswerRecoveryGuidance(state),
+          },
+          continueLoop: true,
+        }]
+      }
+
+      if (isCurrentLastStep && !finalDeliverableRequired(state)) {
+        advanceStep(state, 'Answered inline in chat')
+        state.finalInlineAnswerDelivered = true
+        state.consecutiveNoToolCalls = 0
+        return [
+          { type: 'step_advance' },
+          { type: 'terminate', reason: 'inline_answer_complete' },
+        ]
+      }
 
       // Block premature advancement: if the model outputs <next_step/> but hasn't done enough work,
       // reject the advance and tell it to keep working.

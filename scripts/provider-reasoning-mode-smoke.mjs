@@ -124,7 +124,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.6-flash:nitro')
+    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite:nitro')
     assert.deepEqual(request.body.provider, { sort: 'throughput' })
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)

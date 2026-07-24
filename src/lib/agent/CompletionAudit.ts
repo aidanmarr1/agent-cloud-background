@@ -1,5 +1,6 @@
 import type { AgentStateData } from './AgentState'
 import { analyzeTaskIntent } from './TaskIntent'
+import { explicitlyRequestsInlineAnswer, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 export interface CompletionAuditResult {
   complete: boolean
@@ -29,11 +30,20 @@ function requiresFinalDeliverable(state: AgentStateData): boolean {
   if (state.taskStrategy === 'browse') return false
   const userRequest = state.originalUserRequest || ''
   const taskIntent = analyzeTaskIntent([{ role: 'user', content: userRequest }])
+  const taskText = currentTaskText(state)
+  const plannedIntent = analyzeTaskIntent([{ role: 'user', content: taskText }])
   return state.buildTask ||
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'code' ||
     state.taskStrategy === 'creative' ||
-    taskIntent.requiresSavedArtifact
+    taskIntent.requiresSavedArtifact ||
+    (
+      !explicitlyRequestsInlineAnswer(userRequest) &&
+      (
+        plannedIntent.explicitSavedArtifact ||
+        taskDefaultsToMarkdownDeliverable(taskText)
+      )
+    )
 }
 
 function requiresFinalInlineAnswer(state: AgentStateData): boolean {

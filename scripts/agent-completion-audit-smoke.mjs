@@ -85,6 +85,9 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /Do not create, mention, attach, or claim any file, report, artifact, or deliverable/, 'fixed-search inline answer turns must not claim nonexistent files')
   assert.match(policyEngine, /isFixedWebSearchInlineAnswerState\(state\) && shouldAcceptFinalInlineText/, 'fixed-search answer tasks must be allowed to terminate from a complete inline answer')
   assert.match(policyEngine, /finalStepStartGuidance/, 'final-step transition guidance must distinguish inline answers from saved deliverables')
+  assert.match(policyEngine, /isCurrentLastStep && finalDeliverableRequired\(state\)[\s\S]*latestFinalDeliverableCandidate\(state\)[\s\S]*no successful deliverable file exists/, 'manual final-step advancement must stay blocked until a saved deliverable exists')
+  assert.match(policyEngine, /isCurrentLastStep && finalDeliverableRequired\(state\)[\s\S]*!state\.deliverableVerificationDone[\s\S]*pendingDeliverableRevisionGuidance/, 'manual final-step advancement must stay blocked until the saved deliverable is verified')
+  assert.match(policyEngine, /intent\.requiresSavedArtifact[\s\S]*intent\.wantsCitations[\s\S]*depthProfile\.label === 'deep'/, 'saved, cited, and deep research requests must not use shallow research recovery thresholds')
   assert.match(agentLoop, /stepAdvanceStatusFor\(state,\s*i\)/, 'AgentLoop must propagate incomplete step status to the UI')
   assert.match(agentLoop, /Completion audit failed/, 'failed completion audits must be logged')
   assert.match(agentLoop, /this\.emitter\.error\(completionAudit\.message\)/, 'incomplete runs must emit error, not done')
@@ -97,6 +100,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /persistSandboxTaskFile/, 'created sandbox files must be persisted beyond the serverless tmp lifetime')
   assert.match(toolPipeline, /markTaskFileDeleted/, 'durable task-file records must track deletes')
   assert.doesNotMatch(completionAudit, /hasSavedRequestedMarkdownDeliverable/, 'completion audit must not let a markdown file bypass unfinished plan steps or report verification')
+  assert.match(completionAudit, /plannedIntent\.explicitSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(taskText\)/, 'completion audit must infer the requested artifact from the full task and final plan even if the original request field is incomplete')
   assert.match(taskConstraints, /isFixedWebSearchInlineAnswerState/, 'task constraints must distinguish fixed-search inline answers from fixed-search markdown deliverables')
   assert.match(taskFiles, /create table if not exists task_files/, 'task file schema must create durable task-file records')
   assert.match(taskFiles, /primary key \(user_id, conversation_id, path\)/, 'task file records must be scoped per user and task path')
@@ -290,6 +294,45 @@ export function runCompletionAuditSmoke() {
     false,
     'a future-tense acknowledgement must never be accepted as the final answer',
   )
+
+  const prematureReportAdvance = createInitialState(false, timeouts)
+  prematureReportAdvance.currentPlanItems = ['Gather cited evidence', 'Write comprehensive Markdown report']
+  prematureReportAdvance.currentPlanScopes = [
+    'Compare recent trials across several countries and distinguish evidence quality',
+    'Create the cited report with an executive summary and source links',
+  ]
+  prematureReportAdvance.currentStepIdx = 1
+  prematureReportAdvance.taskStrategy = 'research'
+  prematureReportAdvance.originalUserRequest =
+    'Research whether a four-day work week improves productivity and wellbeing, then present a cited report with an executive summary.'
+  const prematureReportActions = new PolicyEngine().evaluate(
+    prematureReportAdvance,
+    new Map(),
+    '',
+    true,
+    80,
+  )
+  assert.equal(prematureReportAdvance.currentStepIdx, 1, 'an empty final turn must not check off the report step')
+  assert.equal(
+    prematureReportActions.some(action => action.type === 'step_advance' || action.type === 'terminate'),
+    false,
+    'a model-authored next-step marker must not bypass the missing-report gate',
+  )
+  assert.equal(
+    prematureReportActions.some(action => action.type === 'inject_message' && String(action.message?.content || '').includes('no successful deliverable file exists')),
+    true,
+    'the model must be sent back into the pending deliverable action',
+  )
+
+  const inferredReport = createInitialState(false, timeouts)
+  inferredReport.currentPlanItems = ['Gather evidence', 'Write cited Markdown report']
+  inferredReport.currentPlanScopes = [null, 'Create the final report file']
+  inferredReport.currentStepIdx = 2
+  inferredReport.taskStrategy = 'research'
+  inferredReport.originalUserRequest = ''
+  audit = auditAgentCompletion(inferredReport, 'plan_complete')
+  assert.equal(audit.complete, false, 'the completion audit must infer a planned report even if original request text is unavailable')
+  assert.match(audit.message, /no successful final deliverable/)
 }
 `, 'utf8')
 
