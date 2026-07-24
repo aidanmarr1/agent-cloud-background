@@ -96,7 +96,12 @@ export const PLAN_RETRY_BASE_MS = 350
 export const STREAM_MAX_RETRIES = 0
 export const STREAM_RETRY_BASE_MS = 650
 export const STREAM_RETRY_EXPONENT = 1.2
-export const STREAM_REQUEST_TIMEOUT_MS = 5_000
+// Gemini 3.6 Nitro is usually quick, but provider selection and a large native
+// tool schema can occasionally take longer than five seconds before response
+// headers arrive. A realistic start window avoids converting healthy turns
+// into rapid null-stream loops while the shorter stream inactivity limits
+// still catch genuinely stalled responses after they begin.
+export const STREAM_REQUEST_TIMEOUT_MS = 12_000
 export const STREAM_RETRY_MAX_DELAY_MS = 1_500
 
 // --- Semantic loop detection ---
