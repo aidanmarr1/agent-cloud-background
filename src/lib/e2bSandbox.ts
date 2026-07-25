@@ -16,6 +16,7 @@ const SAFE_TASK_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const DEFAULT_E2B_TIMEOUT_MS = 60 * 60 * 1000
 const DEFAULT_E2B_COMMAND_TIMEOUT_MS = 2 * 60 * 1000
 const DEFAULT_E2B_BROWSER_PORT = 9222
+const DEFAULT_E2B_PREVIEW_PORT = 4173
 const DEFAULT_E2B_WARM_POOL_MAX_AGE_MS = 15 * 60 * 1000
 const MAX_LIST_DEPTH = 10
 const MAX_LIST_FILES = 5000
@@ -72,6 +73,13 @@ export interface E2BFileInfo {
   modifiedAt: number
 }
 
+export interface E2BWebsitePreview {
+  url: string
+  origin: string
+  port: number
+  rootDir: string
+}
+
 export type SandboxFileReadResult =
   | { ok: true; body: Uint8Array; size: number }
   | { ok: false; status: 403 | 404 | 413 | 500; error: string }
@@ -82,9 +90,17 @@ const e2bLifecycleEpochs = new Map<string, number>()
 const e2bLifecyclePromises = new Map<string, Promise<void>>()
 const e2bQuarantinedSandboxIds = new Map<string, string>()
 const e2bBrowserLaunchPromises = new Map<string, Promise<string>>()
+const e2bPreviewLaunchPromises = new Map<string, Promise<E2BWebsitePreview>>()
 let schemaReady: Promise<void> | null = null
 let warmSandbox: WarmE2BSandbox | null = null
 let warmSandboxPromise: Promise<WarmE2BSandbox> | null = null
+
+function clearE2BPreviewLaunches(conversationId: string): void {
+  const prefix = `${conversationId}:`
+  for (const key of e2bPreviewLaunchPromises.keys()) {
+    if (key.startsWith(prefix)) e2bPreviewLaunchPromises.delete(key)
+  }
+}
 
 function envString(name: string): string {
   return process.env[name]?.trim() || ''
@@ -93,6 +109,10 @@ function envString(name: string): string {
 function envPositiveInt(name: string, fallback: number): number {
   const parsed = Number.parseInt(envString(name), 10)
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function e2bPreviewPort(): number {
+  return envPositiveInt('AGENT_E2B_PREVIEW_PORT', DEFAULT_E2B_PREVIEW_PORT)
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -1083,6 +1103,7 @@ export async function resetE2BSandbox(conversationId: string): Promise<void> {
   const safeId = sanitizeConversationId(conversationId)
   const cachedAtStart = e2bCache.get(safeId)?.sandboxId || null
   e2bCache.delete(safeId)
+  clearE2BPreviewLaunches(safeId)
   await runE2BLifecycle(safeId, async () => {
     const fence = await beginDurableLifecycle(safeId, 'resetting')
     await awaitPendingE2BCreation(safeId)
@@ -1113,6 +1134,7 @@ export async function pauseE2BSandbox(conversationId: string): Promise<void> {
   if (!envBool('AGENT_E2B_PAUSE_ON_TASK_END', true)) return
   const cachedAtStart = e2bCache.get(safeId)?.sandboxId || null
   e2bCache.delete(safeId)
+  clearE2BPreviewLaunches(safeId)
   await runE2BLifecycle(safeId, async () => {
     await awaitPendingE2BCreation(safeId)
     const sandboxId = cachedAtStart || await loadPersistedSandboxId(safeId)
@@ -1133,6 +1155,7 @@ export async function destroyE2BSandbox(conversationId: string): Promise<void> {
   const safeId = sanitizeConversationId(conversationId)
   const cachedAtStart = e2bCache.get(safeId)?.sandboxId || null
   e2bCache.delete(safeId)
+  clearE2BPreviewLaunches(safeId)
   await runE2BLifecycle(safeId, async () => {
     const fence = await beginDurableLifecycle(safeId, 'destroying')
     await awaitPendingE2BCreation(safeId)
@@ -1805,6 +1828,80 @@ export async function ensureE2BRemoteBrowserDebuggerUrl(conversationId: string):
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+export async function ensureE2BWebsitePreview(
+  conversationId: string,
+  filePath = 'index.html',
+): Promise<E2BWebsitePreview> {
+  const safeId = sanitizeConversationId(conversationId)
+  const sandbox = await getOrCreateE2BSandbox(safeId)
+  const cacheKey = `${safeId}:${sandbox.sandboxId}`
+  const encodedPath = filePath
+    .replace(/^\/+/, '')
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')
+  const existing = e2bPreviewLaunchPromises.get(cacheKey)
+  if (existing) {
+    const preview = await existing
+    return {
+      ...preview,
+      url: `${preview.origin}/${encodedPath}?v=${Date.now()}`,
+    }
+  }
+
+  const launch = (async (): Promise<E2BWebsitePreview> => {
+    const port = e2bPreviewPort()
+    const rootDir = workspaceRoot(safeId)
+    const origin = hostToHttpUrl(sandbox.getHost(port))
+    const logPath = `/tmp/agent-preview-${safeId}.log`
+    const script = `
+set -e
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is required for the task preview server." >&2
+  exit 127
+fi
+if ! curl -fsS http://127.0.0.1:${port}/ >/dev/null 2>&1; then
+  nohup python3 -m http.server ${port} --bind 0.0.0.0 --directory ${shellQuote(rootDir)} >${shellQuote(logPath)} 2>&1 </dev/null &
+fi
+for attempt in $(seq 1 40); do
+  if curl -fsS http://127.0.0.1:${port}/ >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 0.1
+done
+cat ${shellQuote(logPath)} >&2 || true
+exit 1
+`
+    const result = await sandbox.commands.run(script, {
+      cwd: rootDir,
+      timeoutMs: 15_000,
+    })
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || result.stdout || 'E2B website preview server did not start.')
+    }
+    return {
+      url: origin,
+      origin,
+      port,
+      rootDir,
+    }
+  })()
+
+  e2bPreviewLaunchPromises.set(cacheKey, launch)
+  try {
+    const preview = await launch
+    return {
+      ...preview,
+      url: `${preview.origin}/${encodedPath}?v=${Date.now()}`,
+    }
+  } catch (error) {
+    if (e2bPreviewLaunchPromises.get(cacheKey) === launch) {
+      e2bPreviewLaunchPromises.delete(cacheKey)
+    }
+    throw error
+  }
 }
 
 async function launchOrReuseE2BRemoteBrowser(conversationId: string): Promise<string> {

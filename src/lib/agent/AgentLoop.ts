@@ -893,6 +893,11 @@ function shouldAutosaveTextOnlyDraft(
 
   const isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
   if (isLastStep) {
+    // The final index alone is not proof that the earlier phases completed.
+    // stepCompletionTimes is appended only by advanceStep(), so it is the
+    // trustworthy sequential frontier. Never autosave premature prose as the
+    // final artifact while an intermediate phase remains open.
+    if (state.stepCompletionTimes.length < state.currentPlanItems.length - 1) return false
     // A text-only confirmation after the model has already written the final
     // artifact is not a second draft. Saving it as another deliverable leaves
     // the verified file's plan step open and can turn a successful run into a
@@ -907,6 +912,20 @@ function shouldAutosaveTextOnlyDraft(
     state.taskStrategy === 'build' ||
     state.taskStrategy === 'code' ||
     state.taskStrategy === 'creative'
+}
+
+function repairPrematureFinalStepJump(state: AgentStateData): boolean {
+  const planLength = state.currentPlanItems?.length || 0
+  if (planLength < 2 || state.currentStepIdx !== planLength - 1) return false
+  if (state.stepCompletionTimes.length >= planLength - 1) return false
+  if (hasSavedFinalDeliverableCandidate(state)) return false
+
+  state.currentStepIdx = Math.min(state.stepCompletionTimes.length, planLength - 2)
+  updatePhase(state)
+  state.forceTextNextIteration = false
+  state.phaseEndNarrationPending = false
+  state.consecutiveNoToolCalls = 0
+  return true
 }
 
 function autosaveDraftPath(state: AgentStateData): string {
@@ -3229,6 +3248,14 @@ export class AgentLoop {
     const { conversationId } = this.options
     if (!conversationId) return null
 
+    if (repairPrematureFinalStepJump(state)) {
+      contextManager.push({
+        role: 'system',
+        content: `PLAN SEQUENCE REPAIRED: resume active step ${state.currentStepIdx + 1} ("${state.currentPlanItems?.[state.currentStepIdx] || 'the unfinished phase'}"). The final deliverable phase cannot begin until each earlier phase advances normally. Make the next concrete action for this active step now; do not repeat or save the premature draft.`,
+      } as ChatMessageParam)
+      return 'STREAMING'
+    }
+
     const isLastStep = !!state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
     const existingDeliverablePath = isLastStep && taskNeedsSavedFinalArtifact(state, this.options.messages)
       ? latestSavedFinalDeliverablePath(state)
@@ -4021,6 +4048,13 @@ export class AgentLoop {
 
           // ── STREAMING ─────────────────────────────────────────────
           case 'STREAMING': {
+            if (repairPrematureFinalStepJump(state)) {
+              contextManager.push({
+                role: 'system',
+                content: `PLAN SEQUENCE REPAIRED: resume active step ${state.currentStepIdx + 1} ("${state.currentPlanItems?.[state.currentStepIdx] || 'the unfinished phase'}"). The final deliverable phase cannot begin until each earlier phase advances normally. Make the next concrete action for this active step now; do not repeat or save premature report prose.`,
+              } as ChatMessageParam)
+            }
+
             const liveDirectiveInjected = await injectRunLiveDirectives()
             if (liveDirectiveInjected) {
               // A new user directive starts a fresh intent boundary rather than

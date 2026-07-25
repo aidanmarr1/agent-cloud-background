@@ -2,7 +2,7 @@ import { constants } from 'fs'
 import { createServer, type Server } from 'http'
 import { extname, isAbsolute, join, resolve } from 'path'
 import { open, stat } from 'fs/promises'
-import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
+import { getOrCreateSandboxDir, isCloudSandboxProviderEnabled, isInsideSandbox, resolveAndVerify } from './sandbox'
 
 interface LocalWebsiteServer {
   conversationId: string
@@ -229,6 +229,9 @@ export async function buildLocalWebsiteLaunch(
   conversationId: string,
   filePath = 'index.html',
 ): Promise<LocalWebsiteLaunch> {
+  if (isCloudSandboxProviderEnabled()) {
+    return (await import('./e2bSandbox')).ensureE2BWebsitePreview(conversationId, filePath)
+  }
   const server = await getOrStartLocalWebsiteServer(conversationId)
   const path = encodePath(filePath)
   const cacheBuster = `v=${Date.now()}`

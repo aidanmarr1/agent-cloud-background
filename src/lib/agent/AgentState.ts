@@ -328,14 +328,15 @@ export function isCurrentSynthesisStep(
 ): boolean {
   const title = state.currentPlanItems?.[state.currentStepIdx] || ''
   if (SYNTHESIS_LEADING_STEP_PATTERN.test(title)) return true
-  if (
-    state.currentStepIdx > 0 &&
-    ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN.test(title) &&
-    EXPLICIT_EVIDENCE_REUSE_PATTERN.test([
-      title,
-      state.currentPlanScopes?.[state.currentStepIdx] || '',
-    ].join(' '))
-  ) {
+  if (ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN.test(title)) {
+    const explicitlyReusesEvidence =
+      state.currentStepIdx > 0 &&
+      EXPLICIT_EVIDENCE_REUSE_PATTERN.test([
+        title,
+        state.currentPlanScopes?.[state.currentStepIdx] || '',
+      ].join(' '))
+    if (!explicitlyReusesEvidence) return false
+
     const priorFindingCount = [...(state.stepFindings?.keys() || [])]
       .filter(index => index < state.currentStepIdx)
       .length
@@ -347,6 +348,7 @@ export function isCurrentSynthesisStep(
       (priorFindingCount > 0 && openedSourceCount >= 2 && sourceDomainCount >= 2) ||
       (priorFindingCount > 0 && searchCount >= 2 && sourceDomainCount >= 3)
     if (hasReusableEvidence) return true
+    return false
   }
   return isSynthesisStepText(currentStepText(state))
 }

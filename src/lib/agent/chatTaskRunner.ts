@@ -558,10 +558,10 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     })()
       .catch((error) => {
         const transient = isTransientUsageAccountingError(error)
-        console[transient ? 'warn' : 'error']('[AgentDiagnostics] E2B runtime credit checkpoint failed', {
+        console.warn('[AgentDiagnostics] E2B runtime credit checkpoint deferred to lifecycle cleanup', {
           conversationId,
           transient,
-          deferredToCleanup: transient,
+          deferredToCleanup: true,
           finalize,
           error: error instanceof Error ? error.message : String(error),
         })
@@ -570,18 +570,11 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           billingAbortController.abort(error)
           throw error
         }
-        if (!transient) {
-          remoteSandboxCreditFailure ??= error
-        }
-        if (!transient && !emitter.isClosed && !emitter.terminalStatus) {
-          emitter.error(USAGE_ACCOUNTING_FAILURE_MESSAGE)
-          billingAbortController.abort(error)
-        }
-        // A periodic checkpoint is advisory. The task's pre-terminal cleanup
-        // kills the exact provider sandbox and durably reconciles its full
-        // lifetime before the terminal event is committed, so a transient
-        // checkpoint outage must never discard otherwise valid agent work.
-        if (finalize || !transient) throw error
+        // Periodic checkpoints are advisory even when the failure is a
+        // lifecycle-ownership transition rather than a network outage. The
+        // pre-terminal E2B cleanup owns exact provider-lifetime reconciliation.
+        // Only an authoritative out-of-credit result may stop user work.
+        if (finalize) throw error
       })
       .finally(() => {
         if (remoteSandboxCreditPromise === charge) remoteSandboxCreditPromise = null
@@ -915,10 +908,8 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           markHandoffUnsafe?.(`usage_billing_failed:${error instanceof Error ? error.message : String(error)}`)
         } else if (emitOutOfCreditsStop(error)) {
           // The authoritative insufficient-credit result is already visible.
-        } else if (!isTransientUsageAccountingError(error) && !emitter.isClosed && !emitter.terminalStatus) {
-          emitter.error(USAGE_ACCOUNTING_FAILURE_MESSAGE)
         } else {
-          console.warn('[AgentDiagnostics] Deferred transient usage reconciliation to sandbox cleanup', {
+          console.warn('[AgentDiagnostics] Deferred E2B usage reconciliation to sandbox cleanup', {
             conversationId,
             error: error instanceof Error ? error.message : String(error),
           })
