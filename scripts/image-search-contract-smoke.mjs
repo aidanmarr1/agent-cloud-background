@@ -42,5 +42,6 @@ assert.match(appIcon, /viewBox="0 0 256 256"[\s\S]*v32H56a32 32/, 'the favicon m
 assert.match(rootLayout, /\/icon\.svg\?v=robot-2/, 'favicon metadata must cache-bust the current robot mark')
 assert.match(searchResults, /useDeferredEmptyState\(items\.length === 0, streaming\)/, 'web search must keep its loading skeleton through transient empty result hand-offs')
 assert.match(imageSearchResults, /useDeferredEmptyState\(items\.length === 0, streaming\)/, 'image search must keep its loading skeleton through transient empty result hand-offs')
+assert.match(searchResults, /if \(resolvingEmptyResult\)[\s\S]*if \(hasErrorResult\)/, 'web search must render the loading skeleton before any transient empty/error state')
 
 console.log('Image search, favicon, and duplicate-thinking contracts passed.')

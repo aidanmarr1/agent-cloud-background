@@ -58,19 +58,10 @@ function SearchContextHeader({ title, count, streaming }: { title?: string; coun
 export function SearchResults({ results, streaming, title }: SearchResultsProps) {
   const items = Array.isArray(results) ? results : []
   const resolvingEmptyResult = useDeferredEmptyState(items.length === 0, streaming)
-
-  if (!Array.isArray(results) && results && typeof results === 'object' && 'error' in results) {
-    return (
-      <>
-        <SearchContextHeader title={title} count={0} streaming={streaming} />
-        <div className="flex items-center justify-center h-full py-16 px-6">
-          <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
-            Search result is unavailable
-          </p>
-        </div>
-      </>
-    )
-  }
+  const hasErrorResult = !Array.isArray(results) &&
+    !!results &&
+    typeof results === 'object' &&
+    'error' in results
 
   if (resolvingEmptyResult) {
     return (
@@ -90,6 +81,19 @@ export function SearchResults({ results, streaming, title }: SearchResultsProps)
           <div className="text-center text-[12px] text-text-tertiary [font-family:var(--font-display)] animate-pulse pt-3">
             Searching...
           </div>
+        </div>
+      </>
+    )
+  }
+
+  if (hasErrorResult) {
+    return (
+      <>
+        <SearchContextHeader title={title} count={0} streaming={streaming} />
+        <div className="flex items-center justify-center h-full py-16 px-6">
+          <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
+            Search result is unavailable
+          </p>
         </div>
       </>
     )

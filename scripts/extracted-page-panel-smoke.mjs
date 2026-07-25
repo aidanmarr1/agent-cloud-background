@@ -87,8 +87,14 @@ assert.match(
 
 assert.match(
   deferredEmptyState,
-  /window\.setTimeout\(\(\) => setWaitingForResult\(false\), delayMs\)/,
+  /delayMs = 2500[\s\S]*wasStreaming\.current = true[\s\S]*window\.setTimeout\(\(\) => \{[\s\S]*setWaitingForResult\(false\)/,
   'transient empty Computer panel states must retain the loading skeleton for a short reconciliation window',
+)
+
+assert.match(
+  panelMapper,
+  /content: internalRecovery \? '' : content,/,
+  'empty extracted-page results must remain empty until BrowseView finishes its loading hand-off',
 )
 
 console.log('Extracted page panel smoke passed')

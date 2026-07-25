@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 /**
  * Tool results can briefly transition from a streaming placeholder to an
@@ -11,22 +11,33 @@ import { useEffect, useState } from 'react'
 export function useDeferredEmptyState(
   isEmpty: boolean,
   streaming = false,
-  delayMs = 900,
+  delayMs = 2500,
 ): boolean {
-  const [waitingForResult, setWaitingForResult] = useState(isEmpty)
+  const [waitingForResult, setWaitingForResult] = useState(isEmpty && streaming)
+  const wasStreaming = useRef(streaming)
 
   useEffect(() => {
     if (!isEmpty) {
       setWaitingForResult(false)
+      wasStreaming.current = streaming
       return
     }
     if (streaming) {
+      wasStreaming.current = true
       setWaitingForResult(true)
       return
     }
 
+    if (!wasStreaming.current) {
+      setWaitingForResult(false)
+      return
+    }
+
     setWaitingForResult(true)
-    const timeout = window.setTimeout(() => setWaitingForResult(false), delayMs)
+    const timeout = window.setTimeout(() => {
+      wasStreaming.current = false
+      setWaitingForResult(false)
+    }, delayMs)
     return () => window.clearTimeout(timeout)
   }, [delayMs, isEmpty, streaming])
 

@@ -84,7 +84,11 @@ function normalizeBrowseLikeResult(result: unknown, fallbackTitle: string): Brow
   const title = normalizeDocumentTitle(firstStringField(record, ['title', 'name']), url, content, error, status)
   return {
     title: title || fallbackTitleForSource(url, fallbackTitle),
-    content: internalRecovery ? '' : content || 'No extracted text was returned for this source.',
+    // Leave an empty extraction empty here. BrowseView owns the visible
+    // fallback after its streaming-to-result reconciliation window; inserting
+    // fallback prose at mapping time makes the empty-state skeleton disappear
+    // before the real persisted result is reconciled.
+    content: internalRecovery ? '' : content,
     url,
   }
 }
