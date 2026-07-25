@@ -1344,6 +1344,22 @@ export class EventDispatcher {
     if (changed) this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
   }
 
+  private markAllGroupsDone(): void {
+    if (this.parsedGroups.length === 0) return
+    this.deferredBrowseToolStarts.clear()
+    this.toolStartsById.clear()
+    this.parsedGroups = this.parsedGroups.map((group) => ({
+      ...group,
+      status: 'done',
+      subtasks: safeSubtasks(group).map((subtask) => (
+        subtask.status === 'running' ? { ...subtask, status: 'done' } : subtask
+      )),
+    }))
+    this.parsedSteps = this.parsedSteps.map((step) => ({ ...step, status: 'done' }))
+    this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+    this.actions.setSteps(this.conversationId, [...this.parsedSteps])
+  }
+
   private chargeToolEvent(id: string, name: string, result?: unknown): void {
     if (SERVER_CREDIT_ACCOUNTING) return
     if (this.chargedToolIds.has(id) || isInternalActivityTool(name)) return
@@ -1374,7 +1390,7 @@ export class EventDispatcher {
     this.terminalAccum = {}
     this.settleLiveBrowserPanel()
 
-    this.markRunningGroups('done')
+    this.markAllGroupsDone()
 
     if (this.groupsActive) {
       // Build a clean programmatic summary from task metadata.

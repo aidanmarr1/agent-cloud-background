@@ -1,7 +1,12 @@
 'use client'
 
 import type { BrowserResult, ComputerPanelItem, Conversation } from '@/types'
-import { normalizeConversationForPersistence, normalizeConversationListForPersistence } from '@/lib/conversationSerialization'
+import {
+  assistantMessagesShareCursor,
+  mergeSameCursorAssistantPresentation,
+  normalizeConversationForPersistence,
+  normalizeConversationListForPersistence,
+} from '@/lib/conversationSerialization'
 import { onStoreHydrated, resetStoreHydration, signalStoreHydrated } from '@/lib/storeHydration'
 import type { ChatStore } from './types'
 import { clearLegacyChatPersistence, readLegacyChatPersistedState } from './persistence'
@@ -414,6 +419,15 @@ function mergeCanonicalRunRebase(
   const messages = server.messages.map((serverMessage) => {
     if (serverMessage.role !== 'assistant' || serverMessage.streamRunId !== runId) return serverMessage
     const localMessage = localById.get(serverMessage.id)
+    if (
+      localMessage?.role === 'assistant' &&
+      localMessage.streamRunId === runId &&
+      assistantMessagesShareCursor(serverMessage, localMessage)
+    ) {
+      const merged = mergeSameCursorAssistantPresentation(serverMessage, localMessage)
+      if (JSON.stringify(merged) !== JSON.stringify(serverMessage)) localAdvanced = true
+      return merged
+    }
     if (
       !localMessage ||
       localMessage.role !== 'assistant' ||

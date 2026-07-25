@@ -64,8 +64,118 @@ function normalizePanelItems(items: ComputerPanelItem[] | undefined): ComputerPa
   })
 }
 
+function mergeArtifacts(
+  stored: NonNullable<Message['artifacts']>,
+  incoming: NonNullable<Message['artifacts']>,
+): NonNullable<Message['artifacts']> {
+  const merged = new Map<string, NonNullable<Message['artifacts']>[number]>()
+  for (const artifact of [...stored, ...incoming]) {
+    const key = artifact.filePath || artifact.id
+    const current = merged.get(key)
+    if (
+      !current ||
+      (artifact.content || '').length > (current.content || '').length ||
+      (
+        (artifact.content || '').length === (current.content || '').length &&
+        artifact.createdAt >= current.createdAt
+      )
+    ) {
+      merged.set(key, artifact)
+    }
+  }
+  return [...merged.values()]
+}
+
+function mergeTaskGroups(
+  stored: NonNullable<Message['taskGroups']>,
+  incoming: NonNullable<Message['taskGroups']>,
+): NonNullable<Message['taskGroups']> {
+  const storedById = new Map(stored.map((group) => [group.id, group]))
+  const incomingIds = new Set(incoming.map((group) => group.id))
+  const merged = incoming.map((group) => {
+    const previous = storedById.get(group.id)
+    if (!previous) return group
+
+    const subtasks = new Map(previous.subtasks.map((subtask) => [subtask.id, subtask]))
+    for (const subtask of group.subtasks) {
+      const existing = subtasks.get(subtask.id)
+      subtasks.set(
+        subtask.id,
+        !existing || JSON.stringify(subtask).length >= JSON.stringify(existing).length
+          ? subtask
+          : existing,
+      )
+    }
+
+    const narrations = new Map(previous.narrations.map((narration) => [narration.id, narration]))
+    for (const narration of group.narrations) narrations.set(narration.id, narration)
+
+    return {
+      ...previous,
+      ...group,
+      subtasks: [...subtasks.values()],
+      narrations: [...narrations.values()].sort((a, b) => a.position - b.position),
+      synthesis: group.synthesis.length >= previous.synthesis.length
+        ? group.synthesis
+        : previous.synthesis,
+    }
+  })
+  for (const group of stored) {
+    if (!incomingIds.has(group.id)) merged.push(group)
+  }
+  return merged.sort((a, b) => a.index - b.index)
+}
+
+/**
+ * A durable `done` event is authoritative proof that the planned task
+ * completed. Presentation state can arrive a render behind that event, so a
+ * completed message must never retain pending/running plan rows.
+ */
+export function normalizeTerminalAssistantPresentation(message: Message): Message {
+  if (message.role !== 'assistant' || message.streamTerminalStatus !== 'done') return message
+  return {
+    ...message,
+    taskGroups: message.taskGroups?.map((group) => ({
+      ...group,
+      status: 'done',
+      subtasks: group.subtasks.map((subtask) => (
+        subtask.status === 'running' ? { ...subtask, status: 'done' } : subtask
+      )),
+    })),
+    steps: message.steps?.map((step) => ({ ...step, status: 'done' })),
+  }
+}
+
+export function assistantMessagesShareCursor(left: Message, right: Message): boolean {
+  if (left.role !== 'assistant' || right.role !== 'assistant') return false
+  const leftRunId = typeof left.streamRunId === 'string' ? left.streamRunId : ''
+  const rightRunId = typeof right.streamRunId === 'string' ? right.streamRunId : ''
+  const leftSeq = Number.isFinite(left.streamSeq) ? Number(left.streamSeq) : 0
+  const rightSeq = Number.isFinite(right.streamSeq) ? Number(right.streamSeq) : 0
+  return !!leftRunId && leftRunId === rightRunId && leftSeq === rightSeq
+}
+
+/**
+ * The cursor orders runtime events, not React/store flushes. At the same
+ * terminal cursor, merge richer presentation fields monotonically instead of
+ * discarding a later artifact or completed task-group snapshot.
+ */
+export function mergeSameCursorAssistantPresentation(stored: Message, incoming: Message): Message {
+  if (!assistantMessagesShareCursor(stored, incoming)) return incoming
+  const terminalStatus = stored.streamTerminalStatus || incoming.streamTerminalStatus
+  const merged: Message = {
+    ...stored,
+    ...incoming,
+    content: incoming.content || stored.content,
+    streamTerminalStatus: terminalStatus,
+    artifacts: mergeArtifacts(stored.artifacts || [], incoming.artifacts || []),
+    taskGroups: mergeTaskGroups(stored.taskGroups || [], incoming.taskGroups || []),
+  }
+  return normalizeTerminalAssistantPresentation(merged)
+}
+
 function normalizeMessage(message: Message): Message {
-  const next = cloneJson(message)
+  const next = cloneJson(normalizeTerminalAssistantPresentation(message))
   if (typeof next.content === 'string') {
     next.content = truncateStr(next.content, MAX_TEXT_CONTENT_CHARS)
   }

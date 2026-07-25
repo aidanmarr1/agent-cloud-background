@@ -2,7 +2,13 @@ import { createHash } from 'crypto'
 import type { Transaction } from '@tursodatabase/serverless/compat'
 import type { Conversation, LiveDirectiveMessageMarker, Message } from '@/types'
 import { getTursoClient, getTursoSetupStatus, tursoExecute, tursoTransaction } from '@/lib/db/turso'
-import { normalizeConversationForPersistence, normalizeConversationListForPersistence } from '@/lib/conversationSerialization'
+import {
+  assistantMessagesShareCursor,
+  mergeSameCursorAssistantPresentation,
+  normalizeConversationForPersistence,
+  normalizeConversationListForPersistence,
+  normalizeTerminalAssistantPresentation,
+} from '@/lib/conversationSerialization'
 
 const CONVERSATION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/
 const MAX_SYNC_CONVERSATIONS = 500
@@ -363,10 +369,13 @@ export function mergeConversationWithMonotonicAssistantState(
   const messages = incoming.messages.map((message) => {
     const storedAssistant = storedAssistants.get(message.id)
     if (!storedAssistant) return message
+    if (assistantMessagesShareCursor(storedAssistant, message)) {
+      return mergeSameCursorAssistantPresentation(storedAssistant, message)
+    }
     if (
       incomingAssistantHasStrictlyNewerCursor(storedAssistant, message) ||
       incomingAssistantHasMonotonicTerminalState(storedAssistant, message)
-    ) return message
+    ) return normalizeTerminalAssistantPresentation(message)
 
     if (!sameAssistantCanonicalState(storedAssistant, message)) {
       correctedStaleAssistant = true
