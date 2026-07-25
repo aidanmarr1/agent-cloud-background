@@ -2719,9 +2719,22 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   // fail the entire task. Deep/wide work retains the stricter recovery floor.
   const depth = researchDepthProfileForState(state)
   if (depth.label === 'deep' || depth.label === 'wide') return false
-  return state.stepResearchCallCount >= 3 &&
+  const multiSourcePacket = state.stepResearchCallCount >= 3 &&
     state.stepVisitedUrls.size >= 2 &&
     stepOpenedSourceDomains(state).size >= 2
+  if (multiSourcePacket) return true
+
+  // Ordinary brand/product lookups often have one authoritative first-party
+  // page while sibling catalog URLs block extraction. If the model has already
+  // spent a broad action packet, found candidates across domains, opened one
+  // real page, and then stops producing actions, preserve that direct evidence
+  // and advance instead of failing the whole task at the paid retry boundary.
+  return state.stepResearchCallCount >= 4 &&
+    state.stepToolCallCount >= 6 &&
+    state.stepVisitedUrls.size >= 1 &&
+    stepOpenedSourceDomains(state).size >= 1 &&
+    state.stepSourceDomainCounts.size >= 2 &&
+    state.stepFailureCount >= 1
 }
 
 function compactResearchBreadthSaturated(state: AgentStateData, depth: ReturnType<typeof researchDepthProfileForState>): boolean {

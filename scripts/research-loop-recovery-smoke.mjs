@@ -25,6 +25,11 @@ assert.match(
   /planManager\.handleStepAdvance\(state\)[\s\S]*paid_no_progress_research_advance/,
   'paid no-progress recovery must use the normal plan transition and emit diagnostics',
 )
+assert.match(
+  loopSource,
+  /const multiSourcePacket[\s\S]*state\.stepResearchCallCount >= 4[\s\S]*state\.stepToolCallCount >= 6[\s\S]*state\.stepVisitedUrls\.size >= 1[\s\S]*stepOpenedSourceDomains\(state\)\.size >= 1[\s\S]*state\.stepSourceDomainCounts\.size >= 2[\s\S]*state\.stepFailureCount >= 1/,
+  'ordinary paid no-progress recovery must preserve one authoritative opened source after a broad mixed success/failure packet',
+)
 
 const workDir = await mkdtemp(join(root, 'scripts/.research-loop-recovery-smoke-'))
 const runnerPath = join(workDir, 'runner.ts')
