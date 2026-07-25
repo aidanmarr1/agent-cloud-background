@@ -301,6 +301,7 @@ const RESEARCH_STEP_PATTERN = /\b(?:research|gather|find|search|source|sources|c
 const SYNTHESIS_STEP_PATTERN = /\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i
 const SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|prepare|polish)\b/i
 const ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:analy[sz]e|cross[-\s]?reference|evaluate|compare|assess|interpret)\b/i
+const EXPLICIT_EVIDENCE_REUSE_PATTERN = /\b(?:existing|gathered|collected|prior|available)\s+(?:evidence|findings|sources|research|results|material)\b/i
 const SOURCE_GATHERING_STEP_PATTERN = /\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look\s*up|current|latest|recent|news|reported|publicly|public|asset|assets|image|images|reference|references)\b/i
 
 export function isBuildStepText(text: string | undefined | null): boolean {
@@ -329,7 +330,11 @@ export function isCurrentSynthesisStep(
   if (SYNTHESIS_LEADING_STEP_PATTERN.test(title)) return true
   if (
     state.currentStepIdx > 0 &&
-    ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN.test(title)
+    ANALYTICAL_SYNTHESIS_LEADING_STEP_PATTERN.test(title) &&
+    EXPLICIT_EVIDENCE_REUSE_PATTERN.test([
+      title,
+      state.currentPlanScopes?.[state.currentStepIdx] || '',
+    ].join(' '))
   ) {
     const priorFindingCount = [...(state.stepFindings?.keys() || [])]
       .filter(index => index < state.currentStepIdx)

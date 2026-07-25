@@ -14,6 +14,7 @@ import assert from 'node:assert/strict'
 import { StreamProcessor } from ${JSON.stringify(join(root, 'src/lib/agent/StreamProcessor.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { acceptProgressNarration, beginNarrationCadenceAttempt, reviewProgressNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
+import { sanitizeAgentEventEmitter } from ${JSON.stringify(join(root, 'src/lib/agent/SSEEmitter.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -202,6 +203,24 @@ async function* mixedParallelToolChunks() {
 }
 
 export async function runSmoke() {
+  const rawDedupEmitter = makeEmitter()
+  const dedupEmitter = sanitizeAgentEventEmitter(rawDedupEmitter as any)
+  dedupEmitter.toolStart('same-file-write', 'append_file', {
+    action_label: 'Append final section',
+    plan_step_index: 2,
+    path: 'deliverables/report.md',
+  }, { provisional: true })
+  dedupEmitter.toolStart('same-file-write', 'append_file', {
+    action_label: 'Append final section',
+    plan_step_index: 2,
+    path: 'deliverables/report.md',
+  })
+  assert.equal(
+    rawDedupEmitter.events.filter(event => event.type === 'tool_start').length,
+    1,
+    'a provisional file-write start and its finalized replay must persist as one visible action',
+  )
+
   const emitter = makeEmitter()
   const state = createInitialState(true, timeouts)
   state.currentPlanItems = ['Write code']

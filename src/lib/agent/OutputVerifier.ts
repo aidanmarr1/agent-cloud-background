@@ -118,9 +118,15 @@ export class OutputVerifier {
     // Outline-only detection
     const lines = fileContent.split('\n').filter(l => l.trim().length > 0)
     const headingOrBulletLines = lines.filter(l => /^\s*[#\-*•]/.test(l)).length
+    const substantiveProseParagraphs = fileContent.split(/\n\s*\n/).filter(block => {
+      const trimmed = block.trim()
+      if (!trimmed || /^\s*(?:#{1,6}|[-*•])\s+/.test(trimmed)) return false
+      return trimmed.split(/\s+/).filter(Boolean).length >= 50
+    }).length
     if (
       lines.length > 5 &&
       headingOrBulletLines / lines.length > OUTLINE_ONLY_THRESHOLD &&
+      substantiveProseParagraphs < RESEARCH_MIN_PARAGRAPHS &&
       !conciseStructuredDeliverable
     ) {
       failures.push(`Content appears to be an outline (${Math.round(headingOrBulletLines / lines.length * 100)}% headings/bullets) — write substantive paragraphs`)

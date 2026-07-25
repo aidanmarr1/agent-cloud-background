@@ -2018,6 +2018,31 @@ export async function runLedgerSmoke() {
   updatePhase(evidenceReuseState)
   assert.equal(evidenceReuseState.currentPhase, 'deliver', 'evidence-backed analysis phases must use synthesis routing instead of compact research routing')
 
+  const newSubjectAnalysisState = createInitialState(false, timeouts)
+  newSubjectAnalysisState.originalUserRequest = 'Research how iced lattes are made and write a complete guide.'
+  newSubjectAnalysisState.taskStrategy = 'research'
+  newSubjectAnalysisState.currentPlanItems = [
+    'Explore ideal coffee extraction methods',
+    'Analyze optimal milk-to-coffee ratios',
+    'Draft the final guide',
+  ]
+  newSubjectAnalysisState.currentPlanScopes = [
+    'Compare espresso and cold brew',
+    'Determine practical ratios for different milk types',
+    '',
+  ]
+  newSubjectAnalysisState.currentStepIdx = 1
+  newSubjectAnalysisState.stepFindings.set(0, 'Compared espresso and cold brew from several sources.')
+  for (let index = 1; index <= 4; index++) {
+    newSubjectAnalysisState.visitedUrls.add('https://coffee' + index + '.example/report')
+    newSubjectAnalysisState.distinctSourceDomains.add('coffee' + index + '.example')
+  }
+  assert.equal(
+    isCurrentSynthesisStep(newSubjectAnalysisState),
+    false,
+    'an analytical phase covering a new subtopic must retain model freedom to gather its own evidence',
+  )
+
   const deepReportDepth = researchDepthProfileForState(makeDepthState(
     'Conduct the deepest possible research on DevRev AI and produce a concise, visually rich Markdown report. Research history, founding team, funding, leadership, product evolution, AI capabilities, customer adoption, enterprise traction, financial indicators, hiring trends, partnerships, competitive position, pricing, reviews, market sentiment, technical strengths, weaknesses, risks and long term opportunities. Compare DevRev with Zendesk, Intercom, Salesforce, ServiceNow, Freshworks and Linear.',
     3,

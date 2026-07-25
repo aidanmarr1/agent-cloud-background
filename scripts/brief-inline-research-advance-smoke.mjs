@@ -217,6 +217,55 @@ assert.equal(
   'a substantial concise checklist guide must not be rejected merely for using the requested compact structure',
 )
 
+const guideParagraph = 'A reliable iced latte guide needs prose that explains why each preparation choice matters, how dilution changes extraction strength, which practical trade-offs a home barista should expect, and how the evidence translates into a repeatable drink. This paragraph supplies that connected explanation instead of leaving the reader with labels alone.'
+const detailedMixedGuide = [
+  '# Detailed iced latte guide',
+  '## Executive Summary',
+  guideParagraph,
+  '## Coffee Base',
+  guideParagraph,
+  '- Espresso preserves aromatic intensity.',
+  '- Cold brew produces a smoother profile.',
+  '- Strong brewed coffee is a practical fallback.',
+  '- Ice dilution must be anticipated.',
+  '- Coffee should cool before extended contact with ice.',
+  '## Milk Ratios',
+  guideParagraph,
+  '- Begin near a one-to-three coffee-to-milk ratio.',
+  '- Increase coffee for oat milk.',
+  '- Reduce milk for cold brew concentrate.',
+  '- Taste after the ice begins melting.',
+  '- Record preferred ratios for repeatability.',
+  '## Flavor Additions',
+  guideParagraph,
+  '- Dissolve sugar in warm coffee.',
+  '- Use simple syrup in cold drinks.',
+  '- Add spice sparingly.',
+  '- Balance sweetener against milk sweetness.',
+  '- Keep flavor additions measurable.',
+  '## Conclusion',
+  guideParagraph,
+  '## References',
+  '[1] https://example.com/source-1',
+  '[2] https://example.com/source-2',
+  '[3] https://example.com/source-3',
+  '[4] https://example.com/source-4',
+  '[5] https://example.com/source-5',
+].join('\\n\\n')
+const detailedMixedVerification = verifier.verify(
+  detailedMixedGuide,
+  'deliverables/detailed-iced-latte-guide.md',
+  'Research how iced lattes are made and write a comprehensive Markdown guide.',
+  'research',
+  null,
+  1,
+)
+assert.equal(
+  detailedMixedVerification.failures.some(failure => /appears to be an outline/i.test(failure)),
+  false,
+  'a detailed guide with substantial prose must not fail solely because recipes and tips use many bullets',
+)
+
 const deepConciseVerification = verifier.verify(
   conciseStructuredGuide,
   'deliverables/deep-report.md',

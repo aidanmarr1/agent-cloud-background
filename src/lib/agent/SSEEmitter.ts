@@ -48,6 +48,7 @@ export function sanitizeAgentEventEmitter(emitter: AgentEventEmitter): AgentEven
   const cached = sanitizedEmitterCache.get(emitter as object)
   if (cached) return cached
 
+  const emittedToolStarts = new Set<string>()
   const wrapped: AgentEventEmitter = {
     get isClosed() { return emitter.isClosed },
     get terminalStatus() { return emitter.terminalStatus },
@@ -58,6 +59,9 @@ export function sanitizeAgentEventEmitter(emitter: AgentEventEmitter): AgentEven
     reasoningDelta(content) { emitter.reasoningDelta(content) },
     reasoningDone() { emitter.reasoningDone() },
     toolStart(id, name, args, metadata) {
+      const key = `${id}:${name}`
+      if (emittedToolStarts.has(key)) return
+      emittedToolStarts.add(key)
       emitter.toolStart(id, name, sanitizeToolStartArgs(name, args), metadata)
     },
     toolResult(id, name, result) {
