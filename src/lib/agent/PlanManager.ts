@@ -33,10 +33,6 @@ import { analyzeTaskIntent } from './TaskIntent'
 import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 import { researchDepthProfileForState } from './ResearchDepth'
-import {
-  compactAdjacentArtifactLifecyclePhases,
-  compactAdjacentSourceEvidencePhases,
-} from './PlanNormalization'
 
 export interface RequiredPlanStep {
   title: string
@@ -697,8 +693,7 @@ export class PlanManager {
       return typeof scope === 'string' && scope.trim() ? scope.trim() : null
     })
     const alignedScopes = this.alignScopesToTitles(titles, scopes)
-    const compacted = this.compactPlanPhasesForTask(titles, alignedScopes, state.taskStrategy)
-    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
 
     if (options.emitPlan !== false) this.emitter.plan(withRequired.titles)
@@ -1250,7 +1245,7 @@ Requirements:
             role: 'system' as const,
             content: `Repair an invalid task-planner response into a valid JSON object only.
 Schema:
-{"ack":"very brief direct acknowledgement paragraph","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"5-15 word task-specific step","scope":"non-overlapping step scope"}]}
+{"ack":"very brief direct acknowledgement paragraph","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"natural task-specific step","scope":"concise intent, constraints, or success conditions"}]}
 
 Rules:
 - Return only JSON. No markdown, prose, or code fence.
@@ -1259,11 +1254,11 @@ Rules:
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one very brief direct paragraph, one or two short sentences and 12-38 words, using plain words and saying what Agent will do for the exact task and what it will deliver.
-- Step count is flexible: do not default to 3 or 4 steps, do not use fixed ranges, and do not shrink substantive work into a tiny plan.
-- Scopes must be compact, usually 10-22 words. Preserve depth through the phase goal, not long scope prose.
+- The planning model owns the visible plan's wording, step count, boundaries, and order. Preserve explicit user order and real dependencies, but do not force "research → analyze → synthesize → deliver", a phase named "Analyze", or any preferred verb/template.
+- Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
 - Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.
 - "code" means the user asked to write, modify, debug, run, or deploy code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact.
-- A request for current, external, citation-backed, credible, official, or primary-source evidence must put evidence gathering before final synthesis. Never combine evidence gathering and delivery into its only step; choose task-specific phase wording.
+- Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, writing, verification, and delivery are separate or combined visible phases. The requested result must still be completed.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
 - If saved custom instructions require todo.md or another tracking file, preserve that support step; otherwise do not invent tracking files.
 - If the broken response contains useful task details, preserve them. If it does not, derive a specific plan from the user request.
@@ -1346,8 +1341,7 @@ Rules:
       ? arrays.scopes
       : enforcedTitles.map((_, index) => arrays.scopes[index] ?? null)
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
-    const compacted = this.compactPlanPhasesForTask(enforcedTitles, alignedScopes, mappedTaskType)
-    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(compacted.titles, compacted.scopes)
+    const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     assertPlannerVisibleTextQuality(obj.ack, withRequired.titles, withRequired.scopes)
 
@@ -1538,7 +1532,7 @@ REMAINING STEPS: ${remainingSteps.map((s, i) => `${state.currentStepIdx + 2 + i}
 REASON FOR REPLANNING: ${reason}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should be actionable and specific.`,
+Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force a fixed count or a stock research/analyze/synthesize/deliver sequence. Keep the steps actionable and specific.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
@@ -1612,29 +1606,6 @@ Generate an updated list of remaining steps (including a revised current step if
 
   private customInstructionVisibleStepCount(): number | null {
     return parseVisibleStepCountInstruction(this.customInstructions)
-  }
-
-  private compactPlanPhasesForTask(
-    titles: string[],
-    scopes: Array<string | null>,
-    taskType: string | undefined,
-  ): { titles: string[]; scopes: Array<string | null> } {
-    const request = effectiveTaskRequest(this.messages)
-    const fixedVisibleCount = this.customInstructionVisibleStepCount() ?? parseVisibleStepCountInstruction(request)
-    const preserveVisibleStepCount = fixedVisibleCount !== null
-    const eligibleResearchTask = taskType === 'research' || taskType === 'analysis'
-    const explicitlySeparateSourcePhases = /\b(?:separate|distinct|individual)\s+(?:(?:source|research|evidence)[-\s]*)?(?:steps|phases)\b/i.test(request)
-    const explicitlySeparateArtifactPhases = /\b(?:separate|distinct|individual)\s+(?:(?:draft|save|verify|artifact|deliverable)[-\s]*)?(?:steps|phases)\b/i.test(request)
-
-    const sourceCompacted = eligibleResearchTask
-      ? compactAdjacentSourceEvidencePhases(titles, scopes, {
-        preserveVisibleStepCount: preserveVisibleStepCount || explicitlySeparateSourcePhases,
-      })
-      : { titles, scopes }
-
-    return compactAdjacentArtifactLifecyclePhases(sourceCompacted.titles, sourceCompacted.scopes, {
-      preserveVisibleStepCount: preserveVisibleStepCount || explicitlySeparateArtifactPhases,
-    })
   }
 
   private applyCustomInstructionPlanRequirements(
@@ -1811,7 +1782,7 @@ ${trigger.workingMemorySnapshot || '(no facts collected yet)'}
 REASON FOR REPLANNING: ${reasonText}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should account for what was learned.`,
+Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force a fixed count or a stock research/analyze/synthesize/deliver sequence. The steps should account for what was learned.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
