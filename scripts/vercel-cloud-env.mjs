@@ -164,6 +164,18 @@ function parseEnvNamesFromJson(output) {
   }
 }
 
+function parseEnvMetadataFromJson(output) {
+  try {
+    const parsed = JSON.parse(output.slice(output.indexOf('{')))
+    if (!Array.isArray(parsed.envs)) return new Map()
+    return new Map(parsed.envs
+      .filter((row) => typeof row?.key === 'string')
+      .map((row) => [row.key, { type: row.type }]))
+  } catch {
+    return new Map()
+  }
+}
+
 async function pullVercelEnvValues() {
   const tempDir = mkdtempSync(join(tmpdir(), 'agent-vercel-env-'))
   const tempFile = join(tempDir, '.env.pulled')
@@ -185,7 +197,7 @@ function normalizedCompareValue(value) {
   return String(value ?? '').trim()
 }
 
-function safeStatusRows(existingNames, pulledValues) {
+function safeStatusRows(existingNames, pulledValues, envMetadata = new Map()) {
   return CLOUD_ENV.map((entry) => {
     const exists = existingNames.has(entry.name)
     const expectedValue = valueFor(entry)
@@ -195,7 +207,11 @@ function safeStatusRows(existingNames, pulledValues) {
     // so an accidentally empty production secret is detected as drift instead
     // of being reported as healthy. Values remain private and the temp file is
     // deleted by pullVercelEnvValues().
-    const valueChecked = exists && Boolean(pulledValues) && hasLocalValue
+    // Vercel deliberately redacts values marked "sensitive" when they are
+    // pulled through the CLI. Presence can still be verified, but comparing
+    // the redacted placeholder to the local secret would be a false drift.
+    const valueMasked = envMetadata.get(entry.name)?.type === 'sensitive'
+    const valueChecked = exists && Boolean(pulledValues) && hasLocalValue && !valueMasked
     const valueMatches = valueChecked
       ? normalizedCompareValue(pulledValues.get(entry.name)) === normalizedCompareValue(expectedValue)
       : null
@@ -208,6 +224,7 @@ function safeStatusRows(existingNames, pulledValues) {
       valueChecked,
       valueMatches,
       valueMismatch: valueMatches === false,
+      valueMasked,
       required: entry.required === true,
       hint: !exists && !hasLocalValue && entry.required === true
         ? entry.hint || `Set ${entry.name} locally before applying.`
@@ -244,8 +261,9 @@ function printReport(rows) {
 
 const listed = await runVercel(['env', 'ls', target, '--format', 'json'])
 const existingNames = parseEnvNamesFromJson(listed.stdout) || parseEnvNames(`${listed.stdout}\n${listed.stderr}`)
+const envMetadata = parseEnvMetadataFromJson(listed.stdout)
 const pulledValues = verifyValues ? await pullVercelEnvValues() : null
-const rows = safeStatusRows(existingNames, pulledValues)
+const rows = safeStatusRows(existingNames, pulledValues, envMetadata)
 printReport(rows)
 
 if (!apply) {
