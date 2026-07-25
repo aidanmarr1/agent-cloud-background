@@ -6612,6 +6612,33 @@ export class AgentLoop {
             afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
           })
         }
+        if (state.fileWriteRepairPending && !partialFileContinuationNeedsTool) {
+          const pending = state.fileWriteRepairPending
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = activeTools.filter(tool => tool.function?.name !== 'create_file')
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: [
+                `FILE REVISION REQUIRED: "${pending.path}" is already present in the workspace.`,
+                pending.reason === 'stale_edit'
+                  ? 'The previous targeted edit used stale text. Inspect the current file with read_file, then author an exact edit_file call.'
+                  : pending.reason === 'ambiguous_write'
+                    ? 'A sandbox lifecycle transition made the prior write result uncertain. Inspect the current file with read_file before changing it.'
+                    : 'Continue the existing file with edit_file or append_file; inspect it first with read_file when exact current text is needed.',
+                'Do not create a replacement or duplicate file. Choose and author the appropriate native tool call yourself.',
+              ].join(' '),
+            } as ChatMessageParam,
+          ]
+          console.log('[AgentDiagnostics] Suppressed create_file during file repair', {
+            step: state.currentStepIdx,
+            path: pending.path,
+            reason: pending.reason,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
         const exhaustedStepToolPrune = pruneExhaustedStepToolsForCurrentTurn(state, activeTools)
         if (exhaustedStepToolPrune.exhausted.length > 0) {
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
@@ -6776,6 +6803,44 @@ export class AgentLoop {
                   ].filter(Boolean).join(' '),
             } as ChatMessageParam,
           ]
+        }
+        const explicitWebSearchMethod = !!explicitTaskToolConstraint && (
+          explicitTaskToolConstraint.required.includes('web_search') ||
+          explicitTaskToolConstraint.exclusive.includes('web_search')
+        )
+        const directUserUrlNeedsFirstAction =
+          !!state.userProvidedUrl &&
+          state.stepToolCallCount === 0 &&
+          !explicitWebSearchMethod &&
+          !isPostCompletion &&
+          !useCompactNarration &&
+          !useTextFinalDeliverable
+        if (directUserUrlNeedsFirstAction) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          const hasDirectSourceTool = activeTools.some(tool => {
+            const name = tool.function?.name || ''
+            return name === 'browser_navigate' || name === 'read_document' || name === 'http_request'
+          })
+          if (hasDirectSourceTool) {
+            activeTools = activeTools.filter(tool => tool.function?.name !== 'web_search')
+            requestMessages = [
+              ...requestMessages,
+              {
+                role: 'system',
+                content: [
+                  `DIRECT USER TARGET: The user supplied ${state.userProvidedUrl}.`,
+                  'The next action must use that exact target directly; do not turn it into search keywords or discover a replacement first.',
+                  'Choose the available direct tool that best matches the user’s requested method and the current step, then author the native tool call yourself.',
+                ].join(' '),
+              } as ChatMessageParam,
+            ]
+          }
+          console.log('[AgentDiagnostics] Evaluated discovery search before exact user target is opened', {
+            step: state.currentStepIdx,
+            target: state.userProvidedUrl,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
         }
         const effectiveCadenceNarrationInMainTurn =
           cadenceNarrationInMainTurn &&

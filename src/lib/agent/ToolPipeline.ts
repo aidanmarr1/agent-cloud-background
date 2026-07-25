@@ -2865,6 +2865,19 @@ export class ToolPipeline {
     if (!this.conversationId || !filePath || !isNextWebsiteProjectPath(filePath) || hasToolError(result)) {
       return result
     }
+    // A successfully opened preview is already a live browser session; later
+    // file writes update that session through the dev server and must not
+    // repeatedly tear down/reopen the Computer frame.
+    if (state.nextWebsitePreviewDone) return result
+
+    // If the initial launch failed, do not retry it after every component
+    // write. A repair to one of the app entry files is the meaningful signal
+    // that the preview may now build successfully.
+    const normalizedPath = filePath.replace(/\\/g, '/')
+    const isPreviewEntryRepair =
+      /(?:^|\/)app\/(?:page|layout)\.(?:tsx|jsx|ts|js)$/.test(normalizedPath) ||
+      /(?:^|\/)app\/globals\.css$/.test(normalizedPath)
+    if (state.nextWebsitePreviewAttempted && !isPreviewEntryRepair) return result
 
     let status: Awaited<ReturnType<typeof getNextWebsiteProjectStatus>>
     try {
@@ -4171,7 +4184,10 @@ export class ToolPipeline {
         error: errorMessage.error,
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
+      // This is a model-selection correction, not a task action. Do not spend
+      // the phase action budget or make the next model turn believe that work
+      // has started. AgentLoop removes web_search from that repair turn so the
+      // model must author the appropriate direct URL action itself.
       return preflightResult(errorMessage)
     }
 
@@ -4230,6 +4246,7 @@ export class ToolPipeline {
         : null
       if (filePath && pendingPartial) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
+        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
         const errorResult = {
           error: `"${filePath}" already has a recovered partial write (${pendingPartial.lines} lines, ${pendingPartial.chars} chars). Do NOT recreate or overwrite it. Use append_file to continue from the saved content, or edit_file only for a targeted replacement.`,
         }
@@ -4240,12 +4257,14 @@ export class ToolPipeline {
       // On other steps, block rewrites after 1st create.
       if (filePath && priorCreates >= 1 && !isDeliverableStep) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
+        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
         const errorResult = { error: `"${filePath}" already exists. Use append_file to continue writing it or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue working.` }
         this.emitter.toolResult(tc.id, tc.name, errorResult as never)
         return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
       }
       // On deliverable step, block after 2 creates (prevent genuine loops even on last step)
       if (filePath && priorCreates >= 2 && isDeliverableStep) {
+        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
         const errorResult = { error: `"${filePath}" has been created twice already. Use append_file for additional sections or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue.` }
         this.emitter.toolResult(tc.id, tc.name, errorResult as never)
         return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
@@ -4262,6 +4281,7 @@ export class ToolPipeline {
             const overlap = newTokens.filter(t => existingTokens.includes(t)).length
             const similarity = overlap / Math.max(newTokens.length, existingTokens.length)
             if (similarity >= 0.9) { // Only block near-exact dupes (e.g. report.md vs report-v2.md)
+              state.fileWriteRepairPending = { path: existing, reason: 'already_exists' }
               const errorResult = { error: `A file with a very similar name "${existing}" already exists. Use append_file to continue "${existing}" or edit_file for targeted replacements instead of creating a near-duplicate file. Do NOT tell the user about this error — just switch tools and continue working.` }
               this.emitter.toolResult(tc.id, tc.name, errorResult as never)
               return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
@@ -4468,10 +4488,37 @@ export class ToolPipeline {
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : 'Unknown error'
       if (shouldUnwindToolExecution(error, this.signal)) throw error
+      const ambiguousCreateLifecycle =
+        tc.name === 'create_file' &&
+        this.conversationId &&
+        /E2B lifecycle changed while preparing sandbox/i.test(errMsg)
+      if (ambiguousCreateLifecycle) {
+        const path = typeof args.path === 'string' ? args.path : ''
+        const expectedContent = typeof args.content === 'string' ? args.content : ''
+        try {
+          const observed = await readFileInSandbox(this.conversationId!, path)
+          const observedContent = typeof observed.content === 'string' ? observed.content : ''
+          if (observedContent && !observedContent.startsWith('Error:') && observedContent === expectedContent) {
+            result = {
+              action: 'created',
+              path,
+              size: typeof observed.size === 'number' ? observed.size : observedContent.length,
+              recoveredAfterLifecycleChange: true,
+            }
+          } else {
+            state.fileWriteRepairPending = { path, reason: 'ambiguous_write' }
+          }
+        } catch {
+          state.fileWriteRepairPending = { path, reason: 'ambiguous_write' }
+        }
+      }
       const locallyAborted = isRecoverableToolLocalAbort(tc.name, error, this.signal)
       const searchRecovery = searchExecutionRecoveryResult(tc.name, args, errMsg)
       const documentRecovery = documentTimeoutRecoveryResult(tc.name, args, errMsg, locallyAborted)
-      if (searchRecovery) {
+      if (result && typeof result === 'object' && !('error' in (result as Record<string, unknown>))) {
+        // The sandbox changed lifecycle after accepting a non-idempotent
+        // create, but the exact file was found on reconciliation.
+      } else if (searchRecovery) {
         result = searchRecovery
       } else if (documentRecovery) {
         result = documentRecovery
@@ -4579,6 +4626,15 @@ export class ToolPipeline {
     // Check if error
     const isError = isToolExecutionErrorResult(tc.name, result)
     if (!isError) trackSuccessfulToolExecution(state, tc.name)
+    if (isError && (tc.name === 'create_file' || tc.name === 'edit_file')) {
+      const path = typeof args.path === 'string' ? normalizeSandboxFilePath(args.path) : ''
+      const errorText = String((result as Record<string, unknown> | null)?.error || '')
+      if (path && tc.name === 'create_file' && /already exists|similar name/i.test(errorText)) {
+        state.fileWriteRepairPending = { path, reason: 'already_exists' }
+      } else if (path && tc.name === 'edit_file' && /old_string|not found|no match|does not match/i.test(errorText)) {
+        state.fileWriteRepairPending = { path, reason: 'stale_edit' }
+      }
+    }
     const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)
     const usefulResearchProgress =
       !isError &&
@@ -4726,6 +4782,7 @@ export class ToolPipeline {
     } else if (tc.name === 'create_file') {
       const path = (args.path as string) || ''
       if (path) state.createdFiles.add(path)
+      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
       maybeSatisfyWebsiteStructureRequirement(state)
       logWork(state, `Created file: ${path}`)
       if (/^research-notes\//i.test(path) || /research[-_ ]?notes/i.test(path)) {
@@ -4741,6 +4798,7 @@ export class ToolPipeline {
     } else if (tc.name === 'append_file') {
       const path = (args.path as string) || ''
       if (path) state.createdFiles.add(path)
+      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
       maybeSatisfyWebsiteStructureRequirement(state)
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
@@ -4781,6 +4839,12 @@ export class ToolPipeline {
       }
     } else if (tc.name === 'read_file') {
       const path = (args.path as string) || (args.source as string) || ''
+      if (path && state.fileWriteRepairPending?.path === path) {
+        // The model has now refreshed its view of the file. Release the
+        // one-turn create suppression so it may continue with other project
+        // files instead of being trapped in a repair-only tool menu.
+        state.fileWriteRepairPending = null
+      }
       logWork(state, `Read file: ${path}`)
       satisfyWorkLedgerRequirement(state, 'Input file/document read', [
         'read and load selected skill/file',
@@ -4813,6 +4877,7 @@ export class ToolPipeline {
       }
     } else if (tc.name === 'edit_file') {
       const path = (args.path as string) || ''
+      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
         state.partialFileWriteRecoveryNudged = false

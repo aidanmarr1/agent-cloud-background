@@ -62,6 +62,9 @@ assert.equal(
 )
 
 const agentLoopSource = await readFile(new URL('../src/lib/agent/AgentLoop.ts', import.meta.url), 'utf8')
+const agentStateSource = await readFile(new URL('../src/lib/agent/AgentState.ts', import.meta.url), 'utf8')
+const toolPipelineSource = await readFile(new URL('../src/lib/agent/ToolPipeline.ts', import.meta.url), 'utf8')
+const toolsSource = await readFile(new URL('../src/lib/tools.ts', import.meta.url), 'utf8')
 const taskRunnerSource = await readFile(new URL('../src/lib/agent/chatTaskRunner.ts', import.meta.url), 'utf8')
 const localWebsiteSource = await readFile(new URL('../src/lib/localWebsiteServer.ts', import.meta.url), 'utf8')
 const e2bSource = await readFile(new URL('../src/lib/e2bSandbox.ts', import.meta.url), 'utf8')
@@ -96,6 +99,41 @@ assert.match(
   /hostToHttpUrl\(sandbox\.getHost\(port\)\)/,
   'the live preview must be exposed through the task VM hostname',
 )
+assert.match(
+  toolsSource,
+  /Never put a known or user-supplied URL\/domain in query/,
+  'web search tool guidance must keep exact user URLs out of discovery queries',
+)
+assert.match(
+  agentLoopSource,
+  /hasDirectSourceTool[\s\S]*activeTools = activeTools\.filter\(tool => tool\.function\?\.name !== 'web_search'\)/,
+  'the model must lose discovery search only when an exact-target tool is available',
+)
+assert.match(
+  agentStateSource,
+  /fileWriteRepairPending: \{ path: string; reason:/,
+  'file write repair state must survive between paid model turns',
+)
+assert.match(
+  agentLoopSource,
+  /Suppressed create_file during file repair/,
+  'a duplicate or stale file write must remove create_file from the repair turn',
+)
+assert.match(
+  toolPipelineSource,
+  /E2B lifecycle changed while preparing sandbox[\s\S]*readFileInSandbox/,
+  'an ambiguous E2B create must reconcile the actual file before asking the model to retry',
+)
+assert.match(
+  toolPipelineSource,
+  /if \(state\.nextWebsitePreviewDone\) return result/,
+  'a live website preview must remain open instead of relaunching after every file write',
+)
+assert.match(
+  toolPipelineSource,
+  /state\.nextWebsitePreviewAttempted && !isPreviewEntryRepair/,
+  'a failed website preview must not retry after unrelated component writes',
+)
 
 console.log(JSON.stringify({
   ok: true,
@@ -103,4 +141,7 @@ console.log(JSON.stringify({
   sequentialFinalization: true,
   liveE2BPreview: true,
   advisoryUsageCheckpoints: true,
+  exactUrlRouting: true,
+  fileWriteReconciliation: true,
+  stableLivePreview: true,
 }, null, 2))

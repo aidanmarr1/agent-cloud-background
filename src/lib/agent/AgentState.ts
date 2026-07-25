@@ -114,6 +114,7 @@ export interface AgentStateData {
   partialFileWriteRecoveries: Array<{ path: string; toolName: string; chars: number; lines: number; createdAt: number }>
   partialFileWriteRecoveryPending: { path: string; toolName: string; chars: number; lines: number } | null
   partialFileWriteRecoveryNudged: boolean
+  fileWriteRepairPending: { path: string; reason: 'already_exists' | 'stale_edit' | 'ambiguous_write' } | null
 
   // Work log — survives context trimming
   workLog: string[]
@@ -433,6 +434,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     partialFileWriteRecoveries: [],
     partialFileWriteRecoveryPending: null,
     partialFileWriteRecoveryNudged: false,
+    fileWriteRepairPending: null,
     workLog: [],
     workLedger: {
       currentObjective: null,
@@ -663,6 +665,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.browserNoToolRecoveryAttempts = 0
   state.researchNoToolRecoveryAttempts = 0
   state.partialFileWriteRecoveryNudged = false
+  state.fileWriteRepairPending = null
   // Phase 11: do NOT clear recentBrowserStateHashes on step advance — keeping
   // it across steps lets us detect "re-navigated to homepage to start step 2
   // when the test page from step 1 was the right place to be" failures. The

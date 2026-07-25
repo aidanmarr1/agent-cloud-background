@@ -11,11 +11,11 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Search the web. Returns titles, snippets, and URLs.',
+      description: 'Discover candidate webpages from a topical text query. Returns titles, snippets, and URLs. Never put a known or user-supplied URL/domain in query; open that exact target with browser_navigate or extract it with read_document instead.',
       parameters: {
         type: 'object',
         properties: {
-          query: { type: 'string', description: 'Search query' },
+          query: { type: 'string', description: 'Topical search terms only, never a URL or a URL rewritten as spaced words' },
         },
         required: ['query'],
       },
@@ -180,7 +180,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_navigate',
-      description: 'Open URL and return page state/elements.',
+      description: 'Open an exact webpage URL and return live rendered page state/elements. Use this first when the user supplies a URL/domain unless they explicitly require another method.',
       parameters: {
         type: 'object',
         properties: {
