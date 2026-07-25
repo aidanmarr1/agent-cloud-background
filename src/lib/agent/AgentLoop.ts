@@ -337,13 +337,13 @@ function isTransientAssistantStreamError(error: unknown): boolean {
   return /\b(?:fetch failed|network|socket|terminated|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|temporarily unavailable)\b/i.test(message)
 }
 
-function supportsProviderRequiredToolChoice(): boolean {
-  // OpenRouter model routes vary a lot in how they handle provider-forced
-  // tool_choice. Gemini Flash Lite currently times out repeatedly on required
-  // tool starts, which looks like a frozen "thinking" state to the user. Keep
-  // the model-selected tool intent in the prompt, but do not send the provider
-  // forcing flag through OpenRouter.
-  return ASSISTANT_PROVIDER !== 'openrouter'
+function supportsProviderRequiredToolChoice(model: string): boolean {
+  // OpenRouter routes are not interchangeable here. The former Nitro route
+  // could stall before emitting a required tool call, while the pinned Exacto
+  // route accepts `tool_choice: required` and is selected specifically for
+  // accurate native tool calling. Do not let the old provider-wide Nitro
+  // exception turn an Exacto action request into an optional, empty turn.
+  return ASSISTANT_PROVIDER !== 'openrouter' || /:exacto$/i.test(model.trim())
 }
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
@@ -6798,7 +6798,7 @@ export class AgentLoop {
         }
         const useRequiredToolCall = requiredToolIntent &&
           !relaxRequiredToolChoice &&
-          supportsProviderRequiredToolChoice()
+          supportsProviderRequiredToolChoice(model)
         lastShouldRequireToolCall = useRequiredToolCall
 
         const approxChars = requestMessages.reduce((sum, m) => {
@@ -6886,7 +6886,7 @@ export class AgentLoop {
           modelTools: modelTools.length,
           requireToolCall: useRequiredToolCall,
           requiredToolIntent,
-          providerRequiredToolChoice: supportsProviderRequiredToolChoice(),
+          providerRequiredToolChoice: supportsProviderRequiredToolChoice(model),
           fastActionTurn,
           fastSourceActionTurn,
           forceTextNextIteration: !!state.forceTextNextIteration,
