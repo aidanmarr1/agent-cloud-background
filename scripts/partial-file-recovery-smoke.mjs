@@ -29,6 +29,12 @@ assert.match(
   /event_json like '%"type":"text_delta"%'[\s\S]{0,160}event_json like '%"type":"progress_update"%'/,
   'task recovery assessment must include persisted LLM narration events',
 )
+const fileAppendSource = await readFile(join(root, 'src/lib/fileAppend.ts'), 'utf-8')
+assert.match(
+  fileAppendSource,
+  /existingTail\.endsWith\(incoming\.slice\(0, overlap\)\)/,
+  'append recovery must remove an exact replayed suffix/prefix overlap before writing',
+)
 const workDir = await mkdtemp(join(root, 'scripts/.partial-file-recovery-smoke-runner-'))
 const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
@@ -38,6 +44,7 @@ try {
 import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
 import { getSandboxDirPath, readFileInSandbox } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
+import { trimReplayedAppendOverlap } from ${JSON.stringify(join(root, 'src/lib/fileAppend.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
@@ -70,6 +77,18 @@ async function call(pipeline: ToolPipeline, state: ReturnType<typeof createIniti
 }
 
 export async function runSmoke() {
+  const repeatedTail = 'A'.repeat(140) + ' retained continuation'
+  assert.equal(
+    trimReplayedAppendOverlap('existing prefix\\n' + repeatedTail, repeatedTail + '\\nnew material'),
+    '\\nnew material',
+    'exact recovered append overlap must be removed',
+  )
+  assert.equal(
+    trimReplayedAppendOverlap('short repeated heading', 'short repeated heading\\nnew material'),
+    'short repeated heading\\nnew material',
+    'short ordinary repetition must remain untouched',
+  )
+
   const conversationId = \`partial-file-recovery-smoke-\${Date.now()}\`
   const emitter = makeEmitter()
   const state = createInitialState(true, timeouts)

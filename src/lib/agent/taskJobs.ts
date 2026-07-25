@@ -992,8 +992,42 @@ function compactEventForPersistence(event: SSEEvent): SSEEvent {
   }
 }
 
-function minimalToolResultForPersistence(name: string): SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult {
-  if (name === 'web_search' || name === 'image_search') return []
+function minimalToolResultForPersistence(
+  name: string,
+  result?: unknown,
+): unknown {
+  if (name === 'web_search') {
+    if (!Array.isArray(result)) return []
+    return result.slice(0, 8).map((item) => {
+      const source = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+      return {
+        title: compactStringForPersistence(String(source.title || ''), 512),
+        snippet: compactStringForPersistence(String(source.snippet || ''), 1_000),
+        url: compactStringForPersistence(String(source.url || ''), 2_048),
+      }
+    })
+  }
+  if (name === 'image_search') {
+    const source = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+    const compactImages = (items: unknown): Array<Record<string, unknown>> => Array.isArray(items)
+      ? items.slice(0, 8).map((item) => {
+          const image = item && typeof item === 'object' ? item as Record<string, unknown> : {}
+          return {
+            title: compactStringForPersistence(String(image.title || ''), 512),
+            thumbnailUrl: compactStringForPersistence(String(image.thumbnailUrl || ''), 2_048),
+            imageUrl: compactStringForPersistence(String(image.imageUrl || ''), 2_048),
+            sourceUrl: compactStringForPersistence(String(image.sourceUrl || ''), 2_048),
+            localUrl: compactStringForPersistence(String(image.localUrl || ''), 2_048),
+          }
+        })
+      : []
+    return {
+      images: compactImages(source.images),
+      downloaded: Array.isArray(source.downloaded)
+        ? source.downloaded.slice(0, 8).map((item) => compactStringForPersistence(String(item), 2_048))
+        : [],
+    }
+  }
   if (name === 'execute_command' || name === 'run_code') {
     return {
       command: '',
@@ -1058,7 +1092,7 @@ function minimalEventForPersistence(event: SSEEvent): SSEEvent {
         type: 'tool_result',
         id: event.id,
         name: event.name,
-        result: minimalToolResultForPersistence(event.name),
+        result: minimalToolResultForPersistence(event.name, event.result) as SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult,
         seq: event.seq,
         runId: event.runId,
       }

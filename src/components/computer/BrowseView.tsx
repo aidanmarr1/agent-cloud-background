@@ -1,6 +1,7 @@
 'use client'
 
 import { BrowseResult } from '@/types'
+import { useDeferredEmptyState } from './useDeferredEmptyState'
 
 interface BrowseViewProps {
   result: BrowseResult
@@ -23,13 +24,14 @@ export function BrowseView({ result, streaming }: BrowseViewProps) {
         url: typeof result.url === 'string' ? result.url : '',
       }
     : { title: 'Page Content', content: '', url: '' }
+  const resolvingEmptyResult = useDeferredEmptyState(!safeResult.content.trim(), streaming)
   const displayContent = safeResult.content.trim() || 'No extracted text was returned for this source.'
   const paragraphs = splitIntoParagraphs(displayContent)
 
   let hostname = ''
   try { hostname = new URL(safeResult.url).hostname.replace(/^www\./, '') } catch {}
 
-  if (!safeResult.content && streaming) {
+  if (resolvingEmptyResult) {
     return (
       <div className="p-4">
         {/* URL bar */}

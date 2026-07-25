@@ -16,10 +16,10 @@ assert.match(
   /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/,
   'the assistant provider must be statically pinned to OpenRouter',
 )
-assert.match(
+assert.doesNotMatch(
   llmSource,
-  /provider:\s*\{\s*sort:\s*'throughput'\s*\}/,
-  'every request must prefer the fastest OpenRouter provider',
+  /provider:\s*\{\s*sort:\s*'(?:throughput|price|latency)'\s*\}/,
+  'requests must not override the Exacto quality-first provider route',
 )
 assert.doesNotMatch(
   llmSource,
@@ -133,8 +133,8 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite:nitro')
-    assert.deepEqual(request.body.provider, { sort: 'throughput' })
+    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite:exacto')
+    assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
@@ -173,7 +173,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('OpenRouter Nitro provider mode smoke test passed')
+  console.log('OpenRouter Exacto provider mode smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

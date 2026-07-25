@@ -1322,6 +1322,9 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
         'Do not mention internal verification, phases, ledgers, retries, or tool mechanics.',
       ].filter(Boolean).join(' ')
     }
+    const duplicatedPassageFailure = revision.failures.some(failure =>
+      /\bduplicat(?:e|ed|ion)\b/i.test(failure),
+    )
     return [
       `FINAL SAVED DELIVERABLE REVISION NOW: make exactly one native append_file or edit_file call to "${existingPath}" immediately.`,
       request ? `User request: ${request}.` : '',
@@ -1329,7 +1332,9 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       revision?.failures?.length ? `Fix these verification failures: ${revision.failures.join('; ')}.` : '',
       revision?.suggestions?.length ? `Use these suggestions: ${revision.suggestions.join('; ')}.` : '',
       'Do not call create_file, do not create a second report, do not write visible prose, and do not emit <next_step/>.',
-      'Prefer append_file for missing sections, citations, source URLs, or extra analysis; use edit_file only for a targeted replacement.',
+      duplicatedPassageFailure
+        ? 'This is a duplication repair: use edit_file to remove the repeated copy while preserving the single complete passage. Do not append anything.'
+        : 'Prefer append_file for missing sections, citations, source URLs, or extra analysis; use edit_file only for a targeted replacement.',
       'For research/report Markdown, make the saved file clearly structured and expansive by default: # title, ## Executive Summary, numbered thematic sections with inline [n] citations, ## Conclusion, and ## References with URLs.',
       'End cleanly at a sentence or section boundary.',
     ].filter(Boolean).join(' ')
@@ -2151,14 +2156,24 @@ function buildPlanningMessages(messages: AgentLoopOptions['messages']): Array<{ 
 }
 
 function requiredAttachmentPlanSteps(messages: AgentLoopOptions['messages']): RequiredPlanStep[] {
-  const attachments = uploadedAttachments(messages)
+  const attachments = uploadedAttachments(messages).filter((attachment) => !(
+    ASSISTANT_SUPPORTS_IMAGE_INPUT &&
+    attachment.contentEncoding === 'data-url' &&
+    !!attachment.content &&
+    (
+      attachment.type.startsWith('image/') ||
+      attachment.type.startsWith('audio/') ||
+      attachment.type.startsWith('video/') ||
+      attachment.type === 'application/pdf'
+    )
+  ))
   if (attachments.length === 0) return []
 
-  const names = uploadedAttachmentNames(messages)
+  const names = [...new Set(attachments.map((attachment) => attachment.name).filter(Boolean))]
   const readableName = names.slice(0, 2).join(', ') + (names.length > 2 ? ` +${names.length - 2} more` : '')
-  const firstReadable = readableUploadedAttachments(messages)[0]
-  const hasVisualImages = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
-  const hasNativeMultimodal = nativeMultimodalUploadedAttachments(messages).length > 0
+  const firstReadable = attachments.find(isReadableAttachmentContent)
+  const hasVisualImages = false
+  const hasNativeMultimodal = false
   const hasTextOnlyImages = !ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(messages).length > 0
   const hasSandboxUploads = attachments.some(attachment => !!attachment.sandboxPath)
   const contentPreview = firstReadable?.content
@@ -3749,6 +3764,7 @@ export class AgentLoop {
       assertPlannerCreditRunway,
       this.options.skipStartupAcknowledgement === true,
       signal,
+      processedMessages as ChatMessageParam[],
     )
 
     planManager.setStateRef(state)

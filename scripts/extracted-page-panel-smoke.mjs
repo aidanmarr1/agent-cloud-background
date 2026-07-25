@@ -4,11 +4,13 @@ import { join } from 'node:path'
 
 const root = process.cwd()
 
-const [browse, documentReader, panelMapper, dispatcher] = await Promise.all([
+const [browse, documentReader, panelMapper, dispatcher, browseView, deferredEmptyState] = await Promise.all([
   readFile(join(root, 'src/lib/browse.ts'), 'utf8'),
   readFile(join(root, 'src/lib/document.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/panelMapper.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
+  readFile(join(root, 'src/components/computer/BrowseView.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/computer/useDeferredEmptyState.ts'), 'utf8'),
 ])
 
 assert.match(
@@ -75,6 +77,18 @@ assert.match(
   dispatcher,
   /previousBrowse\?\.url && !nextBrowse\.url/,
   'final cheap-extraction results must preserve the live placeholder URL when needed',
+)
+
+assert.match(
+  browseView,
+  /useDeferredEmptyState\(!safeResult\.content\.trim\(\), streaming\)/,
+  'extracted-page view must defer its empty state while the final result event is reconciling',
+)
+
+assert.match(
+  deferredEmptyState,
+  /window\.setTimeout\(\(\) => setWaitingForResult\(false\), delayMs\)/,
+  'transient empty Computer panel states must retain the loading skeleton for a short reconciliation window',
 )
 
 console.log('Extracted page panel smoke passed')

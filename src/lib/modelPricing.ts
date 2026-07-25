@@ -1,4 +1,4 @@
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:nitro'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:exacto'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,

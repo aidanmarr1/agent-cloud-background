@@ -2,6 +2,7 @@ import {
   createCompletion,
   createStreamingCompletion,
   DEFAULT_MODEL,
+  type ChatContentPart,
   type ChatMessageParam,
   type StreamingChatCompletionChunk,
 } from '@/lib/llm'
@@ -246,9 +247,31 @@ function stringifyPlannerResponseForRepair(response: PlannerResponseObject | nul
   }
 }
 
-function plannerTaskMessages(messages: Array<{ role: string; content: string }>): ChatMessageParam[] {
+function nativePlannerMediaParts(messages: ChatMessageParam[] | undefined): ChatContentPart[] {
+  if (!messages?.length) return []
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index]
+    if (message.role !== 'user' || !Array.isArray(message.content)) continue
+    const media = message.content.filter((part) => part.type !== 'text')
+    if (media.length > 0) return media
+  }
+  return []
+}
+
+function plannerTaskMessages(
+  messages: Array<{ role: string; content: string }>,
+  nativeMessages?: ChatMessageParam[],
+  requestOverride?: string,
+): ChatMessageParam[] {
   const request = effectiveTaskRequest(messages).slice(0, 6000).trim() || 'Continue the current task.'
-  return [{ role: 'user', content: request }]
+  const userText = requestOverride?.trim() || request
+  const media = nativePlannerMediaParts(nativeMessages)
+  return [{
+    role: 'user',
+    content: media.length > 0
+      ? [{ type: 'text', text: userText }, ...media]
+      : userText,
+  }]
 }
 
 function isConcreteBuildStep(strategy: string | undefined, title: string | undefined): boolean {
@@ -520,6 +543,7 @@ function planAwareIterationFloor(
 export class PlanManager {
   private emitter: AgentEventEmitter
   private messages: Array<{ role: string; content: string }>
+  private nativeMessages?: ChatMessageParam[]
   private planPromise: Promise<null> | null = null
   private taskComplexity: number
   private requiredFirstSteps: RequiredPlanStep[]
@@ -552,6 +576,7 @@ export class PlanManager {
     preflightCredit?: PlanCreditPreflight,
     skipAcknowledgement = false,
     externalSignal?: AbortSignal,
+    nativeMessages?: ChatMessageParam[],
   ) {
     this.emitter = emitter
     this.messages = messages
@@ -562,6 +587,7 @@ export class PlanManager {
     this.preflightCredit = preflightCredit
     this.skipAcknowledgement = skipAcknowledgement
     this.externalSignal = externalSignal
+    this.nativeMessages = nativeMessages
     this.resetPlannerAbortController()
   }
 
@@ -806,12 +832,13 @@ Requirements:
 - No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
 - No markdown, no bullets, no refusal, no mention of being an AI.`,
         },
-        {
-          role: 'user' as const,
-          content: priorInvalidAck
+        ...plannerTaskMessages(
+          this.messages,
+          this.nativeMessages,
+          priorInvalidAck
             ? `USER REQUEST:\n${request}\n\nINVALID ACK TO REPLACE:\n${priorInvalidAck}\n\nWrite a better task-specific acknowledgement paragraph.`
             : request,
-        },
+        ),
       ],
       temperature: 0.4,
       max_tokens: PLANNER_ACK_MAX_TOKENS,
@@ -1394,7 +1421,7 @@ Rules:
               ? getFastPlanningPrompt(this.customInstructions)
               : getPlanningPrompt(this.customInstructions),
           },
-          ...plannerTaskMessages(this.messages),
+          ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
         temperature: fastPlannerMode ? 0.2 : 0.3,
         max_tokens: fastPlannerMode ? PLANNER_FAST_JSON_MAX_TOKENS : this.plannerJsonMaxTokens(),
@@ -1513,7 +1540,7 @@ ${customInstructionContext}
 
 Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should be actionable and specific.`,
           },
-          ...plannerTaskMessages(this.messages),
+          ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
         temperature: 0.3,
         max_tokens: REPLAN_JSON_MAX_TOKENS,
@@ -1786,7 +1813,7 @@ ${customInstructionContext}
 
 Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. Keep it concise (3-6 steps max). The steps should account for what was learned.`,
           },
-          ...plannerTaskMessages(this.messages),
+          ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
         temperature: 0.3,
         max_tokens: REPLAN_JSON_MAX_TOKENS,

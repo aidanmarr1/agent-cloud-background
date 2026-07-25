@@ -626,7 +626,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /sandbox path: \$\{attachment\.sandboxPath\}/, 'runtime model context must include uploaded attachment sandbox paths when available')
   assert.match(agentLoop, /Do not say no file was attached/, 'metadata-only attachments must prevent false "no file attached" replies')
   assert.match(agentLoop, /Use the listed sandbox path with document or terminal tools/, 'metadata-only sandboxed uploads must direct the agent toward the uploaded sandbox file')
-  assert.match(agentLoop, /requiredAttachmentPlanSteps/, 'uploaded attachments must get a preloaded read step before runtime work')
+  assert.match(agentLoop, /requiredAttachmentPlanSteps/, 'non-native uploaded attachments must still get a preloaded read step before runtime work')
+  assert.match(agentLoop, /uploadedAttachments\(messages\)\.filter\(\(attachment\) => !\([\s\S]*ASSISTANT_SUPPORTS_IMAGE_INPUT[\s\S]*attachment\.contentEncoding === 'data-url'/, 'native multimodal uploads must bypass the redundant visible attachment preflight step')
   assert.match(attachments, /withMessageAttachmentSandboxPaths/, 'uploaded attachments must be annotated with sandbox paths before planning')
   assert.match(attachments, /materializeMessageAttachmentsToSandbox/, 'uploaded attachments must be copied into the task sandbox before tool execution')
   assert.match(chatTaskRunner, /withMessageAttachmentSandboxPaths\(agentMessages\)/, 'background tasks must expose uploaded file sandbox paths to AgentLoop')
@@ -644,6 +645,8 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /UPLOADED ATTACHMENT CONTEXT AVAILABLE/, 'policy recovery must not force web_search/read_file for uploaded attachments')
   assert.match(prompts, /Uploaded user attachments are already supplied in the message context/, 'runtime prompt must define uploaded attachment handling')
   assert.match(prompts, /Do not plan web_search for an attachment filename\/title/, 'planning prompt must prevent attachment filename searches')
+  assert.match(prompts, /Do not create a standalone visible phase whose only purpose is to inspect, view, analyze, identify, or read native media/, 'planning prompt must treat native media understanding as immediate context rather than a visible analysis phase')
+  assert.match(planManager, /nativePlannerMediaParts/, 'planner and acknowledgement must receive native multimodal content')
   assert.match(validationSchemas, /contentEncoding:\s*z\.enum\(\['text',\s*'data-url'\]\)/, 'chat validation must preserve attachment contentEncoding')
   assert.match(streamConstants, /read_attachment:\s*'read_file'/, 'client must render read_attachment as a file-style subtask')
   assert.doesNotMatch(agentLoop, /buildTaskStartAcknowledgement|I'll open the site, check what loads/, 'agent startup acknowledgement must not use a hardcoded generic sentence')
@@ -793,7 +796,7 @@ async function assertSourceContracts() {
   assert.match(llm, /effort: DEFAULT_REASONING_EFFORT/, 'OpenRouter calls must include the configured reasoning effort by default')
   assert.match(llm, /exclude: DEFAULT_REASONING_EXCLUDE/, 'internal reasoning should be excluded from user-visible responses by default')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
-  assert.match(llm, /provider:\s*\{\s*sort:\s*'throughput'\s*\}/, 'OpenRouter calls must prefer the fastest Nitro provider route')
+  assert.doesNotMatch(llm, /provider:\s*\{\s*sort:\s*'(?:throughput|price|latency)'\s*\}/, 'OpenRouter calls must not override the Exacto quality-first provider route')
   assert.match(llm, /estimateUsageCost/, 'OpenRouter token usage must be normalized into billable provider cost')
   assert.match(streamProcessor, /reasoningContent \+= String\(delta\.reasoning_content\)/, 'thinking-mode tool calls must preserve reasoning content internally for provider history')
   assert.match(llm, /ASSISTANT_LOG_LABEL\s*=\s*'Agent'/, 'provider/runtime internals must be redacted from logs')
@@ -1526,7 +1529,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'create_file'\)[\s\S]*Narrowed tools for initial final saved deliverable/, 'initial final saved deliverables must expose only create_file when no final file exists yet')
   assert.match(agentLoop, /toolCallsNeedStartupReady\(lastStreamResult\.toolCalls\)/, 'source actions must not wait for sandbox startup when they do not need it')
   assert.match(toolPipeline, /state\.partialFileWriteRecoveryPending[\s\S]*FILE_WRITE_TOOLS\.has\(toolName\)[\s\S]*toolName === 'append_file' && requestedPath === pending\.path[\s\S]*INTERNAL_RECOVERY/, 'partial file recovery preflight must block recreate/wrong-path writes before visible tool_start')
-  assert.match(tools, /Create a workspace file\. Put path before content; write the largest complete useful version that fits/, 'create_file schema must bias providers toward complete path-first visible file writes')
+  assert.match(tools, /Create a workspace file\. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts\./, 'create_file schema must bias providers toward path-first live file writes')
   assert.match(agentLoop, /Math\.min\(0\.35,\s*state\.strategyConfig\?\.temperature \?\? strategy\.temperature\)/, 'final chat-answer turns should use a calmer temperature to avoid status chatter')
   assert.match(agentLoop, /const requestReasoning = useCompactNarration[\s\S]*MINIMAL_THINKING_REASONING[\s\S]*isFinalInlineAnswerTurn[\s\S]*MINIMAL_THINKING_REASONING/, 'narration and final chat-answer turns must use the provider-supported minimal reasoning floor')
   assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES[\s\S]*The final file write took too long to start/, 'nudgeable final saved deliverable timeouts must error instead of resetting forever when no file exists')
@@ -2855,6 +2858,20 @@ export async function runLedgerSmoke() {
   }]]), researchDetourState)
   assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 0, 'research blocker-note create_file detour must be blocked before visible tool_start')
   assert.match(JSON.stringify(detourWriteResults[0]?.result || {}), /Do not create\\/read research notes/)
+
+  researchDetourState.stepResearchCallCount = 2
+  const prematureReportResults = await researchDetourPipeline.executeAll(new Map([[0, {
+    id: 'premature-report-create',
+    name: 'create_file',
+    arguments: JSON.stringify({
+      path: 'deliverables/controversy-report.md',
+      content: '# Premature report\\n\\nThis report content is long enough to pass the ordinary file-size guard but belongs exclusively to the final synthesis phase, not the active research phase.',
+      action_label: 'Write controversy report',
+      plan_step_index: 1,
+    }),
+  }]]), researchDetourState)
+  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 0, 'a user-facing Markdown report must be blocked before visible tool_start during an earlier research phase')
+  assert.match(JSON.stringify(prematureReportResults[0]?.result || {}), /final synthesis phase owns the report/)
 
   const searchBalanceEvents: Array<{ type: string; name?: string; result?: unknown }> = []
   const searchBalanceEmitter = {

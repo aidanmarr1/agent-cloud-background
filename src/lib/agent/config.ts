@@ -278,7 +278,7 @@ export const PHASE_TOOL_FILTER: Record<string, string[]> = {
     'browser_get_content',
     'image_search',
     'read_document',
-    'create_file', 'edit_file', 'append_file',  // .md notes allowed (ToolPipeline blocks non-.md)
+    'create_file', 'edit_file', 'append_file',  // ToolPipeline permits only explicitly requested phase-scoped notes
   ],
   build: [
     'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'delete_file', 'list_files',

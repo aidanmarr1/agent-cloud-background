@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 const root = resolve(import.meta.dirname, '..')
-const [imageSearch, tools, toolRegistry, taskGroupView, icons, agentMessage, appIcon, rootLayout] = await Promise.all([
+const [imageSearch, tools, toolRegistry, taskGroupView, icons, agentMessage, appIcon, rootLayout, searchResults, imageSearchResults] = await Promise.all([
   readFile(join(root, 'src/lib/imageSearch.ts'), 'utf8'),
   readFile(join(root, 'src/lib/tools.ts'), 'utf8'),
   readFile(join(root, 'src/lib/toolRegistry.ts'), 'utf8'),
@@ -12,6 +12,8 @@ const [imageSearch, tools, toolRegistry, taskGroupView, icons, agentMessage, app
   readFile(join(root, 'src/components/chat/AgentMessage.tsx'), 'utf8'),
   readFile(join(root, 'src/app/icon.svg'), 'utf8'),
   readFile(join(root, 'src/app/layout.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/computer/SearchResults.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/computer/ImageSearchResults.tsx'), 'utf8'),
 ])
 
 assert.match(
@@ -38,5 +40,7 @@ assert.match(
 )
 assert.match(appIcon, /viewBox="0 0 256 256"[\s\S]*v32H56a32 32/, 'the favicon must use the current robot mark')
 assert.match(rootLayout, /\/icon\.svg\?v=robot-2/, 'favicon metadata must cache-bust the current robot mark')
+assert.match(searchResults, /useDeferredEmptyState\(items\.length === 0, streaming\)/, 'web search must keep its loading skeleton through transient empty result hand-offs')
+assert.match(imageSearchResults, /useDeferredEmptyState\(items\.length === 0, streaming\)/, 'image search must keep its loading skeleton through transient empty result hand-offs')
 
 console.log('Image search, favicon, and duplicate-thinking contracts passed.')

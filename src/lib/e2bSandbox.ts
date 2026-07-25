@@ -5,6 +5,7 @@ import { createRequire } from 'module'
 import { dirname, join, relative, isAbsolute, basename, posix } from 'path'
 import type { FileResult } from '@/types'
 import { getTursoSetupStatus, tursoExecute, tursoTransaction } from '@/lib/db/turso'
+import { trimReplayedAppendOverlap } from './fileAppend'
 
 const require = createRequire(import.meta.url)
 const { Sandbox } = require('e2b') as typeof import('e2b')
@@ -1679,11 +1680,20 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
   if (!target) return { action: 'appended', path: filePath, content: 'Error: path traversal not allowed' }
 
   const sandbox = await getOrCreateE2BSandbox(conversationId)
+  const existing = await sandbox.files.read(target.absolutePath).catch(() => '')
+  const appendContent = trimReplayedAppendOverlap(existing, content)
+  if (!appendContent) {
+    return {
+      action: 'appended',
+      path: target.relativePath,
+      size: Buffer.byteLength(existing, 'utf8'),
+    }
+  }
   const root = workspaceRoot(conversationId)
   const tempDir = `${root}/.agent/tmp`
   const tempPath = `${tempDir}/append-${randomUUID()}.txt`
   await sandbox.files.makeDir(tempDir).catch(() => undefined)
-  await sandbox.files.write(tempPath, content)
+  await sandbox.files.write(tempPath, appendContent)
 
   const script = `
 set -e
@@ -1695,11 +1705,11 @@ wc -c < ${shellQuote(target.absolutePath)}
   const result = await sandbox.commands.run(script, {
     timeoutMs: envPositiveInt('AGENT_E2B_COMMAND_TIMEOUT_MS', DEFAULT_E2B_COMMAND_TIMEOUT_MS),
   })
-  if (localMirrorRoot) await appendLocalMirror(localMirrorRoot, target.relativePath, content).catch(() => undefined)
+  if (localMirrorRoot) await appendLocalMirror(localMirrorRoot, target.relativePath, appendContent).catch(() => undefined)
   const parsedSize = Number.parseInt((result.stdout || '').trim().split(/\s+/)[0] || '', 10)
   const size = Number.isFinite(parsedSize) && parsedSize >= 0
     ? parsedSize
-    : Buffer.byteLength(content, 'utf8')
+    : Buffer.byteLength(existing + appendContent, 'utf8')
   return { action: 'appended', path: target.relativePath, size }
 }
 

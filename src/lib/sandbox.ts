@@ -5,6 +5,7 @@ import { tmpdir } from 'os'
 import { join, relative, dirname, isAbsolute } from 'path'
 import type { FileResult } from '@/types'
 import { acquireRegisteredBrowserSessionFence } from './browserSessionLifecycle'
+import { trimReplayedAppendOverlap } from './fileAppend'
 
 export type SandboxFileReadResult =
   | { ok: true; body: Uint8Array; size: number }
@@ -654,13 +655,32 @@ export async function appendFileInSandbox(
 
   await mkdir(dirname(resolved), { recursive: true })
 
+  let appendContent = content
+  try {
+    const readFd = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW)
+    try {
+      const existing = await readFd.readFile('utf-8')
+      appendContent = trimReplayedAppendOverlap(existing, content)
+    } finally {
+      await readFd.close()
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT') throw err
+  }
+
+  if (!appendContent) {
+    const existingStat = await stat(resolved)
+    return { action: 'appended', path: filePath, size: existingStat.size }
+  }
+
   let fd: Awaited<ReturnType<typeof open>>
   try {
     fd = await open(
       resolved,
       constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW,
       0o644,
-    )
+  )
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
     if (code === 'ELOOP' || code === 'EMLINK') {
@@ -669,7 +689,7 @@ export async function appendFileInSandbox(
     throw err
   }
   try {
-    await fd.writeFile(content, 'utf-8')
+    await fd.writeFile(appendContent, 'utf-8')
   } finally {
     await fd.close()
   }

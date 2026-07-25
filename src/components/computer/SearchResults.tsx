@@ -1,6 +1,7 @@
 'use client'
 
 import { SearchResult } from '@/types'
+import { useDeferredEmptyState } from './useDeferredEmptyState'
 
 interface SearchResultsProps {
   results: SearchResult[]
@@ -56,6 +57,7 @@ function SearchContextHeader({ title, count, streaming }: { title?: string; coun
 
 export function SearchResults({ results, streaming, title }: SearchResultsProps) {
   const items = Array.isArray(results) ? results : []
+  const resolvingEmptyResult = useDeferredEmptyState(items.length === 0, streaming)
 
   if (!Array.isArray(results) && results && typeof results === 'object' && 'error' in results) {
     return (
@@ -70,10 +72,10 @@ export function SearchResults({ results, streaming, title }: SearchResultsProps)
     )
   }
 
-  if (items.length === 0 && streaming) {
+  if (resolvingEmptyResult) {
     return (
       <>
-        <SearchContextHeader title={title} count={items.length} streaming={streaming} />
+        <SearchContextHeader title={title} count={items.length} streaming />
         <div className="p-3 space-y-1">
           {[1, 2, 3].map((i) => (
             <div key={i} className="flex items-start gap-3 py-3 px-3 rounded-lg border border-border-primary bg-bg-secondary">

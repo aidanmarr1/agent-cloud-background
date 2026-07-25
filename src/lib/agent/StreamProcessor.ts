@@ -69,7 +69,10 @@ export interface StreamToolCallPolicy {
   cadenceProgressUpdateEnabled?: boolean
 }
 
-const FILE_PREVIEW_MIN_DELTA_CHARS = 48
+// File previews are a live transparency surface, not a completion preview.
+// Forward every provider content chunk so the editor is visible from the
+// opening characters instead of appearing after a large buffered block.
+const FILE_PREVIEW_MIN_DELTA_CHARS = 1
 const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
 const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
 const INLINE_FINAL_TEXT_STREAM_CAP = 6000

@@ -150,6 +150,37 @@ assert.equal(
   'an explicit saved one-source report must not be forced to invent five citations',
 )
 
+const duplicatedPassage = 'The trial evidence shows a measurable reduction in employee stress while output remained stable across the observed period. The finding is useful, but its interpretation still depends on selection effects, implementation quality, and the limited duration of the study, so the report should present it with clear caveats and direct source attribution.'
+const duplicatedReport = [
+  '# Duplicated report',
+  '## Executive Summary',
+  duplicatedPassage,
+  '## Evidence',
+  duplicatedPassage,
+  '## Conclusion',
+  'The conclusion should retain only one copy of each substantive finding.',
+  '## References',
+  '[1] https://example.com/trial',
+].join('\\n\\n')
+const duplicateVerification = verifier.verify(
+  duplicatedReport,
+  'deliverables/duplicated-report.md',
+  'Research the trial and write a Markdown report.',
+  'research',
+  null,
+  2,
+)
+assert.equal(
+  duplicateVerification.failures.some(failure => /duplicated substantive passage/i.test(failure)),
+  true,
+  'a report with a repeated substantive passage must not be marked complete',
+)
+assert.equal(
+  duplicateVerification.suggestions.some(suggestion => /edit_file.*remove repeated passages/i.test(suggestion)),
+  true,
+  'duplicate-report recovery must request a targeted edit instead of another append',
+)
+
 const compactChecklistDetail = 'This implementation note explains the concrete action, why it matters, the evidence supporting it, the practical trade-off, and the verification signal the reader should check before proceeding.'
 const conciseStructuredGuide = [
   '# Concise implementation guide',

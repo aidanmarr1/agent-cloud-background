@@ -39,7 +39,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'create_file',
-      description: 'Create a workspace file. Put path before content; write the largest complete useful version that fits. Use append_file only for genuine continuation chunks.',
+      description: 'Create a workspace file. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts. Write the largest complete useful version that fits. Use append_file only for genuine continuation chunks.',
       parameters: {
         type: 'object',
         properties: {
@@ -95,7 +95,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'edit_file',
-      description: 'Edit a file by find-and-replace. old_string must match exactly.',
+      description: 'Edit a file by find-and-replace. Emit action_label, plan_step_index, and path before old_string/new_string so the task stream and live file viewer open before editing starts. old_string must match exactly.',
       parameters: {
         type: 'object',
         properties: {
@@ -111,7 +111,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'append_file',
-      description: 'Append a complete continuation section to an existing workspace file. Put path before content; do not repeat already-written content.',
+      description: 'Append a complete continuation section to an existing workspace file. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts. Do not repeat already-written content.',
       parameters: {
         type: 'object',
         properties: {

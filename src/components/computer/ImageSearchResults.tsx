@@ -2,6 +2,7 @@
 
 import { ImageSearchPanelItem } from '@/types'
 import { ImageIcon } from '@/components/icons'
+import { useDeferredEmptyState } from './useDeferredEmptyState'
 
 interface ImageSearchResultsProps {
   results: ImageSearchPanelItem[]
@@ -53,11 +54,12 @@ function ImageSearchContextHeader({ title, count, streaming }: { title?: string;
 
 export function ImageSearchResults({ results, streaming, title }: ImageSearchResultsProps) {
   const items = Array.isArray(results) ? results : []
+  const resolvingEmptyResult = useDeferredEmptyState(items.length === 0, streaming)
 
-  if (items.length === 0 && streaming) {
+  if (resolvingEmptyResult) {
     return (
       <>
-        <ImageSearchContextHeader title={title} count={items.length} streaming={streaming} />
+        <ImageSearchContextHeader title={title} count={items.length} streaming />
         <div className="p-4 grid grid-cols-2 gap-2.5">
           {[1, 2, 3, 4].map((i) => (
             <div key={i} className="aspect-square bg-bg-secondary rounded-2xl animate-pulse" />

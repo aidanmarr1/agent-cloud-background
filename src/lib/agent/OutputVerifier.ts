@@ -27,6 +27,38 @@ export interface VerificationResult {
 }
 
 export class OutputVerifier {
+  private repeatedSubstantiveBlocks(content: string): string[] {
+    const seen = new Map<string, string>()
+    const duplicates: string[] = []
+    const blocks = content.split(/\n\s*\n/)
+
+    for (const block of blocks) {
+      const readable = block
+        .replace(/^\s*#{1,6}\s+/gm, '')
+        .replace(/^\s*[-*]\s+/gm, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (readable.length < 180 || readable.split(/\s+/).length < 28) continue
+
+      const normalized = readable
+        .toLowerCase()
+        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+        .replace(/[^\p{L}\p{N}\s]/gu, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+      if (!normalized) continue
+
+      const first = seen.get(normalized)
+      if (first) {
+        duplicates.push(readable.slice(0, 90))
+      } else {
+        seen.set(normalized, readable)
+      }
+    }
+
+    return duplicates
+  }
+
   private isExplicitlyConciseDeliverableRequest(originalRequest: string, filePath: string): boolean {
     return filePath.toLowerCase().endsWith('.md') &&
       /\b(?:brief|quick|short|concise|succinct|one[-\s]?page|1[-\s]?page)\b/i.test(originalRequest)
@@ -101,6 +133,13 @@ export class OutputVerifier {
       failures.push('Content appears cut off or unfinished at the end')
       suggestions.push('Finish the final section cleanly before delivering')
       score -= 0.25
+    }
+
+    const repeatedBlocks = this.repeatedSubstantiveBlocks(fileContent)
+    if (repeatedBlocks.length > 0) {
+      failures.push(`Contains ${repeatedBlocks.length} duplicated substantive passage${repeatedBlocks.length === 1 ? '' : 's'}`)
+      suggestions.push('Use edit_file to remove repeated passages while preserving the single complete version')
+      score -= Math.min(0.35, 0.18 + repeatedBlocks.length * 0.06)
     }
 
     const savedMarkdownReport = filePath.toLowerCase().endsWith('.md') &&

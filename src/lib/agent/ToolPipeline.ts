@@ -463,6 +463,30 @@ function fileWritePreflightBlockReason(
     }
   }
 
+  if (
+    FILE_WRITE_TOOLS.has(toolName) &&
+    isResearchPhaseStep(state) &&
+    state.currentPlanItems &&
+    state.currentPlanItems.length > 1
+  ) {
+    const rawPath = typeof args.path === 'string'
+      ? args.path
+      : typeof args.output_path === 'string'
+        ? args.output_path
+        : ''
+    const filePath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
+    const phaseOwnsExplicitNotes =
+      toolName !== 'export_pdf' &&
+      !!filePath &&
+      isSupportOnlyFilePath(filePath) &&
+      currentStepExplicitlyRequestsNotes(state)
+
+    if (!phaseOwnsExplicitNotes) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+      return `INTERNAL_RECOVERY: The active research phase does not own a user-facing saved deliverable. Do not call ${toolName}${filePath ? ` for "${filePath}"` : ''} here. Keep gathering/analyzing evidence and advance normally; the final synthesis phase owns the report and other requested deliverables. A phase may write only explicitly requested support notes under research-notes/step-${state.currentStepIdx + 1}.md. Do not mention this correction to the user.`
+    }
+  }
+
   if (toolName === 'create_file') {
     const filePath = (args.path as string) || ''
     const isMdFile = filePath.endsWith('.md')
@@ -473,7 +497,7 @@ function fileWritePreflightBlockReason(
     console.log(`[ToolPipeline] create_file guard: path="${filePath}" isMd=${isMdFile} hasPlan=${!!hasPlan} isLastStep=${isLastStep} isBuildStep=${isBuildStep} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0} researchCalls=${state.stepResearchCallCount}`)
 
     if (hasPlan && !isLastStep && !isBuildStep && !isMdFile) {
-      return 'BLOCKED: Only .md files are allowed during research steps. Save non-markdown deliverables for the final step. You CAN create .md files for notes and intermediate findings.'
+      return 'BLOCKED: Saved deliverables belong to the final plan phase. Continue the active research phase without creating this file.'
     }
     if (hasPlan && !isLastStep && !isBuildStep && isMdFile && isTaskTrackingMarkdownPath(filePath) && !currentStepAllowsTaskTrackingMarkdown(state, filePath)) {
       return 'BLOCKED: Do not invent task-tracking, todo, checklist, plan, progress, scratch, or generic notes files. If the user or saved custom instructions require one, it must appear in the current step title or scope; otherwise use research-notes/step-N.md for genuine phase notes after research.'
@@ -1250,8 +1274,8 @@ function userRequestedMarkdownDeliverable(state: AgentStateData, filePath: strin
 
 function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', explicitDeliverable = false): WorkLedgerArtifactPurpose {
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return 'deliverable'
-  if (userRequestedMarkdownDeliverable(state, filePath)) return 'deliverable'
   if (explicitDeliverable || isCurrentPlanDeliverableStep(state)) return 'deliverable'
+  if (userRequestedMarkdownDeliverable(state, filePath)) return 'support'
   return 'support'
 }
 

@@ -2638,19 +2638,16 @@ Then make your first tool call. Your plan will be remembered across iterations o
     // Check if the current step is a build/code step where file writes are expected
     if (isConcreteBuildStep(state)) return null
 
-    // Check if any tool call is create_file for non-.md files (premature deliverable creation)
-    // .md files are fine — they're research notes
-    const hasNonMdCreate = Array.from(toolCalls.values()).some(tc => {
-      if (tc.name !== 'create_file') return false
-      try { return !JSON.parse(tc.arguments).path?.endsWith('.md') } catch { return true }
-    })
-    if (!hasNonMdCreate) return null
+    const hasPrematureFileWrite = Array.from(toolCalls.values()).some(tc =>
+      ['create_file', 'append_file', 'edit_file', 'export_pdf'].includes(tc.name),
+    )
+    if (!hasPrematureFileWrite) return null
 
     return {
       type: 'inject_message',
       message: {
         role: 'system',
-        content: `You called create_file during a RESEARCH step. Do NOT create deliverable files yet — that belongs to the final step. Save research notes to .md files instead. When done researching, the system will advance you automatically.`,
+        content: 'You attempted a file write during a RESEARCH step. Do not begin, append, revise, or export the user-facing deliverable until the final synthesis step. Continue the current evidence action or advance when this phase is complete. Phase-scoped notes are allowed only when the current plan explicitly requests them.',
       },
     }
   }
