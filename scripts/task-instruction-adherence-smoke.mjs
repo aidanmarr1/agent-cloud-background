@@ -24,6 +24,9 @@ const { trackSuccessfulToolExecution } = await jiti.import(
 const { analyzeTaskIntent } = await jiti.import(
   fileURLToPath(new URL('../src/lib/agent/TaskIntent.ts', import.meta.url)),
 )
+const { compactAdjacentArtifactLifecyclePhases } = await jiti.import(
+  fileURLToPath(new URL('../src/lib/agent/PlanNormalization.ts', import.meta.url)),
+)
 
 assert.deepEqual(
   explicitTaskToolConstraintFromText('Extract https://example.com using the terminal only that you have.'),
@@ -74,6 +77,18 @@ assert.equal(
   explicitTaskToolConstraintFromText('Write a browser-compatible interface with browser support.'),
   null,
   'incidental with/in wording must not force a named tool',
+)
+assert.deepEqual(
+  compactAdjacentArtifactLifecyclePhases(
+    [
+      'Draft the automated testing report',
+      'Format and save the report',
+      'Verify the generated Markdown report',
+    ],
+    [null, null, null],
+  ).titles,
+  ['Draft the automated testing report and verify the saved deliverable'],
+  'adjacent draft/save/verify bookkeeping for one generic report must collapse into one artifact lifecycle',
 )
 const successfulToolState = { taskSuccessfulToolTypeCounts: new Map() }
 trackSuccessfulToolExecution(successfulToolState, 'image_search')

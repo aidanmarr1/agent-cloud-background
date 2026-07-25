@@ -97,6 +97,8 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /if \(fileResult\.size !== undefined\) \{[\s\S]*?recordWorkLedgerDeliverable/, 'only successful file writes may satisfy deliverable ledger state')
   assert.doesNotMatch(toolPipeline, /recordWorkLedgerDeliverable\(state, \{ path: pathStr, purpose \}\)\s*\n\s*if \(hasPlan && !isDeliverableStep\) return\s*\n\s*if \(fileResult\.size !== undefined\)/, 'failed file writes must not be recorded before success is known')
   assert.match(toolPipeline, /userRequestedMarkdownDeliverable/, 'requested markdown files must be recognized as final deliverables even if written before the last planner phase')
+  assert.match(toolPipeline, /tc\.name === 'edit_file'[\s\S]*?await this\.emitFileArtifact\(tc\.id, args, result, state\)/, 'successful edit_file writes must update the surfaced artifact instead of leaving the deliverable ledger behind')
+  assert.match(toolPipeline, /Register successful saved outputs after durable persistence[\s\S]*?recordWorkLedgerDeliverable/, 'all successful durable file writes must register before later verification phases')
   assert.match(toolPipeline, /purpose !== 'deliverable'/, 'non-final support files should still be hidden from final artifacts')
   assert.match(toolPipeline, /persistGeneratedTaskFile/, 'successful file tool results must be mirrored into durable task-file storage')
   assert.match(toolPipeline, /persistSandboxTaskFile/, 'created sandbox files must be persisted beyond the serverless tmp lifetime')

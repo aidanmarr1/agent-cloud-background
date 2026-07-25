@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { createHmac } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import { Agent } from 'undici'
 
 const INLINE_RESEARCH_FLAG = '--expect-inline-research'
 const SAVED_REPORT_FLAG = '--expect-saved-report'
@@ -171,6 +172,10 @@ const response = await fetch(url, {
     'x-agent-health-ts': timestamp,
     'x-agent-health-signature': signature,
   },
+  dispatcher: new Agent({
+    headersTimeout: 180_000,
+    bodyTimeout: 180_000,
+  }),
 })
 
 const body = await response.text()

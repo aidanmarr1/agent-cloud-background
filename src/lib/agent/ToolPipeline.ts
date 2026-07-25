@@ -4814,6 +4814,26 @@ export class ToolPipeline {
       }
     }
 
+    // Register successful saved outputs after durable persistence, independently
+    // of whether this particular tool shape also carries inline preview content.
+    // edit_file is especially important here: it can be the successful operation
+    // that turns an earlier draft into the requested report, but its arguments
+    // contain replacements rather than a full `content` field.
+    if (
+      (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf') &&
+      (result as { size?: number } | undefined)?.size !== undefined
+    ) {
+      const savedPath = tc.name === 'export_pdf'
+        ? String((result as { path?: string } | undefined)?.path || args.output_path || '')
+        : String((result as { path?: string } | undefined)?.path || args.path || '')
+      if (savedPath) {
+        recordWorkLedgerDeliverable(state, {
+          path: savedPath,
+          purpose: artifactPurposeForCurrentStep(state, savedPath),
+        })
+      }
+    }
+
     // Emit success only after any generated file is durably persisted.
     this.emitter.toolResult(tc.id, tc.name, sanitizeToolResultForEvent(tc.name, result) as never)
 
@@ -4823,6 +4843,7 @@ export class ToolPipeline {
       result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
       result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
     } else if (tc.name === 'edit_file') {
+      await this.emitFileArtifact(tc.id, args, result, state)
       result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
       result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
     } else if (tc.name === 'export_pdf') {
@@ -5109,12 +5130,9 @@ export class ToolPipeline {
     const isDeliverableStep = hasPlan && state.currentStepIdx === state.currentPlanItems!.length - 1
     const purpose = artifactPurposeForCurrentStep(state, pathStr)
     if (fileResult.size !== undefined) {
-      if (pathStr) {
-        recordWorkLedgerDeliverable(state, { path: pathStr, purpose })
-      }
       if (hasPlan && !isDeliverableStep && purpose !== 'deliverable') return
       let contentStr = String(args.content ?? '')
-      if (fileResult.action === 'appended' && this.conversationId && pathStr) {
+      if ((fileResult.action === 'appended' || fileResult.action === 'edited') && this.conversationId && pathStr) {
         try {
           const diskFile = await readFileInSandbox(this.conversationId, pathStr)
           if (diskFile.content && !diskFile.content.startsWith('Error:')) {

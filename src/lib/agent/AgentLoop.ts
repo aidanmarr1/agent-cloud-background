@@ -1312,6 +1312,16 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
   const existingPath = existingFinalDeliverablePath(state)
   if (existingPath) {
     const revision = state.pendingDeliverableRevision
+    if (!revision) {
+      return [
+        `SAVED DELIVERABLE VERIFICATION BOUNDARY: "${existingPath}" already exists.`,
+        request ? `User request: ${request}.` : '',
+        `Current final task: ${step}.`,
+        'Do not rewrite, append, recreate, or inspect the file with another tool.',
+        'Write one brief, natural user-facing confirmation that the saved deliverable is ready, then stop.',
+        'Do not mention internal verification, phases, ledgers, retries, or tool mechanics.',
+      ].filter(Boolean).join(' ')
+    }
     return [
       `FINAL SAVED DELIVERABLE REVISION NOW: make exactly one native append_file or edit_file call to "${existingPath}" immediately.`,
       request ? `User request: ${request}.` : '',

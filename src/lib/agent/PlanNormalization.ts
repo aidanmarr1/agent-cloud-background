@@ -296,7 +296,7 @@ const ARTIFACT_FILE_PATTERN = /\b[\w.-]+\.(?:md|markdown|txt|pdf|docx?|html?|css
 const ARTIFACT_TOKEN_STOP_WORDS = new Set([
   'and', 'artifact', 'check', 'complete', 'confirm', 'content', 'create', 'created',
   'deliverable', 'document', 'draft', 'edit', 'export', 'file', 'final', 'finalize',
-  'finalise', 'generate', 'guide', 'implement', 'markdown', 'output', 'prepare',
+  'finalise', 'format', 'generate', 'generated', 'guide', 'implement', 'markdown', 'output', 'prepare',
   'produce', 'read', 'report', 'review', 'save', 'saved', 'the', 'to', 'validate',
   'verification', 'verify', 'write',
 ])
@@ -326,7 +326,10 @@ function artifactTargetsMatch(
 
   const firstTokens = artifactTargetTokens(firstTitle, firstScope)
   const nextTokens = artifactTargetTokens(nextTitle, nextScope)
-  if (firstTokens.size === 0 || nextTokens.size === 0) return false
+  if (firstTokens.size === 0 || nextTokens.size === 0) {
+    const sharedGenericArtifact = /\b(report|document|deliverable|artifact|file|markdown|pdf)\b/i
+    return sharedGenericArtifact.test(firstText) && sharedGenericArtifact.test(nextText)
+  }
   let shared = 0
   for (const token of firstTokens) {
     if (nextTokens.has(token)) shared += 1
