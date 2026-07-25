@@ -2749,8 +2749,7 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
     state.stepResearchCallCount >= 1 &&
     state.stepToolCallCount >= 2 &&
     state.stepSearchQueries.size >= 1 &&
-    state.stepSourceDomainCounts.size >= 2 &&
-    state.stepFailureCount >= 1
+    state.stepSourceDomainCounts.size >= 2
 }
 
 function compactResearchBreadthSaturated(state: AgentStateData, depth: ReturnType<typeof researchDepthProfileForState>): boolean {
