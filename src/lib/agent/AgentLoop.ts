@@ -3779,6 +3779,7 @@ export class AgentLoop {
     let lastStreamWasCompactNarration = false
     let lastToolResults: ToolExecutionResult[] = []
     let pendingPaidTurnProgress: PaidModelTurnProgressSnapshot | null = null
+    let pendingActionSelectionRepairPrompt: string | null = null
     let pendingCadenceTurnProgress: {
       attemptIteration: number
       visibleActionFrontier: number
@@ -4025,6 +4026,7 @@ export class AgentLoop {
               // A new user directive starts a fresh intent boundary rather than
               // consuming the autonomous recovery allowance from the old intent.
               pendingPaidTurnProgress = null
+              pendingActionSelectionRepairPrompt = null
               pendingCadenceTurnProgress = null
               consecutivePaidNoProgressTurns = 0
               consecutivePaidInternalRecoveryTurns = 0
@@ -4071,15 +4073,12 @@ export class AgentLoop {
                   state.dynamicIterationLimit,
                   state.iterations + 2,
                 )
-                contextManager.push({
-                  role: 'system',
-                  content: [
-                    'ACTION SELECTION REPAIR: The previous assistant turn produced neither an executable action nor a complete answer.',
-                    `Continue the active work "${activeStep}" now.`,
-                    'If this is the final answer phase, answer directly from the evidence already gathered.',
-                    'Otherwise make one materially new native tool call with complete strict arguments; do not repeat the preceding request, write a status update, expose this repair, or ask permission.',
-                  ].join(' '),
-                } as ChatMessageParam)
+                pendingActionSelectionRepairPrompt = [
+                  'ACTION SELECTION REPAIR: The previous assistant turn produced neither an executable action nor a complete answer.',
+                  `Continue the active work "${activeStep}" now.`,
+                  'If this is the final answer phase, answer directly from the evidence already gathered.',
+                  'Otherwise make one materially new native tool call with complete strict arguments; do not repeat the preceding request, write a status update, expose this repair, or ask permission.',
+                ].join(' ')
                 this.options.diagnostics?.({
                   type: 'paid_no_progress_recovery',
                   data: {
@@ -4252,6 +4251,8 @@ export class AgentLoop {
               maxParallelSourceExtractionCalls: 1,
               cadenceProgressUpdateEnabled: false,
             }
+            const actionSelectionRepairPrompt = pendingActionSelectionRepairPrompt
+            pendingActionSelectionRepairPrompt = null
             const response = await this.callLLMWithRetry(
               model,
               modelRequestMessagesForUsage,
@@ -4266,6 +4267,7 @@ export class AgentLoop {
               policy => {
                 streamToolCallPolicy = policy
               },
+              actionSelectionRepairPrompt,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
 
@@ -6171,6 +6173,7 @@ export class AgentLoop {
       requestTools: unknown[],
     ) => void,
     captureStreamToolCallPolicy?: (policy: StreamToolCallPolicy) => void,
+    actionSelectionRepairPrompt: string | null = null,
   ): Promise<AsyncIterable<StreamingChatCompletionChunk> | null> {
     const useCompactForcedNarration = false
     const useCompactNarration = useCompactForcedNarration
@@ -6365,6 +6368,18 @@ export class AgentLoop {
         {
           role: 'system',
           content: finalSavedDeliverablePrompt(state),
+        } as ChatMessageParam,
+      ]
+    }
+    if (actionSelectionRepairPrompt) {
+      // Compact task prompts intentionally replace raw history. Carry this
+      // one-turn repair explicitly so a rejected/cached action cannot be
+      // requested again merely because its recovery message was compacted out.
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: actionSelectionRepairPrompt,
         } as ChatMessageParam,
       ]
     }
