@@ -2729,10 +2729,26 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   // spent a broad action packet, found candidates across domains, opened one
   // real page, and then stops producing actions, preserve that direct evidence
   // and advance instead of failing the whole task at the paid retry boundary.
-  return state.stepResearchCallCount >= 4 &&
+  const authoritativeCurrentPhasePacket = state.stepResearchCallCount >= 4 &&
     state.stepToolCallCount >= 6 &&
     state.stepVisitedUrls.size >= 1 &&
     stepOpenedSourceDomains(state).size >= 1 &&
+    state.stepSourceDomainCounts.size >= 2 &&
+    state.stepFailureCount >= 1
+  if (authoritativeCurrentPhasePacket) return true
+
+  // In later phases of an ordinary overview, retain the opened evidence from
+  // completed phases when the current angle has a multi-domain search packet
+  // but its concrete source-opening route fails and the model exhausts its
+  // bounded action repair. This is never available to the first phase or to
+  // deep/wide work, so a snippets-only task still cannot finish as researched.
+  const hasPriorOpenedEvidence =
+    state.currentStepIdx > 0 &&
+    state.visitedUrls.size > state.stepVisitedUrls.size
+  return hasPriorOpenedEvidence &&
+    state.stepResearchCallCount >= 1 &&
+    state.stepToolCallCount >= 2 &&
+    state.stepSearchQueries.size >= 1 &&
     state.stepSourceDomainCounts.size >= 2 &&
     state.stepFailureCount >= 1
 }
