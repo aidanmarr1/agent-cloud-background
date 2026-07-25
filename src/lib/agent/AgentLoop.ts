@@ -1831,7 +1831,7 @@ function loopRecoveryToolForState(
 
 function hasRenderedBrowserContext(state: AgentStateData): boolean {
   const signature = state.lastBrowserStateHash
-  return !!signature && signature !== '||0'
+  return !!signature && signature !== '||0' && !signature.startsWith('about:blank|')
 }
 
 function currentToolIntentText(state: AgentStateData): string {

@@ -1415,6 +1415,35 @@ function researchQueryFromToolArgs(toolName: string, args: Record<string, unknow
   return query || undefined
 }
 
+function restoreKnownAbbreviatedNavigationUrl(
+  toolName: string,
+  args: Record<string, unknown>,
+  state: AgentStateData,
+): string | null {
+  if (toolName !== 'browser_navigate' || typeof args.url !== 'string') return null
+  const rawUrl = args.url.trim()
+  const ellipsis = rawUrl.search(/(?:\u2026|\.{3})/)
+  if (ellipsis < 0) return null
+
+  const prefix = rawUrl.slice(0, ellipsis)
+  if (!/^https?:\/\//i.test(prefix) || prefix.length < 16) return null
+
+  const matches = Array.from(new Set(
+    state.workLedger.searchResults
+      .map(result => result.url.trim())
+      .filter(url => url.startsWith(prefix)),
+  ))
+  if (matches.length !== 1) return null
+
+  try {
+    const restored = new URL(matches[0])
+    if (!/^https?:$/.test(restored.protocol)) return null
+    return restored.toString()
+  } catch {
+    return null
+  }
+}
+
 function browserEvidenceLooksUsable(toolName: string, result: unknown): boolean {
   if (!BROWSER_RESULT_TOOLS.has(toolName)) return true
   const resultObj = result && typeof result === 'object'
@@ -3941,6 +3970,11 @@ export class ToolPipeline {
     const modelActionLabel = strictActionLabelFromArgs(args)
     if (modelActionLabel) {
       args.action_label = modelActionLabel
+      tc.arguments = JSON.stringify(args)
+    }
+    const restoredNavigationUrl = restoreKnownAbbreviatedNavigationUrl(tc.name, args, state)
+    if (restoredNavigationUrl) {
+      args.url = restoredNavigationUrl
       tc.arguments = JSON.stringify(args)
     }
 

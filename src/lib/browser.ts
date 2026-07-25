@@ -5111,6 +5111,17 @@ export async function browserGetContent(
 
     let content = await session.page.innerText('body')
     const finalUrl = session.page.url()
+    if (finalUrl === 'about:blank' || (!title.trim() && !content.trim())) {
+      return {
+        success: false,
+        recoverable: true,
+        url: finalUrl,
+        title,
+        error: 'The current browser page is blank and has no content to extract.',
+        content: 'INTERNAL_RECOVERY: No webpage is currently loaded. Navigate to a complete URL from the latest source results before requesting page content.',
+        action: 'Skipped content extraction from blank page',
+      }
+    }
     const errorReason = detectErrorPage({ status: 0, finalUrl, title, bodyText: content })
     if (content.length > 8000) content = content.slice(0, 8000) + '\n...[truncated]'
 

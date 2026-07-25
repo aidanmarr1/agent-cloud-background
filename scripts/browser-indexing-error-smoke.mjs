@@ -73,6 +73,10 @@ export async function runSmoke() {
     assert.equal(abbreviated.success, false, 'visually truncated URLs must never be opened')
     assert.match(String(abbreviated.error), /abbreviated or truncated/)
 
+    const blankContent = await browserGetContent(conversationId)
+    assert.equal(blankContent.success, false, 'about:blank must not look like successful page evidence')
+    assert.match(String(blankContent.error), /blank and has no content/)
+
     const launch = await writePage(conversationId, 'index.html', \`
       <button data-action="add-to-cart"><span>Add to Cart</span></button>
       <button aria-label="Open menu"><svg aria-hidden="true"><title>Menu icon</title><circle cx="5" cy="5" r="5"></circle></svg></button>
@@ -82,6 +86,24 @@ export async function runSmoke() {
         Silver
       </label>
     \`)
+
+    const restoreState = createInitialState(false, timeouts)
+    restoreState.taskStrategy = 'browse'
+    restoreState.originalUserRequest = state.originalUserRequest
+    restoreState.currentPlanItems = state.currentPlanItems
+    restoreState.workLedger.searchResults.push({
+      stepIdx: 0,
+      query: 'browser indexing smoke',
+      domain: new URL(launch.url).hostname,
+      url: launch.url,
+      title: 'Browser Indexing Smoke',
+      createdAt: Date.now(),
+    })
+    const restorePipeline = new ToolPipeline(makeEmitter() as any, conversationId)
+    const abbreviatedKnownUrl = launch.url.slice(0, -4) + '...'
+    const restoredKnownNav = await call(restorePipeline, restoreState, 'known-abbreviated-nav', 'browser_navigate', { url: abbreviatedKnownUrl })
+    assert.equal(restoredKnownNav.isError, false, 'a unique abbreviated URL from current search results should be restored')
+    assert.equal((restoredKnownNav.result as any).url, launch.url)
 
     const nav = await browserNavigate(conversationId, launch.url)
     assert.equal(nav.success, true, 'expected normal page navigation to succeed')
