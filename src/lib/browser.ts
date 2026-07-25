@@ -844,6 +844,9 @@ function normalizeBrowserInputUrl(rawUrl: string): string {
 
 async function validateBrowserNavigationUrl(rawUrl: string): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
   try {
+    if (/(?:\u2026|\.{3})/.test(rawUrl)) {
+      throw new Error('Navigation URL is abbreviated or truncated. Copy the complete URL exactly from the source result; never replace part of a URL with "..." or an ellipsis')
+    }
     const parsed = validateHttpUrl(normalizeBrowserInputUrl(rawUrl))
     if (isSandboxPreviewUrl(parsed) || isManagedWebsiteServerUrl(parsed) || isManagedWebsitePreviewUrl(parsed)) {
       return { ok: true, url: parsed.toString() }
@@ -2024,12 +2027,21 @@ export async function browserNavigate(
   try {
     const validation = await validateBrowserNavigationUrl(url)
     if (!validation.ok) {
+      const abbreviated = /abbreviated or truncated/i.test(validation.error)
       return {
         success: false,
+        recoverable: abbreviated || undefined,
         url,
         title: '',
-        error: `Blocked unsafe navigation target: ${validation.error}`,
-        action: `Blocked navigation: ${url}`,
+        error: abbreviated
+          ? validation.error
+          : `Blocked unsafe navigation target: ${validation.error}`,
+        content: abbreviated
+          ? 'INTERNAL_RECOVERY: Reuse the complete URL field from the source result exactly, or choose another full result URL. Do not reconstruct or shorten it.'
+          : undefined,
+        action: abbreviated
+          ? 'Rejected abbreviated navigation URL'
+          : `Blocked navigation: ${url}`,
       }
     }
     const safeUrl = validation.url
@@ -4718,6 +4730,19 @@ export async function browserFindText(
 ): Promise<BrowserActionResult> {
   try {
     const session = await getOrCreateSession(conversationId)
+    if (session.pageBlocker) {
+      const title = await session.page.title().catch(() => '')
+      const url = session.page.url()
+      return {
+        success: false,
+        recoverable: true,
+        url,
+        title,
+        error: `Current page is a failed/blocking page (${session.pageBlocker}). Text search on this page cannot provide task evidence.`,
+        content: navigationRecoveryContent(session.pageBlocker, url, url, title, '', '') || undefined,
+        action: `Skipped text search on blocked page: ${title || url}`,
+      }
+    }
     const needle = query.trim()
     if (!needle) {
       return {

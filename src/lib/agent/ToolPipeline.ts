@@ -1218,7 +1218,8 @@ function browserVisualBypassesBudget(
     isFindTextNoMatchVisualRecovery: boolean
   },
 ): boolean {
-  return opts.hasLocalWebsiteSnapshot ||
+  return BROWSER_VISION_TOOLS.has(toolName) ||
+    opts.hasLocalWebsiteSnapshot ||
     opts.hasNextWebsiteSnapshot ||
     toolName === 'browser_screenshot' ||
     (state?.taskStrategy === 'browse' && opts.isFindTextNoMatchVisualRecovery) ||
@@ -1236,6 +1237,11 @@ function shouldAttachBrowserVisual(
   },
 ): boolean {
   if (opts.hasLocalWebsiteSnapshot || opts.hasNextWebsiteSnapshot) return true
+  // Browser actions are visual decisions. Every action that produced a frame
+  // must give that fresh frame to the model, not only the first action in a
+  // step. ContextManager compacts older frames, so this improves grounding
+  // without accumulating an unbounded image history.
+  if (BROWSER_VISION_TOOLS.has(toolName)) return true
   if (toolName === 'browser_screenshot') return true
   if (!state) return false
   if ((state.currentPhase === 'build' || state.websiteBrowserCheckAttempted || state.websiteResponsiveCheckPrompted) && toolName === 'browser_screenshot') return true

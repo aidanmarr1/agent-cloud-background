@@ -180,11 +180,11 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_navigate',
-      description: 'Open an exact webpage URL and return live rendered page state/elements. Use this first when the user supplies a URL/domain unless they explicitly require another method.',
+      description: 'Open an exact, complete webpage URL and return live rendered page state/elements. Use this first when the user supplies a URL/domain unless they explicitly require another method. Copy surfaced URLs verbatim; never abbreviate, shorten, or replace any part with "..." or an ellipsis.',
       parameters: {
         type: 'object',
         properties: {
-          url: { type: 'string', description: 'URL to navigate to' },
+          url: { type: 'string', description: 'Complete URL copied exactly from the user or tool result; never a visually truncated URL containing "..." or an ellipsis' },
         },
         required: ['url'],
       },

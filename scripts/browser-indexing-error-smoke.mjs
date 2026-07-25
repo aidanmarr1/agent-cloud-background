@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
 import { createFileInSandbox, getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
 import { buildLocalWebsiteLaunch, stopLocalWebsiteServer } from ${JSON.stringify(join(root, 'src/lib/localWebsiteServer.ts'))}
-import { browserActionPreflight, browserGetContent, browserNavigate, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
+import { browserActionPreflight, browserFindText, browserGetContent, browserNavigate, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
@@ -69,6 +69,10 @@ export async function runSmoke() {
   const pipeline = new ToolPipeline(makeEmitter() as any, conversationId)
 
   try {
+    const abbreviated = await browserNavigate(conversationId, 'https://example.com/products/sil...')
+    assert.equal(abbreviated.success, false, 'visually truncated URLs must never be opened')
+    assert.match(String(abbreviated.error), /abbreviated or truncated/)
+
     const launch = await writePage(conversationId, 'index.html', \`
       <button data-action="add-to-cart"><span>Add to Cart</span></button>
       <button aria-label="Open menu"><svg aria-hidden="true"><title>Menu icon</title><circle cx="5" cy="5" r="5"></circle></svg></button>
@@ -156,6 +160,11 @@ export async function runSmoke() {
     assert.equal(errorContent.success, false, 'content extraction from an error page must not look like useful evidence')
     assert.match(String(errorContent.error), /Current page is an error page/)
     assert.match(String(errorContent.content), /Do not click elements on this error page/)
+
+    const errorFind = await browserFindText(conversationId, 'Click trap')
+    assert.equal(errorFind.success, false, 'find-text must not turn a known error page into apparent evidence')
+    assert.match(String(errorFind.error), /failed\\/blocking page/)
+    assert.doesNotMatch(String(errorFind.content), /not proof the target is absent/i)
 
     const errorSnapshot = await browserActionPreflight(conversationId)
     assert.ok(errorSnapshot.pageBlocker, 'expected failed page blocker state')

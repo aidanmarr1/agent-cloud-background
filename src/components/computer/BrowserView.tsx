@@ -74,6 +74,7 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
       }
     : { success: true, url: '', title: '', action: 'Browser' }
   const hasInlineFrame = !!safeResult.screenshotBase64
+  const hasVisualFrame = hasInlineFrame || !!safeResult.screenshotUrl
   const hasInlineLiveFrame = hasInlineFrame && !!safeResult.liveFrame
   const isLive = hasInlineLiveFrame
   const isWaitingForLiveFrame = !!conversationId && streaming && !hasInlineFrame
@@ -81,7 +82,11 @@ export function BrowserView({ result, streaming, conversationId, isLatest, onJum
     ? `data:image/jpeg;base64,${safeResult.screenshotBase64}`
     : safeResult.screenshotUrl || ''
   const hasCurrentLiveEvidence = hasInlineLiveFrame
-  const hasPageError = !hasCurrentLiveEvidence && safeResult.success === false && isPageLevelBrowserError(safeResult.error, safeResult.action)
+  const hasPageError =
+    !hasCurrentLiveEvidence &&
+    !(safeResult.recoverable && hasVisualFrame) &&
+    safeResult.success === false &&
+    isPageLevelBrowserError(safeResult.error, safeResult.action)
   const errorText = safeResult.error && hasPageError ? visibleBrowserError(safeResult.error, safeResult.action) : null
   const isActionBlocked = isBlockedBrowserAction(safeResult.error, safeResult.action)
 
