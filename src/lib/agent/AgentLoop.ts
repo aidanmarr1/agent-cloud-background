@@ -2718,6 +2718,24 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   // distinct sources are enough to advance this ordinary phase rather than
   // fail the entire task. Deep/wide work retains the stricter recovery floor.
   const depth = researchDepthProfileForState(state)
+
+  // A later evidence angle can exhaust several distinct searches while its
+  // review/catalog pages reject extraction. When earlier phases already opened
+  // real sources, retain that verified task-level evidence and advance after a
+  // substantial multi-domain discovery packet instead of throwing away the
+  // entire answer. Explicit wide research remains strict.
+  const hasPriorOpenedEvidence =
+    state.currentStepIdx > 0 &&
+    state.visitedUrls.size > state.stepVisitedUrls.size
+  const exhaustedLaterPhaseDiscoveryPacket =
+    depth.label !== 'wide' &&
+    hasPriorOpenedEvidence &&
+    state.stepResearchCallCount >= 4 &&
+    state.stepToolCallCount >= 6 &&
+    state.stepSearchQueries.size >= 4 &&
+    state.stepSourceDomainCounts.size >= 3
+  if (exhaustedLaterPhaseDiscoveryPacket) return true
+
   if (depth.label === 'deep' || depth.label === 'wide') return false
 
   // A first-party claims/ingredients extraction phase is complete once the
@@ -2758,9 +2776,6 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   // but its concrete source-opening route fails and the model exhausts its
   // bounded action repair. This is never available to the first phase or to
   // deep/wide work, so a snippets-only task still cannot finish as researched.
-  const hasPriorOpenedEvidence =
-    state.currentStepIdx > 0 &&
-    state.visitedUrls.size > state.stepVisitedUrls.size
   return hasPriorOpenedEvidence &&
     state.stepResearchCallCount >= 1 &&
     state.stepToolCallCount >= 2 &&

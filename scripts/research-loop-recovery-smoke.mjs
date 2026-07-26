@@ -32,6 +32,11 @@ assert.match(
 )
 assert.match(
   loopSource,
+  /exhaustedLaterPhaseDiscoveryPacket[\s\S]*depth\.label !== 'wide'[\s\S]*stepResearchCallCount >= 4[\s\S]*stepToolCallCount >= 6[\s\S]*stepSearchQueries\.size >= 4[\s\S]*stepSourceDomainCounts\.size >= 3/,
+  'a later non-wide phase with prior opened evidence must survive an exhausted multi-domain discovery packet',
+)
+assert.match(
+  loopSource,
   /const multiSourcePacket[\s\S]*state\.stepResearchCallCount >= 4[\s\S]*state\.stepToolCallCount >= 6[\s\S]*state\.stepVisitedUrls\.size >= 1[\s\S]*stepOpenedSourceDomains\(state\)\.size >= 1[\s\S]*state\.stepSourceDomainCounts\.size >= 2[\s\S]*state\.stepFailureCount >= 1/,
   'ordinary paid no-progress recovery must preserve one authoritative opened source after a broad mixed success/failure packet',
 )
