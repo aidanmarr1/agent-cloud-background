@@ -21,6 +21,7 @@ import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/l
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
+import { defaultFileActionLabel } from '@/lib/stream/ActivityDescriber'
 
 import { sanitizeAgentEventEmitter, type AgentEventEmitter } from './SSEEmitter'
 import {
@@ -941,7 +942,9 @@ function shouldAutosaveTextOnlyDraft(
     // the verified file's plan step open and can turn a successful run into a
     // paid no-progress failure.
     if (hasSavedFinalDeliverableCandidate(state)) return false
-    return text.length >= FINAL_AUTOSAVE_DRAFT_MIN_CHARS && taskNeedsSavedFinalArtifact(state, messages)
+    const requestedMinimum = savedFinalDeliverableMinimumChars(state, messages)
+    const recoveryMinimum = Math.min(FINAL_AUTOSAVE_DRAFT_MIN_CHARS, requestedMinimum)
+    return text.length >= recoveryMinimum && taskNeedsSavedFinalArtifact(state, messages)
   }
 
   if (text.length < AUTOSAVE_DRAFT_MIN_CHARS) return false
@@ -973,6 +976,44 @@ function autosaveDraftPath(state: AgentStateData): string {
   return isLastStep
     ? `deliverables/${slug}.md`
     : `drafts/step-${state.currentStepIdx + 1}-${slug}.md`
+}
+
+function requestedMarkdownDeliverablePath(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): string | null {
+  const request = state.originalUserRequest ||
+    messages.filter(message => message.role === 'user').slice(-1)[0]?.content ||
+    ''
+  const matches = [
+    ...request.matchAll(
+      /\b(?:save|write|create|export|deliver|output)\b[^\n]{0,180}?\b((?:\.\/)?(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*\.md)\b/gi,
+    ),
+    ...request.matchAll(
+      /\b(deliverables\/(?:[A-Za-z0-9][A-Za-z0-9._-]*\/)*[A-Za-z0-9][A-Za-z0-9._-]*\.md)\b/gi,
+    ),
+  ].sort((a, b) => (a.index || 0) - (b.index || 0))
+  for (const match of matches.reverse()) {
+    const path = match[1].replace(/^\.\//, '')
+    if (
+      path.length <= 240 &&
+      !path.startsWith('/') &&
+      !path.split('/').includes('..')
+    ) {
+      return path
+    }
+  }
+  return null
+}
+
+function textSavedDeliverableTarget(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): NonNullable<StreamToolCallPolicy['textSavedDeliverable']> {
+  return {
+    id: `autosave_${state.iterations}_${state.currentStepIdx}`,
+    path: requestedMarkdownDeliverablePath(state, messages) || autosaveDraftPath(state),
+  }
 }
 
 function shouldKeepAssistantInjection(content: string): boolean {
@@ -3423,6 +3464,7 @@ export class AgentLoop {
     goalTracker: GoalTracker,
     outputVerifier: OutputVerifier,
     toolPipeline: ToolPipeline,
+    streamedTarget?: StreamToolCallPolicy['textSavedDeliverable'],
   ): Promise<Phase | null> {
     const { conversationId } = this.options
     if (!conversationId) return null
@@ -3508,14 +3550,19 @@ export class AgentLoop {
     if (!shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
 
     const content = cleanDraftContent(assistantContent)
-    const path = autosaveDraftPath(state)
-    const id = `autosave_${state.iterations}_${state.currentStepIdx}`
+    const target = streamedTarget || textSavedDeliverableTarget(state, this.options.messages)
+    const { path, id } = target
 
-    this.emitter.toolStart(id, 'create_file', {
-      path,
-      contentCharCount: content.length,
-      contentLineCount: content.split('\n').length,
-    })
+    if (!target.started) {
+      target.started = true
+      this.emitter.toolStart(id, 'create_file', {
+        path,
+        action_label: defaultFileActionLabel('create_file', path),
+        plan_step_index: state.currentStepIdx + 1,
+      }, { provisional: true })
+      this.emitter.fileContentStart(id, path, 'create_file')
+      this.emitter.fileContentDelta(id, content)
+    }
     await this.emitter.flush?.()
     if (this.options.signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
 
@@ -3982,6 +4029,11 @@ export class AgentLoop {
     // ── Mutable iteration state ───────────────────────────────────────
 
     let lastStreamResult: StreamResult | null = null
+    let lastStreamToolCallPolicy: StreamToolCallPolicy = {
+      allowParallelSourceExtractionCalls: false,
+      maxParallelSourceExtractionCalls: 1,
+      cadenceProgressUpdateEnabled: false,
+    }
     let lastStreamWasCompactNarration = false
     let lastToolResults: ToolExecutionResult[] = []
     let pendingPaidTurnProgress: PaidModelTurnProgressSnapshot | null = null
@@ -4550,6 +4602,7 @@ export class AgentLoop {
               },
               actionSelectionRepairPrompt,
             )
+            lastStreamToolCallPolicy = streamToolCallPolicy
             if (signal?.aborted) { phase = 'ERROR'; break }
 
             const cadenceNarrationForRequestedStream =
@@ -6130,6 +6183,7 @@ export class AgentLoop {
                 goalTracker,
                 outputVerifier,
                 toolPipeline,
+                lastStreamToolCallPolicy.textSavedDeliverable,
               )
               if (recoveredPhase) {
                 phase = recoveredPhase
@@ -7459,6 +7513,9 @@ export class AgentLoop {
           allowParallelSourceExtractionCalls: allowParallelSourceToolCalls,
           maxParallelSourceExtractionCalls,
           cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn,
+          ...(useTextFinalDeliverable
+            ? { textSavedDeliverable: textSavedDeliverableTarget(state, this.options.messages) }
+            : {}),
         }
         // Capture the exact request policy before awaiting provider response
         // headers. If the request itself times out, the outer loop can still

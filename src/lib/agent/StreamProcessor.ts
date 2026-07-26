@@ -67,6 +67,11 @@ export interface StreamToolCallPolicy {
   allowParallelSourceExtractionCalls: boolean
   maxParallelSourceExtractionCalls: number
   cadenceProgressUpdateEnabled?: boolean
+  textSavedDeliverable?: {
+    id: string
+    path: string
+    started?: boolean
+  }
 }
 
 // File previews are a live transparency surface, not a completion preview.
@@ -570,6 +575,7 @@ export class StreamProcessor {
     let visibleTextBuffer = ''
     const toolCalls: Map<number, ToolCallData> = new Map()
     let firstToolCallIndex: number | null = null
+    const textSavedDeliverable = toolCallPolicy?.textSavedDeliverable
     const requestedParallelSourceCallLimitRaw = toolCallPolicy?.maxParallelSourceExtractionCalls
     const requestedParallelSourceCallLimit =
       typeof requestedParallelSourceCallLimitRaw === 'number' && Number.isFinite(requestedParallelSourceCallLimitRaw)
@@ -693,6 +699,49 @@ export class StreamProcessor {
     const progressNarrationTextCap = shouldCapProgressNarrationText(state)
       ? PROGRESS_NARRATION_TEXT_STREAM_CAP
       : null
+
+    const emitVisibleAssistantContent = (content: string): void => {
+      if (!content) return
+      lastVisibleActivityTime = Date.now()
+      if (!textSavedDeliverable) {
+        this.emit(() => this.emitter.textDelta(content))
+        return
+      }
+
+      if (!textSavedDeliverable.started) {
+        textSavedDeliverable.started = true
+        this.exposedBufferedFileTools.set(textSavedDeliverable.id, 'create_file')
+        this.emit(
+          () => this.emitter.toolStart(
+            textSavedDeliverable.id,
+            'create_file',
+            {
+              path: textSavedDeliverable.path,
+              action_label: defaultFileActionLabel('create_file', textSavedDeliverable.path),
+              plan_step_index: state.currentStepIdx + 1,
+            },
+            { provisional: true },
+          ),
+          { immediate: true },
+        )
+        this.emit(
+          () => this.emitter.fileContentStart(
+            textSavedDeliverable.id,
+            textSavedDeliverable.path,
+            'create_file',
+          ),
+          { immediate: true },
+        )
+      }
+
+      // This is the provider's accepted output chunk, not a placeholder or a
+      // replay. It bypasses persistence/billing buffering in the same way as
+      // native streamed file arguments so the task view is genuinely live.
+      this.emit(
+        () => this.emitter.fileContentDelta(textSavedDeliverable.id, content),
+        { immediate: true },
+      )
+    }
 
     const abortStreamingResponse = (): void => {
       try {
@@ -976,6 +1025,8 @@ export class StreamProcessor {
               // progress paragraph into a terminal task error.
               const TEXT_ONLY_CAP = progressNarrationTextCap !== null
                 ? progressNarrationTextCap
+                : textSavedDeliverable
+                  ? INLINE_FINAL_TEXT_STREAM_CAP
                 : inlineFinalAnswerAllowsLongText(state)
                 ? INLINE_FINAL_TEXT_STREAM_CAP
                 : DEFAULT_TEXT_ONLY_STREAM_CAP
@@ -1005,8 +1056,7 @@ export class StreamProcessor {
 
               // Only emit to user AFTER leakage check passes
               if (cleaned) {
-                lastVisibleActivityTime = Date.now()
-                this.emit(() => this.emitter.textDelta(cleaned))
+                emitVisibleAssistantContent(cleaned)
               }
                 contentBuffer = contentBuffer.slice(safeContent.length)
               }
@@ -1150,7 +1200,7 @@ export class StreamProcessor {
           }
         }
         assistantContent += flushed
-        this.emit(() => this.emitter.textDelta(flushed))
+        emitVisibleAssistantContent(flushed)
       }
     }
 

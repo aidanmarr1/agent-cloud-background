@@ -70,6 +70,12 @@ async function* failedBufferedFinalReportChunks() {
   throw new Error('simulated provider stream failure')
 }
 
+async function* recoveredTextSavedDeliverableChunks(gate: Promise<void>) {
+  yield { choices: [{ delta: { content: '# Immediate live output\\n\\n- The first real provider chunk is visible now.\\n' } }] }
+  await gate
+  yield { choices: [{ delta: { content: '- Later provider chunks continue in the same real file.\\n' } }] }
+}
+
 async function* editChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_edit', function: { name: 'edit_file', arguments: '{\\"action_label\\":\\"Replace app page headline copy\\",\\"plan_step_index\\":1,\\"path\\":\\"app/page.tsx\\",\\"old_string\\":\\"Hello\\",\\"new_string\\":\\"' } }] } }] }
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'Updated copy\\\\n' } }] } }] }
@@ -370,6 +376,76 @@ export async function runSmoke() {
     discardedReportEmitter.events.filter(e => e.type === 'tool_result').length,
     1,
     'discard cleanup must be idempotent and never duplicate the closing result',
+  )
+
+  let releaseRecoveredText: () => void = () => {}
+  const recoveredTextGate = new Promise<void>(resolve => {
+    releaseRecoveredText = resolve
+  })
+  const recoveredTextEmitter = makeEmitter()
+  const recoveredTextState = createInitialState(true, timeouts)
+  recoveredTextState.currentPlanItems = ['Gather evidence', 'Write concise note']
+  recoveredTextState.currentStepIdx = 1
+  const recoveredTextTarget: { id: string; path: string; started?: boolean } = {
+    id: 'autosave_recovered_text',
+    path: 'deliverables/live-recovery.md',
+  }
+  const recoveredTextProcessor = new StreamProcessor(recoveredTextEmitter as any, timeouts)
+  recoveredTextProcessor.beginBufferedEmission()
+  let recoveredTextSettled = false
+  const recoveredTextProcessing = recoveredTextProcessor.processStream(
+    recoveredTextSavedDeliverableChunks(recoveredTextGate) as any,
+    recoveredTextState,
+    false,
+    undefined,
+    {
+      allowParallelSourceExtractionCalls: false,
+      maxParallelSourceExtractionCalls: 1,
+      textSavedDeliverable: recoveredTextTarget,
+    },
+  ).finally(() => {
+    recoveredTextSettled = true
+  })
+
+  await new Promise(resolve => setImmediate(resolve))
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(recoveredTextSettled, false, 'the text-save recovery stream must still be generating when its file appears')
+  assert.equal(recoveredTextTarget.started, true, 'the target must record that its live file lane was opened')
+  assert.deepEqual(
+    recoveredTextEmitter.events.slice(0, 3).map(event => event.type),
+    ['tool_start', 'file_content_start', 'file_content_delta'],
+    'the first real recovery content chunk must immediately open and update the actual file lane',
+  )
+  assert.equal(
+    recoveredTextEmitter.events.filter(event => event.type === 'text_delta').length,
+    0,
+    'saved deliverable recovery content must not leak into the ordinary chat lane',
+  )
+  assert.match(
+    recoveredTextEmitter.events
+      .filter(event => event.type === 'file_content_delta')
+      .map(event => event.content)
+      .join(''),
+    /first real provider chunk is visible now/,
+    'the live preview must contain actual provider output before generation completes',
+  )
+
+  releaseRecoveredText()
+  const recoveredTextResult = await recoveredTextProcessing
+  recoveredTextProcessor.commitBufferedEmission()
+  assert.match(recoveredTextResult.assistantContent, /Later provider chunks continue/)
+  assert.equal(
+    recoveredTextEmitter.events.filter(event => event.type === 'tool_start').length,
+    1,
+    'completing a recovery stream must keep one stable real file action',
+  )
+  assert.match(
+    recoveredTextEmitter.events
+      .filter(event => event.type === 'file_content_delta')
+      .map(event => event.content)
+      .join(''),
+    /Later provider chunks continue in the same real file/,
+    'every later provider chunk must continue through the same live file lane',
   )
 
   const searchEmitter = makeEmitter()
