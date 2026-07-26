@@ -1215,7 +1215,12 @@ function shouldUseTextSavedFinalDeliverable(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
+  // Native file-tool streaming is the primary path even on OpenRouter. It
+  // exposes the real target and exact generated body deltas while the model is
+  // writing. Retain text-then-save only as a last-resort recovery after the
+  // provider has produced two malformed native tool envelopes.
   return ASSISTANT_PROVIDER === 'openrouter' &&
+    state.toolJsonRecoveryCount >= 2 &&
     finalSavedDeliverableTurn(state, messages) &&
     !state.partialFileWriteRecoveryPending &&
     !hasSavedFinalDeliverableCandidate(state)

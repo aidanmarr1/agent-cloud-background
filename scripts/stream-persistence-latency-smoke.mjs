@@ -59,6 +59,11 @@ assert.match(
   'failed usage persistence must discard unbilled buffered output',
 )
 assert.match(streamProcessor, /beginBufferedEmission\(\)/, 'model-turn buffering must remain enabled')
+assert.match(
+  agentLoop,
+  /function shouldUseTextSavedFinalDeliverable[\s\S]*state\.toolJsonRecoveryCount >= 2[\s\S]*finalSavedDeliverableTurn\(state, messages\)/,
+  'OpenRouter saved deliverables must attempt native live file tools before text-then-save recovery',
+)
 assert.match(taskJobs, /function shouldPublishFileEventLive[\s\S]*file_content_start[\s\S]*create_file[\s\S]*append_file/, 'file starts and live content must have an explicit low-latency event lane')
 assert.match(taskJobs, /publishFileEventLive\(job, record\)/, 'file events must be published to connected task streams before the durable batch completes')
 assert.match(taskJobs, /alreadyPublishedSubscriberIds\?\.has\(subscriber\.id\)/, 'live file events must not be duplicated for subscribers that already received them')
