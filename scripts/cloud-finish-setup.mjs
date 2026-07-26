@@ -13,6 +13,7 @@ const root = fileURLToPath(rootUrl)
 const args = process.argv.slice(2)
 const nodeBin = process.execPath
 const READY_PATH = '/api/internal/background-worker-ready'
+const SAFE_INTAKE_HOLD_ID = /^[A-Za-z0-9_.:-]{8,128}$/
 
 loadLocalEnvFiles(rootUrl)
 
@@ -59,6 +60,17 @@ function env(name) {
 
 function hasFlag(name) {
   return args.includes(name)
+}
+
+function rolloutIntakeHoldId() {
+  const configured = readArg('--intake-hold-id')
+  if (!configured) return randomUUID()
+  if (!SAFE_INTAKE_HOLD_ID.test(configured)) {
+    throw new Error(
+      '--intake-hold-id must be 8-128 letters, numbers, dots, colons, underscores, or hyphens.',
+    )
+  }
+  return configured
 }
 
 function formatEnvValue(value) {
@@ -262,7 +274,10 @@ async function writeWorkerEnvFile(path) {
 }
 
 let renderRolloutAttempted = false
-const intakeHoldId = randomUUID()
+// An explicit owner makes a failed guarded rollout safely resumable. The
+// Render helper's compare-and-set hold permits the same owner to retry but
+// refuses to replace a different rollout.
+const intakeHoldId = rolloutIntakeHoldId()
 
 try {
   let renderWorkerDeployTriggered = false
@@ -420,7 +435,11 @@ try {
       `release only this rollout hold with: ${nodeBin} scripts/render-worker-env.mjs ` +
       `--release-intake-hold --intake-hold-id ${intakeHoldId} --intake-hold-url ${deployedUrl}`,
     )
+    console.error(
+      `To resume this rollout instead, rerun the finisher with --intake-hold-id ${intakeHoldId}; ` +
+      'a new owner ID cannot replace the active hold.',
+    )
   }
-  console.error('Fix the failing step above, then rerun this command.')
+  console.error('Fix the failing step above, then use the owner-fenced recovery guidance.')
   process.exit(1)
 }

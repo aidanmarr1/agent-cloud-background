@@ -3,6 +3,14 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import {
+  parseRenderDeployList,
+  renderDeployCommitId,
+  renderDeployId,
+  renderDeployStatus,
+  selectNewestExactRenderDeploy,
+  unwrapRenderDeploy,
+} from './render-deploy-response.mjs'
 
 const root = process.cwd()
 const [
@@ -50,6 +58,61 @@ const guardedRollout = sourceSection(
   'async function runGuardedSuspendedDeploy',
   'async function main',
 )
+const triggerDeploy = sourceSection(
+  renderHelper,
+  'async function triggerDeploy',
+  'function positiveIntArg',
+)
+
+const exactCommit = 'a'.repeat(40)
+const olderExactDeploy = {
+  id: 'dep-older',
+  commit: { id: exactCommit },
+  status: 'live',
+  trigger: 'service_resumed',
+  createdAt: '2026-07-26T10:00:00.000Z',
+}
+const newerExactDeploy = {
+  id: 'dep-newer',
+  commit: { id: exactCommit },
+  status: 'queued',
+  trigger: 'api',
+  createdAt: '2026-07-26T10:01:00.000Z',
+}
+const wrappedExactDeploy = { deploy: newerExactDeploy, cursor: 'next-page' }
+
+assert.equal(unwrapRenderDeploy(newerExactDeploy), newerExactDeploy, 'bare deploy responses must remain bare')
+assert.equal(unwrapRenderDeploy(wrappedExactDeploy), newerExactDeploy, 'wrapped deploy responses must unwrap')
+assert.equal(renderDeployId(wrappedExactDeploy), 'dep-newer', 'wrapped deploy ids must be readable')
+assert.equal(renderDeployCommitId(wrappedExactDeploy), exactCommit, 'wrapped commit ids must be readable')
+assert.equal(renderDeployStatus(wrappedExactDeploy), 'queued', 'wrapped statuses must be readable')
+assert.deepEqual(
+  parseRenderDeployList([
+    { deploy: olderExactDeploy, cursor: 'first-page' },
+    wrappedExactDeploy,
+  ]),
+  [olderExactDeploy, newerExactDeploy],
+  'Render list envelopes must parse into deploy objects',
+)
+assert.equal(
+  selectNewestExactRenderDeploy([olderExactDeploy, newerExactDeploy], {
+    expectedCommitId: exactCommit,
+    failedStatuses: new Set(['canceled']),
+  })?.id,
+  'dep-newer',
+  'reconciliation must deterministically adopt the newest exact nonfailed deploy',
+)
+assert.equal(
+  selectNewestExactRenderDeploy([
+    { ...newerExactDeploy, status: 'canceled' },
+    olderExactDeploy,
+  ], {
+    expectedCommitId: exactCommit,
+    failedStatuses: new Set(['canceled']),
+  })?.id,
+  'dep-older',
+  'reconciliation must never adopt a failed deploy',
+)
 
 assert.match(
   renderHelper,
@@ -70,6 +133,16 @@ assert.match(
   guardedRollout,
   /resumeAttempted = true[\s\S]*await resumeService[\s\S]*finally \{[\s\S]*suspendAndVerifyForCleanup/,
   'every attempted resume must flow through a guaranteed suspend-and-verify finally block',
+)
+assert.match(
+  guardedRollout,
+  /if \(!envChanged\)[\s\S]*reconcileExactDeploy[\s\S]*SUCCESSFUL_DEPLOY_STATUSES[\s\S]*if \(!deployId\)[\s\S]*await resumeService[\s\S]*reconcileExactDeploy[\s\S]*if \(resumedDeploy\)[\s\S]*else \{[\s\S]*triggerDeploy/,
+  'the rollout must adopt a safe prior exact deploy and reconcile resume-created deploys before POST',
+)
+assert.match(
+  triggerDeploy,
+  /single-shot[\s\S]*try \{[\s\S]*renderRequest[\s\S]*catch \(error\)[\s\S]*reconcileExactDeploy[\s\S]*allowedTriggers: new Set\(\['api'\]\)[\s\S]*POST was not retried/,
+  'id-less 202 and timed-out POST results must reconcile without a duplicate trigger',
 )
 assert.match(
   guardedRollout,

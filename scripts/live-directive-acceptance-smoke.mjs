@@ -804,8 +804,13 @@ assert.match(
 assert.match(conversationSource, /revision integer not null default 1/, 'conversation bodies must have a monotonic server revision')
 assert.match(
   conversationSource,
-  /if \(!baseRevisionMatches\)[\s\S]*mergeConversationForRevisionConflict/,
-  'a stale base revision must use non-destructive stored-tail reconciliation',
+  /if \(!baseRevisionMatches && !currentIsPlaceholder\)[\s\S]*mergeConversationForRevisionConflict/,
+  'a stale non-placeholder base revision must use non-destructive stored-tail reconciliation',
+)
+assert.match(
+  conversationSource,
+  /currentIsPlaceholder[\s\S]*first complete UI body[\s\S]*if \(!baseRevisionMatches && !currentIsPlaceholder\)/,
+  'a provisional task-start placeholder must accept the first complete client body without stale-tail reconciliation',
 )
 assert.match(conversationRouteSource, /Response\.json\(\{ ok: true, conversations \}\)/, 'sync POST must return reconciled bodies and revisions')
 assert.match(serverSyncSource, /mergeSyncAcknowledgement\(current, server, submitted\)/, 'the client must adopt the reconciled server body')

@@ -359,6 +359,26 @@ assert.match(cloudFinishSetupScript, /--render-repo/, 'cloud finish setup must f
 assert.match(cloudFinishSetupScript, /--wait-for-deploy/, 'cloud finish setup must wait for the Render worker image to become live')
 assert.match(cloudFinishSetupScript, /--safe-suspended-deploy/, 'cloud finish setup must use the guarded suspended-base deploy path')
 assert.match(cloudFinishSetupScript, /--keep-intake-held/, 'cloud finish setup must retain task intake hold through the web rollout')
+assert.match(
+  cloudFinishSetupScript,
+  /function rolloutIntakeHoldId\(\)[\s\S]*readArg\('--intake-hold-id'\)[\s\S]*SAFE_INTAKE_HOLD_ID\.test\(configured\)[\s\S]*return configured[\s\S]*const intakeHoldId = rolloutIntakeHoldId\(\)/,
+  'cloud finish setup must accept and validate an explicit hold owner so a failed rollout can be resumed',
+)
+assert.match(
+  cloudFinishSetupScript,
+  /'--keep-intake-held',[\s\S]*'--intake-hold-id',[\s\S]*intakeHoldId[\s\S]*'--intake-hold-url'/,
+  'cloud finish setup must pass the same owner into the guarded Render rollout',
+)
+assert.match(
+  cloudFinishSetupScript,
+  /'--release-intake-hold',[\s\S]*'--intake-hold-id',[\s\S]*intakeHoldId[\s\S]*'--intake-hold-url'/,
+  'cloud finish setup must release only the exact owner retained through the web proof',
+)
+assert.match(
+  cloudFinishSetupScript,
+  /To resume this rollout instead[\s\S]*--intake-hold-id \$\{intakeHoldId\}[\s\S]*new owner ID cannot replace the active hold/,
+  'cloud finish setup failure output must make same-owner recovery directly actionable',
+)
 assert.ok(
   cloudFinishSetupScript.indexOf("runStep('Apply and deploy Render worker env") <
     cloudFinishSetupScript.indexOf("runStep('Apply Vercel production env"),
@@ -714,6 +734,11 @@ assert.match(cloudDocs, /AGENT_TASK_WORKER_MAX_ATTEMPTS/, 'cloud docs must docum
 assert.match(cloudDocs, /AGENT_DEPLOYMENT_VERSION/, 'cloud docs must document web and worker deployment version matching')
 assert.match(cloudDocs, /npm run cloud:status/, 'cloud docs must document the single production setup status command')
 assert.match(cloudDocs, /npm run cloud:finish-setup/, 'cloud docs must document the post-secret production setup finisher')
+assert.match(
+  cloudDocs,
+  /--intake-hold-id[\s\S]*same exact owner ID[\s\S]*different owner cannot replace the active hold/i,
+  'cloud docs must explain owner-fenced recovery with the same explicit hold id',
+)
 assert.match(cloudDocs, /--write-worker-env/, 'cloud docs must document writing a private Render worker env file')
 assert.match(cloudDocs, /--build-e2b-template/, 'cloud docs must document the E2B template build option in the finish setup command')
 assert.match(cloudDocs, /E2B_ACCESS_TOKEN/, 'cloud docs must document non-interactive E2B template build auth')

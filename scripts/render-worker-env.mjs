@@ -6,6 +6,14 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { createClient } from '@tursodatabase/serverless/compat'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
+import {
+  parseRenderDeployList,
+  renderDeployCommitId,
+  renderDeployId,
+  renderDeployStatus,
+  selectNewestExactRenderDeploy,
+  unwrapRenderDeploy,
+} from './render-deploy-response.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
 const root = fileURLToPath(rootUrl)
@@ -16,6 +24,7 @@ const DEFAULT_WORKER_REGION = 'singapore'
 const DEFAULT_WORKER_PLAN = 'starter'
 const DEFAULT_DEPLOY_WAIT_MS = 15 * 60 * 1000
 const DEFAULT_DEPLOY_POLL_MS = 3_000
+const DEFAULT_DEPLOY_RECONCILE_WAIT_MS = 45_000
 const DEFAULT_SERVICE_WAIT_MS = 5 * 60 * 1000
 const DEFAULT_SERVICE_POLL_MS = 2_000
 const DEFAULT_QUEUE_STABILITY_MS = 2_000
@@ -874,14 +883,7 @@ async function disableAndVerifyAutoDeploy(serviceId, options = {}) {
 }
 
 function deployCommitId(body) {
-  const candidates = [
-    body?.commit?.id,
-    body?.commit?.commitId,
-    body?.commitId,
-    body?.commit_id,
-  ]
-  const value = candidates.find((candidate) => typeof candidate === 'string' && candidate)
-  return value ? String(value).toLowerCase() : ''
+  return renderDeployCommitId(body)
 }
 
 function verifyDeployCommit(body, expectedCommitId, deployId) {
@@ -898,18 +900,107 @@ function verifyDeployCommit(body, expectedCommitId, deployId) {
   }
 }
 
+async function listDeploys(serviceId, options = {}) {
+  const search = new URLSearchParams({ limit: '100' })
+  if (options.createdAfter) search.set('createdAfter', options.createdAfter)
+  const body = await renderRequest(
+    `/services/${encodeURIComponent(serviceId)}/deploys?${search.toString()}`,
+  )
+  return parseRenderDeployList(body)
+}
+
+async function reconcileExactDeploy(serviceId, commitId, options = {}) {
+  const waitMs = options.waitMs ?? positiveIntArg(
+    '--deploy-reconcile-wait-ms',
+    DEFAULT_DEPLOY_RECONCILE_WAIT_MS,
+  )
+  const pollMs = positiveIntArg('--deploy-poll-ms', DEFAULT_DEPLOY_POLL_MS)
+  const startedAt = Date.now()
+  let lastCandidateCount = 0
+
+  do {
+    const deploys = await listDeploys(serviceId, {
+      createdAfter: options.createdAfter || '',
+    })
+    lastCandidateCount = deploys.length
+    const candidate = selectNewestExactRenderDeploy(deploys, {
+      expectedCommitId: commitId,
+      failedStatuses: FAILED_DEPLOY_STATUSES,
+      createdAfter: options.createdAfter || '',
+      allowedTriggers: options.allowedTriggers || null,
+    })
+    if (candidate) return candidate
+    if (Date.now() - startedAt >= waitMs) break
+    await sleep(Math.min(pollMs, Math.max(1, waitMs - (Date.now() - startedAt))))
+  } while (Date.now() - startedAt < waitMs)
+
+  if (options.required) {
+    throw new Error(
+      `Render did not expose a nonfailed deploy for exact commit ${commitId} within ${waitMs}ms ` +
+      `(${lastCandidateCount} recent deploy records observed).`,
+    )
+  }
+  return null
+}
+
 async function triggerDeploy(serviceId, commitId = '') {
   const clearCache = hasFlag('--clear-cache') ? 'clear' : 'do_not_clear'
-  const body = await renderRequest(`/services/${encodeURIComponent(serviceId)}/deploys`, {
-    method: 'POST',
-    body: JSON.stringify({
-      clearCache,
-      ...(commitId ? { commitId } : {}),
-    }),
+  const requestedAfter = new Date(Date.now() - 1_000).toISOString()
+  let body = null
+  let requestError = null
+
+  // This POST is intentionally single-shot. A timeout can occur after Render
+  // accepts the launch, and retrying it would create a second paid deploy.
+  try {
+    body = await renderRequest(`/services/${encodeURIComponent(serviceId)}/deploys`, {
+      method: 'POST',
+      body: JSON.stringify({
+        clearCache,
+        ...(commitId ? { commitId } : {}),
+      }),
+    })
+  } catch (error) {
+    requestError = error
+  }
+
+  const responseDeploy = unwrapRenderDeploy(body)
+  const responseDeployId = renderDeployId(responseDeploy)
+  if (responseDeployId) {
+    console.log(
+      `Triggered Render worker deploy ${responseDeployId} ` +
+      `(${renderDeployStatus(responseDeploy) || 'created'}).`,
+    )
+    return { deployId: responseDeployId, body: responseDeploy }
+  }
+
+  if (!commitId) {
+    if (requestError) throw requestError
+    throw new Error(
+      'Render accepted a deploy without returning an id, and no exact commit was provided for safe reconciliation.',
+    )
+  }
+
+  // A valid 202 Queued response has no documented body. Network timeouts are
+  // also ambiguous. Reconcile the one accepted request from List Deploys
+  // instead of ever repeating the POST.
+  const reconciled = await reconcileExactDeploy(serviceId, commitId, {
+    createdAfter: requestedAfter,
+    allowedTriggers: new Set(['api']),
+    required: false,
   })
-  const deployId = typeof body?.id === 'string' ? body.id : ''
-  console.log(`Triggered Render worker deploy ${deployId || '<unknown>'} (${body?.status || 'created'}).`)
-  return { deployId, body }
+  if (!reconciled) {
+    const reason = requestError instanceof Error ? ` Original request error: ${requestError.message}` : ''
+    throw new Error(
+      `Render did not return a deploy id and no exact API-triggered deploy could be reconciled. ` +
+      `The POST was not retried because its launch result is ambiguous.${reason}`,
+    )
+  }
+  const deployId = renderDeployId(reconciled)
+  console.log(
+    `Reconciled Render worker deploy ${deployId} ` +
+    `(${renderDeployStatus(reconciled) || 'created'}) after an id-less or ambiguous trigger response.`,
+  )
+  return { deployId, body: reconciled }
 }
 
 function positiveIntArg(name, fallback) {
@@ -937,10 +1028,11 @@ async function waitForDeploy(serviceId, deployId) {
     const body = await renderRequest(
       `/services/${encodeURIComponent(serviceId)}/deploys/${encodeURIComponent(deployId)}`,
     )
-    lastStatus = typeof body?.status === 'string' ? body.status : 'unknown'
+    const deploy = unwrapRenderDeploy(body)
+    lastStatus = renderDeployStatus(deploy) || 'unknown'
     if (SUCCESSFUL_DEPLOY_STATUSES.has(lastStatus)) {
       console.log(`Render worker deploy ${deployId} is live.`)
-      return body
+      return deploy
     }
     if (FAILED_DEPLOY_STATUSES.has(lastStatus)) {
       throw new Error(`Render worker deploy ${deployId} ended with status ${lastStatus}.`)
@@ -954,9 +1046,9 @@ async function waitForDeploy(serviceId, deployId) {
 }
 
 async function readDeploy(serviceId, deployId) {
-  return renderRequest(
+  return unwrapRenderDeploy(await renderRequest(
     `/services/${encodeURIComponent(serviceId)}/deploys/${encodeURIComponent(deployId)}`,
-  )
+  ))
 }
 
 const apply = hasFlag('--apply')
@@ -1086,6 +1178,7 @@ async function runGuardedSuspendedDeploy(input) {
     await disableAndVerifyAutoDeploy(input.serviceId)
     await applyEnvVars(input.serviceId, input.expected, input.rows)
     console.log('Render worker env apply finished.')
+    const envChanged = input.rows.some((row) => row.action !== 'keep')
 
     // Repeat both proofs immediately before resume. The durable hold closes
     // new acceptance, while the second stable drain check rules out work that
@@ -1093,10 +1186,41 @@ async function runGuardedSuspendedDeploy(input) {
     await proveDeployedIntakeHold(baseUrl, deployedQueueName, holdId)
     await proveQueueDrained(client, baseName, deployedQueueName)
 
-    resumeAttempted = true
-    await resumeService(input.serviceId)
-    const triggered = await triggerDeploy(input.serviceId, commitId)
-    deployId = triggered.deployId
+    // A retry after an id-less 202 or timed-out POST can already have the exact
+    // artifact live. It is safe to adopt it only when this run made no env
+    // changes; otherwise a fresh deploy must capture the new configuration.
+    if (!envChanged) {
+      const existing = await reconcileExactDeploy(input.serviceId, commitId, { waitMs: 1 })
+      if (existing && SUCCESSFUL_DEPLOY_STATUSES.has(renderDeployStatus(existing))) {
+        deployId = renderDeployId(existing)
+        console.log(`Adopting existing exact Render deploy ${deployId} before resume.`)
+      }
+    }
+
+    if (!deployId) {
+      const resumedAfter = new Date(Date.now() - 1_000).toISOString()
+      resumeAttempted = true
+      await resumeService(input.serviceId)
+
+      // Resuming a Render service can itself create a service_resumed deploy.
+      // Reconcile that exact nonfailed candidate before issuing any explicit
+      // trigger so the guarded rollout never creates a redundant paid launch.
+      const resumedDeploy = await reconcileExactDeploy(input.serviceId, commitId, {
+        ...(envChanged ? { createdAfter: resumedAfter } : {}),
+        required: false,
+      })
+      if (resumedDeploy) {
+        deployId = renderDeployId(resumedDeploy)
+        console.log(
+          `Adopting exact Render deploy ${deployId} ` +
+          `(${renderDeployStatus(resumedDeploy) || 'created'}) after resume.`,
+        )
+      } else {
+        const triggered = await triggerDeploy(input.serviceId, commitId)
+        deployId = triggered.deployId
+      }
+    }
+
     const liveDeploy = await waitForDeploy(input.serviceId, deployId)
     verifyDeployCommit(liveDeploy, commitId, deployId)
     deployVerified = true
