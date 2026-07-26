@@ -295,9 +295,11 @@ Before every tool call, do a quick private check. Do NOT write this check in the
 - No placeholders, no TODOs, no outlines. Fully complete content only.
 - Code: inspect the relevant files first, create or edit the actual files, run targeted checks/tests when available, and fix failures. Charts should save image files rather than relying on an interactive viewer.
 - PDF requests: first save the complete polished source as Markdown or HTML, then call export_pdf to produce the actual .pdf. Do not give the user conversion instructions instead of exporting the file.
-- Websites/apps: default to a complete Next.js + TSX structure, not standalone HTML. Create app/page.tsx, app/layout.tsx, app/globals.css, and at least one imported reusable component under components/*.tsx or app/components/*.tsx unless the user explicitly asks for one standalone HTML file. app/layout.tsx MUST import './globals.css'. Build the actual first-screen experience, meaningful states, responsive behavior, and polished interaction details rather than a placeholder shell.
-- A lone home.tsx, page.tsx, or single TSX file is invalid for a website build. The page may be a single route, but it still needs layout, authored CSS, component composition, and enough visual structure to render as a real site.
-- In website/app builds, create the initial page, layout, global styles, and component files together during the build phase. Do not split first-time file creation across research, cross-validation, or final verification phases.
+- Websites/apps: default to a complete Next.js + TSX structure, not standalone HTML. Create app/page.tsx, app/layout.tsx, and substantive app/globals.css; app/layout.tsx MUST import './globals.css'. Add reusable components when they genuinely clarify the architecture, but a cohesive page.tsx is valid and must not be split into artificial files merely to satisfy a component count. Build the actual first-screen experience, meaningful states, responsive behavior, and polished interaction details rather than a placeholder shell.
+- Before the first website write, privately commit to one coherent product/brand direction, type and color system, navigation model, and section map. Preserve that direction through every edit; do not rename the brand, change the visual language, or invent unrelated features midway through the build.
+- Build one integrated vertical slice first: layout, page, authored styles, real content, and the primary interaction. Do not create competing Navbar/Header/Navigation variants, duplicate sections, unused components, or a directory of speculative features.
+- Use real coherent imagery/assets when the request is image-led. Do not use emoji, random icon glyphs, empty colored boxes, or placeholder copy as the primary visual system. Make CTA links target real page anchors/routes and make interactive controls behave honestly; do not imply unavailable functionality.
+- In website/app builds, create the initial page, layout, global styles, and only the needed components together during the build phase. Then run one focused visual-polish pass based on the live preview. Do not split first-time file creation across research, cross-validation, or final verification phases.
 - Standalone HTML is only for explicit requests such as "single HTML file", "plain HTML", or "index.html".
 - Standalone HTML files are opened automatically on a local sandbox web server in the Computer browser after writes. Next.js/TSX website structures are also built into a local preview and opened automatically after app/page.tsx, app/layout.tsx, and app/globals.css exist; the plan must still include a separate late "boot/open local preview and inspect rendering" phase. In that phase, inspect the live preview with browser_screenshot and browser_scroll before finishing, and fix any blank/unstyled/default-browser/overlapping result before delivery. Do not change the Computer browser viewport or aspect ratio.
 - Websites/apps: Do NOT add login, sign-in, account, profile, dashboard, or authentication buttons/links unless the user explicitly asks for accounts/authentication. Keep navigation and calls-to-action focused on the requested content.
@@ -457,8 +459,10 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
   const quickOnly =
     /\b(?:very quickly|real quick|asap|super quick|quickly|quick|brief|briefly|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/i.test(content) &&
     !/\b(?:deep|comprehensive|thorough|detailed|citations?|sources?|cite|analysis|report|current|latest|build|create|implement|fix|deploy|file|pdf|markdown|deliverable)\b/i.test(content)
+  const explicitlyComplex =
+    /\b(?:multi[-\s]?(?:page|surface|tenant|service|repo|repository)|production[-\s]ready|enterprise[-\s]grade|end[-\s]to[-\s]end|full[-\s]stack|complex architecture|migration|across\s+\d+\s+(?:pages|services|repositories|systems))\b/i.test(content)
 
-  if (/\b(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|deep[-\s]?dive|full report|serious analysis|strategic|technical|historical|cultural|comparative)\b/i.test(content) || wordCount > 120) {
+  if (explicitlyComplex || /\b(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|deep[-\s]?dive|full report|serious analysis|strategic|technical|historical|cultural|comparative)\b/i.test(content) || wordCount > 120) {
     return 3
   }
 
@@ -474,7 +478,10 @@ export function estimateTaskComplexity(messages: Array<{ role: string; content: 
   }
 
   if (toolOrArtifactWork || wordCount > 28) {
-    return 3
+    // Ordinary artifact/tool work is moderate by default. A short "build a
+    // website" request must not inherit the maximum multi-phase budget simply
+    // because it contains generic verbs such as build/create/design.
+    return 2
   }
 
   // Default to moderate for ordinary direct answers; tool work rounds up above.

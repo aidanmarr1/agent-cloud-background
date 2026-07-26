@@ -3,7 +3,13 @@ import { createServer, type Server } from 'http'
 import { extname, isAbsolute, join, relative, resolve } from 'path'
 import { mkdir, open, readdir, readFile, rm, stat, writeFile } from 'fs/promises'
 import type { Plugin } from 'esbuild'
-import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
+import {
+  getOrCreateSandboxDir,
+  isCloudSandboxProviderEnabled,
+  isInsideSandbox,
+  resolveAndVerify,
+  writeSandboxFileBytes,
+} from './sandbox'
 
 interface WebsitePreviewServer {
   conversationId: string
@@ -39,6 +45,7 @@ export interface TsxWebsitePreviewLaunch {
 
 const servers = new Map<string, WebsitePreviewServer>()
 const managedPorts = new Set<number>()
+const managedOrigins = new Set<string>()
 const SAFE_SEGMENT = /%2f|%5c/i
 const TSX_PREVIEW_CSP = [
   "default-src 'self'",
@@ -526,8 +533,6 @@ export async function getNextWebsiteProjectStatus(conversationId: string): Promi
   const cssHasSubstantiveStyles = cssLooksSubstantive(cssContent)
   const layoutImportsGlobalCss = layoutImportsStylesheet(layoutContent)
   const structureIssues = [
-    componentFiles.length > 0 ? '' : 'Create at least one reusable TSX component under components/ or app/components/ and render it from page.tsx.',
-    pageImportsComponent ? '' : 'Import and render a local component from app/page.tsx; a lone page/home TSX file is not a complete website build.',
     cssHasSubstantiveStyles ? '' : 'Add substantive authored CSS in globals.css for layout, typography, spacing, responsive behavior, and visual polish.',
     layoutImportsGlobalCss ? '' : `Import './globals.css' from ${best.appDir}/layout.tsx so the generated Next.js app loads the authored stylesheet instead of default browser styles.`,
   ].filter(Boolean)
@@ -548,9 +553,43 @@ export async function getNextWebsiteProjectStatus(conversationId: string): Promi
 }
 
 export function isManagedWebsitePreviewUrl(url: URL): boolean {
+  if (managedOrigins.has(url.origin)) return true
   const host = url.hostname.toLowerCase()
   const isLocal = host === '127.0.0.1' || host === 'localhost' || host === '::1'
   return isLocal && managedPorts.has(Number(url.port))
+}
+
+async function listPreviewFiles(dir: string, prefix = ''): Promise<string[]> {
+  const entries = await readdir(dir, { withFileTypes: true })
+  const files: string[] = []
+  for (const entry of entries) {
+    const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name
+    if (entry.isDirectory()) {
+      files.push(...await listPreviewFiles(join(dir, entry.name), relativePath))
+    } else if (entry.isFile()) {
+      files.push(relativePath)
+    }
+  }
+  return files
+}
+
+async function syncGeneratedPreviewToCloud(
+  conversationId: string,
+  previewDir: string,
+  distDir: string,
+): Promise<void> {
+  const generatedFiles = [
+    'index.html',
+    ...(await listPreviewFiles(distDir)).map(filePath => `dist/${filePath}`),
+  ]
+  await Promise.all(generatedFiles.map(async filePath => {
+    const body = await readFile(join(previewDir, filePath))
+    await writeSandboxFileBytes(
+      conversationId,
+      `.agent-preview/${toPosixPath(filePath)}`,
+      new Uint8Array(body),
+    )
+  }))
 }
 
 export async function buildTsxWebsitePreviewLaunch(conversationId: string): Promise<TsxWebsitePreviewLaunch> {
@@ -635,14 +674,29 @@ createRoot(document.getElementById('root')!).render(
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Generated Website Preview</title>
-    <link rel="stylesheet" href="/dist/preview.css" />
-    <script type="module" src="/dist/preview.js"></script>
+    <link rel="stylesheet" href="./dist/preview.css" />
+    <script type="module" src="./dist/preview.js"></script>
   </head>
   <body>
     <div id="root"></div>
   </body>
 </html>
 `, 'utf-8')
+
+  if (isCloudSandboxProviderEnabled()) {
+    await syncGeneratedPreviewToCloud(conversationId, previewDir, distDir)
+    const { ensureE2BWebsitePreview } = await import('./e2bSandbox')
+    const cloudPreview = await ensureE2BWebsitePreview(conversationId, '.agent-preview/index.html')
+    managedOrigins.add(cloudPreview.origin)
+    return {
+      url: cloudPreview.url,
+      origin: cloudPreview.origin,
+      port: cloudPreview.port,
+      rootDir: status.rootDir,
+      previewDir,
+      appDir: status.appDir,
+    }
+  }
 
   const server = await getOrStartPreviewServer(conversationId, previewDir)
   const cacheBuster = `v=${Date.now()}`

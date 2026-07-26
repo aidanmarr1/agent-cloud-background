@@ -36,6 +36,7 @@ export function HeroSection({ onSubmit, prefillText }: HeroSectionProps) {
           onSubmit={onSubmit}
           placeholder="Assign a task or type / for more"
           initialValue={prefillText}
+          startsNewTask
         />
       </div>
     </section>

@@ -17,7 +17,14 @@ import {
   normalizeConversationForPersistence,
 } from ${JSON.stringify(join(root, 'src/lib/conversationSerialization.ts'))}
 import { mergeConversationWithMonotonicAssistantState } from ${JSON.stringify(join(root, 'src/lib/conversations.ts'))}
+import { useChatStore } from ${JSON.stringify(join(root, 'src/store/chat/index.ts'))}
+import { useUIStore } from ${JSON.stringify(join(root, 'src/store/ui.ts'))}
 import type { Conversation, Message, TaskGroup } from ${JSON.stringify(join(root, 'src/types/index.ts'))}
+
+;(globalThis as any).requestAnimationFrame = (callback: (timestamp: number) => void) =>
+  setTimeout(() => callback(Date.now()), 0)
+;(globalThis as any).cancelAnimationFrame = (handle: ReturnType<typeof setTimeout>) =>
+  clearTimeout(handle)
 
 const now = Date.now()
 const groups: TaskGroup[] = [
@@ -132,6 +139,166 @@ function message(contentLength: number, finalGroupStatus: TaskGroup['status']): 
   dispatcher.flushPendingUpdates()
   assert.ok(latestGroups.every((group) => group.status === 'done'), 'done event must close every plan group')
   assert.ok(latestSteps?.every((step) => step.status === 'done'), 'done event must close every legacy step')
+}
+
+function storeBackedActions(): StoreActions {
+  return {
+    appendToLastMessage: (...args) => useChatStore.getState().appendToLastMessage(...args),
+    appendReasoning: (...args) => useChatStore.getState().appendReasoning(...args),
+    setSteps: (...args) => useChatStore.getState().setSteps(...args),
+    setTaskGroups: (...args) => useChatStore.getState().setTaskGroups(...args),
+    updateTaskGroupStatus: (...args) => useChatStore.getState().updateTaskGroupStatus(...args),
+    addSubtaskToGroup: (...args) => useChatStore.getState().addSubtaskToGroup(...args),
+    updateSubtaskInGroup: (...args) => useChatStore.getState().updateSubtaskInGroup(...args),
+    addGroupNarration: (...args) => useChatStore.getState().addGroupNarration(...args),
+    setLastMessageContent: (...args) => useChatStore.getState().setLastMessageContent(...args),
+    setFollowUps: (...args) => useChatStore.getState().setFollowUps(...args),
+    addArtifact: (...args) => useChatStore.getState().addArtifact(...args),
+    addComputerPanelItem: (...args) => useChatStore.getState().addComputerPanelItem(...args),
+    upsertComputerPanelItem: (...args) => useChatStore.getState().upsertComputerPanelItem(...args),
+    removeComputerPanelItem: (...args) => useChatStore.getState().removeComputerPanelItem(...args),
+    setComputerPanelOpen: (...args) => useUIStore.getState().setComputerPanelOpen(...args),
+    addToast: () => {},
+  }
+}
+
+{
+  const conversationId = 'personalized-final-handoff'
+  const initialMessage: Message = {
+    id: 'assistant-handoff',
+    role: 'assistant',
+    content: 'I’ll examine the interface and prepare a practical report.',
+    timestamp: now,
+  }
+  const conversation: Conversation = {
+    id: conversationId,
+    title: 'Personalized handoff',
+    starred: false,
+    createdAt: now,
+    updatedAt: now,
+    messages: [initialMessage],
+  }
+  useChatStore.setState({ conversations: [conversation], activeId: conversationId, folders: [] })
+  useUIStore.setState({ isStreaming: true })
+  const storeActions = storeBackedActions()
+  const dispatcher = new EventDispatcher(conversationId, storeActions, () => {})
+  dispatcher.dispatch({ type: 'plan', items: ['Write the Manus interface research report'] })
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'report-write',
+    name: 'create_file',
+    args: {
+      path: 'manus-interface-research-report.md',
+      action_label: 'Compile interface research findings',
+      plan_step_index: 1,
+    },
+  })
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'report-write',
+    name: 'create_file',
+    result: {
+      action: 'created',
+      path: 'manus-interface-research-report.md',
+      content: '# Manus Interface Research Report\\n\\nVerified report content.',
+    },
+  })
+  const personalized = [
+    '## Key Findings',
+    '',
+    'The research report is complete, and its strongest finding is that the three-panel workspace keeps planning, execution, and live computer feedback visible at the same time.',
+    '',
+    '### Interface Architecture',
+    '',
+    'The report explains how the task stream and computer surface reinforce one another, with concrete notes on onboarding and task handoff.',
+    '',
+    '### Conclusion',
+    '',
+    'Use the findings matrix to compare the onboarding and live-feedback recommendations. Open the Markdown report below for the full evidence and recommendations.',
+  ].join('\\n')
+  dispatcher.dispatch({ type: 'text_delta', content: personalized })
+  dispatcher.dispatch({ type: 'done' })
+  dispatcher.flushPendingUpdates()
+
+  const finalAssistant = useChatStore.getState().conversations[0]?.messages[0]
+  const finalMessage = finalAssistant?.content || ''
+  assert.match(finalMessage, /## Key Findings/, 'a heading-rich model handoff must remain visible')
+  assert.match(finalMessage, /three-panel workspace/, 'the model’s task-specific finding must win over the client fallback')
+  assert.match(finalMessage, /Use the findings matrix/, 'imperative usage detail in the final handoff must not be stripped as tool narration')
+  assert.match(finalMessage, /Open the Markdown report below/, 'the final artifact reference must remain natural and task-specific')
+  assert.doesNotMatch(finalMessage, /The completed file,.*is attached below/, 'the old canned attachment sentence must never replace the model handoff')
+  assert.equal(
+    finalAssistant?.taskGroups?.flatMap((group) => group.narrations || [])
+      .some((narration) => narration.includes('three-panel workspace')),
+    false,
+    'the personalized handoff must render once, not repeat inside the final task group',
+  )
+}
+
+{
+  const conversationId = 'suppress-duplicated-saved-report'
+  const initialMessage: Message = {
+    id: 'assistant-duplicate-report',
+    role: 'assistant',
+    content: 'I’ll compile the findings into a report.',
+    timestamp: now,
+  }
+  const conversation: Conversation = {
+    id: conversationId,
+    title: 'Duplicate report suppression',
+    starred: false,
+    createdAt: now,
+    updatedAt: now,
+    messages: [initialMessage],
+  }
+  useChatStore.setState({ conversations: [conversation], activeId: conversationId, folders: [] })
+  useUIStore.setState({ isStreaming: true })
+  const dispatcher = new EventDispatcher(conversationId, storeBackedActions(), () => {})
+  dispatcher.dispatch({ type: 'plan', items: ['Write the final research report'] })
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'duplicate-report-write',
+    name: 'create_file',
+    args: {
+      path: 'final-research-report.md',
+      action_label: 'Compile final research findings',
+      plan_step_index: 1,
+    },
+  })
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'duplicate-report-write',
+    name: 'create_file',
+    result: {
+      action: 'created',
+      path: 'final-research-report.md',
+      content: '# Final Research Report\\n\\nSaved report.',
+    },
+  })
+  const longSection = 'Evidence, interpretation, and implementation detail. '.repeat(32)
+  const duplicatedReport = [
+    '# Final Research Report',
+    '',
+    '## 1. Executive Summary',
+    '',
+    longSection,
+    '',
+    '## 2. Architecture',
+    '',
+    longSection,
+    '',
+    '## 3. Recommendations',
+    '',
+    longSection,
+  ].join('\\n')
+  assert.ok(duplicatedReport.length > 4_000 && duplicatedReport.length < 6_000)
+  dispatcher.dispatch({ type: 'text_delta', content: duplicatedReport })
+  dispatcher.dispatch({ type: 'done' })
+  dispatcher.flushPendingUpdates()
+
+  const finalMessage = useChatStore.getState().conversations[0]?.messages[0]?.content || ''
+  assert.doesNotMatch(finalMessage, /## 2\. Architecture/, 'a structurally duplicated saved report must not be republished in chat')
+  assert.match(finalMessage, /final-research-report\.md/, 'duplicate report suppression must retain the concise artifact fallback')
 }
 `, 'utf8')
 

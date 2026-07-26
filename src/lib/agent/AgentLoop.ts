@@ -810,6 +810,20 @@ const NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS = new Set([
   'runtime_deadline',
   'runtime_deadline_finalized',
 ])
+const NON_REOPENABLE_WEBSITE_TERMINAL_REASONS = new Set([
+  'safety_leakage',
+  'runtime_deadline',
+  'runtime_deadline_finalized',
+  'iteration_cap',
+  'paid_internal_recovery_cap',
+  'paid_no_progress_cap',
+  'rewrite_loop',
+  'post_completion_rewrite',
+  'step_blocked',
+  'browser_stuck_step',
+  'deliverable_verification_failed',
+  'saved_deliverable_model_start_timeout',
+])
 const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 const MAX_PLANNING_SKILL_CHARS = 18_000
 const MAX_PLANNING_ATTACHMENT_CHARS = 12_000
@@ -1314,6 +1328,53 @@ function finalSavedDeliverableToolCallInstruction(
     'Do not write visible prose, a status update, a plan, a source count, or a permission question.',
     'The worker will keep the same final phase active until the saved output is complete.',
   ].join(' ')
+}
+
+function finalDeliverableHandoffPrompt(state: AgentStateData): string {
+  const pending = state.finalDeliverableHandoffPending
+  const request = state.originalUserRequest?.trim()
+  const target = pending?.path || 'the completed deliverable'
+  return [
+    'PERSONALIZED FINAL HANDOFF NOW: the requested artifact is complete and verified.',
+    request ? `Original request: ${request}` : '',
+    `Completed artifact: ${target}.`,
+    'Write the user-facing final response now with no tool call.',
+    'Tailor it to this exact task: lead with the real outcome, then mention the most useful concrete findings, design choices, behavior, caveats, or usage detail from the completed work.',
+    'Mention the artifact and format naturally so the attachment card below is understandable.',
+    'Do not use a fixed handoff sentence such as "The completed file is attached below", do not repeat the whole deliverable, and do not narrate internal steps, source counts, tool calls, verification mechanics, or phases.',
+    'Keep it concise but substantive, use natural Markdown only when it helps, and finish with a complete sentence.',
+  ].filter(Boolean).join(' ')
+}
+
+function finalDeliverableHandoffLooksUseful(content: string): boolean {
+  const text = content.trim()
+  if (text.length < 80) return false
+  if (!/[.!?)]\s*$/.test(text)) return false
+  if (/^(?:the completed file|the completed files|here(?:'|’)?s the completed deliverable)\b/i.test(text)) return false
+  return true
+}
+
+function shouldAcceptFinalDeliverableHandoff(content: string, attemptNumber: number): boolean {
+  const text = content.trim()
+  return finalDeliverableHandoffLooksUseful(text) ||
+    (text.length >= 40 && attemptNumber >= 2)
+}
+
+function scheduleFinalDeliverableHandoff(
+  state: AgentStateData,
+  path: string,
+  kind: 'file' | 'image',
+): void {
+  state.finalDeliverableHandoffPending = {
+    path: path || (kind === 'image' ? 'the generated image' : 'the completed deliverable'),
+    kind,
+  }
+  state.finalDeliverableHandoffAttempts = 0
+  state.forceTextNextIteration = false
+  state.phaseEndNarrationPending = false
+  state.consecutiveNoToolCalls = 0
+  state.consecutiveNullStreams = 0
+  state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
 }
 
 function finalInlineAnswerPrompt(state: AgentStateData): string {
@@ -1887,12 +1948,14 @@ function buildStepAllowsOptionalTool(state: AgentStateData, toolName: string): b
     return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|download|real one|use real)\b/i.test(text)
   }
   if (toolName === 'browser_screenshot' || toolName === 'browser_scroll') {
-    return state.websiteBrowserCheckAttempted ||
-      state.websiteBrowserCheckDone ||
+    const stalePreviewNeedsRefresh =
+      state.nextWebsitePreviewAttempted &&
+      !state.nextWebsitePreviewDone &&
+      /stale after/i.test(state.nextWebsitePreviewError || '')
+    return state.websiteBrowserCheckDone ||
       state.websiteResponsiveCheckPrompted ||
-      state.nextWebsitePreviewAttempted ||
       state.nextWebsitePreviewDone ||
-      /\b(?:preview|visual|inspect|browser|screenshot|scroll|render|responsive|viewport|local site|local preview|qa|quality check|verify)\b/i.test(text)
+      stalePreviewNeedsRefresh
   }
   if (toolName === 'export_pdf') {
     return /\b(?:pdf|export)\b/i.test(text)
@@ -1910,13 +1973,15 @@ function finalStepAllowsOptionalTool(state: AgentStateData, toolName: string): b
     return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|download|real one|use real)\b/i.test(text)
   }
   if (toolName === 'browser_screenshot' || toolName === 'browser_scroll') {
+    const stalePreviewNeedsRefresh =
+      state.nextWebsitePreviewAttempted &&
+      !state.nextWebsitePreviewDone &&
+      /stale after/i.test(state.nextWebsitePreviewError || '')
     return state.taskStrategy === 'browse' ||
-      state.websiteBrowserCheckAttempted ||
       state.websiteBrowserCheckDone ||
       state.websiteResponsiveCheckPrompted ||
-      state.nextWebsitePreviewAttempted ||
       state.nextWebsitePreviewDone ||
-      /\b(?:preview|visual|inspect|browser|screenshot|scroll|render|responsive|viewport|local site|local preview|qa|quality check|verify)\b/i.test(text)
+      stalePreviewNeedsRefresh
   }
   if (toolName === 'export_pdf') {
     return /\b(?:pdf|export)\b/i.test(text)
@@ -2365,10 +2430,6 @@ function createdFileWebsiteProblems(createdFiles: Iterable<string>): { missingFi
   const hasPage = created.has('app/page.tsx') || created.has('src/app/page.tsx')
   const hasLayout = created.has('app/layout.tsx') || created.has('src/app/layout.tsx')
   const hasStyles = created.has('app/globals.css') || created.has('src/app/globals.css') || created.has('styles/globals.css')
-  const hasComponent = [...created].some(p =>
-    /^(src\/)?components\/.+\.(?:tsx|jsx)$/.test(p) ||
-    /^(src\/)?app\/components\/.+\.(?:tsx|jsx)$/.test(p)
-  )
 
   return {
     missingFiles: [
@@ -2376,9 +2437,7 @@ function createdFileWebsiteProblems(createdFiles: Iterable<string>): { missingFi
       hasLayout ? '' : 'app/layout.tsx',
       hasStyles ? '' : 'app/globals.css',
     ].filter(Boolean),
-    structureIssues: hasComponent
-      ? []
-      : ['Create at least one reusable TSX component under components/ or app/components/ and render it from page.tsx.'],
+    structureIssues: [],
   }
 }
 
@@ -2413,7 +2472,7 @@ async function getNextWebsiteCompletionBlocker(
         : '',
     ].filter(Boolean).join(' ')
 
-    return `WEBSITE COMPLETION BLOCKED: The requested website is not a complete renderable Next.js/TSX build. ${details} Create or edit the actual website files now: app/page.tsx, app/layout.tsx importing './globals.css', app/globals.css, and at least one imported reusable component under components/ or app/components/. Do not finish after only package/config/layout files.`
+    return `WEBSITE COMPLETION BLOCKED: The requested website is not a complete renderable Next.js/TSX build. ${details} Create or edit the actual website files now: app/page.tsx, app/layout.tsx importing './globals.css', and substantive app/globals.css. Reusable components are optional when page.tsx is already cohesive; do not create parallel header/navigation variants merely to satisfy structure.`
   }
 
   if (!state.nextWebsitePreviewDone) {
@@ -3557,13 +3616,13 @@ export class AgentLoop {
         return 'COMPLETE'
       }
 
-      const stepIdxBefore = state.currentStepIdx
       state.deliverableVerificationDone = true
-      state.currentStepIdx = state.currentPlanItems.length
-      for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
-        this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-      }
-      return 'COMPLETE'
+      state.pendingDeliverableRevision = null
+      state.partialFileWriteRecoveryPending = null
+      state.partialFileWriteRecoveryNudged = false
+      scheduleFinalDeliverableHandoff(state, path, 'file')
+      state.lastIterationEnd = Date.now()
+      return 'STREAMING'
     }
 
     const stepIdxBefore = state.currentStepIdx
@@ -4400,6 +4459,28 @@ export class AgentLoop {
                 phase = 'ERROR'
                 break
               }
+              if (state.finalDeliverableHandoffPending) {
+                state.finalDeliverableHandoffAttempts += 1
+                if (state.finalDeliverableHandoffAttempts < 2) {
+                  contextManager.push({
+                    role: 'system',
+                    content: 'The prior personalized handoff stream did not start. Respond immediately with the concise, task-specific final handoff requested for the completed artifact.',
+                  } as ChatMessageParam)
+                  state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                  state.lastIterationEnd = Date.now()
+                  phase = 'STREAMING'
+                  break
+                }
+                const stepBeforeComplete = state.currentStepIdx
+                state.finalDeliverableHandoffPending = null
+                if (state.currentPlanItems) state.currentStepIdx = state.currentPlanItems.length
+                for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                }
+                terminalReason = 'deliverable_handoff_fallback'
+                phase = 'COMPLETE'
+                break
+              }
               if (cadenceNarrationForRequestedStream) {
                 retryNarrationCadenceAttemptWithoutNewAction(state)
               } else if (cadenceNarrationInMainTurn) {
@@ -4721,6 +4802,17 @@ export class AgentLoop {
             cumulativeOutputTokens += u.completionTokens
             cumulativeCost += u.cost
             console.log(`[COST] iter=${state.iterations} in=${u.promptTokens} out=${u.completionTokens} cost=$${u.cost.toFixed(6)} totalCost=$${cumulativeCost.toFixed(6)}`)
+            const pendingHandoffText =
+              state.finalDeliverableHandoffPending &&
+              lastStreamResult.toolCalls.size === 0
+                ? lastStreamResult.assistantContent.trim()
+                : null
+            const rejectedHandoffEmission =
+              pendingHandoffText !== null &&
+              !shouldAcceptFinalDeliverableHandoff(
+                pendingHandoffText,
+                state.finalDeliverableHandoffAttempts + 1,
+              )
             const usageDebitStartedAt = Date.now()
             try {
               if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
@@ -4738,10 +4830,11 @@ export class AgentLoop {
               // Validated current-step file writes stream their action and LIVE
               // preview immediately; discardBufferedEmission settles those
               // optimistic actions if this turn cannot commit.
-              // A cadence violation is only possible when the turn supplied no
-              // executable tool call; useful actions never enter this repair
-              // branch merely because display narration was absent or invalid.
-              if (lastStreamResult.cadenceProgressViolation) {
+              // Validate personalized handoff prose before releasing the
+              // buffered text. A rejected attempt remains model context for the
+              // retry, but never reaches the client and cannot concatenate with
+              // the accepted final response.
+              if (lastStreamResult.cadenceProgressViolation || rejectedHandoffEmission) {
                 streamProcessor.discardBufferedEmission()
               } else {
                 streamProcessor.commitBufferedEmission()
@@ -4753,23 +4846,30 @@ export class AgentLoop {
                   })
                 }
               }
-              console.log(lastStreamResult.cadenceProgressViolation
-                ? '[AgentDiagnostics] Discarded cadence-contract-invalid model-turn emissions'
-                : '[AgentDiagnostics] Released billed model-turn emissions', {
-                iteration: state.iterations,
-                usageDebitMs: Date.now() - usageDebitStartedAt,
-                firstContentHeldMs: lastStreamResult.contentStreamingStartTime === null
-                  ? 0
-                  : Date.now() - lastStreamResult.contentStreamingStartTime,
-                cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
-              })
+              console.log(
+                lastStreamResult.cadenceProgressViolation
+                  ? '[AgentDiagnostics] Discarded cadence-contract-invalid model-turn emissions'
+                  : rejectedHandoffEmission
+                    ? '[AgentDiagnostics] Held back an unaccepted personalized handoff'
+                    : '[AgentDiagnostics] Released billed model-turn emissions',
+                {
+                  iteration: state.iterations,
+                  usageDebitMs: Date.now() - usageDebitStartedAt,
+                  firstContentHeldMs: lastStreamResult.contentStreamingStartTime === null
+                    ? 0
+                    : Date.now() - lastStreamResult.contentStreamingStartTime,
+                  cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
+                  rejectedHandoffEmission,
+                },
+              )
               pendingPaidTurnProgress = {
                 iteration: state.iterations,
                 stepIdxBefore: modelTurnStartStepIdx,
                 visibleText: !lastStreamResult.cadenceProgressViolation &&
+                  !rejectedHandoffEmission &&
                   lastStreamResult.assistantContent.trim().length > 0,
                 acceptedToolCall: false,
-                ...(lastStreamResult.cadenceProgressViolation
+                ...(lastStreamResult.cadenceProgressViolation || rejectedHandoffEmission
                   ? { internalRecoveryScheduled: 'display_contract' as const }
                   : {}),
               }
@@ -4802,6 +4902,64 @@ export class AgentLoop {
             }
 
             updatePhase(state)
+
+            if (
+              state.finalDeliverableHandoffPending &&
+              lastStreamResult.toolCalls.size === 0
+            ) {
+              const handoffText = lastStreamResult.assistantContent.trim()
+              state.finalDeliverableHandoffAttempts += 1
+
+              if (shouldAcceptFinalDeliverableHandoff(handoffText, state.finalDeliverableHandoffAttempts)) {
+                const stepBeforeComplete = state.currentStepIdx
+                contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                state.finalDeliverableHandoffPending = null
+                if (state.currentPlanItems) {
+                  state.currentStepIdx = state.currentPlanItems.length
+                }
+                state.lastIterationEnd = Date.now()
+                terminalReason = 'deliverable_handoff_complete'
+                for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+                }
+                console.log('[AgentDiagnostics] Personalized deliverable handoff accepted', {
+                  iteration: state.iterations,
+                  chars: handoffText.length,
+                  step: stepBeforeComplete,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  attempts: state.finalDeliverableHandoffAttempts,
+                })
+                phase = 'COMPLETE'
+                break
+              }
+
+              if (state.finalDeliverableHandoffAttempts < 2) {
+                if (handoffText) {
+                  contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+                }
+                contextManager.push({
+                  role: 'system',
+                  content: 'The previous personalized handoff was too short, generic, or unfinished. Give the concise, task-specific final response immediately in this turn.',
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+
+              // Never turn a successfully completed artifact into a failed task
+              // solely because the optional handoff prose failed to stream.
+              const stepBeforeComplete = state.currentStepIdx
+              state.finalDeliverableHandoffPending = null
+              if (state.currentPlanItems) {
+                state.currentStepIdx = state.currentPlanItems.length
+              }
+              terminalReason = 'deliverable_handoff_fallback'
+              for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+              }
+              phase = 'COMPLETE'
+              break
+            }
 
             if (
               processedCompactNarrationTurn &&
@@ -5380,13 +5538,15 @@ export class AgentLoop {
             )
 
             if (isLastStep && imageDeliverableCreated && imageDeliverableRequested) {
-              state.currentStepIdx = state.currentPlanItems!.length
-              log.info('Image artifact created on last step — terminating')
-              terminalReason = 'image_deliverable_created'
-              for (let i = stepIdxBeforeExec; i < state.currentStepIdx; i++) {
-                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-              }
-              phase = 'COMPLETE'
+              const imageResult = lastToolResults.find(result => {
+                if (result.tc.name !== 'image_search' || result.isError) return false
+                return ((result.result as { downloaded?: string[] })?.downloaded?.length || 0) > 0
+              })
+              const imagePath = (imageResult?.result as { downloaded?: string[] } | undefined)?.downloaded?.[0] || 'the generated image'
+              scheduleFinalDeliverableHandoff(state, imagePath, 'image')
+              state.lastIterationEnd = Date.now()
+              log.info('Image artifact created on last step — requesting personalized final handoff')
+              phase = 'STREAMING'
               break
             }
 
@@ -5425,13 +5585,10 @@ export class AgentLoop {
                       state.partialFileWriteRecoveryNudged = false
                       state.deliverableVerificationDone = true
                       state.pendingDeliverableRevision = null
-                      state.currentStepIdx = state.currentPlanItems!.length
-                      terminalReason = 'deliverable_created'
-                      for (let i = stepIdxBeforeExec; i < state.currentStepIdx; i++) {
-                        this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-                      }
-                      log.info('Recovered deliverable passed whole-file verification at append recovery limit')
-                      phase = 'COMPLETE'
+                      scheduleFinalDeliverableHandoff(state, path, 'file')
+                      state.lastIterationEnd = Date.now()
+                      log.info('Recovered deliverable passed whole-file verification — requesting personalized final handoff')
+                      phase = 'STREAMING'
                       break
                     }
 
@@ -5543,7 +5700,7 @@ export class AgentLoop {
                       if (websiteProblems.structureIssues.length > 0) {
                         contextManager.push({
                           role: 'system',
-                          content: `NEXT.JS WEBSITE COMPLETENESS REQUIRED: Before finishing, fix these structure/style issues: ${websiteProblems.structureIssues.join(' ')} The site may still be one page, but it must be a real composed website with app/page.tsx, app/layout.tsx importing './globals.css', app/globals.css, imported component files, substantive styling, and a successful local visual check.`,
+                          content: `NEXT.JS WEBSITE COMPLETENESS REQUIRED: Before finishing, fix these structure/style issues: ${websiteProblems.structureIssues.join(' ')} The site may be one cohesive page, but it must include app/page.tsx, app/layout.tsx importing './globals.css', substantive app/globals.css, and a successful local visual check. Add reusable components only when they improve the architecture; do not create redundant header/navigation variants.`,
                         } as ChatMessageParam)
                         phase = 'EVALUATING'
                         break
@@ -5668,19 +5825,21 @@ export class AgentLoop {
               }
               state.deliverableVerificationDone = true
               state.pendingDeliverableRevision = null
-              state.currentStepIdx = state.currentPlanItems!.length
-              log.info('Deliverable file created on last step — terminating')
-              terminalReason = 'deliverable_created'
-              for (let i = stepIdxBeforeExec; i < state.currentStepIdx; i++) {
-                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-              }
-              phase = 'COMPLETE'
+              const finalPath = deliverableResult
+                ? toolResultPath(deliverableResult) || latestSavedFinalDeliverablePath(state) || 'the completed deliverable'
+                : latestSavedFinalDeliverablePath(state) || 'the completed deliverable'
+              scheduleFinalDeliverableHandoff(state, finalPath, 'file')
+              state.lastIterationEnd = Date.now()
+              log.info('Deliverable file created on last step — requesting personalized final handoff')
+              phase = 'STREAMING'
               break
             }
 
-            // Non-last step non-note file creation → force advance.
+            // Non-last website build mutations → force advance as soon as the
+            // runnable file set is complete. Integration edits are just as
+            // meaningful as first-time creates.
             const nonNoteFileCreated = lastToolResults.some(r => {
-              if (r.tc.name !== 'create_file' || r.isError) return false
+              if (!['create_file', 'append_file', 'edit_file'].includes(r.tc.name) || r.isError) return false
               try {
                 const parsed = JSON.parse(r.tc.arguments) as { path?: string }
                 const p = String(parsed?.path || '')
@@ -6081,11 +6240,13 @@ export class AgentLoop {
 
         if (phase !== 'COMPLETE') break
 
-        const websiteBlocker = await getNextWebsiteCompletionBlocker(
-          conversationId,
-          state,
-          messages[messages.length - 1]?.content || '',
-        )
+        const websiteBlocker = NON_REOPENABLE_WEBSITE_TERMINAL_REASONS.has(terminalReason)
+          ? null
+          : await getNextWebsiteCompletionBlocker(
+              conversationId,
+              state,
+              messages[messages.length - 1]?.content || '',
+            )
         if (websiteBlocker) {
           if (state.iterations >= state.dynamicIterationLimit) {
             state.lastModelErrorForUser = `Website build did not complete. ${websiteBlocker}`
@@ -6126,6 +6287,8 @@ export class AgentLoop {
           state.forcedNarrationRepairAttempts = 0
           state.finalInlineAnswerDelivered = false
           state.finalInlineAnswerRecoveryAttempts = 0
+          state.finalDeliverableHandoffPending = null
+          state.finalDeliverableHandoffAttempts = 0
           state.consecutiveNoToolCalls = 0
           state.deliverableVerificationDone = false
           if (state.currentPlanItems?.length && state.currentStepIdx >= state.currentPlanItems.length) {
@@ -6499,6 +6662,14 @@ export class AgentLoop {
           content: 'LIVE EVIDENCE REQUIRED BEFORE WRITING: The requested saved research output does not yet have usable source-page evidence from this run. Choose the most direct research action now. Select a concrete source URL before calling a source reader, do not reopen an already extracted source, and do not create or revise the deliverable until evidence exists.',
         } as ChatMessageParam,
       ]
+    } else if (state.finalDeliverableHandoffPending) {
+      requestMessages = [
+        ...requestMessages,
+        {
+          role: 'system',
+          content: finalDeliverableHandoffPrompt(state),
+        } as ChatMessageParam,
+      ]
     } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
       requestMessages = [
         ...requestMessages,
@@ -6556,7 +6727,7 @@ export class AgentLoop {
 
         let activeTools: ToolDefinitionLike[]
         const isPostCompletion = state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length
-        if (isPostCompletion) {
+        if (isPostCompletion || state.finalDeliverableHandoffPending) {
           activeTools = []
         } else if (state.exactExtractionGuardPending) {
           activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
@@ -6742,26 +6913,33 @@ export class AgentLoop {
         if (state.fileWriteRepairPending && !partialFileContinuationNeedsTool) {
           const pending = state.fileWriteRepairPending
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = activeTools.filter(tool => tool.function?.name !== 'create_file')
+          const codeLikeTarget = /\.(?:[cm]?[jt]sx?|css|scss|sass|less|vue|svelte|astro|json|ya?ml|toml|xml|html?)$/i.test(pending.path)
+          const allowedRepairTools = !pending.inspected
+            ? new Set(['read_file'])
+            : codeLikeTarget
+              ? new Set(['edit_file'])
+              : new Set(['edit_file', 'append_file'])
+          activeTools = activeTools.filter(tool => allowedRepairTools.has(tool.function?.name || ''))
           requestMessages = [
             ...requestMessages,
             {
               role: 'system',
               content: [
-                `FILE REVISION REQUIRED: "${pending.path}" is already present in the workspace.`,
-                pending.reason === 'stale_edit'
-                  ? 'The previous targeted edit used stale text. Inspect the current file with read_file, then author an exact edit_file call.'
-                  : pending.reason === 'ambiguous_write'
-                    ? 'A sandbox lifecycle transition made the prior write result uncertain. Inspect the current file with read_file before changing it.'
-                    : 'Continue the existing file with edit_file or append_file; inspect it first with read_file when exact current text is needed.',
-                'Do not create a replacement or duplicate file. Choose and author the appropriate native tool call yourself.',
+                `FILE REVISION REQUIRED: "${pending.path}" has an unresolved write conflict.`,
+                !pending.inspected
+                  ? 'Read that exact file now. No unrelated tool or replacement file is allowed until its current contents are refreshed.'
+                  : codeLikeTarget
+                    ? 'The current contents are refreshed. Make one exact edit_file repair now; never append a second code module.'
+                    : 'The current contents are refreshed. Make one exact edit_file repair, or append only the genuinely missing prose continuation.',
+                'Do not create a replacement or duplicate file. If no repair is needed for the current phase, emit <next_step/> without another tool call.',
               ].join(' '),
             } as ChatMessageParam,
           ]
-          console.log('[AgentDiagnostics] Suppressed create_file during file repair', {
+          console.log('[AgentDiagnostics] Narrowed tools during exact-path file repair', {
             step: state.currentStepIdx,
             path: pending.path,
             reason: pending.reason,
+            inspected: pending.inspected,
             beforeTools,
             afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
           })
@@ -7511,6 +7689,39 @@ export class AgentLoop {
 
     // Nudgeable timeout
     if (isNudgeableTimeout(error)) {
+      if (state.finalDeliverableHandoffPending) {
+        const partialContent = (error.partialContent || '').trim()
+        state.finalDeliverableHandoffAttempts += 1
+        if (shouldAcceptFinalDeliverableHandoff(partialContent, state.finalDeliverableHandoffAttempts)) {
+          const stepBeforeComplete = state.currentStepIdx
+          this.emitter.textDelta(partialContent)
+          contextManager.push({ role: 'assistant', content: partialContent } as ChatMessageParam)
+          state.finalDeliverableHandoffPending = null
+          if (state.currentPlanItems) state.currentStepIdx = state.currentPlanItems.length
+          state.lastIterationEnd = Date.now()
+          for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+            this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+          }
+          return 'COMPLETE'
+        }
+        if (state.finalDeliverableHandoffAttempts < 2) {
+          contextManager.push({
+            role: 'system',
+            content: 'The previous personalized handoff stalled. Give the concise, task-specific final response immediately.',
+          } as ChatMessageParam)
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+          state.lastIterationEnd = Date.now()
+          return 'STREAMING'
+        }
+        const stepBeforeComplete = state.currentStepIdx
+        state.finalDeliverableHandoffPending = null
+        if (state.currentPlanItems) state.currentStepIdx = state.currentPlanItems.length
+        for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+          this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+        }
+        return 'COMPLETE'
+      }
+
       if (finalInlineAnswerTurn(state, this.options.messages)) {
         const partialContent = error.partialContent || ''
         if (shouldCompleteFinalInlineAnswerTurn(state, this.options.messages, partialContent)) {

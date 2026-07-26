@@ -5,7 +5,7 @@ import { createRequire } from 'module'
 import { dirname, join, relative, isAbsolute, basename, posix } from 'path'
 import type { FileResult } from '@/types'
 import { getTursoSetupStatus, tursoExecute, tursoTransaction } from '@/lib/db/turso'
-import { trimReplayedAppendOverlap } from './fileAppend'
+import { markdownAppendStructureConflict, trimReplayedAppendOverlap } from './fileAppend'
 
 const require = createRequire(import.meta.url)
 const { Sandbox } = require('e2b') as typeof import('e2b')
@@ -1710,6 +1710,16 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
       action: 'appended',
       path: target.relativePath,
       size: Buffer.byteLength(existing, 'utf8'),
+    }
+  }
+  if (/\.md(?:own)?$/i.test(target.relativePath)) {
+    const structureConflict = markdownAppendStructureConflict(existing, appendContent)
+    if (structureConflict) {
+      return {
+        action: 'appended',
+        path: target.relativePath,
+        error: `INTERNAL_RECOVERY: append_file was blocked because it would corrupt the Markdown report structure: ${structureConflict}. Read the existing report and use edit_file to merge, replace, or reorder the existing section instead. Do not append another title or repeated section.`,
+      }
     }
   }
   const root = workspaceRoot(conversationId)

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict'
 import { rm } from 'node:fs/promises'
 import { createFileInSandbox, getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
 import { buildLocalWebsiteLaunch, stopLocalWebsiteServer } from ${JSON.stringify(join(root, 'src/lib/localWebsiteServer.ts'))}
-import { browserActionPreflight, browserFindText, browserGetContent, browserNavigate, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
+import { browserActionPreflight, browserFindText, browserGetContent, browserNavigate, browserScreenshot, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
@@ -73,6 +73,12 @@ export async function runSmoke() {
     assert.equal(abbreviated.success, false, 'visually truncated URLs must never be opened')
     assert.match(String(abbreviated.error), /abbreviated or truncated/)
 
+    const blankScreenshot = await browserScreenshot(conversationId)
+    assert.equal(blankScreenshot.success, false, 'about:blank must not look like successful screenshot evidence')
+    assert.equal(blankScreenshot.recoverable, true)
+    assert.match(String(blankScreenshot.error), /blank and has no meaningful content/)
+    assert.equal(blankScreenshot.screenshotPath, undefined, 'blank screenshots must not be persisted')
+
     const blankContent = await browserGetContent(conversationId)
     assert.equal(blankContent.success, false, 'about:blank must not look like successful page evidence')
     assert.match(String(blankContent.error), /blank and has no content/)
@@ -107,6 +113,9 @@ export async function runSmoke() {
 
     const nav = await browserNavigate(conversationId, launch.url)
     assert.equal(nav.success, true, 'expected normal page navigation to succeed')
+    const renderedScreenshot = await browserScreenshot(conversationId)
+    assert.equal(renderedScreenshot.success, true, 'a rendered page must still produce screenshot evidence')
+    assert.ok(renderedScreenshot.screenshotPath, 'rendered screenshot must be persisted')
     const snapshot = await browserActionPreflight(conversationId)
     const add = snapshot.elements.find(element => /add to cart/i.test(element.label + ' ' + element.primary))
     const menu = snapshot.elements.find(element => /open menu/i.test(element.label + ' ' + element.primary))

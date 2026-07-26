@@ -111,13 +111,23 @@ assert.match(
 )
 assert.match(
   agentStateSource,
-  /fileWriteRepairPending: \{ path: string; reason:/,
+  /fileWriteRepairPending:\s*\{\s*path: string\s*reason:[\s\S]*inspected: boolean/,
   'file write repair state must survive between paid model turns',
 )
 assert.match(
   agentLoopSource,
-  /Suppressed create_file during file repair/,
-  'a duplicate or stale file write must remove create_file from the repair turn',
+  /Narrowed tools during exact-path file repair/,
+  'a duplicate or stale file write must narrow the repair turn to the exact recovery action',
+)
+assert.match(
+  toolPipelineSource,
+  /!pending\.inspected[\s\S]*toolName === 'read_file' && exactTarget/,
+  'a file write conflict must first force one exact read',
+)
+assert.match(
+  toolPipelineSource,
+  /isCodeLikeFilePath\(pending\.path\)[\s\S]*new Set\(\['edit_file'\]\)/,
+  'an inspected code-file conflict must then narrow recovery to one exact edit',
 )
 assert.match(
   toolPipelineSource,
@@ -126,8 +136,8 @@ assert.match(
 )
 assert.match(
   toolPipelineSource,
-  /if \(state\.nextWebsitePreviewDone\) return result/,
-  'a live website preview must remain open instead of relaunching after every file write',
+  /if \(state\.nextWebsitePreviewDone\) \{\s*state\.nextWebsitePreviewDone = false[\s\S]*Preview is stale after a newer website file change/,
+  'a one-shot website preview must become stale after a newer frontend write',
 )
 assert.match(
   toolPipelineSource,
@@ -143,5 +153,5 @@ console.log(JSON.stringify({
   advisoryUsageCheckpoints: true,
   exactUrlRouting: true,
   fileWriteReconciliation: true,
-  stableLivePreview: true,
+  freshLivePreview: true,
 }, null, 2))

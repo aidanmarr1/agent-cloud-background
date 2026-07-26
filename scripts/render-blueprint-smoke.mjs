@@ -154,6 +154,7 @@ for (const service of [web, worker]) {
 
 requireSecret(web, 'AGENT_INTERNAL_HEALTH_SECRET')
 requireValue(worker, 'AGENT_TASK_WORKER_ID', 'render-worker-1')
+requireValue(worker, 'AGENT_TASK_WORKER_CONCURRENCY', '2')
 requireValue(worker, 'AGENT_TASK_WORKER_POLL_MS', '100')
 requireValue(worker, 'AGENT_E2B_VERIFY_ON_WORKER_STARTUP', 'true')
 requireValue(worker, 'AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP', 'true')

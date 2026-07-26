@@ -137,6 +137,8 @@ services:
         value: production
       - key: AGENT_TASK_WORKER_ID
         value: render-worker-1
+      - key: AGENT_TASK_WORKER_CONCURRENCY
+        value: "2"
       - key: AGENT_TASK_WORKER_POLL_MS
         value: "100"
       - key: AGENT_TASK_WORKER_HEARTBEAT_MS

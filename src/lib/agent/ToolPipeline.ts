@@ -431,6 +431,10 @@ function currentStepAllowsTaskTrackingMarkdown(state: AgentStateData, filePath: 
   return /\b(?:todo\.md|to-do\.md|tracking file|task tracking|progress file|checklist\.md|plan\.md)\b/i.test(stepText)
 }
 
+function isCodeLikeFilePath(filePath: string): boolean {
+  return /\.(?:[cm]?[jt]sx?|css|scss|sass|less|vue|svelte|astro|json|ya?ml|toml|xml|html?)$/i.test(filePath)
+}
+
 function fileWritePreflightBlockReason(
   toolName: string,
   args: Record<string, unknown>,
@@ -438,6 +442,35 @@ function fileWritePreflightBlockReason(
 ): string | null {
   if (FILE_WRITE_TOOLS.has(toolName) && state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length) {
     return 'BLOCKED: All steps are complete. Do NOT create or edit any more files. Write a brief final summary for the user, then STOP.'
+  }
+
+  if (state.fileWriteRepairPending) {
+    const pending = state.fileWriteRepairPending
+    const rawPath = typeof args.path === 'string'
+      ? args.path
+      : typeof args.source === 'string'
+        ? args.source
+        : ''
+    const requestedPath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
+    const exactTarget = requestedPath === pending.path
+
+    if (!pending.inspected) {
+      if (!(toolName === 'read_file' && exactTarget)) {
+        state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+        return `INTERNAL_RECOVERY: "${pending.path}" has an unresolved file-write conflict. Inspect that exact file once with read_file before any other action. Do not call ${toolName}${requestedPath ? ` on "${requestedPath}"` : ''}, do not create a replacement, and do not continue unrelated work yet.`
+      }
+    } else {
+      const allowedRepairTools = isCodeLikeFilePath(pending.path)
+        ? new Set(['edit_file'])
+        : new Set(['edit_file', 'append_file'])
+      if (!allowedRepairTools.has(toolName) || !exactTarget) {
+        state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+        const allowed = isCodeLikeFilePath(pending.path)
+          ? 'one exact edit_file call'
+          : 'one exact edit_file or append_file call'
+        return `INTERNAL_RECOVERY: "${pending.path}" was inspected and now requires ${allowed} against that same path. Do not call ${toolName}${requestedPath ? ` on "${requestedPath}"` : ''}, do not append a second code module, and do not create a replacement.`
+      }
+    }
   }
 
   if (state.partialFileWriteRecoveryPending && FILE_WRITE_TOOLS.has(toolName)) {
@@ -1024,6 +1057,17 @@ function isManagedLocalBrowserUrl(rawUrl: unknown): boolean {
   }
 }
 
+function browserUrlMatchesExpectedPreview(rawUrl: unknown, expectedUrl: string | null): boolean {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim() || !expectedUrl) return false
+  try {
+    const actual = new URL(rawUrl)
+    const expected = new URL(expectedUrl)
+    return actual.origin === expected.origin && actual.pathname === expected.pathname
+  } catch {
+    return false
+  }
+}
+
 function sourceDomainFromUrl(rawUrl: unknown): string | null {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) return null
   try {
@@ -1281,6 +1325,11 @@ function userRequestedMarkdownDeliverable(state: AgentStateData, filePath: strin
 function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', explicitDeliverable = false): WorkLedgerArtifactPurpose {
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return 'deliverable'
   if (explicitDeliverable || isCurrentPlanDeliverableStep(state)) return 'deliverable'
+  if (
+    (state.taskStrategy === 'build' || state.taskStrategy === 'code') &&
+    filePath &&
+    !isSupportOnlyFilePath(filePath)
+  ) return 'deliverable'
   if (userRequestedMarkdownDeliverable(state, filePath)) return 'support'
   return 'support'
 }
@@ -1288,7 +1337,6 @@ function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', exp
 function maybeSatisfyWebsiteStructureRequirement(state: AgentStateData): void {
   const files = [...state.createdFiles].map(path => path.toLowerCase())
   const hasNextStructure =
-    files.some(path => /(?:^|\/)package\.json$/.test(path)) &&
     files.some(path => /(?:^|\/)(?:app\/)?layout\.(?:tsx|jsx)$/.test(path)) &&
     files.some(path => /(?:^|\/)(?:app\/)?page\.(?:tsx|jsx)$/.test(path)) &&
     files.some(path => /(?:^|\/)(?:app\/)?globals\.css$/.test(path) || path.endsWith('.css'))
@@ -2844,7 +2892,9 @@ export class ToolPipeline {
     }
     await this.ensureDurableBrowserScreenshot(browserResultWithServer)
     state.websiteBrowserCheckDone = !!browserResult.success
-    state.websiteResponsiveCheckDone = !!browserResult.success
+    // Automatic opening proves the page renders. Keep the explicit visual-QA
+    // requirement pending until a later screenshot/scroll inspects that render.
+    state.websiteResponsiveCheckDone = false
     logWork(state, `${browserResult.success ? 'Opened local website server for' : 'Failed local website server check for'} ${filePath}${browserResult.error ? `: ${browserResult.error}` : ''}`)
     recordWorkLedgerVisualObservation(state, {
       tool: 'browser_navigate',
@@ -2901,10 +2951,18 @@ export class ToolPipeline {
     if (!this.conversationId || !filePath || !isNextWebsiteProjectPath(filePath) || hasToolError(result)) {
       return result
     }
-    // A successfully opened preview is already a live browser session; later
-    // file writes update that session through the dev server and must not
-    // repeatedly tear down/reopen the Computer frame.
-    if (state.nextWebsitePreviewDone) return result
+    // The TSX preview is a one-shot esbuild bundle, not a watch server. Any
+    // later frontend write makes the prior browser frame stale. Rebuild only
+    // when visual QA is requested so component-heavy builds do not relaunch on
+    // every small write.
+    if (state.nextWebsitePreviewDone) {
+      state.nextWebsitePreviewDone = false
+      state.websiteBrowserCheckDone = false
+      state.websiteResponsiveCheckDone = false
+      state.nextWebsitePreviewError = 'Preview is stale after a newer website file change.'
+      logWork(state, `Marked TSX website preview stale after writing ${filePath}`)
+      return result
+    }
 
     // If the initial launch failed, do not retry it after every component
     // write. A repair to one of the app entry files is the meaningful signal
@@ -3037,10 +3095,10 @@ export class ToolPipeline {
     await this.ensureDurableBrowserScreenshot(browserResultWithPreview)
 
     state.nextWebsitePreviewDone = !!browserResult.success
-    state.nextWebsitePreviewUrl = launch.url
+    state.nextWebsitePreviewUrl = browserResult.success ? launch.url : null
     state.nextWebsitePreviewError = browserResult.success ? null : browserResult.error || 'Browser preview failed'
     state.websiteBrowserCheckDone = !!browserResult.success
-    state.websiteResponsiveCheckDone = !!browserResult.success
+    state.websiteResponsiveCheckDone = false
     logWork(state, `${browserResult.success ? 'Opened TSX website preview for' : 'Failed TSX website browser check for'} ${status.appDir}/page.tsx${browserResult.error ? `: ${browserResult.error}` : ''}`)
     recordWorkLedgerVisualObservation(state, {
       tool: 'browser_navigate',
@@ -3076,14 +3134,14 @@ export class ToolPipeline {
       return {
         ...(result as Record<string, unknown>),
         nextWebsitePreview: cleanBrowserResult,
-        nextWebsitePreviewUrl: launch.url,
+        ...(browserResult.success ? { nextWebsitePreviewUrl: launch.url } : {}),
         screenshotBase64: browserResult.screenshotBase64,
       }
     }
     return {
       result,
       nextWebsitePreview: cleanBrowserResult,
-      nextWebsitePreviewUrl: launch.url,
+      ...(browserResult.success ? { nextWebsitePreviewUrl: launch.url } : {}),
       screenshotBase64: browserResult.screenshotBase64,
     }
   }
@@ -4152,6 +4210,49 @@ export class ToolPipeline {
       return preflightResult(errorResult, true, 'research_source_balance')
     }
 
+    if (state.fileWriteRepairPending) {
+      const repairReason = fileWritePreflightBlockReason(tc.name, args, state)
+      if (repairReason) {
+        const errorResult = { error: repairReason }
+        recordWorkLedgerFailure(state, {
+          tool: tc.name,
+          target: toolTargetFromArgs(args),
+          error: repairReason,
+        })
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.stepFailureCount++
+        return preflightResult(errorResult)
+      }
+    }
+
+    if (
+      (tc.name === 'browser_screenshot' || tc.name === 'browser_scroll') &&
+      state.nextWebsitePreviewAttempted &&
+      !state.nextWebsitePreviewDone &&
+      state.websiteBrowserCheckPath
+    ) {
+      await this.maybeLaunchNextWebsiteAfterWrite(
+        `${tc.id}_refresh`,
+        state.websiteBrowserCheckPath,
+        { action: 'Refresh the latest TSX website preview before visual QA' },
+        state,
+      )
+      if (!state.nextWebsitePreviewDone) {
+        const error = `INTERNAL_RECOVERY: The latest TSX website preview could not be rebuilt before ${tc.name}.${state.nextWebsitePreviewError ? ` ${state.nextWebsitePreviewError}` : ''} Repair the frontend file named in the build error, then retry the visual check.`
+        const errorResult = { error }
+        recordWorkLedgerFailure(state, {
+          tool: tc.name,
+          target: state.websiteBrowserCheckPath,
+          error,
+        })
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.stepFailureCount++
+        return preflightResult(errorResult)
+      }
+    }
+
     const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
     if (browserPreflightBlock) return browserPreflightBlock
 
@@ -4297,6 +4398,24 @@ export class ToolPipeline {
       },
     }
 
+    const recordBlockedCreateAttempt = (filePath: string, errorResult: { error: string }): ToolExecutionResult => {
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.stepToolTypeCounts.set(tc.name, (state.stepToolTypeCounts.get(tc.name) || 0) + 1)
+      state.stepFailureCount++
+      if (filePath) trackFileCreate(state, filePath)
+      updateToolHealth(state, tc.name, false)
+      trackFailure(state, tc.name, errorResult.error)
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: filePath,
+        error: errorResult.error,
+      })
+      this.memory?.recordFailure(tc.name, errorResult.error, state.currentStepIdx)
+      this.emitter.toolResult(tc.id, tc.name, errorResult as never)
+      return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+    }
+
     // Block same-file rewrites AND semantically similar filenames
     if (tc.name === 'create_file') {
       const filePath = args.path as string
@@ -4307,28 +4426,24 @@ export class ToolPipeline {
         : null
       if (filePath && pendingPartial) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
-        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
         const errorResult = {
           error: `"${filePath}" already has a recovered partial write (${pendingPartial.lines} lines, ${pendingPartial.chars} chars). Do NOT recreate or overwrite it. Use append_file to continue from the saved content, or edit_file only for a targeted replacement.`,
         }
-        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return recordBlockedCreateAttempt(filePath, errorResult)
       }
       // Allow overwriting on the deliverable step — the final output supersedes research notes.
       // On other steps, block rewrites after 1st create.
       if (filePath && priorCreates >= 1 && !isDeliverableStep) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
-        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
+        state.fileWriteRepairPending = { path: normalizeSandboxFilePath(filePath), reason: 'already_exists', inspected: false }
         const errorResult = { error: `"${filePath}" already exists. Use append_file to continue writing it or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue working.` }
-        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return recordBlockedCreateAttempt(filePath, errorResult)
       }
       // On deliverable step, block after 2 creates (prevent genuine loops even on last step)
       if (filePath && priorCreates >= 2 && isDeliverableStep) {
-        state.fileWriteRepairPending = { path: filePath, reason: 'already_exists' }
+        state.fileWriteRepairPending = { path: normalizeSandboxFilePath(filePath), reason: 'already_exists', inspected: false }
         const errorResult = { error: `"${filePath}" has been created twice already. Use append_file for additional sections or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue.` }
-        this.emitter.toolResult(tc.id, tc.name, errorResult as never)
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return recordBlockedCreateAttempt(filePath, errorResult)
       }
 
       // Semantic dedup: check if a file with a similar name was already created
@@ -4342,10 +4457,9 @@ export class ToolPipeline {
             const overlap = newTokens.filter(t => existingTokens.includes(t)).length
             const similarity = overlap / Math.max(newTokens.length, existingTokens.length)
             if (similarity >= 0.9) { // Only block near-exact dupes (e.g. report.md vs report-v2.md)
-              state.fileWriteRepairPending = { path: existing, reason: 'already_exists' }
+              state.fileWriteRepairPending = { path: normalizeSandboxFilePath(existing), reason: 'already_exists', inspected: false }
               const errorResult = { error: `A file with a very similar name "${existing}" already exists. Use append_file to continue "${existing}" or edit_file for targeted replacements instead of creating a near-duplicate file. Do NOT tell the user about this error — just switch tools and continue working.` }
-              this.emitter.toolResult(tc.id, tc.name, errorResult as never)
-              return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+              return recordBlockedCreateAttempt(existing, errorResult)
             }
           }
         }
@@ -4568,10 +4682,10 @@ export class ToolPipeline {
               recoveredAfterLifecycleChange: true,
             }
           } else {
-            state.fileWriteRepairPending = { path, reason: 'ambiguous_write' }
+            state.fileWriteRepairPending = { path: normalizeSandboxFilePath(path), reason: 'ambiguous_write', inspected: false }
           }
         } catch {
-          state.fileWriteRepairPending = { path, reason: 'ambiguous_write' }
+          state.fileWriteRepairPending = { path: normalizeSandboxFilePath(path), reason: 'ambiguous_write', inspected: false }
         }
       }
       const locallyAborted = isRecoverableToolLocalAbort(tc.name, error, this.signal)
@@ -4688,13 +4802,35 @@ export class ToolPipeline {
     // Check if error
     const isError = isToolExecutionErrorResult(tc.name, result)
     if (!isError) trackSuccessfulToolExecution(state, tc.name)
+    if (
+      !isError &&
+      (tc.name === 'browser_screenshot' || tc.name === 'browser_scroll') &&
+      result &&
+      typeof result === 'object'
+    ) {
+      const browserResult = result as BrowserActionResult
+      const url = browserResult.url || ''
+      const expectedNextPreview = browserUrlMatchesExpectedPreview(url, state.nextWebsitePreviewUrl)
+      const managedPreview = expectedNextPreview || isManagedLocalBrowserUrl(url)
+      const nonBlankFrame =
+        !/^about:blank(?:$|[?#])/i.test(url) &&
+        typeof browserResult.screenshotBase64 === 'string' &&
+        browserResult.screenshotBase64.length > 0
+      if (managedPreview && nonBlankFrame && state.websiteBrowserCheckDone) {
+        state.websiteResponsiveCheckDone = true
+        recordWorkLedgerVerification(state, {
+          kind: 'fixed-viewport-preview',
+          detail: `Inspected the latest website preview at ${url} with ${tc.name} after the final frontend changes.`,
+        })
+      }
+    }
     if (isError && (tc.name === 'create_file' || tc.name === 'edit_file')) {
       const path = typeof args.path === 'string' ? normalizeSandboxFilePath(args.path) : ''
       const errorText = String((result as Record<string, unknown> | null)?.error || '')
       if (path && tc.name === 'create_file' && /already exists|similar name/i.test(errorText)) {
-        state.fileWriteRepairPending = { path, reason: 'already_exists' }
+        state.fileWriteRepairPending = { path, reason: 'already_exists', inspected: false }
       } else if (path && tc.name === 'edit_file' && /old_string|not found|no match|does not match/i.test(errorText)) {
-        state.fileWriteRepairPending = { path, reason: 'stale_edit' }
+        state.fileWriteRepairPending = { path, reason: 'stale_edit', inspected: false }
       }
     }
     const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)
@@ -4846,10 +4982,10 @@ export class ToolPipeline {
           allowedRepeatReason: activityRepeatReason,
         })
       }
-    } else if (tc.name === 'create_file') {
+    } else if (!isError && tc.name === 'create_file') {
       const path = (args.path as string) || ''
       if (path) state.createdFiles.add(path)
-      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
+      if (path && state.fileWriteRepairPending?.path === normalizeSandboxFilePath(path)) state.fileWriteRepairPending = null
       maybeSatisfyWebsiteStructureRequirement(state)
       logWork(state, `Created file: ${path}`)
       if (/^research-notes\//i.test(path) || /research[-_ ]?notes/i.test(path)) {
@@ -4862,10 +4998,10 @@ export class ToolPipeline {
       if (this.memory && path) {
         this.memory.recordFileCreated(path, state.currentStepIdx)
       }
-    } else if (tc.name === 'append_file') {
+    } else if (!isError && tc.name === 'append_file') {
       const path = (args.path as string) || ''
       if (path) state.createdFiles.add(path)
-      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
+      if (path && state.fileWriteRepairPending?.path === normalizeSandboxFilePath(path)) state.fileWriteRepairPending = null
       maybeSatisfyWebsiteStructureRequirement(state)
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
@@ -4882,7 +5018,7 @@ export class ToolPipeline {
       if (this.memory && path) {
         this.memory.recordFileCreated(path, state.currentStepIdx)
       }
-    } else if (tc.name === 'export_pdf') {
+    } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string } | undefined
       const path = pdfResult?.path || (args.output_path as string) || ''
       if (path) state.createdFiles.add(path)
@@ -4904,13 +5040,13 @@ export class ToolPipeline {
           allowedRepeatReason: activityRepeatReason,
         })
       }
-    } else if (tc.name === 'read_file') {
+    } else if (!isError && tc.name === 'read_file') {
       const path = (args.path as string) || (args.source as string) || ''
-      if (path && state.fileWriteRepairPending?.path === path) {
-        // The model has now refreshed its view of the file. Release the
-        // one-turn create suppression so it may continue with other project
-        // files instead of being trapped in a repair-only tool menu.
-        state.fileWriteRepairPending = null
+      const normalizedPath = path ? normalizeSandboxFilePath(path) : ''
+      if (normalizedPath && state.fileWriteRepairPending?.path === normalizedPath) {
+        // Reading is the first half of recovery, not the end of it. Keep the
+        // exact-path lock until a targeted edit/append actually succeeds.
+        state.fileWriteRepairPending.inspected = true
       }
       logWork(state, `Read file: ${path}`)
       satisfyWorkLedgerRequirement(state, 'Input file/document read', [
@@ -4942,9 +5078,9 @@ export class ToolPipeline {
           })
         }
       }
-    } else if (tc.name === 'edit_file') {
+    } else if (!isError && tc.name === 'edit_file') {
       const path = (args.path as string) || ''
-      if (path && state.fileWriteRepairPending?.path === path) state.fileWriteRepairPending = null
+      if (path && state.fileWriteRepairPending?.path === normalizeSandboxFilePath(path)) state.fileWriteRepairPending = null
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
         state.partialFileWriteRecoveryNudged = false
@@ -4956,7 +5092,7 @@ export class ToolPipeline {
       logWork(state, `Edited file: ${(args.path as string) || ''}`)
     }
 
-    if (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'delete_file' || tc.name === 'image_search') {
+    if (!isError && (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'delete_file' || tc.name === 'image_search')) {
       try {
         await this.persistGeneratedTaskFile(tc.name, args, result)
       } catch (error) {
@@ -4994,15 +5130,15 @@ export class ToolPipeline {
     this.emitter.toolResult(tc.id, tc.name, sanitizeToolResultForEvent(tc.name, result) as never)
 
     // Emit/update artifact for deliverable file writes.
-    if ((tc.name === 'create_file' || tc.name === 'append_file') && args.content) {
+    if (!isError && (tc.name === 'create_file' || tc.name === 'append_file') && args.content) {
       await this.emitFileArtifact(tc.id, args, result, state)
       result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
       result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
-    } else if (tc.name === 'edit_file') {
+    } else if (!isError && tc.name === 'edit_file') {
       await this.emitFileArtifact(tc.id, args, result, state)
       result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
       result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
-    } else if (tc.name === 'export_pdf') {
+    } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string; size?: number } | undefined
       if (pdfResult?.path && pdfResult.size !== undefined) {
         await this.emitFileArtifact(tc.id, { path: pdfResult.path, content: '' }, result, state)
@@ -5010,12 +5146,12 @@ export class ToolPipeline {
     }
 
     // Scan for new images after execute_command or run_code
-    if ((tc.name === 'execute_command' || tc.name === 'run_code') && this.conversationId) {
+    if (!isError && (tc.name === 'execute_command' || tc.name === 'run_code') && this.conversationId) {
       await this.scanForNewImages(state)
     }
 
     // Emit artifacts for image_search downloads
-    if (tc.name === 'image_search' && this.conversationId) {
+    if (!isError && tc.name === 'image_search' && this.conversationId) {
       await this.emitImageSearchArtifacts(result, state)
       const downloadResult = result as { downloaded?: string[] }
       for (const imgPath of downloadResult.downloaded || []) {
@@ -5028,17 +5164,17 @@ export class ToolPipeline {
     }
 
     // Track file creates
-    if (tc.name === 'create_file') {
+    if (!isError && tc.name === 'create_file') {
       const filePath = args.path as string
       if (filePath) {
         trackFileCreate(state, filePath)
       }
-    } else if (tc.name === 'append_file') {
+    } else if (!isError && tc.name === 'append_file') {
       const filePath = args.path as string
       if (filePath) {
         state.createdFiles.add(filePath)
       }
-    } else if (tc.name === 'export_pdf') {
+    } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string } | undefined
       if (pdfResult?.path) {
         state.createdFiles.add(pdfResult.path)

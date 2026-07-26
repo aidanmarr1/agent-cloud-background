@@ -114,7 +114,11 @@ export interface AgentStateData {
   partialFileWriteRecoveries: Array<{ path: string; toolName: string; chars: number; lines: number; createdAt: number }>
   partialFileWriteRecoveryPending: { path: string; toolName: string; chars: number; lines: number } | null
   partialFileWriteRecoveryNudged: boolean
-  fileWriteRepairPending: { path: string; reason: 'already_exists' | 'stale_edit' | 'ambiguous_write' } | null
+  fileWriteRepairPending: {
+    path: string
+    reason: 'already_exists' | 'stale_edit' | 'ambiguous_write'
+    inspected: boolean
+  } | null
 
   // Work log — survives context trimming
   workLog: string[]
@@ -254,6 +258,8 @@ export interface AgentStateData {
   deliverableVerificationDone: boolean
   deliverableRevisionCount: number
   pendingDeliverableRevision: { path: string; failures: string[]; suggestions: string[]; createdAt: number } | null
+  finalDeliverableHandoffPending: { path: string; kind: 'file' | 'image' } | null
+  finalDeliverableHandoffAttempts: number
   websiteBrowserCheckAttempted: boolean
   websiteBrowserCheckDone: boolean
   websiteBrowserCheckPath: string | null
@@ -529,6 +535,8 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     deliverableVerificationDone: false,
     deliverableRevisionCount: 0,
     pendingDeliverableRevision: null,
+    finalDeliverableHandoffPending: null,
+    finalDeliverableHandoffAttempts: 0,
     websiteBrowserCheckAttempted: false,
     websiteBrowserCheckDone: false,
     websiteBrowserCheckPath: null,

@@ -5,7 +5,7 @@ import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult,
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useSettingsStore } from '@/store/settings'
-import { cleanThinkingTags, normalizeMarkdownForDisplay, sanitizeNarrationText, stripToolActionNarration } from '@/lib/stream/cleaners'
+import { cleanThinkingTags, normalizeMarkdownForDisplay, sanitizeNarrationText } from '@/lib/stream/cleaners'
 import {
   toolNameToSubtaskType,
   BROWSER_TOOLS,
@@ -119,9 +119,15 @@ function looksLikeDuplicatedSavedReport(text: string, savedFileCount: number): b
   if (savedFileCount <= 0) return false
   const trimmed = text.trim()
   if (!trimmed) return false
-  return trimmed.length > 700 ||
-    /^#{1,6}\s+/m.test(trimmed) ||
-    /\b(?:Executive Summary|References|Conclusion|Research Report|Final Report)\b/i.test(trimmed)
+  const headingCount = trimmed.match(/^#{1,6}\s+/gm)?.length || 0
+  const numberedSectionCount = trimmed.match(/^#{1,6}\s+(?:section\s+)?\d+(?:[.)]|\s|:)/gim)?.length || 0
+
+  // A tailored handoff may legitimately include a few headings and say
+  // "research report." Suppress only content large and structured enough to
+  // be the saved document itself, not a useful Manus-style summary.
+  return trimmed.length > 6_000 ||
+    headingCount >= 8 ||
+    (trimmed.length > 4_000 && numberedSectionCount >= 3)
 }
 
 function capStr(s: string, max: number): string {
@@ -1388,8 +1394,18 @@ export class EventDispatcher {
       useCreditStore.getState().chargeTokens(this.conversationId, usage)
     }
     this.webIde.cleanup(this.conversationId)
-    if (this.flushNarration()) this.pendingNarrationTools = []
-    else {
+    const hasDedicatedFinalHandoff = normalizeMarkdownForDisplay(
+      cleanThinkingTags(this.postLastToolText),
+    ).trim().length > 0
+    if (hasDedicatedFinalHandoff) {
+      // Text after the last tool is rendered once as the main final handoff.
+      // Flushing the same buffer into the last task group would visibly repeat
+      // the model's conclusion immediately above it.
+      this.discardNarrationBuffer()
+      this.clearPendingNarrationTools(true)
+    } else if (this.flushNarration()) {
+      this.pendingNarrationTools = []
+    } else {
       this.discardNarrationBuffer()
       this.clearPendingNarrationTools(true)
     }
@@ -1404,7 +1420,6 @@ export class EventDispatcher {
       // Earlier groups are research steps — any files there are intermediate notes,
       // not deliverables, and should not appear in the final UI.
       const createdFiles: string[] = []
-      let sourceCount = 0
       const lastGroupIdx = this.parsedGroups.length - 1
       for (let gi = 0; gi < this.parsedGroups.length; gi++) {
         const g = this.parsedGroups[gi]
@@ -1413,9 +1428,6 @@ export class EventDispatcher {
             const match = s.label?.match(/(?:Writing|Appending to|Appending|Exporting)[:\s]+(.+?)(?:\s+\(\d+\s+lines?\))?$/i)
             if (match) createdFiles.push(match[1])
             else if (s.filePath) createdFiles.push(s.filePath.split('/').pop() || s.filePath)
-          }
-          if ((s.type === 'search' || s.type === 'browse') && s.status === 'done') {
-            sourceCount++
           }
         }
       }
@@ -1454,24 +1466,18 @@ export class EventDispatcher {
           }
         }
 
-        const fileSentence = uniqueFiles.length === 1
-          ? `The completed file, \`${uniqueFiles[0]}\`, is attached below.`
-          : `The completed files are attached below: ${uniqueFiles.map(fileName => `\`${fileName}\``).join(', ')}.`
-
-        const summaryLines = [
-          topicHint
-            ? `Here’s the completed ${topicHint}.`
-            : 'Here’s the completed deliverable.',
-          sourceCount > 0
-            ? `I grounded it with ${sourceCount} completed search/browse ${sourceCount === 1 ? 'check' : 'checks'}.`
-            : null,
-          fileSentence,
-        ].filter((line): line is string => line !== null)
-
-        summary = summaryLines.join('\n\n')
+        const artifactLabel = uniqueFiles.length === 1
+          ? `\`${uniqueFiles[0]}\``
+          : uniqueFiles.map(fileName => `\`${fileName}\``).join(', ')
+        summary = topicHint
+          ? `I finished ${topicHint}. You can open ${artifactLabel} below.`
+          : `Your requested deliverable is ready in ${artifactLabel} below.`
       }
 
-      const postToolAnswer = normalizeMarkdownForDisplay(stripToolActionNarration(cleanThinkingTags(this.postLastToolText)))
+      // Text after the last tool is the model's dedicated final handoff, not
+      // progress narration. Preserve its usage instructions and Markdown;
+      // narration cleaning can erase valid sentences such as "Use the filter".
+      const postToolAnswer = normalizeMarkdownForDisplay(cleanThinkingTags(this.postLastToolText))
         .replace(/\n{3,}/g, '\n\n')
         .trim()
       const suppressDuplicateReportText = looksLikeDuplicatedSavedReport(postToolAnswer, uniqueFiles.length)

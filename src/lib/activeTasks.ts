@@ -324,15 +324,19 @@ export async function releaseActiveTaskLease(userId: string, runId: string): Pro
   ))
 }
 
-export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveTaskLease | null> {
-  if (!userId) return null
+async function getActiveTaskLease(
+  userId: string,
+  conversationId?: string,
+): Promise<ActiveTaskLease | null> {
+  if (!userId || (conversationId !== undefined && !conversationId)) return null
   const now = nowMs()
   const queueName = taskQueueName()
   const memoryKey = `${queueName}:${userId}`
 
   if (!shouldUseDatabaseActiveTasks()) {
     const lease = activeTaskState.leases.get(memoryKey)
-    return lease && lease.expiresAt > now ? lease : null
+    if (!lease || lease.expiresAt <= now) return null
+    return conversationId && lease.conversationId !== conversationId ? null : lease
   }
 
   await withActiveTaskSchemaRepair(() => tursoExecute(
@@ -343,10 +347,13 @@ export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveT
     `
       select queue_name, user_id, conversation_id, run_id, started_at_ms, updated_at_ms, expires_at_ms
       from user_active_task_leases
-      where queue_name = ? and user_id = ? and expires_at_ms > ?
+      where queue_name = ?
+        and user_id = ?
+        ${conversationId ? 'and conversation_id = ?' : ''}
+        and expires_at_ms > ?
       limit 1
     `,
-    [queueName, userId, now],
+    conversationId ? [queueName, userId, conversationId, now] : [queueName, userId, now],
   ))
   const lease = rowToLease(rows.rows[0] as ActiveTaskRow | undefined)
   if (!lease) return null
@@ -358,6 +365,17 @@ export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveT
 
   await releaseActiveTaskLease(lease.userId, lease.runId)
   return null
+}
+
+export async function getActiveTaskLeaseForConversation(
+  userId: string,
+  conversationId: string,
+): Promise<ActiveTaskLease | null> {
+  return getActiveTaskLease(userId, conversationId)
+}
+
+export async function getActiveTaskLeaseForUser(userId: string): Promise<ActiveTaskLease | null> {
+  return getActiveTaskLease(userId)
 }
 
 export function clearActiveTaskLeasesForTest(): void {

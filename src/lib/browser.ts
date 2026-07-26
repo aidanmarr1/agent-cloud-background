@@ -5044,11 +5044,45 @@ export async function browserScreenshot(
   try {
     const session = await getOrCreateSession(conversationId)
     const title = await session.page.title()
+    const finalUrl = session.page.url()
+    const pageEvidence = await session.page.evaluate(() => {
+      const body = document.body
+      if (!body) return { text: '', hasVisibleSurface: false }
+      const text = (body.innerText || '').trim()
+      const candidates = Array.from(body.querySelectorAll<HTMLElement>(
+        'img[src], svg, canvas, video, iframe, input, textarea, select, button, [role="progressbar"], [aria-label]',
+      ))
+      const hasVisibleSurface = candidates.some((element) => {
+        const style = window.getComputedStyle(element)
+        const rect = element.getBoundingClientRect()
+        return (
+          style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity || '1') > 0
+          && rect.width > 1
+          && rect.height > 1
+        )
+      })
+      return { text, hasVisibleSurface }
+    }).catch(() => ({ text: '', hasVisibleSurface: false }))
+
+    if (finalUrl === 'about:blank' || (!pageEvidence.text && !pageEvidence.hasVisibleSurface)) {
+      return {
+        success: false,
+        recoverable: true,
+        url: finalUrl,
+        title,
+        error: 'The current browser page is blank and has no meaningful content to capture.',
+        content: 'INTERNAL_RECOVERY: No rendered webpage is currently available. Navigate to the latest complete preview URL and wait for it to render before taking a screenshot.',
+        action: 'Skipped screenshot of blank page',
+      }
+    }
+
     const { screenshotPath, screenshotUrl, screenshotBase64, interactiveElements } = await captureFrame(session, { fullPage })
 
     return {
       success: true,
-      url: session.page.url(),
+      url: finalUrl,
       title,
       screenshotPath,
       screenshotUrl,

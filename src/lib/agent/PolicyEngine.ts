@@ -787,10 +787,7 @@ function websiteStructureStatus(state: AgentStateData): { complete: boolean; mis
   const hasPage = files.some(path => /(?:^|\/)(?:app\/)?page\.(?:tsx|jsx)$/.test(path))
   const hasLayout = files.some(path => /(?:^|\/)(?:app\/)?layout\.(?:tsx|jsx)$/.test(path))
   const hasStyles = files.some(path => /(?:^|\/)(?:app\/)?globals\.css$/.test(path) || path.endsWith('.css'))
-  const hasPackage = files.some(path => /(?:^|\/)package\.json$/.test(path))
-
   const missing: string[] = []
-  if (!hasPackage) missing.push('package.json')
   if (!hasLayout) missing.push('app/layout.tsx with ./globals.css import')
   if (!hasPage) missing.push('app/page.tsx')
   if (!hasStyles) missing.push('app/globals.css or equivalent CSS')
@@ -2632,59 +2629,41 @@ Then make your first tool call. Your plan will be remembered across iterations o
   }
 
   private checkRewriteLoop(state: AgentStateData): PolicyAction[] {
-    const totalFileCreates = Array.from(state.fileCreateCounts.values()).reduce((a, b) => a + b, 0)
-    const hasRewrite = Array.from(state.fileCreateCounts.values()).some(c => c >= 2)
-
-    if (!hasRewrite && totalFileCreates < 4) return []
+    const createCounts = Array.from(state.fileCreateCounts.values())
+    const hasRewrite = createCounts.some(count => count >= 2)
+    // A successfully repaired conflict leaves historical counters behind for
+    // recurrence detection. Only inject rewrite policy while an exact-path
+    // conflict is actively unresolved; otherwise every later phase would keep
+    // receiving a stale warning.
+    if (!hasRewrite || !state.fileWriteRepairPending) return []
 
     // File blocked on 2nd+ attempt — warn first, only terminate on 3rd+
-    if (hasRewrite) {
-      const maxCount = Math.max(...Array.from(state.fileCreateCounts.values()))
-      if (maxCount >= 3) {
-        // 3+ attempts on same file — actually stuck, terminate
-        return [
-          {
-            type: 'inject_message',
-            message: {
-              role: 'system',
-              content: `CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`,
-            },
-          },
-          { type: 'terminate', reason: 'rewrite_loop' },
-        ]
-      }
-      // 2nd attempt — warn but let agent try a different approach
+    const maxCount = Math.max(...createCounts)
+    if (maxCount >= 3) {
+      // 3+ attempts on the same exact path — actually stuck, terminate.
       return [
         {
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'WARNING: A file you tried to create already exists. Use append_file to continue writing it, edit_file for targeted replacements, or create a DIFFERENT file. Do NOT retry the same create_file call.',
+            content: `CRITICAL: The same file path was requested at least three times. STOP retrying that create operation. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`,
           },
         },
+        { type: 'terminate', reason: 'rewrite_loop' },
       ]
     }
 
-    if (!state.currentPlanItems || (state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length)) {
-      return [
-        {
-          type: 'inject_message',
-          message: {
-            role: 'system',
-            content: `CRITICAL: You have already created all necessary files. STOP creating or rewriting files immediately. ${NATURAL_FINAL_RESPONSE_GUIDANCE} Any further file operations will be blocked.`,
-          },
+    // A second same-path attempt enters ToolPipeline's exact-path read/edit
+    // repair flow. Distinct legitimate project files never count as a rewrite.
+    return [
+      {
+        type: 'inject_message',
+        message: {
+          role: 'system',
+          content: 'WARNING: A file you tried to create already exists. Follow the exact-path recovery instruction: read the current file, then make one targeted edit (or a genuine prose continuation). Do not retry create_file.',
         },
-        { type: 'terminate', reason: 'post_completion_rewrite' },
-      ]
-    }
-
-    // Mid-plan rewrite loop: block; rewrites do not satisfy the current step.
-    if (state.currentPlanItems && state.currentStepIdx < state.currentPlanItems.length) {
-      state.fileCreateCounts.clear()
-      return blockCurrentStep(state, 'file rewrite loop prevented verified step completion', 'rewrite_loop')
-    }
-
-    return []
+      },
+    ]
   }
 
   /**

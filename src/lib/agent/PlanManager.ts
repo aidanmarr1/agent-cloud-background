@@ -479,7 +479,7 @@ function nonDeliverableStepGuidance(
   }
 
   if (isConcreteBuildStep(state.taskStrategy, stepTitle)) {
-    return `RULES:\n- Build now with create_file, append_file, edit_file, export_pdf, or read_file.\n- Website/app builds: create the initial layout, page, globals, and needed components before advancing; app/layout.tsx must import './globals.css'. Verification is for running/preview/fixes, not first-time file creation.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT write future-tense status; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact.'}`
+    return `RULES:\n- Build now with create_file, append_file, edit_file, export_pdf, or read_file.\n- Website/app builds: commit to one coherent brand, visual system, navigation model, and section map; create the initial layout, page, substantive globals, and only genuinely useful components before advancing. app/layout.tsx must import './globals.css'. A cohesive page.tsx is valid—do not invent duplicate Header/Navbar/Navigation variants or speculative features. Verification is for running/preview/fixes, not first-time file creation.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT write future-tense status; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact.'}`
   }
 
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
@@ -1219,7 +1219,16 @@ Requirements:
         this.taskComplexity = mapped
         state.taskComplexity = mapped
       } else if (mapped < this.taskComplexity) {
-        console.log(`[Plan] Keeping higher regex complexity ${this.taskComplexity} over planner ${llmComplexity} (mapped ${mapped})`)
+        const requestText = effectiveTaskRequest(this.messages)
+        const explicitlyDeepOrComplex =
+          /\b(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|deep[-\s]?dive|full report|enterprise[-\s]grade|production[-\s]ready|multi[-\s]?(?:page|surface|tenant|service|repo|repository)|end[-\s]to[-\s]end|full[-\s]stack)\b/i.test(requestText)
+        if (!explicitlyDeepOrComplex) {
+          console.log(`[Plan] Agent complexity ${llmComplexity} (mapped ${mapped}) corrects regex guess ${this.taskComplexity}`)
+          this.taskComplexity = mapped
+          state.taskComplexity = mapped
+        } else {
+          console.log(`[Plan] Keeping explicit deep/complex request at regex complexity ${this.taskComplexity} over planner ${llmComplexity} (mapped ${mapped})`)
+        }
       }
     }
 

@@ -85,6 +85,10 @@ function validatePositiveInteger(value) {
   return Number.isFinite(parsed) && parsed > 0
 }
 
+function validateWorkerConcurrency(value) {
+  return /^\d+$/.test(value) && Number(value) >= 1 && Number(value) <= 32
+}
+
 requireExact('AGENT_TASK_WORKER_MODE', 'external', 'worker must claim durable cloud jobs')
 requireRealEnv('AGENT_TASK_QUEUE_NAME', 'worker queue namespace', validateQueueName)
 if (env('AGENT_TASK_QUEUE_NAME') === 'default') {
@@ -129,6 +133,14 @@ if (!env('AGENT_TASK_WORKER_ID')) {
   warn('AGENT_TASK_WORKER_ID is not set; the worker will generate a unique ID at startup')
 } else {
   pass('AGENT_TASK_WORKER_ID is set')
+}
+
+if (!env('AGENT_TASK_WORKER_CONCURRENCY')) {
+  pass('AGENT_TASK_WORKER_CONCURRENCY=1 (default)')
+} else if (validateWorkerConcurrency(env('AGENT_TASK_WORKER_CONCURRENCY'))) {
+  pass(`AGENT_TASK_WORKER_CONCURRENCY=${env('AGENT_TASK_WORKER_CONCURRENCY')}`)
+} else {
+  fail('AGENT_TASK_WORKER_CONCURRENCY must be an integer between 1 and 32')
 }
 
 for (const name of [

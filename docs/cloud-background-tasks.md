@@ -88,12 +88,15 @@ Optional worker tuning:
 
 ```bash
 AGENT_TASK_WORKER_ID=production-worker-1
+AGENT_TASK_WORKER_CONCURRENCY=2
 AGENT_TASK_WORKER_POLL_MS=100
 ```
 
 If you set `AGENT_TASK_WORKER_ID` manually, keep it unique per queue. Leaving it blank is fine; the worker generates a unique ID at startup.
 
 Workers must publish a fresh, protocol-compatible `idle` heartbeat before claiming a queued task. Each boot appends a UUID to the configured logical ID, so cancellation fencing can reason about the exact process generation instead of a reused service label.
+
+`AGENT_TASK_WORKER_CONCURRENCY` controls how many isolated task-worker processes the supervisor runs inside one host. It defaults to `1`; the Render worker uses `2`, allowing two conversations to progress concurrently without adding a second paid Render service. Each slot has its own restart backoff and boot-unique worker identity, so a hard task exit replaces only the affected process.
 
 Keep `AGENT_E2B_WARM_POOL_ENABLED=false` by default so E2B runtime starts only when a task can be billed. If you explicitly turn warm pooling on for lower startup latency, prewarm time is an operational cost; user runtime billing starts only after a task adopts and confirms the sandbox.
 

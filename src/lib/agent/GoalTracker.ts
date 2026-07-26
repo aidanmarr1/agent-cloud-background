@@ -192,9 +192,31 @@ export class GoalTracker {
       met = state.browserTaskCompleted && state.browserTaskCompletionEvidence.length > 0
     } else if (isLastStep) {
       // Deliverable step: need at least one file written
-      met = state.createdFiles.size > 0 && goal.evidence.some(e => e.startsWith('Created:') || e.startsWith('Appended:') || e.startsWith('Exported PDF:'))
+      met = state.createdFiles.size > 0 && goal.evidence.some(e =>
+        e.startsWith('Created:') ||
+        e.startsWith('Edited:') ||
+        e.startsWith('Appended:') ||
+        e.startsWith('Exported PDF:'),
+      )
     } else if (state.emittedImageArtifacts.size > 0 && /image|photo|picture|asset|retrieve|return|download/i.test(goal.description)) {
       met = goal.evidence.some(e => e.toLowerCase().includes('image'))
+    } else if (
+      state.taskStrategy === 'build' ||
+      state.taskStrategy === 'code' ||
+      state.currentPhase === 'build'
+    ) {
+      // Build phases are proven by successful implementation activity, not by
+      // research-source counts. Integration edits must be able to finish a
+      // phase just like first-time file creation.
+      const hasFileMutationEvidence = goal.evidence.some(e =>
+        e.startsWith('Created:') ||
+        e.startsWith('Edited:') ||
+        e.startsWith('Appended:'),
+      )
+      const hasVerifiedCommandEvidence =
+        state.createdFiles.size > 0 &&
+        goal.evidence.includes('Executed code/command')
+      met = hasFileMutationEvidence || hasVerifiedCommandEvidence
     } else {
       // Research step: complex phases need both enough actions and actual source
       // extraction, otherwise shallow search snippets can tick off the plan.

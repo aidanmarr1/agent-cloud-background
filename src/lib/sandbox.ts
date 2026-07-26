@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join, relative, dirname, isAbsolute } from 'path'
 import type { FileResult } from '@/types'
 import { acquireRegisteredBrowserSessionFence } from './browserSessionLifecycle'
-import { trimReplayedAppendOverlap } from './fileAppend'
+import { markdownAppendStructureConflict, trimReplayedAppendOverlap } from './fileAppend'
 
 export type SandboxFileReadResult =
   | { ok: true; body: Uint8Array; size: number }
@@ -656,11 +656,12 @@ export async function appendFileInSandbox(
   await mkdir(dirname(resolved), { recursive: true })
 
   let appendContent = content
+  let existingContent = ''
   try {
     const readFd = await open(resolved, constants.O_RDONLY | constants.O_NOFOLLOW)
     try {
-      const existing = await readFd.readFile('utf-8')
-      appendContent = trimReplayedAppendOverlap(existing, content)
+      existingContent = await readFd.readFile('utf-8')
+      appendContent = trimReplayedAppendOverlap(existingContent, content)
     } finally {
       await readFd.close()
     }
@@ -672,6 +673,17 @@ export async function appendFileInSandbox(
   if (!appendContent) {
     const existingStat = await stat(resolved)
     return { action: 'appended', path: filePath, size: existingStat.size }
+  }
+
+  if (/\.md(?:own)?$/i.test(filePath)) {
+    const structureConflict = markdownAppendStructureConflict(existingContent, appendContent)
+    if (structureConflict) {
+      return {
+        action: 'appended',
+        path: filePath,
+        error: `INTERNAL_RECOVERY: append_file was blocked because it would corrupt the Markdown report structure: ${structureConflict}. Read the existing report and use edit_file to merge, replace, or reorder the existing section instead. Do not append another title or repeated section.`,
+      }
+    }
   }
 
   let fd: Awaited<ReturnType<typeof open>>

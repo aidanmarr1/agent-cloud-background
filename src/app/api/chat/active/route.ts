@@ -1,6 +1,6 @@
 import { auth } from '@/auth'
 import { assertSameOriginRequest } from '@/lib/api'
-import { getActiveTaskLeaseForUser } from '@/lib/activeTasks'
+import { getActiveTaskLeaseForConversation } from '@/lib/activeTasks'
 import {
   findActiveTaskJobForConversation,
   findReplayableTaskJobForConversation,
@@ -102,8 +102,8 @@ export async function GET(request: Request) {
     return Response.json({ active: false })
   }
 
-  const lease = await getActiveTaskLeaseForUser(userId)
-  if (!lease || lease.conversationId !== conversationId) {
+  const lease = await getActiveTaskLeaseForConversation(userId, conversationId)
+  if (!lease) {
     return Response.json({ active: false })
   }
 

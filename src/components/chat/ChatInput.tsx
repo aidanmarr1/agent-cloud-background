@@ -21,6 +21,7 @@ interface ChatInputProps {
   conversationId?: string
   initialValue?: string
   variant?: 'hero' | 'thread'
+  startsNewTask?: boolean
 }
 
 interface SlashRange {
@@ -67,6 +68,7 @@ export function ChatInput({
   conversationId,
   initialValue,
   variant = 'hero',
+  startsNewTask = false,
 }: ChatInputProps) {
   const [value, setValue] = useState('')
   const [focused, setFocused] = useState(false)
@@ -92,6 +94,10 @@ export function ChatInput({
   const cursorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingBatchRef = useRef(0)
   const isStreaming = useUIStore((s) => s.isStreaming)
+  // The home composer starts a distinct conversation. A task running in
+  // another conversation must not turn this composer into a live-directive
+  // input or block attachments/new submissions.
+  const currentTaskStreaming = isStreaming && !startsNewTask
   const skills = useSettingsStore((s) => s.skillLibrary)
   const normalizedSkillQuery = skillQuery.trim().toLowerCase()
   const visibleSkills = normalizedSkillQuery
@@ -101,11 +107,11 @@ export function ChatInput({
   const hasText = value.trim().length > 0
   const hasValue = value.trim().length > 0 || attachments.length > 0
   const inputBusy = submitPending || isProcessingFiles
-  const optimisticTaskStarting = submitPending && !isStreaming && !isProcessingFiles
-  const canSendLiveInstruction = isStreaming && hasText && attachments.length === 0 && !inputBusy
-  const liveInstructionBlockedByAttachments = isStreaming && attachments.length > 0
-  const showStopButton = (isStreaming || optimisticTaskStarting) && !!onStop
-  const showSendButton = !(isStreaming || optimisticTaskStarting) || canSendLiveInstruction
+  const optimisticTaskStarting = submitPending && !currentTaskStreaming && !isProcessingFiles
+  const canSendLiveInstruction = currentTaskStreaming && hasText && attachments.length === 0 && !inputBusy
+  const liveInstructionBlockedByAttachments = currentTaskStreaming && attachments.length > 0
+  const showStopButton = (currentTaskStreaming || optimisticTaskStarting) && !!onStop
+  const showSendButton = !(currentTaskStreaming || optimisticTaskStarting) || canSendLiveInstruction
   const compact = variant === 'thread'
   const atInputLimit = value.length >= MAX_TASK_INPUT_CHARS
 
@@ -156,8 +162,8 @@ export function ChatInput({
   }, [setClampedValue, setTextareaCursorAt, slashRange, value])
 
   useEffect(() => {
-    if (isStreaming) setSubmitPending(false)
-  }, [isStreaming])
+    if (currentTaskStreaming) setSubmitPending(false)
+  }, [currentTaskStreaming])
 
   // Pre-fill from initialValue prop (e.g. quick actions)
   useEffect(() => {
@@ -323,9 +329,9 @@ export function ChatInput({
         if (conversationId && submittedValue) localStorage.setItem(`agent-draft-${conversationId}`, submittedValue)
       })
       .finally(() => {
-        if (!useUIStore.getState().isStreaming) setSubmitPending(false)
+        if (startsNewTask || !useUIStore.getState().isStreaming) setSubmitPending(false)
       })
-  }, [value, attachments, inputBusy, liveInstructionBlockedByAttachments, onSubmit, conversationId, setClampedValue])
+  }, [value, attachments, inputBusy, liveInstructionBlockedByAttachments, onSubmit, conversationId, setClampedValue, startsNewTask])
 
   const processFiles = useCallback(async (files: FileList | File[]) => {
     const fileList = Array.from(files)

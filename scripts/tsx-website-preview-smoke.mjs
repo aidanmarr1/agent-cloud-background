@@ -1,9 +1,18 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
+import assert from 'node:assert/strict'
 
 const root = process.cwd()
+const previewSource = await readFile(join(root, 'src/lib/tsxWebsitePreview.ts'), 'utf8')
+assert.match(previewSource, /href="\.\/dist\/preview\.css"/, 'preview CSS must resolve relative to a nested cloud preview page')
+assert.match(previewSource, /src="\.\/dist\/preview\.js"/, 'preview JavaScript must resolve relative to a nested cloud preview page')
+assert.match(
+  previewSource,
+  /isCloudSandboxProviderEnabled\(\)[\s\S]*syncGeneratedPreviewToCloud[\s\S]*ensureE2BWebsitePreview\(conversationId, '\.agent-preview\/index\.html'\)/,
+  'cloud TSX previews must sync generated output into E2B and launch the sandbox-hosted page',
+)
 const workDir = await mkdtemp(join(root, 'scripts/.tsx-preview-smoke-runner-'))
 const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
@@ -49,24 +58,18 @@ export async function runSmoke() {
 import Link from 'next/link'
 import Image from 'next/image'
 import { usePathname } from 'next/navigation'
-import { Hero } from '../components/Hero'
 
 export default function Page() {
   const pathname = usePathname()
   return (
     <main className="shell">
-      <Hero />
+      <section className="hero"><h1>TSX Preview Smoke</h1></section>
       <p data-path={pathname}>Preview is live.</p>
       <Link href="/demo">Demo link</Link>
       <Image src="/logo.svg" alt="Logo" width={32} height={32} />
       <button type="button" onClick={() => document.body.dataset.clicked = 'true'}>Try control</button>
     </main>
   )
-}
-\`)
-    await write(goodId, 'components/Hero.tsx', \`
-export function Hero() {
-  return <section className="hero"><h1>TSX Preview Smoke</h1></section>
 }
 \`)
     await write(goodId, 'app/layout.tsx', \`
@@ -89,6 +92,8 @@ button { min-height: 40px; border: 1px solid #111827; border-radius: 6px; backgr
     assert.equal(status.ready, true)
     assert.equal(status.complete, true)
     assert.deepEqual(status.missingFiles, [])
+    assert.deepEqual(status.componentFiles, [])
+    assert.equal(status.pageImportsComponent, false)
     assert.equal(status.layoutImportsGlobalCss, true)
 
     const launch = await buildTsxWebsitePreviewLaunch(goodId)
@@ -96,7 +101,10 @@ button { min-height: 40px; border: 1px solid #111827; border-radius: 6px; backgr
 
     const html = await fetch(launch.url)
     assert.equal(html.status, 200)
-    assert.match(await html.text(), /Generated Website Preview/)
+    const htmlBody = await html.text()
+    assert.match(htmlBody, /Generated Website Preview/)
+    assert.ok(htmlBody.includes('href="./dist/preview.css"'))
+    assert.ok(htmlBody.includes('src="./dist/preview.js"'))
 
     const js = await fetch(\`\${launch.origin}/dist/preview.js\`)
     assert.equal(js.status, 200)

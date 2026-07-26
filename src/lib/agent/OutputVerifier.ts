@@ -18,6 +18,10 @@ import {
 } from './config'
 import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import { requestedBriefInlineSourceCount } from './BriefInlineResearch'
+import {
+  duplicateNumberedMarkdownH2Sections,
+  markdownTerminalSectionOrderingIssues,
+} from '../fileAppend'
 
 export interface VerificationResult {
   passed: boolean
@@ -146,6 +150,30 @@ export class OutputVerifier {
       failures.push(`Contains ${repeatedBlocks.length} duplicated substantive passage${repeatedBlocks.length === 1 ? '' : 's'}`)
       suggestions.push('Use edit_file to remove repeated passages while preserving the single complete version')
       score -= Math.min(0.35, 0.18 + repeatedBlocks.length * 0.06)
+    }
+
+    const structuredMarkdownReport = filePath.toLowerCase().endsWith('.md') &&
+      (
+        strategy === 'research' ||
+        strategy === 'analysis' ||
+        /\b(?:report|research|analysis|assessment|white\s+paper|briefing)\b/i.test(originalRequest)
+      )
+
+    if (structuredMarkdownReport) {
+      const duplicateSectionNumbers = duplicateNumberedMarkdownH2Sections(fileContent)
+      if (duplicateSectionNumbers.length > 0) {
+        failures.push(`Contains duplicate numbered level-2 section heading${duplicateSectionNumbers.length === 1 ? '' : 's'}: ${duplicateSectionNumbers.join(', ')}`)
+        suggestions.push('Use edit_file to merge or remove repeated numbered sections; do not append another copy')
+        score -= Math.min(0.3, 0.16 + duplicateSectionNumbers.length * 0.05)
+      }
+
+      const terminalOrderingIssues = markdownTerminalSectionOrderingIssues(fileContent)
+      if (terminalOrderingIssues.length > 0) {
+        const firstIssue = terminalOrderingIssues[0]
+        failures.push(`Report structure restarts after its ending: "${firstIssue.terminalHeading}" is followed by later substantive section "${firstIssue.laterHeading}"`)
+        suggestions.push('Use edit_file to restore section order and keep the conclusion and references at the end')
+        score -= 0.22
+      }
     }
 
     const savedMarkdownReport = filePath.toLowerCase().endsWith('.md') &&

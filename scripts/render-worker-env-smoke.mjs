@@ -117,6 +117,7 @@ for (const key of template.keys()) {
 
 assert.equal(String(template.get('AGENT_TASK_WORKER_MODE')), 'external', 'worker template must force external task worker mode')
 assert.equal(String(template.get('AGENT_TASK_QUEUE_NAME')), 'production', 'worker template must use the production queue')
+assert.equal(String(template.get('AGENT_TASK_WORKER_CONCURRENCY')), '2', 'one Render worker service should run two isolated task processes')
 assert.equal(String(template.get('AGENT_SANDBOX_PROVIDER')), 'e2b', 'worker template must use hosted E2B sandboxes')
 assert.equal(String(template.get('E2B_TEMPLATE_ID')), 'agent-cloud-browser', 'worker template must configure an E2B browser runtime')
 assert.equal(String(template.get('AGENT_E2B_PAUSE_ON_TASK_END')), 'false', 'worker template must destroy sandboxes after tasks')
