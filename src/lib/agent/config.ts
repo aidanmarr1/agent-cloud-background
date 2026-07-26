@@ -18,7 +18,7 @@ export const AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS = 20_000
 export const AGENT_DEADLINE_HARD_STOP_BUFFER_MS = 18_000
 export const AGENT_WORKER_RUN_MAX_DURATION_MS = 900_000
 export const AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS = 120_000
-export const AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS = 12_000
+export const AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS = 60_000
 export const AGENT_WORKER_DEADLINE_HARD_STOP_BUFFER_MS = 20_000
 
 // --- Step budgets ---
@@ -60,7 +60,7 @@ export const WORK_SUMMARY_RECENT_ACTIONS = 6
 
 // --- Timeouts (ms) ---
 export const TIER_TIMEOUTS = {
-  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 12_000,    // Keep API turns from looking frozen
+  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 60_000,    // X-high reasoning can take longer before the first streamed event
   inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 3_000,    // Allow ordinary provider jitter while the bounded iteration deadline still prevents frozen turns
   checkIntervalMs: 150,
   build: {
@@ -101,7 +101,7 @@ export const STREAM_RETRY_EXPONENT = 1.2
 // headers arrive. A realistic start window avoids converting healthy turns
 // into rapid null-stream loops while the shorter stream inactivity limits
 // still catch genuinely stalled responses after they begin.
-export const STREAM_REQUEST_TIMEOUT_MS = 12_000
+export const STREAM_REQUEST_TIMEOUT_MS = 60_000
 export const STREAM_RETRY_MAX_DELAY_MS = 1_500
 
 // --- Semantic loop detection ---
