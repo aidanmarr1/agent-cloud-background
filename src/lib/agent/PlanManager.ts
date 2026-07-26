@@ -82,9 +82,9 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 7_500
 const PLANNER_OVERALL_DEADLINE_MS = 16_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-// Gemini 3.5 Flash Lite requires reasoning. Minimal is the provider-supported
-// floor, and exclusion keeps the acknowledgement concise and user-facing.
+const PLANNER_CONTROL_REASONING = { effort: 'xhigh' as const, exclude: true }
+// Keep the user-facing acknowledgement fast while substantive Gemini planning
+// and task turns use the configured x-high effort (Google's highest level).
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
@@ -479,7 +479,7 @@ function nonDeliverableStepGuidance(
   }
 
   if (isConcreteBuildStep(state.taskStrategy, stepTitle)) {
-    return `RULES:\n- Build now with create_file, append_file, edit_file, export_pdf, or read_file.\n- Website/app builds: commit to one coherent brand, visual system, navigation model, and section map; create the initial layout, page, substantive globals, and only genuinely useful components before advancing. app/layout.tsx must import './globals.css'. A cohesive page.tsx is valid—do not invent duplicate Header/Navbar/Navigation variants or speculative features. Verification is for running/preview/fixes, not first-time file creation.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT write future-tense status; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact.'}`
+    return `RULES:\n- Build now with create_file, edit_file, export_pdf, or read_file. Use append_file for prose or a runtime-confirmed partial streamed write only—never append a second TSX/JS/CSS module to an existing code file.\n- Website/app builds: commit to one coherent brand, visual system, navigation model, and section map; create each initial layout, page, stylesheet, and genuinely useful component once before advancing. app/layout.tsx must import './globals.css'. A cohesive page.tsx is valid—do not invent duplicate Header/Navbar/Navigation variants or speculative features. When a preview reports a compile error, read the named file and make one targeted edit; do not recreate or append alternate implementations. Verification is for running/preview/fixes, not first-time file creation.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT paste code or claim completion in chat; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact.'}`
   }
 
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {

@@ -119,7 +119,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
       DEEPSEEK_API_KEY: 'ignored-stale-key',
       OPENROUTER_API_KEY: 'smoke-openrouter-key',
       OPENROUTER_MODEL: 'ignored/stale-model',
-      OPENROUTER_REASONING_EFFORT: 'minimal',
+      OPENROUTER_REASONING_EFFORT: 'xhigh',
       OPENROUTER_REASONING_EXCLUDE: 'true',
     },
     maxBuffer: 4 * 1024 * 1024,
@@ -133,13 +133,13 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite:exacto')
+    assert.equal(request.body.model, 'google/gemini-3.6-flash:exacto')
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[0].body.reasoning, { effort: 'xhigh', exclude: true })
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },

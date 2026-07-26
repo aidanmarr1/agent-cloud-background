@@ -1004,6 +1004,7 @@ export class PolicyEngine {
       state.consecutiveNoToolCalls = 0
       state.browserNoToolRecoveryAttempts = 0
       state.researchNoToolRecoveryAttempts = 0
+      state.buildNoToolRecoveryAttempts = 0
     }
 
     const postComplete = this.checkPostCompletion(state)
@@ -2011,6 +2012,30 @@ Then make your first tool call. Your plan will be remembered across iterations o
         !isLastStep &&
         isResearchLikeStep(state) &&
         !researchDepth.complete
+      const repeatedBuildNoTool =
+        !isLastStep &&
+        (state.currentPhase === 'build' || state.taskStrategy === 'build' || state.taskStrategy === 'code') &&
+        state.stepToolCallCount > 0 &&
+        state.consecutiveNoToolCalls >= threshold
+
+      if (repeatedBuildNoTool) {
+        state.buildNoToolRecoveryAttempts++
+        if (state.buildNoToolRecoveryAttempts >= 3) {
+          return [{ type: 'terminate', reason: 'build_no_tool_recovery_exhausted' }]
+        }
+        state.consecutiveNoToolCalls = Math.max(0, threshold - 1)
+        return [{
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: stepMsg(
+              state,
+              'BUILD ACTION REQUIRED: the previous response described or pasted code without changing the workspace. Make exactly one native file action now. For an existing TSX/CSS/code file, read it once if needed and use edit_file for a targeted replacement; never append another code module. Emit <next_step/> only when the current build requirement is actually complete.',
+            ),
+          },
+          continueLoop: true,
+        }]
+      }
 
       if (
         repeatedIncompleteResearchNoTool &&

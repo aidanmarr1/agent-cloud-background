@@ -348,6 +348,7 @@ const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
+const TASK_REASONING = { effort: 'xhigh' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -1358,6 +1359,24 @@ function shouldAcceptFinalDeliverableHandoff(content: string, attemptNumber: num
   const text = content.trim()
   return finalDeliverableHandoffLooksUseful(text) ||
     (text.length >= 40 && attemptNumber >= 2)
+}
+
+function shouldRejectBuildTextOnlyEmission(
+  state: AgentStateData,
+  result: Pick<StreamResult, 'assistantContent' | 'toolCalls' | 'stepAdvancedThisIteration'>,
+): boolean {
+  if (result.toolCalls.size > 0 || result.stepAdvancedThisIteration) return false
+  if (state.finalDeliverableHandoffPending) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
+  if (!(state.taskStrategy === 'build' || state.taskStrategy === 'code')) return false
+
+  const text = result.assistantContent.trim()
+  if (!text) return false
+  const codeOrFalseCompletion =
+    /```(?:tsx?|jsx?|css|html)?\b/i.test(text) ||
+    /\b(?:import\s+React|export\s+default\s+function|className=|What Was Built|I have created|I(?:'|’)ve created|fully responsive|website is complete)\b/i.test(text)
+
+  return state.currentPhase === 'build' || codeOrFalseCompletion
 }
 
 function scheduleFinalDeliverableHandoff(
@@ -4022,8 +4041,8 @@ export class AgentLoop {
             // the update factual.
             temperature: 0.55,
             max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
-            // Gemini 3.5 Flash Lite requires reasoning on every request. Use
-            // its lowest supported effort and keep it out of the visible text.
+            // Keep the tiny narration sidecar on minimal reasoning while
+            // substantive Gemini task turns use the configured x-high effort.
             reasoning: MINIMAL_THINKING_REASONING,
             includeTemporalContext: false,
             requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,
@@ -4813,6 +4832,13 @@ export class AgentLoop {
                 pendingHandoffText,
                 state.finalDeliverableHandoffAttempts + 1,
               )
+            const rejectedBuildTextOnlyEmission = shouldRejectBuildTextOnlyEmission(
+              state,
+              lastStreamResult,
+            )
+            const rejectedModelEmission =
+              rejectedHandoffEmission ||
+              rejectedBuildTextOnlyEmission
             const usageDebitStartedAt = Date.now()
             try {
               if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
@@ -4834,7 +4860,7 @@ export class AgentLoop {
               // buffered text. A rejected attempt remains model context for the
               // retry, but never reaches the client and cannot concatenate with
               // the accepted final response.
-              if (lastStreamResult.cadenceProgressViolation || rejectedHandoffEmission) {
+              if (lastStreamResult.cadenceProgressViolation || rejectedModelEmission) {
                 streamProcessor.discardBufferedEmission()
               } else {
                 streamProcessor.commitBufferedEmission()
@@ -4851,6 +4877,8 @@ export class AgentLoop {
                   ? '[AgentDiagnostics] Discarded cadence-contract-invalid model-turn emissions'
                   : rejectedHandoffEmission
                     ? '[AgentDiagnostics] Held back an unaccepted personalized handoff'
+                    : rejectedBuildTextOnlyEmission
+                      ? '[AgentDiagnostics] Held back a text-only website build drift'
                     : '[AgentDiagnostics] Released billed model-turn emissions',
                 {
                   iteration: state.iterations,
@@ -4860,16 +4888,17 @@ export class AgentLoop {
                     : Date.now() - lastStreamResult.contentStreamingStartTime,
                   cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
                   rejectedHandoffEmission,
+                  rejectedBuildTextOnlyEmission,
                 },
               )
               pendingPaidTurnProgress = {
                 iteration: state.iterations,
                 stepIdxBefore: modelTurnStartStepIdx,
                 visibleText: !lastStreamResult.cadenceProgressViolation &&
-                  !rejectedHandoffEmission &&
+                  !rejectedModelEmission &&
                   lastStreamResult.assistantContent.trim().length > 0,
                 acceptedToolCall: false,
-                ...(lastStreamResult.cadenceProgressViolation || rejectedHandoffEmission
+                ...(lastStreamResult.cadenceProgressViolation || rejectedModelEmission
                   ? { internalRecoveryScheduled: 'display_contract' as const }
                   : {}),
               }
@@ -7270,12 +7299,12 @@ export class AgentLoop {
         const requestReasoning = useCompactNarration
           ? { reasoning: MINIMAL_THINKING_REASONING }
           : isFinalInlineAnswerTurn
-            ? { reasoning: MINIMAL_THINKING_REASONING }
+            ? { reasoning: TASK_REASONING }
             : isFinalSavedDeliverableTurn
-              ? { reasoning: MINIMAL_THINKING_REASONING }
+              ? { reasoning: TASK_REASONING }
               : fastActionTurn
-                ? { reasoning: MINIMAL_THINKING_REASONING }
-            : { reasoning: MINIMAL_THINKING_REASONING }
+                ? { reasoning: TASK_REASONING }
+            : { reasoning: TASK_REASONING }
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS
           : isFinalInlineAnswerTurn

@@ -131,6 +131,22 @@ assert.match(
 )
 assert.match(
   toolPipelineSource,
+  /toolName === 'append_file'[\s\S]*isCodeLikeFilePath\(requestedPath\)[\s\S]*reason: 'code_append_disallowed'/,
+  'code files must reject ordinary append_file calls before duplicate modules or exports are introduced',
+)
+assert.match(
+  agentLoopSource,
+  /shouldRejectBuildTextOnlyEmission[\s\S]*rejectedBuildTextOnlyEmission[\s\S]*discardBufferedEmission/,
+  'raw code and false completion prose from tool-required build turns must stay out of the task stream',
+)
+const policyEngineSource = await readFile(new URL('../src/lib/agent/PolicyEngine.ts', import.meta.url), 'utf8')
+assert.match(
+  policyEngineSource,
+  /repeatedBuildNoTool[\s\S]*buildNoToolRecoveryAttempts >= 3[\s\S]*build_no_tool_recovery_exhausted/,
+  'repeated text-only build recovery must terminate within a bounded number of attempts',
+)
+assert.match(
+  toolPipelineSource,
   /E2B lifecycle changed while preparing sandbox[\s\S]*readFileInSandbox/,
   'an ambiguous E2B create must reconcile the actual file before asking the model to retry',
 )
@@ -153,5 +169,8 @@ console.log(JSON.stringify({
   advisoryUsageCheckpoints: true,
   exactUrlRouting: true,
   fileWriteReconciliation: true,
+  codeAppendGuard: true,
+  hiddenBuildTextDrift: true,
+  boundedBuildRecovery: true,
   freshLivePreview: true,
 }, null, 2))

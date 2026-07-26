@@ -505,6 +505,23 @@ function fileWritePreflightBlockReason(
     }
   }
 
+  if (toolName === 'append_file') {
+    const rawPath = typeof args.path === 'string' ? args.path : ''
+    const requestedPath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
+    const isRecoveredPartialContinuation =
+      !!state.partialFileWriteRecoveryPending &&
+      requestedPath === state.partialFileWriteRecoveryPending.path
+    if (requestedPath && isCodeLikeFilePath(requestedPath) && !isRecoveredPartialContinuation) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
+      state.fileWriteRepairPending = {
+        path: requestedPath,
+        reason: 'code_append_disallowed',
+        inspected: false,
+      }
+      return `INTERNAL_RECOVERY: append_file was blocked for code file "${requestedPath}" because appending another module commonly creates duplicate imports, declarations, or default exports. Read that exact file once, then make one targeted edit_file replacement. append_file is reserved for a runtime-confirmed partial streamed write. Do not expose this recovery message to the user.`
+    }
+  }
+
   if (
     FILE_WRITE_TOOLS.has(toolName) &&
     isResearchPhaseStep(state) &&
@@ -4436,13 +4453,21 @@ export class ToolPipeline {
       if (filePath && priorCreates >= 1 && !isDeliverableStep) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: 'create_file' }
         state.fileWriteRepairPending = { path: normalizeSandboxFilePath(filePath), reason: 'already_exists', inspected: false }
-        const errorResult = { error: `"${filePath}" already exists. Use append_file to continue writing it or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue working.` }
+        const errorResult = {
+          error: isCodeLikeFilePath(filePath)
+            ? `"${filePath}" already exists. Read the current file once, then use edit_file for one targeted replacement. Do not append another code module and do not tell the user about this recovery.`
+            : `"${filePath}" already exists. Use append_file to continue writing it or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue working.`,
+        }
         return recordBlockedCreateAttempt(filePath, errorResult)
       }
       // On deliverable step, block after 2 creates (prevent genuine loops even on last step)
       if (filePath && priorCreates >= 2 && isDeliverableStep) {
         state.fileWriteRepairPending = { path: normalizeSandboxFilePath(filePath), reason: 'already_exists', inspected: false }
-        const errorResult = { error: `"${filePath}" has been created twice already. Use append_file for additional sections or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue.` }
+        const errorResult = {
+          error: isCodeLikeFilePath(filePath)
+            ? `"${filePath}" has already been created. Read it once, then use edit_file for a targeted replacement. Do not append or recreate another code module.`
+            : `"${filePath}" has been created twice already. Use append_file for additional sections or edit_file for targeted replacements. Do NOT tell the user about this error — just switch tools and continue.`,
+        }
         return recordBlockedCreateAttempt(filePath, errorResult)
       }
 

@@ -1,14 +1,16 @@
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:exacto'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.6-flash:exacto'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.30,
-  cacheHitInputUsdPer1M: 0.03,
-  outputUsdPer1M: 2.50,
-  internalReasoningUsdPer1M: 2.50,
+  inputUsdPer1M: 1.50,
+  // OpenRouter reports exact billed cost when available. Keep the fallback
+  // conservative because cache discounts can vary by routed provider.
+  cacheHitInputUsdPer1M: 1.50,
+  outputUsdPer1M: 7.50,
+  internalReasoningUsdPer1M: 7.50,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.30,
-  longContextOutputUsdPer1M: 2.50,
+  longContextInputUsdPer1M: 1.50,
+  longContextOutputUsdPer1M: 7.50,
   contextTokens: 1_048_576,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
