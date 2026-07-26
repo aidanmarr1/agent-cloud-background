@@ -342,7 +342,9 @@ check('cancellation is an atomic spend fence before every provider launch', () =
     /cancel_requested[\s\S]*fenceAndFinalizeTaskCancellation\(row\.user_id, runId\)[\s\S]*clearLiveDirectivesForRun[\s\S]*releaseActiveTaskLease/,
     'the coordinator cancellation branch must reuse the sandbox/worker execution fence',
   )
-  const cancellationBranch = workflow.indexOf('if (state.cancelRequested)')
+  const cancellationBranch = workflow.indexOf(
+    'if (!taskIsTerminal && state.cancelRequested)',
+  )
   const hardDeadlineCalculation = workflow.indexOf(
     'const hardDeadlineReached = observedAtMs >= hardDeadlineAtMs',
   )
@@ -363,8 +365,76 @@ check('cancellation is an atomic spend fence before every provider launch', () =
   )
   assert.match(
     workflow.slice(cancellationBranch, liveWorkerBranch),
-    /finalizeRequestedTaskCancellationStep\(runId\)[\s\S]*status: 'cancelled'[\s\S]*catch \{[\s\S]*hardDeadlineReached[\s\S]*outcome: 'coordinator_deadline'[\s\S]*taskStillActive: true[\s\S]*if \(hardDeadlineReached\)[\s\S]*outcome: 'coordinator_deadline'[\s\S]*taskStillActive: true[\s\S]*continue/,
-    'failed or unfinished cancellation cleanup must remain sleep-only and stop at the coordinator hard deadline',
+    /finalizeRequestedTaskCancellationStep\(runId\)[\s\S]*if \(finalized\) \{[\s\S]*sleep\(INITIAL_RUNTIME_WAIT_MS\)[\s\S]*continue[\s\S]*catch \{[\s\S]*hardDeadlineReached[\s\S]*outcome: 'coordinator_deadline'[\s\S]*taskStillActive: true[\s\S]*if \(hardDeadlineReached\)[\s\S]*outcome: 'coordinator_deadline'[\s\S]*taskStillActive: true[\s\S]*continue/,
+    'successful cancellation must re-enter terminal provider reconciliation, while failed or unfinished cleanup remains bounded and sleep-only',
+  )
+})
+
+check('terminal tasks reconcile Render dispatches before Workflow completion', () => {
+  const workflow = exportedFunction(sources.taskWorkflow, 'taskExecutionWorkflow')
+  const terminalState = workflow.indexOf(
+    "const taskIsTerminal = state.state === 'terminal'",
+  )
+  const providerObservation = workflow.indexOf(
+    'providerObservation = await observeTaskExecutionProviderStep({',
+  )
+  const terminalCompletion = workflow.lastIndexOf(
+    'if (taskIsTerminal) return terminalWorkflowResult(runId, state)',
+  )
+  const eligibleNotFoundBranch = workflow.indexOf(
+    'if (eligibleNotFoundDispatches.length > 0)',
+  )
+  const terminalCancellation = workflow.indexOf(
+    'const providerJobIdsToCancel',
+    providerObservation,
+  )
+  const unresolvedDispatchCheck = workflow.indexOf(
+    'const unresolvedDispatchExists',
+    eligibleNotFoundBranch,
+  )
+  const liveDispatchCheck = workflow.indexOf(
+    'if (providerObservation.possiblyLive || unresolvedDispatchExists)',
+    unresolvedDispatchCheck,
+  )
+  const providerLaunch = workflow.indexOf(
+    'dispatchTaskExecutionStep(runId, generation)',
+  )
+  assert(
+    terminalState >= 0 &&
+      providerObservation > terminalState &&
+      terminalCancellation > providerObservation &&
+      eligibleNotFoundBranch > providerObservation &&
+      eligibleNotFoundBranch > terminalCancellation &&
+      unresolvedDispatchCheck > eligibleNotFoundBranch &&
+      liveDispatchCheck > unresolvedDispatchCheck &&
+      terminalCompletion > liveDispatchCheck &&
+      providerLaunch > terminalCompletion,
+    'terminal state must reconcile every provider branch before completing and before any replacement launch',
+  )
+  assert.doesNotMatch(
+    workflow.slice(terminalState, providerObservation),
+    /return terminalWorkflowResult/,
+    'terminal state must not bypass Render reconciliation',
+  )
+  assert.match(
+    workflow.slice(eligibleNotFoundBranch, unresolvedDispatchCheck),
+    /resolveTaskDispatchesNotFoundStep[\s\S]*sleep\(INITIAL_RUNTIME_WAIT_MS\)[\s\S]*continue/,
+    'settling one not-found subset must re-inspect all generations before terminal completion',
+  )
+  assert.doesNotMatch(
+    workflow.slice(eligibleNotFoundBranch, unresolvedDispatchCheck),
+    /terminalWorkflowResult/,
+    'one eligible not-found dispatch must not hide another live or unresolved generation',
+  )
+  assert.match(
+    workflow.slice(terminalCancellation, terminalCompletion + 100),
+    /liveProviderJobIds\.filter[\s\S]*terminalCancellationAttempted\[providerJobId\] = true[\s\S]*cancelTerminalTaskProviderJobsStep[\s\S]*providerObservation\.possiblyLive \|\| unresolvedDispatchExists[\s\S]*outcome: 'coordinator_deadline'[\s\S]*if \(taskIsTerminal\) return terminalWorkflowResult/,
+    'terminal tasks must cancel each exact live provider job once, preserve uncertain rows at the deadline, and complete only after authoritative settlement',
+  )
+  assert.match(
+    sources.taskWorkflow,
+    /const liveProviderJobIds = new Set<string>\(\)[\s\S]*liveProviderJobIds\.add\(observation\.job\.providerJobId\)[\s\S]*liveProviderJobIds\.add\(job\.providerJobId\)[\s\S]*liveProviderJobIds: Array\.from\(liveProviderJobIds\)\.sort\(\)/,
+    'provider observation must retain every live exact job across retrieval and listing for multi-generation cancellation',
   )
 })
 
@@ -623,6 +693,87 @@ assert.throws(
   'the runtime Render command must reject a shell-unsafe run id',
 )
 passed.push('runtime malformed-target and exact-command validation')
+
+{
+  const renderEnvironment = {
+    RENDER_API_KEY: process.env.RENDER_API_KEY,
+    RENDER_WORKER_SERVICE_ID: process.env.RENDER_WORKER_SERVICE_ID,
+  }
+  const originalFetch = globalThis.fetch
+  const serviceId = 'srv-00000000000000000000'
+  const providerJobId = 'job-00000000000000000000'
+  const requests = []
+  process.env.RENDER_API_KEY = 'render-cancellation-smoke-key'
+  process.env.RENDER_WORKER_SERVICE_ID = serviceId
+  try {
+    globalThis.fetch = async (url, init) => {
+      requests.push({ url: String(url), init })
+      return new Response('{}', {
+        status: requests.length === 1 ? 200 : requests.length === 2 ? 404 : 503,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    assert.deepEqual(
+      await taskDispatch.cancelTaskDispatchProviderJob(providerJobId),
+      { outcome: 'accepted', providerJobId },
+      'a successful Render cancellation must be reported as accepted',
+    )
+    assert.equal(
+      requests[0]?.url,
+      `https://api.render.com/v1/services/${serviceId}/jobs/${providerJobId}/cancel`,
+      'Render cancellation must target the exact service and one-off job',
+    )
+    assert.equal(
+      requests[0]?.init?.method,
+      'POST',
+      'Render cancellation must use the provider cancellation POST',
+    )
+    assert.deepEqual(
+      await taskDispatch.cancelTaskDispatchProviderJob(providerJobId),
+      { outcome: 'not_found', providerJobId },
+      'an authoritative missing Render job must be distinguished from an uncertain cancellation',
+    )
+    const uncertainCancellation =
+      await taskDispatch.cancelTaskDispatchProviderJob(providerJobId)
+    assert.equal(uncertainCancellation.outcome, 'unknown')
+    assert.equal(uncertainCancellation.errorCode, 'PROVIDER_UNAVAILABLE')
+
+    globalThis.fetch = async (_url, init) =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal
+        if (signal?.aborted) {
+          reject(new Error('aborted'))
+          return
+        }
+        signal?.addEventListener(
+          'abort',
+          () => reject(new Error('aborted')),
+          { once: true },
+        )
+      })
+    const smokeDeadline = new AbortController()
+    const startedAtMs = Date.now()
+    const smokeDeadlineTimer = setTimeout(() => smokeDeadline.abort(), 25)
+    const abortedCancellation =
+      await taskDispatch.cancelTaskDispatchProviderJob(providerJobId, {
+        signal: smokeDeadline.signal,
+      })
+    clearTimeout(smokeDeadlineTimer)
+    assert.equal(abortedCancellation.outcome, 'unknown')
+    assert.equal(abortedCancellation.errorCode, 'REQUEST_TIMEOUT')
+    assert.ok(
+      Date.now() - startedAtMs < 1_000,
+      'a smoke-scoped provider deadline must abort a hanging cancellation well before the default 20s request timeout',
+    )
+  } finally {
+    globalThis.fetch = originalFetch
+    for (const [name, value] of Object.entries(renderEnvironment)) {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+  }
+}
+passed.push('bounded exact Render cancellation outcomes')
 
 if (withTurso) {
   const {

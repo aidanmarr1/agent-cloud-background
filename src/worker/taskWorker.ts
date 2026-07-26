@@ -395,7 +395,14 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
 
           const now = Date.now()
           if (dispatchState.state === 'missing' && now >= drainMissingDeadlineMs) {
-            throw new Error(`Target task "${targetRunId}" was not found before the drain grace period expired.`)
+            // A targeted provider job can outlive an intentionally cleaned-up
+            // internal probe. Once the bounded enqueue-lag grace expires there
+            // is no durable claim left to recover, so exit successfully instead
+            // of making the supervisor restart the same impossible drain.
+            console.log('[TaskWorker] Target task no longer exists after the drain grace period; drain complete', {
+              runId: targetRunId,
+            })
+            break
           }
           if (dispatchState.state === 'running' && now >= drainClaimDeadlineMs) {
             console.log('[TaskWorker] Target task remains owned by a live worker; drain duplicate is exiting', {

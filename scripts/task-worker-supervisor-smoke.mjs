@@ -6,6 +6,10 @@ import { join, resolve } from 'node:path'
 
 const root = process.cwd()
 const supervisorEntry = resolve(root, 'scripts/task-worker-supervisor.mjs')
+const taskWorkerSource = await readFile(
+  resolve(root, 'src/worker/taskWorker.ts'),
+  'utf8',
+)
 const probeDir = await mkdtemp(join(tmpdir(), 'agent-worker-supervisor-'))
 const probeEntry = join(probeDir, 'worker-probe.mjs')
 const onceFile = join(probeDir, 'once-slot.txt')
@@ -308,6 +312,25 @@ try {
       'targeted drain must explain the bounded positive wall-clock contract',
     )
   }
+
+  const missingTargetBranch = taskWorkerSource.slice(
+    taskWorkerSource.indexOf(
+      "dispatchState.state === 'missing' && now >= drainMissingDeadlineMs",
+    ),
+    taskWorkerSource.indexOf(
+      "dispatchState.state === 'running' && now >= drainClaimDeadlineMs",
+    ),
+  )
+  assert.match(
+    missingTargetBranch,
+    /Target task no longer exists after the drain grace period; drain complete[\s\S]*break/,
+    'a cleaned-up exact target must end its targeted drain successfully after the enqueue-lag grace',
+  )
+  assert.doesNotMatch(
+    missingTargetBranch,
+    /throw new Error/,
+    'a permanently missing exact target must not consume the supervisor crash-restart budget',
+  )
 
   console.log('task worker supervisor smoke checks passed')
 } finally {

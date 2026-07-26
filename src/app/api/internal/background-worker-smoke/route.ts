@@ -6,6 +6,7 @@ import {
   enqueueTaskJob,
   createTaskJobEventStream,
   findActiveTaskJobForConversation,
+  inspectTaskExecutionDispatchState,
 } from '@/lib/agent/taskJobs'
 import { taskQueueName } from '@/lib/agent/taskQueue'
 import {
@@ -18,20 +19,30 @@ import {
   getTaskExecutionCoordinatorStatus,
   startTaskExecutionCoordinator,
 } from '@/lib/agent/taskExecutionCoordinator'
-import { usesOnDemandTaskDispatch } from '@/lib/agent/taskDispatch'
+import {
+  cancelTaskDispatchProviderJob,
+  listTaskDispatchProviderJobs,
+  retrieveTaskDispatchProviderJob,
+  usesOnDemandTaskDispatch,
+} from '@/lib/agent/taskDispatch'
 import { parseSSE } from '@/lib/stream'
 import type { SSEEvent } from '@/types'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+export const maxDuration = 180
 
 const MAX_TIMESTAMP_SKEW_MS = 5 * 60 * 1000
 const HEALTH_PATH = '/api/internal/background-worker-smoke'
 const FIRST_VIEWER_TIMEOUT_MS = 45_000
-const RECONNECT_TIMEOUT_MS = 60_000
+const ON_DEMAND_COLD_START_GRACE_MS = 60_000
+const RECONNECT_TIMEOUT_MS = 20_000
 const PROBE_DELAY_MS = 2_500
 const CLEANUP_RETRY_MS = 100
 const CLEANUP_RETRIES = 30
+const PROVIDER_SETTLE_TIMEOUT_MS = 8_000
+const PROVIDER_SETTLE_POLL_MS = 500
+const PROVIDER_SETTLE_MIN_MS = 2_000
+const PROVIDER_SETTLE_REQUIRED_CLEAN_OBSERVATIONS = 2
 
 function safeCompareHex(a: string, b: string): boolean {
   if (!/^[a-f0-9]+$/i.test(a) || !/^[a-f0-9]+$/i.test(b)) return false
@@ -141,14 +152,247 @@ async function cleanupProbeRows(userId: string, runId: string): Promise<boolean>
   return false
 }
 
-async function cancelAndCleanupProbe(userId: string, runId: string): Promise<boolean> {
+interface ProviderSettlement {
+  safeToCleanup: boolean
+  observedProviderJobs: number
+  cancellationAccepted: number
+  reason: string | null
+}
+
+interface ProbeCleanupResult extends ProviderSettlement {
+  cleanedUp: boolean
+}
+
+function providerJobIsLive(status: string): boolean {
+  return status === 'pending' || status === 'running'
+}
+
+async function withinProviderSettleDeadline<T>(
+  operation: Promise<T>,
+  deadlineMs: number,
+): Promise<T> {
+  const remainingMs = deadlineMs - Date.now()
+  if (remainingMs <= 0) {
+    throw new Error('Provider settlement deadline reached.')
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error('Provider settlement deadline reached.')),
+      remainingMs,
+    )
+    timeout.unref?.()
+    operation.then(
+      (value) => {
+        clearTimeout(timeout)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timeout)
+        reject(error)
+      },
+    )
+  })
+}
+
+async function settleOnDemandProviderJobs(input: {
+  runId: string
+  startedAtMs: number
+  cancelLiveJobs: boolean
+}): Promise<ProviderSettlement> {
+  const deadlineMs = Date.now() + PROVIDER_SETTLE_TIMEOUT_MS
+  const providerSettleController = new AbortController()
+  const providerSettleTimeout = setTimeout(
+    () => providerSettleController.abort(),
+    PROVIDER_SETTLE_TIMEOUT_MS,
+  )
+  const cleanNotBeforeMs = Date.now() + PROVIDER_SETTLE_MIN_MS
+  const cancellationAttempted = new Set<string>()
+  const cancellationAccepted = new Set<string>()
+  const observedProviderJobs = new Set<string>()
+  let cleanObservations = 0
+  let lastReason: string | null = 'The provider execution has not reached a terminal state.'
+
+  while (Date.now() < deadlineMs) {
+    try {
+      const [dispatchState, listed] = await withinProviderSettleDeadline(
+        Promise.all([
+          inspectTaskExecutionDispatchState(input.runId),
+          listTaskDispatchProviderJobs({
+            runId: input.runId,
+            createdAfterMs: input.startedAtMs,
+          }, {
+            signal: providerSettleController.signal,
+          }),
+        ]),
+        deadlineMs,
+      )
+      if (listed.outcome !== 'complete') {
+        cleanObservations = 0
+        lastReason = `Render job listing was not authoritative (${listed.errorCode}).`
+        await sleep(PROVIDER_SETTLE_POLL_MS)
+        continue
+      }
+
+      const jobs = new Map(
+        listed.jobs.map((job) => [job.providerJobId, job]),
+      )
+      const activeDispatches = dispatchState.renderDispatches.filter(
+        (dispatch) => (
+          dispatch.status === 'creating' ||
+          dispatch.status === 'unknown' ||
+          dispatch.status === 'created'
+        ),
+      )
+      let authoritative = true
+
+      for (const dispatch of activeDispatches) {
+        if (!dispatch.providerJobId || jobs.has(dispatch.providerJobId)) continue
+        const observation = await withinProviderSettleDeadline(
+          retrieveTaskDispatchProviderJob(dispatch.providerJobId, {
+            signal: providerSettleController.signal,
+          }),
+          deadlineMs,
+        )
+        if (observation.outcome === 'found') {
+          jobs.set(observation.job.providerJobId, observation.job)
+        } else {
+          authoritative = false
+          lastReason = observation.outcome === 'unknown'
+            ? `Render job retrieval was not authoritative (${observation.errorCode}).`
+            : 'A durable Render dispatch was not visible from the provider yet.'
+        }
+      }
+
+      const providerlessActiveDispatches = activeDispatches.filter(
+        (dispatch) => !dispatch.providerJobId,
+      ).length
+      if (providerlessActiveDispatches > 0) {
+        // Exact jobs from the listing are still cancelled below, but an
+        // ambiguous durable launch is never treated as proof that every
+        // provider execution is terminal. Preserve the rows for late workers.
+        authoritative = false
+        lastReason = 'A provider launch is still ambiguous.'
+      }
+
+      const liveJobs = Array.from(jobs.values()).filter((job) =>
+        providerJobIsLive(job.status))
+      for (const job of jobs.values()) {
+        observedProviderJobs.add(job.providerJobId)
+      }
+
+      if (input.cancelLiveJobs) {
+        for (const job of liveJobs) {
+          if (cancellationAttempted.has(job.providerJobId)) continue
+          cancellationAttempted.add(job.providerJobId)
+          const cancellation = await withinProviderSettleDeadline(
+            cancelTaskDispatchProviderJob(job.providerJobId, {
+              signal: providerSettleController.signal,
+            }),
+            deadlineMs,
+          )
+          if (cancellation.outcome === 'accepted') {
+            cancellationAccepted.add(job.providerJobId)
+          } else if (cancellation.outcome === 'unknown') {
+            lastReason = `Render job cancellation was not authoritative (${cancellation.errorCode}).`
+          } else {
+            // A 404 can be eventual provider state. Require a subsequent
+            // authoritative list/retrieve cycle before deleting durable rows.
+            lastReason = 'A Render job disappeared while cancellation was requested.'
+          }
+        }
+      }
+
+      if (
+        authoritative &&
+        liveJobs.length === 0 &&
+        Date.now() >= cleanNotBeforeMs
+      ) {
+        cleanObservations += 1
+        if (
+          cleanObservations >=
+            PROVIDER_SETTLE_REQUIRED_CLEAN_OBSERVATIONS
+        ) {
+          clearTimeout(providerSettleTimeout)
+          return {
+            safeToCleanup: true,
+            observedProviderJobs: observedProviderJobs.size,
+            cancellationAccepted: cancellationAccepted.size,
+            reason: null,
+          }
+        }
+      } else {
+        cleanObservations = 0
+        if (liveJobs.length > 0) {
+          lastReason = input.cancelLiveJobs
+            ? 'Render is still stopping the one-off job.'
+            : 'The successful one-off job has not exited yet.'
+        }
+      }
+    } catch (error) {
+      cleanObservations = 0
+      lastReason = error instanceof Error ? error.message : String(error)
+    }
+
+    await sleep(PROVIDER_SETTLE_POLL_MS)
+  }
+
+  clearTimeout(providerSettleTimeout)
+  return {
+    safeToCleanup: false,
+    observedProviderJobs: observedProviderJobs.size,
+    cancellationAccepted: cancellationAccepted.size,
+    reason: lastReason,
+  }
+}
+
+async function cleanupProbeRowsSafely(input: {
+  userId: string
+  runId: string
+  startedAtMs: number
+  onDemandDispatch: boolean
+  cancelLiveProviderJobs: boolean
+}): Promise<ProbeCleanupResult> {
+  const settlement = input.onDemandDispatch
+    ? await settleOnDemandProviderJobs({
+        runId: input.runId,
+        startedAtMs: input.startedAtMs,
+        cancelLiveJobs: input.cancelLiveProviderJobs,
+      })
+    : {
+        safeToCleanup: true,
+        observedProviderJobs: 0,
+        cancellationAccepted: 0,
+        reason: null,
+      }
+  if (!settlement.safeToCleanup) {
+    // Keeping the terminal task and dispatch rows is intentional. A late
+    // one-off worker then observes a terminal target and exits cleanly instead
+    // of treating a deleted target as a restartable infrastructure failure.
+    return { ...settlement, cleanedUp: false }
+  }
+  return {
+    ...settlement,
+    cleanedUp: await cleanupProbeRows(input.userId, input.runId),
+  }
+}
+
+async function cancelAndCleanupProbe(input: {
+  userId: string
+  runId: string
+  startedAtMs: number
+  onDemandDispatch: boolean
+}): Promise<ProbeCleanupResult> {
+  const { userId, runId } = input
   await cancelTaskJob(userId, runId).catch((error) => {
     console.error('[BackgroundWorkerSmoke] Probe cancellation failed', {
       runId,
       error: error instanceof Error ? error.message : String(error),
     })
   })
-  return cleanupProbeRows(userId, runId)
+  return cleanupProbeRowsSafely({
+    ...input,
+    cancelLiveProviderJobs: true,
+  })
 }
 
 async function collectStreamEvents(input: {
@@ -301,28 +545,90 @@ export async function GET(request: NextRequest) {
 
   const discoveredJob = await findActiveTaskJobForConversation(userId, conversationId)
   if (discoveredJob?.runId !== runId) {
-    const cleanedUp = await cancelAndCleanupProbe(userId, runId)
+    const cleanup = await cancelAndCleanupProbe({
+      userId,
+      runId,
+      startedAtMs: startedAt,
+      onDemandDispatch,
+    })
     return NextResponse.json({
       ok: false,
       error: 'Durable active-run discovery could not find the queued probe.',
       runId,
       queueName: taskQueueName(),
-      cleanedUp,
+      cleanedUp: cleanup.cleanedUp,
+      providerExecutionStopped: cleanup.safeToCleanup,
+      providerCleanupReason: cleanup.reason,
       discoveredRunId: discoveredJob?.runId || null,
       durationMs: Date.now() - startedAt,
     }, { status: 502 })
   }
 
-  const first = await collectStreamEvents({
+  let first = await collectStreamEvents({
     userId,
     conversationId,
     runId,
     timeoutMs: FIRST_VIEWER_TIMEOUT_MS,
     stopWhen: (event) => event.type === 'text_delta' && event.content.includes('__background_probe_start__'),
   })
-  const sawStart = first.events.some((event) => event.type === 'text_delta' && event.content.includes('__background_probe_start__'))
+  let sawStart = first.events.some((event) =>
+    event.type === 'text_delta' &&
+    event.content.includes('__background_probe_start__'))
+  let coldStartGraceUsed = false
+  let coldStartState: string | null = null
+  if (!sawStart && onDemandDispatch) {
+    let coldStartMayStillBeProgressing = true
+    try {
+      const state = await inspectTaskExecutionDispatchState(runId)
+      coldStartState = state.state
+      coldStartMayStillBeProgressing = (
+        !state.cancelRequested &&
+        (
+          state.state === 'queued' ||
+          state.state === 'running' ||
+          state.state === 'stale'
+        )
+      )
+    } catch (error) {
+      // A transient control-plane read must not cause destructive cleanup while
+      // a paid one-off job can still be booting. The additional wait is finite.
+      console.warn('[BackgroundWorkerSmoke] Cold-start state inspection failed', {
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+
+    if (coldStartMayStillBeProgressing) {
+      coldStartGraceUsed = true
+      const coldStart = await collectStreamEvents({
+        userId,
+        conversationId,
+        runId,
+        afterSeq: first.lastSeq,
+        timeoutMs: ON_DEMAND_COLD_START_GRACE_MS,
+        stopWhen: (event) => (
+          event.type === 'text_delta' &&
+          event.content.includes('__background_probe_start__')
+        ),
+      })
+      first = {
+        events: [...first.events, ...coldStart.events],
+        lastSeq: coldStart.lastSeq,
+        timedOut: coldStart.timedOut,
+      }
+      sawStart = first.events.some((event) =>
+        event.type === 'text_delta' &&
+        event.content.includes('__background_probe_start__'))
+    }
+  }
+
   if (!sawStart) {
-    const cleanedUp = await cancelAndCleanupProbe(userId, runId)
+    const cleanup = await cancelAndCleanupProbe({
+      userId,
+      runId,
+      startedAtMs: startedAt,
+      onDemandDispatch,
+    })
     return NextResponse.json({
       ok: false,
       error: first.timedOut ? 'Timed out waiting for worker to claim the probe.' : 'Worker stream ended before probe start.',
@@ -332,7 +638,13 @@ export async function GET(request: NextRequest) {
       hostedWorkerCount: cloudCapableWorkers.length,
       executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
       activeDiscovery: true,
-      cleanedUp,
+      cleanedUp: cleanup.cleanedUp,
+      providerExecutionStopped: cleanup.safeToCleanup,
+      providerJobsObserved: cleanup.observedProviderJobs,
+      providerCancellationsAccepted: cleanup.cancellationAccepted,
+      providerCleanupReason: cleanup.reason,
+      coldStartGraceUsed,
+      coldStartState,
       firstViewerEvents: first.events.map(eventSummary),
       durationMs: Date.now() - startedAt,
     }, { status: 504 })
@@ -352,7 +664,12 @@ export async function GET(request: NextRequest) {
   const sawDone = reconnected.events.some((event) => event.type === 'done')
 
   if (errors.length > 0 || !sawFinish || !sawDone) {
-    const cleanedUp = await cancelAndCleanupProbe(userId, runId)
+    const cleanup = await cancelAndCleanupProbe({
+      userId,
+      runId,
+      startedAtMs: startedAt,
+      onDemandDispatch,
+    })
     return NextResponse.json({
       ok: false,
       error: errors[0]?.type === 'error' ? errors[0].message : 'Reconnected stream did not replay worker completion.',
@@ -362,7 +679,13 @@ export async function GET(request: NextRequest) {
       workerCount: workers.length,
       hostedWorkerCount: cloudCapableWorkers.length,
       executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
-      cleanedUp,
+      cleanedUp: cleanup.cleanedUp,
+      providerExecutionStopped: cleanup.safeToCleanup,
+      providerJobsObserved: cleanup.observedProviderJobs,
+      providerCancellationsAccepted: cleanup.cancellationAccepted,
+      providerCleanupReason: cleanup.reason,
+      coldStartGraceUsed,
+      coldStartState,
       firstViewerLastSeq: first.lastSeq,
       firstViewerEvents: first.events.map(eventSummary),
       reconnectedEvents: reconnected.events.map(eventSummary),
@@ -370,7 +693,13 @@ export async function GET(request: NextRequest) {
     }, { status: 502 })
   }
 
-  const cleanedUp = await cleanupProbeRows(userId, runId)
+  const cleanup = await cleanupProbeRowsSafely({
+    userId,
+    runId,
+    startedAtMs: startedAt,
+    onDemandDispatch,
+    cancelLiveProviderJobs: false,
+  })
 
   return NextResponse.json({
     ok: true,
@@ -380,7 +709,12 @@ export async function GET(request: NextRequest) {
     hostedWorkerCount: cloudCapableWorkers.length,
     executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
     activeDiscovery: true,
-    cleanedUp,
+    cleanedUp: cleanup.cleanedUp,
+    providerExecutionStopped: cleanup.safeToCleanup,
+    providerJobsObserved: cleanup.observedProviderJobs,
+    providerCleanupReason: cleanup.reason,
+    coldStartGraceUsed,
+    coldStartState,
     workers: workers.map((worker) => ({
       workerId: worker.workerId,
       status: worker.status,

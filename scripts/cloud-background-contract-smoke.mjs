@@ -12,6 +12,7 @@ const [
   conversations,
   taskJobs,
   taskQueue,
+  taskDispatch,
   useAgentStream,
   taskFiles,
   taskWorkerHeartbeat,
@@ -59,6 +60,7 @@ const [
   readFile(join(root, 'src/lib/conversations.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/taskJobs.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/taskQueue.ts'), 'utf8'),
+  readFile(join(root, 'src/lib/agent/taskDispatch.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
   readFile(join(root, 'src/lib/taskFiles.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/taskWorkerHeartbeat.ts'), 'utf8'),
@@ -510,13 +512,103 @@ assert.match(backgroundWorkerSmokeRoute, /No hosted E2B task worker heartbeat fo
 assert.match(backgroundWorkerSmokeRoute, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'deployed background worker smoke must support deployment-version matching')
 assert.match(backgroundWorkerSmokeRoute, /matched AGENT_DEPLOYMENT_VERSION/, 'deployed background worker smoke must explain deployment-version mismatch')
 assert.match(backgroundWorkerSmokeRoute, /__background_probe_start__/, 'deployed background worker smoke route must wait for worker claim before disconnect')
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /if \(!sawStart && onDemandDispatch\)[\s\S]*inspectTaskExecutionDispatchState\(runId\)[\s\S]*ON_DEMAND_COLD_START_GRACE_MS/,
+  'on-demand smoke must inspect durable execution state and grant a bounded Render cold-start grace before cleanup',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /catch \(error\) \{[\s\S]*Cold-start state inspection failed[\s\S]*if \(coldStartMayStillBeProgressing\)/,
+  'a transient cold-start state read failure must conservatively use the finite grace instead of deleting a possibly-live target',
+)
 assert.match(backgroundWorkerSmokeRoute, /afterSeq:\s*first\.lastSeq/, 'deployed background worker smoke route must reconnect by sequence after disconnect')
 assert.match(backgroundWorkerSmokeRoute, /__background_probe_finish__/, 'deployed background worker smoke route must prove completion after reconnect')
 assert.match(backgroundWorkerSmokeRoute, /cleanupProbeRows/, 'deployed background worker smoke route must clean up successful diagnostic rows')
 assert.match(backgroundWorkerSmokeRoute, /cancelAndCleanupProbe/, 'deployed background worker smoke route must try to cancel and clean up failed diagnostic rows')
+assert.match(
+  taskDispatch,
+  /export async function cancelTaskDispatchProviderJob\([\s\S]*\/jobs\/\$\{encodeURIComponent\(normalizedJobId\)\}\/cancel[\s\S]*method:\s*'POST'/,
+  'smoke cleanup must have a bounded authenticated Render one-off cancellation primitive',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /await cancelTaskJob\(userId, runId\)[\s\S]*cleanupProbeRowsSafely\(\{[\s\S]*cancelLiveProviderJobs:\s*true/,
+  'failed smoke cleanup must cancel the durable task and its live provider job before deleting diagnostic rows',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /if \(!settlement\.safeToCleanup\)[\s\S]*cleanedUp:\s*false[\s\S]*cleanupProbeRows\(input\.userId, input\.runId\)/,
+  'non-authoritative provider cancellation must leave terminal diagnostic rows for a late worker to observe',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /if \(providerlessActiveDispatches > 0\) \{[\s\S]*authoritative = false[\s\S]*provider launch is still ambiguous/,
+  'an ambiguous provider launch must never be inferred terminal from an unrelated exact-job listing',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /withinProviderSettleDeadline\([\s\S]*Promise\.all\([\s\S]*listTaskDispatchProviderJobs[\s\S]*retrieveTaskDispatchProviderJob[\s\S]*withinProviderSettleDeadline\([\s\S]*cancelTaskDispatchProviderJob/,
+  'provider listing, retrieval, and cancellation must all share the route-level settlement deadline',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /const providerSettleController = new AbortController\(\)[\s\S]*listTaskDispatchProviderJobs\([\s\S]*signal:\s*providerSettleController\.signal[\s\S]*retrieveTaskDispatchProviderJob\([\s\S]*signal:\s*providerSettleController\.signal[\s\S]*cancelTaskDispatchProviderJob\([\s\S]*signal:\s*providerSettleController\.signal/,
+  'the smoke route must actively abort every Render observation and cancellation with one shared deadline signal',
+)
+assert.match(
+  taskDispatch,
+  /const callerSignal = init\.signal[\s\S]*addEventListener\('abort', abortFromCaller[\s\S]*signal:\s*controller\.signal[\s\S]*removeEventListener\('abort', abortFromCaller\)/,
+  'Render requests must combine the caller deadline with their default 20-second request timeout',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /if \(cancellationAttempted\.has\(job\.providerJobId\)\) continue[\s\S]*cancellationAttempted\.add\(job\.providerJobId\)[\s\S]*cancelTaskDispatchProviderJob/,
+  'an ambiguous cancellation response must not cause repeated provider mutations for the same one-off job',
+)
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /const cleanup = await cleanupProbeRowsSafely\(\{[\s\S]*cancelLiveProviderJobs:\s*false/,
+  'successful smoke cleanup must also wait for the one-off provider process to exit before deleting its target',
+)
 assert.match(backgroundWorkerSmokeRoute, /cleanedUp/, 'deployed background worker smoke response must report cleanup status')
 assert.match(backgroundWorkerSmokeRoute, /hostedWorkerCount/, 'deployed background worker smoke response must report hosted E2B-capable worker count')
 assert.match(backgroundWorkerSmokeRoute, /activeDiscovery:\s*true/, 'deployed background worker smoke response must report active-run discovery proof')
+
+const smokeTimeoutConstant = (name) => {
+  const match = backgroundWorkerSmokeRoute.match(
+    new RegExp(`const ${name} = ([0-9_]+)`),
+  )
+  assert.ok(match, `background worker smoke must define ${name} as a literal bounded duration`)
+  return Number(match[1].replaceAll('_', ''))
+}
+const smokeMaxDurationMatch = backgroundWorkerSmokeRoute.match(
+  /export const maxDuration = ([0-9_]+)/,
+)
+assert.ok(smokeMaxDurationMatch, 'background worker smoke must declare an explicit platform duration')
+const smokeMaxDurationMs =
+  Number(smokeMaxDurationMatch[1].replaceAll('_', '')) * 1_000
+const smokeFirstViewerMs = smokeTimeoutConstant('FIRST_VIEWER_TIMEOUT_MS')
+const smokeColdStartGraceMs =
+  smokeTimeoutConstant('ON_DEMAND_COLD_START_GRACE_MS')
+const smokeReconnectMs = smokeTimeoutConstant('RECONNECT_TIMEOUT_MS')
+const smokeProviderSettleMs =
+  smokeTimeoutConstant('PROVIDER_SETTLE_TIMEOUT_MS')
+const smokeCleanupRetryMs = smokeTimeoutConstant('CLEANUP_RETRY_MS')
+const smokeCleanupRetries = smokeTimeoutConstant('CLEANUP_RETRIES')
+assert.ok(
+  smokeFirstViewerMs + smokeColdStartGraceMs >= 100_000,
+  'on-demand first-viewer budget must accommodate a real Render image cold start',
+)
+assert.ok(
+  smokeFirstViewerMs +
+      smokeColdStartGraceMs +
+      smokeReconnectMs +
+      smokeProviderSettleMs +
+      smokeCleanupRetryMs * smokeCleanupRetries <=
+    smokeMaxDurationMs - 20_000,
+  'the cold-start, reconnect, provider-stop, and cleanup budgets must retain platform deadline headroom',
+)
 assert.match(backgroundWorkerSmokeScript, /\/api\/internal\/background-worker-smoke/, 'deployed background worker smoke script must call the signed smoke endpoint')
 assert.match(backgroundWorkerSmokeScript, /x-agent-health-signature/, 'deployed background worker smoke script must sign the internal smoke request')
 assert.match(backgroundWorkerSmokeScript, /--timeout-ms/, 'deployed background worker smoke script must support a timeout override')

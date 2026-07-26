@@ -18,6 +18,7 @@ const PROVIDER_BACKOFF_MAX_MS = 60_000
 const KNOWN_REJECTION_BACKOFF_MS = 30_000
 const UNKNOWN_DISPATCH_SETTLE_MS = 2 * 60_000
 const REQUIRED_EMPTY_PROVIDER_OBSERVATIONS = 2
+const TERMINAL_PROVIDER_EXIT_GRACE_MS = 30_000
 const COORDINATOR_LAUNCH_DEADLINE_MS = 2 * 60 * 60_000
 const COORDINATOR_DRAIN_BACKSTOP_MS = 60 * 60_000
 
@@ -40,6 +41,7 @@ interface ProviderObservationResult {
   observedAtMs: number
   authoritative: boolean
   possiblyLive: boolean
+  liveProviderJobIds: string[]
   notFoundDispatches: Array<{
     dispatchId: string
     providerJobId: string | null
@@ -75,6 +77,18 @@ function terminalStatus(
   if (terminal === 'done' || status === 'done') return 'done'
   if (status === 'cancelled') return 'cancelled'
   return 'error'
+}
+
+function terminalWorkflowResult(
+  runId: string,
+  state: TaskExecutionDispatchState,
+): TaskExecutionWorkflowResult {
+  return {
+    outcome: 'terminal',
+    runId,
+    status: terminalStatus(state.status, state.terminalStatus),
+    attempts: state.attempts,
+  }
 }
 
 function providerBackoffMs(consecutiveFailures: number): number {
@@ -244,12 +258,14 @@ async function observeTaskExecutionProviderStep(input: {
       observedAtMs,
       authoritative: true,
       possiblyLive: false,
+      liveProviderJobIds: [],
       notFoundDispatches: [],
     }
   }
 
   let authoritative = true
   let possiblyLive = false
+  const liveProviderJobIds = new Set<string>()
   const unresolved = new Map(
     activeDispatches.map((dispatch) => [dispatch.dispatchId, dispatch]),
   )
@@ -282,7 +298,10 @@ async function observeTaskExecutionProviderStep(input: {
       observation.job.providerJobId,
       observation.job.status,
     )
-    if (isProviderJobLive(observation.job.status)) possiblyLive = true
+    if (isProviderJobLive(observation.job.status)) {
+      possiblyLive = true
+      liveProviderJobIds.add(observation.job.providerJobId)
+    }
   }
 
   if (unresolved.size > 0) {
@@ -302,7 +321,10 @@ async function observeTaskExecutionProviderStep(input: {
           left.providerJobId.localeCompare(right.providerJobId)
         ))
       for (const job of exactJobs) {
-        if (isProviderJobLive(job.status)) possiblyLive = true
+        if (isProviderJobLive(job.status)) {
+          possiblyLive = true
+          liveProviderJobIds.add(job.providerJobId)
+        }
       }
 
       const unassignedJobs = exactJobs.filter(
@@ -338,6 +360,7 @@ async function observeTaskExecutionProviderStep(input: {
     observedAtMs,
     authoritative,
     possiblyLive,
+    liveProviderJobIds: Array.from(liveProviderJobIds).sort(),
     notFoundDispatches: authoritative
       ? Array.from(unresolved.values()).map((dispatch) => ({
           dispatchId: dispatch.dispatchId,
@@ -378,6 +401,26 @@ async function resolveTaskDispatchesNotFoundStep(
 
 resolveTaskDispatchesNotFoundStep.maxRetries = 0
 
+async function cancelTerminalTaskProviderJobsStep(
+  runId: string,
+  providerJobIds: string[],
+): Promise<void> {
+  'use step'
+  const {
+    cancelTaskDispatchProviderJob,
+    validateTaskExecutionRunId,
+  } = await import('@/lib/agent/taskDispatch')
+  validateTaskExecutionRunId(runId)
+  for (const providerJobId of providerJobIds) {
+    // Cancellation responses can be ambiguous after the provider accepted the
+    // mutation. The workflow records each exact attempt before entering this
+    // step and relies on later GET/list observations rather than repeating it.
+    await cancelTaskDispatchProviderJob(providerJobId)
+  }
+}
+
+cancelTerminalTaskProviderJobsStep.maxRetries = 0
+
 export async function taskExecutionWorkflow(
   runId: string,
 ): Promise<TaskExecutionWorkflowResult> {
@@ -395,7 +438,9 @@ export async function taskExecutionWorkflow(
   let lastRejectedDispatchId: string | undefined
   let launchDeadlineAtMs: number | null = null
   let hardDeadlineAtMs: number | null = null
+  let terminalObservedAtMs: number | null = null
   const emptyProviderObservations: Record<string, number> = {}
+  const terminalCancellationAttempted: Record<string, true> = {}
 
   // Workflow sleeps release compute. The task's persisted startedAt value
   // defines a finite deadline that remains stable across workflow replays.
@@ -443,13 +488,9 @@ export async function taskExecutionWorkflow(
       return { outcome: 'missing', runId }
     }
     missingTaskWaitMs = 0
-    if (state.state === 'terminal') {
-      return {
-        outcome: 'terminal',
-        runId,
-        status: terminalStatus(state.status, state.terminalStatus),
-        attempts: state.attempts,
-      }
+    const taskIsTerminal = state.state === 'terminal'
+    if (taskIsTerminal && terminalObservedAtMs === null) {
+      terminalObservedAtMs = observedAtMs
     }
     const startedAtMs = (
       typeof state.startedAtMs === 'number' &&
@@ -469,20 +510,23 @@ export async function taskExecutionWorkflow(
         )
     const launchDeadlineReached = observedAtMs >= launchDeadlineAtMs
     const hardDeadlineReached = observedAtMs >= hardDeadlineAtMs
-    if (launchDeadlineReached && observeOnlyReason === null) {
+    if (
+      !taskIsTerminal &&
+      launchDeadlineReached &&
+      observeOnlyReason === null
+    ) {
       observeOnlyReason = 'launch_deadline'
       observeOnlyErrorCode = 'COORDINATOR_LAUNCH_DEADLINE'
     }
-    if (state.cancelRequested) {
+    if (!taskIsTerminal && state.cancelRequested) {
       try {
         const finalized = await finalizeRequestedTaskCancellationStep(runId)
         if (finalized) {
-          return {
-            outcome: 'terminal',
-            runId,
-            status: 'cancelled',
-            attempts: state.attempts,
-          }
+          // Finalizing the durable task can precede the provider process
+          // actually exiting. Re-inspect the terminal row and reconcile its
+          // Render dispatch before completing this coordinator.
+          await sleep(INITIAL_RUNTIME_WAIT_MS)
+          continue
         }
       } catch {
         providerFailureCount += 1
@@ -557,6 +601,44 @@ export async function taskExecutionWorkflow(
       continue
     }
 
+    if (
+      taskIsTerminal &&
+      providerObservation.liveProviderJobIds.length > 0 &&
+      terminalObservedAtMs !== null &&
+      (
+        hardDeadlineReached ||
+        providerObservation.observedAtMs >=
+          terminalObservedAtMs + TERMINAL_PROVIDER_EXIT_GRACE_MS
+      )
+    ) {
+      const providerJobIdsToCancel =
+        providerObservation.liveProviderJobIds.filter(
+          (providerJobId) => !terminalCancellationAttempted[providerJobId],
+        )
+      if (providerJobIdsToCancel.length > 0) {
+        for (const providerJobId of providerJobIdsToCancel) {
+          terminalCancellationAttempted[providerJobId] = true
+        }
+        try {
+          await cancelTerminalTaskProviderJobsStep(
+            runId,
+            providerJobIdsToCancel,
+          )
+        } catch {
+          providerFailureCount += 1
+          if (hardDeadlineReached) {
+            return {
+              outcome: 'coordinator_deadline',
+              runId,
+              taskStillActive: true,
+            }
+          }
+          await sleep(providerBackoffMs(providerFailureCount))
+          continue
+        }
+      }
+    }
+
     if (!providerObservation.authoritative) {
       providerFailureCount += 1
       // Unknown provider state can mean the POST succeeded. Keep observing
@@ -624,6 +706,8 @@ export async function taskExecutionWorkflow(
       for (const dispatch of eligibleNotFoundDispatches) {
         delete emptyProviderObservations[dispatch.dispatchId]
       }
+      // Re-inspect every dispatch after applying this subset. Another active
+      // generation can still be live or inside its not-found settlement grace.
       await sleep(INITIAL_RUNTIME_WAIT_MS)
       continue
     }
@@ -632,6 +716,9 @@ export async function taskExecutionWorkflow(
       providerObservation.notFoundDispatches.length > 0
     if (providerObservation.possiblyLive || unresolvedDispatchExists) {
       if (hardDeadlineReached) {
+        // Preserve the active dispatch rows as a rollout guard. The provider
+        // state was not proven terminal, so a terminal workflow result would
+        // falsely claim that reconciliation completed.
         return {
           outcome: 'coordinator_deadline',
           runId,
@@ -641,6 +728,12 @@ export async function taskExecutionWorkflow(
       await sleep(providerBackoffMs(1))
       continue
     }
+
+    // A terminal task is not fully reconciled until every active Render
+    // dispatch has authoritatively stopped or settled as not found. This keeps
+    // rollout drain accounting truthful without delaying the user-visible
+    // terminal result or launching a replacement generation.
+    if (taskIsTerminal) return terminalWorkflowResult(runId, state)
 
     if (hardDeadlineReached) {
       let finalized = false

@@ -115,6 +115,20 @@ export type TaskDispatchProviderJobListObservation =
       jobs: TaskDispatchProviderJob[]
     } & TaskDispatchProviderObservationFailure)
 
+export type TaskDispatchProviderJobCancellation =
+  | {
+      outcome: 'accepted'
+      providerJobId: string
+    }
+  | {
+      outcome: 'not_found'
+      providerJobId: string
+    }
+  | ({
+      outcome: 'unknown'
+      providerJobId: string
+    } & TaskDispatchProviderObservationFailure)
+
 export class TaskDispatchProviderError extends Error {
   constructor(
     readonly code:
@@ -374,7 +388,7 @@ function providerObservationFailure(
 
 async function renderProviderRequest(
   url: string,
-  operation: 'readiness' | 'retrieve' | 'list' | 'launch',
+  operation: 'readiness' | 'retrieve' | 'list' | 'launch' | 'cancel',
   init: RequestInit,
 ): Promise<{
   ok: boolean
@@ -382,6 +396,13 @@ async function renderProviderRequest(
   payload: unknown
 }> {
   const controller = new AbortController()
+  const callerSignal = init.signal
+  const abortFromCaller = () => controller.abort(callerSignal?.reason)
+  if (callerSignal?.aborted) {
+    abortFromCaller()
+  } else {
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true })
+  }
   const timeout = setTimeout(() => controller.abort(), RENDER_REQUEST_TIMEOUT_MS)
   timeout.unref?.()
   try {
@@ -418,6 +439,7 @@ async function renderProviderRequest(
     )
   } finally {
     clearTimeout(timeout)
+    callerSignal?.removeEventListener('abort', abortFromCaller)
   }
 }
 
@@ -507,6 +529,7 @@ export async function getTaskDispatchProviderReadiness():
 
 export async function retrieveTaskDispatchProviderJob(
   providerJobId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<TaskDispatchProviderJobObservation> {
   const normalizedJobId = providerJobId.trim()
   if (!SAFE_PROVIDER_JOB_ID.test(normalizedJobId)) {
@@ -520,6 +543,7 @@ export async function retrieveTaskDispatchProviderJob(
       'retrieve',
       {
         method: 'GET',
+        signal: options.signal,
         headers: {
           accept: 'application/json',
           authorization: `Bearer ${apiKey}`,
@@ -549,10 +573,49 @@ export async function retrieveTaskDispatchProviderJob(
   }
 }
 
+export async function cancelTaskDispatchProviderJob(
+  providerJobId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<TaskDispatchProviderJobCancellation> {
+  const normalizedJobId = providerJobId.trim()
+  if (!SAFE_PROVIDER_JOB_ID.test(normalizedJobId)) {
+    throw new Error('Invalid task runtime job id.')
+  }
+
+  try {
+    const { apiKey, serviceId } = requireRenderServiceConfiguration()
+    const response = await renderProviderRequest(
+      `${RENDER_API_BASE_URL}/services/${encodeURIComponent(serviceId)}/jobs/${encodeURIComponent(normalizedJobId)}/cancel`,
+      'cancel',
+      {
+        method: 'POST',
+        signal: options.signal,
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
+      },
+    )
+    if (response.status === 404) {
+      return { outcome: 'not_found', providerJobId: normalizedJobId }
+    }
+    if (!response.ok) throw providerStatusError(response.status)
+    return { outcome: 'accepted', providerJobId: normalizedJobId }
+  } catch (error) {
+    return {
+      outcome: 'unknown',
+      providerJobId: normalizedJobId,
+      ...providerObservationFailure(error),
+    }
+  }
+}
+
 export async function listTaskDispatchProviderJobs(input: {
   runId: string
   createdAfterMs: number
-}): Promise<TaskDispatchProviderJobListObservation> {
+}, options: {
+  signal?: AbortSignal
+} = {}): Promise<TaskDispatchProviderJobListObservation> {
   const runId = validateTaskExecutionRunId(input.runId)
   if (!Number.isFinite(input.createdAfterMs) || input.createdAfterMs < 0) {
     throw new Error('Invalid task runtime job observation time.')
@@ -575,6 +638,7 @@ export async function listTaskDispatchProviderJobs(input: {
         'list',
         {
           method: 'GET',
+          signal: options.signal,
           headers: {
             accept: 'application/json',
             authorization: `Bearer ${apiKey}`,
