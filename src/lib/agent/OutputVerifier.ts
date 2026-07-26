@@ -74,7 +74,9 @@ export class OutputVerifier {
 
   private compactDeliverableHasSubstance(content: string): boolean {
     const headingCount = (content.match(/^#{1,3}\s+\S/gm) || []).length
+    const bulletItems = (content.match(/^\s*[-*]\s+(?!\[[ xX]\])\S.+$/gm) || []).length
     const checklistItems = (content.match(/^\s*[-*]\s+\[[ xX]\]\s+\S.+$/gm) || []).length
+    const wordCount = content.split(/\s+/).filter(Boolean).length
     const informativeBlocks = content.split(/\n\s*\n/).filter(block => {
       const withoutMarkdown = block
         .replace(/^\s*#{1,6}\s+/gm, '')
@@ -84,7 +86,14 @@ export class OutputVerifier {
       return words >= 18
     }).length
 
-    return headingCount >= 4 && (checklistItems >= 5 || informativeBlocks >= 6)
+    return (
+      headingCount >= 1 &&
+      wordCount >= 35 &&
+      (bulletItems >= 3 || checklistItems >= 3)
+    ) || (
+      headingCount >= 4 &&
+      (checklistItems >= 5 || informativeBlocks >= 6)
+    )
   }
 
   verify(
@@ -179,7 +188,7 @@ export class OutputVerifier {
     const savedMarkdownReport = filePath.toLowerCase().endsWith('.md') &&
       taskDefaultsToMarkdownDeliverable(originalRequest)
 
-    if (savedMarkdownReport) {
+    if (savedMarkdownReport && !conciseStructuredDeliverable) {
       const headingCount = (fileContent.match(/^#{1,3}\s+\S/gm) || []).length
       if (headingCount < 4) {
         failures.push('Saved Markdown report needs a title, executive summary, multiple substantive sections, conclusion, and references')
@@ -220,7 +229,7 @@ export class OutputVerifier {
         this.checkBrowseAction(fileContent, failures, suggestions)
         break
       default:
-        if (savedMarkdownReport) {
+        if (savedMarkdownReport && !conciseStructuredDeliverable) {
           this.checkResearch(fileContent, filePath, originalRequest, taskComplexity, workingMemory, failures, suggestions)
         }
         break

@@ -1263,12 +1263,14 @@ function savedFinalDeliverableMinimumChars(
   const taskText = `${state.originalUserRequest || ''} ${currentToolIntentText(state)} ${messages.map(m => m.content).join(' ')}`.toLowerCase()
   const originalRequest = state.originalUserRequest || ''
   const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(originalRequest)
-  const requestedSavedReport = taskDefaultsToMarkdownDeliverable(originalRequest)
   if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|long report|serious analysis|technical)\b/.test(taskText)) {
     return 4_800
   }
   if (requestLooksBrief) {
-    return requestedSavedReport ? 2_200 : 1_400
+    // A clean, explicitly concise artifact must not be expanded merely to hit
+    // a generic report-length floor. Whole-file verification still checks its
+    // requested structure, substance, placeholders, duplicates, and ending.
+    return 160
   }
   return 2_600
 }
@@ -1353,13 +1355,15 @@ function finalDeliverableHandoffLooksUseful(content: string): boolean {
   if (text.length < 80) return false
   if (!/[.!?)]\s*$/.test(text)) return false
   if (/^(?:the completed file|the completed files|here(?:'|’)?s the completed deliverable)\b/i.test(text)) return false
+  if (/^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)) return false
   return true
 }
 
 function shouldAcceptFinalDeliverableHandoff(content: string, attemptNumber: number): boolean {
   const text = content.trim()
+  const futureOnly = /^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)
   return finalDeliverableHandoffLooksUseful(text) ||
-    (text.length >= 40 && attemptNumber >= 2)
+    (text.length >= 40 && attemptNumber >= 2 && !futureOnly)
 }
 
 function shouldRejectBuildTextOnlyEmission(
@@ -1626,6 +1630,15 @@ function tierTimeoutsForIteration(
       iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FORCED_NARRATION_ITERATION_TIMEOUT_MS),
       inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FORCED_NARRATION_INACTIVITY_TIMEOUT_MS),
       contentOnlyTimeoutMs: FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS,
+      contentOnlyMinChars: 80,
+    }
+  }
+  if (state.finalDeliverableHandoffPending) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS,
+      inactivityTimeoutMs: FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS,
+      contentOnlyTimeoutMs: 1_200,
       contentOnlyMinChars: 80,
     }
   }
@@ -3369,6 +3382,10 @@ const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
 const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
 const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
+const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
+const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
+const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
+const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 240
 const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = 700
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
@@ -6816,7 +6833,11 @@ export class AgentLoop {
     let relaxRequiredToolChoice = false
     let lastShouldRequireToolCall = false
     let providerRequestRepairAttempts = 0
-    const maxModelStartAttempts = STREAM_MAX_RETRIES + MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS + 1
+    // The outer handoff state already provides two bounded LLM-authored
+    // attempts. Do not multiply those by the normal provider-start retry loop.
+    const maxModelStartAttempts = state.finalDeliverableHandoffPending
+      ? 1
+      : STREAM_MAX_RETRIES + MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS + 1
     for (let attempt = 0; attempt < maxModelStartAttempts; attempt++) {
       try {
         const budgetFraction = state.dynamicIterationLimit
@@ -7337,6 +7358,7 @@ export class AgentLoop {
         )
         const isFinalInlineAnswerTurn = finalInlineAnswerTurn(state, this.options.messages)
         const isFinalSavedDeliverableTurn = finalSavedDeliverableTurn(state, this.options.messages)
+        const isFinalDeliverableHandoffTurn = !!state.finalDeliverableHandoffPending
         const isInitialFinalSavedDeliverableTurn = isFinalSavedDeliverableTurn &&
           !state.partialFileWriteRecoveryPending &&
           !hasSavedFinalDeliverableCandidate(state)
@@ -7345,6 +7367,8 @@ export class AgentLoop {
           isPartialRecoveryClosingAppendTurn(state)
         const maxTokens = useCompactNarration
           ? Math.min(maxTokensForIteration(state), FORCED_NARRATION_MAX_TOKENS)
+          : isFinalDeliverableHandoffTurn
+          ? Math.min(maxTokensForIteration(state), FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS)
           : isBoundedPartialRecoveryClosingAppend
           ? Math.min(maxTokensForIteration(state), PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS)
           : isFinalInlineAnswerTurn
@@ -7360,6 +7384,8 @@ export class AgentLoop {
           : maxTokensForIteration(state)
         const requestTemperature = useCompactNarration
           ? 0.25
+          : isFinalDeliverableHandoffTurn
+            ? 0.3
           : isFinalInlineAnswerTurn
             ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : isFinalSavedDeliverableTurn
@@ -7367,6 +7393,8 @@ export class AgentLoop {
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
           ? { reasoning: MINIMAL_THINKING_REASONING }
+          : isFinalDeliverableHandoffTurn
+            ? { reasoning: MINIMAL_THINKING_REASONING }
           : isFinalInlineAnswerTurn
             ? { reasoning: TASK_REASONING }
             : isFinalSavedDeliverableTurn
@@ -7376,6 +7404,8 @@ export class AgentLoop {
             : { reasoning: TASK_REASONING }
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS
+          : isFinalDeliverableHandoffTurn
+            ? FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS
           : isFinalInlineAnswerTurn
             ? FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS
           : useTextFinalDeliverable
