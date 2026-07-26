@@ -59,15 +59,6 @@ export interface PolicyAction {
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
-function blockCurrentStep(state: AgentStateData, reason: string, code = 'step_blocked'): PolicyAction[] {
-  const stepNumber = state.currentStepIdx + 1
-  const stepTitle = state.currentPlanItems?.[state.currentStepIdx]
-  const titleText = stepTitle ? ` "${stepTitle}"` : ''
-  const detail = `Step ${stepNumber}${titleText} blocked before completion: ${reason}`
-  state.stepFindings.set(state.currentStepIdx, `[BLOCKED] ${detail}`)
-  return [{ type: 'terminate', reason: `${code}: ${detail}` }]
-}
-
 /** Helper to build step message with findings, micro-plan, working memory, goal tracking, and session health */
 function stepMsg(state: AgentStateData, extra?: string): string {
   const memText = state.workingMemory?.render({ stepIdx: state.currentStepIdx, maxFacts: 8, maxChars: 1200 })
@@ -1322,8 +1313,8 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
    *
    * Stage 1 (>= 3): Inject a strong nudge telling the model the click is a no-op
    *   and to scroll, pick a different @(x,y), or navigate elsewhere.
-   * Stage 2 (>= 5): Block the current step. A stuck prerequisite is not allowed
-   *   to advance the plan, because later steps would be based on false progress.
+   * Stage 2 (>= 5): Reset the stale browser route and require a different
+   *   inspection/navigation strategy without ending the task.
    */
   private checkBrowserProgress(state: AgentStateData, assistantContent: string): PolicyAction[] | null {
     if (state.browserTaskCompleted) return null
@@ -1361,32 +1352,21 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
       state.consecutiveNoProgressClicks = 0
       state.lastBrowserStateHash = null
 
-      const isLastStep = !!state.currentPlanItems &&
-        state.currentStepIdx === state.currentPlanItems.length - 1
-
-      if (!isLastStep && state.currentPlanItems) {
-        if (isResearchLikeStep(state)) {
-          const depth = researchDepthStatus(state)
-          if (!depth.complete) {
-            state.consecutiveNoProgressClicks = 2
-            return [
-              { type: 'inject_message', message: { role: 'assistant', content: assistantContent || '' } },
-              {
-                type: 'inject_message',
-                message: {
-                  role: 'system',
-                  content: stepMsg(state, `Your last ${stuck} browser actions left the page unchanged. ${depth.message} Stop clicking the same page; use browser_get_content, browser_find_text, browser_scroll, or navigate to a different useful source.`),
-                },
-                continueLoop: true,
-              },
-            ]
-          }
-        }
-        return blockCurrentStep(state, `${stuck} consecutive browser clicks made no visible progress`, 'browser_stuck_step')
-      }
-
-      // Last step or no plan — terminate
-      return [{ type: 'terminate', reason: 'browser_stuck_loop' }]
+      state.consecutiveNoProgressClicks = 2
+      const researchDetail = isResearchLikeStep(state)
+        ? ` ${researchDepthStatus(state).message}`
+        : ''
+      return [
+        { type: 'inject_message', message: { role: 'assistant', content: assistantContent || '' } },
+        {
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: stepMsg(state, `BROWSER ROUTE CHANGE: your last ${stuck} browser actions left the page unchanged.${researchDetail} Stop using the same control or coordinates. Read the rendered content or screenshot, then use a different visible control, scroll direction, navigation path, source domain, or non-browser tool. Continue the task and do not report an internal failure.`),
+          },
+          continueLoop: true,
+        },
+      ]
     }
 
     // Stage 1: nudge
@@ -1820,10 +1800,17 @@ Then make your first tool call. Your plan will be remembered across iterations o
           state.browserNoToolRecoveryAttempts++
           if (state.browserNoToolRecoveryAttempts > 3 && !isLastStep && state.stepToolCallCount > 0) {
             state.consecutiveNoToolCalls = 0
-            state.browserNoToolRecoveryAttempts = 0
-            return [
-              { type: 'terminate', reason: 'browser_no_tool_recovery_exhausted' },
-            ]
+            state.browserNoToolRecoveryAttempts = 1
+            state.recentToolCalls = []
+            state.recentToolSequence = []
+            return [{
+              type: 'inject_message',
+              message: {
+                role: 'system',
+                content: stepMsg(state, browserActionRecoveryGuidance(state, 'BROWSER ROUTE RESET: repeated text-only recovery did not produce an action. Refresh the visible state with browser_screenshot or browser_get_content, then choose a different control or navigation path and continue.')),
+              },
+              continueLoop: true,
+            }]
           }
           if (state.browserNoToolRecoveryAttempts > 3) {
             state.browserNoToolRecoveryAttempts = 2
@@ -2021,7 +2008,21 @@ Then make your first tool call. Your plan will be remembered across iterations o
       if (repeatedBuildNoTool) {
         state.buildNoToolRecoveryAttempts++
         if (state.buildNoToolRecoveryAttempts >= 3) {
-          return [{ type: 'terminate', reason: 'build_no_tool_recovery_exhausted' }]
+          state.buildNoToolRecoveryAttempts = 1
+          state.consecutiveNoToolCalls = 0
+          state.recentToolCalls = []
+          state.recentToolSequence = []
+          return [{
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(
+                state,
+                'BUILD ROUTE RESET: repeated text-only recovery did not change the workspace. Inspect the current file or command result, preserve all existing work, then use a materially different native action: a targeted edit, a different file operation, or a different verification command. Never recreate or append a duplicate code module, and do not report an internal failure.',
+              ),
+            },
+            continueLoop: true,
+          }]
         }
         state.consecutiveNoToolCalls = Math.max(0, threshold - 1)
         return [{
@@ -2662,19 +2663,23 @@ Then make your first tool call. Your plan will be remembered across iterations o
     // receiving a stale warning.
     if (!hasRewrite || !state.fileWriteRepairPending) return []
 
-    // File blocked on 2nd+ attempt — warn first, only terminate on 3rd+
+    // File blocked on 2nd+ attempt — redirect from create to inspect/edit.
     const maxCount = Math.max(...createCounts)
     if (maxCount >= 3) {
-      // 3+ attempts on the same exact path — actually stuck, terminate.
+      // Repeated create_file on the same path is an edit-route signal, not a
+      // reason to end the user's task.
+      for (const [path, count] of state.fileCreateCounts) {
+        if (count >= 3) state.fileCreateCounts.set(path, 2)
+      }
       return [
         {
           type: 'inject_message',
           message: {
             role: 'system',
-            content: `CRITICAL: The same file path was requested at least three times. STOP retrying that create operation. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`,
+            content: 'FILE ROUTE RESET: the same file path was requested at least three times. Do not call create_file for that path again. Read the existing file, then use one targeted edit_file operation, or continue a genuine prose document with append_file. Preserve the existing content and continue the task.',
           },
+          continueLoop: true,
         },
-        { type: 'terminate', reason: 'rewrite_loop' },
       ]
     }
 
@@ -3342,7 +3347,17 @@ Then make your first tool call. Your plan will be remembered across iterations o
     if (!state.currentPlanItems) {
       state.iterationsWithoutPlan++
       if (state.iterationsWithoutPlan >= NO_PLAN_RUNAWAY_LIMIT) {
-        return { type: 'terminate', reason: 'no_plan_runaway' }
+        state.iterationsWithoutPlan = Math.max(0, NO_PLAN_RUNAWAY_LIMIT - 2)
+        state.recentToolCalls = []
+        state.recentToolSequence = []
+        return {
+          type: 'inject_message',
+          message: {
+            role: 'system',
+            content: 'PLAN RECOVERY: planning metadata is unavailable, but the user task remains active. Infer the next smallest concrete action directly from the latest user request. Use one appropriate native tool now, or provide the complete direct answer if no tool is needed. Do not expose this recovery or ask the user to restart.',
+          },
+          continueLoop: true,
+        }
       }
     }
     return null

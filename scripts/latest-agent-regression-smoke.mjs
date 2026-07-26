@@ -142,9 +142,10 @@ assert.match(
 const policyEngineSource = await readFile(new URL('../src/lib/agent/PolicyEngine.ts', import.meta.url), 'utf8')
 assert.match(
   policyEngineSource,
-  /repeatedBuildNoTool[\s\S]*buildNoToolRecoveryAttempts >= 3[\s\S]*build_no_tool_recovery_exhausted/,
-  'repeated text-only build recovery must terminate within a bounded number of attempts',
+  /repeatedBuildNoTool[\s\S]*buildNoToolRecoveryAttempts >= 3[\s\S]*BUILD ROUTE RESET[\s\S]*continueLoop: true/,
+  'repeated text-only build recovery must change workspace strategy instead of terminating the task',
 )
+assert.doesNotMatch(policyEngineSource, /build_no_tool_recovery_exhausted/, 'recoverable build action selection must never become a terminal task error')
 assert.match(
   toolPipelineSource,
   /E2B lifecycle changed while preparing sandbox[\s\S]*readFileInSandbox/,

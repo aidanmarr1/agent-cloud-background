@@ -87,6 +87,7 @@ export interface AgentStateData {
   finalInlineAnswerRecoveryAttempts: number
   finalSavedDeliverableRecoveryAttempts: number
   buildNoToolRecoveryAttempts: number
+  autonomousRecoveryEscalations: number
   exactExtractionGuardPending: boolean
   exactExtractionGuardPrompt: string | null
   exactExtractionGuardAttempts: number
@@ -423,6 +424,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     finalInlineAnswerRecoveryAttempts: 0,
     finalSavedDeliverableRecoveryAttempts: 0,
     buildNoToolRecoveryAttempts: 0,
+    autonomousRecoveryEscalations: 0,
     exactExtractionGuardPending: false,
     exactExtractionGuardPrompt: null,
     exactExtractionGuardAttempts: 0,
@@ -678,6 +680,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.browserNoToolRecoveryAttempts = 0
   state.researchNoToolRecoveryAttempts = 0
   state.buildNoToolRecoveryAttempts = 0
+  state.autonomousRecoveryEscalations = 0
   state.partialFileWriteRecoveryNudged = false
   state.fileWriteRepairPending = null
   // Phase 11: do NOT clear recentBrowserStateHashes on step advance — keeping

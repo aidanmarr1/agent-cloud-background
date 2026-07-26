@@ -348,7 +348,7 @@ const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'xhigh' as const, exclude: true }
+const TASK_REASONING = { effort: 'medium' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -365,12 +365,11 @@ function isTransientAssistantStreamError(error: unknown): boolean {
 }
 
 function supportsProviderRequiredToolChoice(model: string): boolean {
-  // OpenRouter routes are not interchangeable here. The former Nitro route
-  // could stall before emitting a required tool call, while the pinned Exacto
-  // route accepts `tool_choice: required` and is selected specifically for
-  // accurate native tool calling. Do not let the old provider-wide Nitro
-  // exception turn an Exacto action request into an optional, empty turn.
-  return ASSISTANT_PROVIDER !== 'openrouter' || /:exacto$/i.test(model.trim())
+  // Explicit OpenRouter route variants are pinned model routes rather than the
+  // broad auto-router. Keep native action turns required on both accuracy and
+  // throughput variants so a Nitro task cannot silently return an empty prose
+  // turn instead of the concrete tool call the active phase requires.
+  return ASSISTANT_PROVIDER !== 'openrouter' || /:(?:exacto|nitro)$/i.test(model.trim())
 }
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
@@ -816,9 +815,6 @@ const NON_REOPENABLE_WEBSITE_TERMINAL_REASONS = new Set([
   'runtime_deadline',
   'runtime_deadline_finalized',
   'iteration_cap',
-  'paid_internal_recovery_cap',
-  'paid_no_progress_cap',
-  'rewrite_loop',
   'post_completion_rewrite',
   'step_blocked',
   'browser_stuck_step',
@@ -4042,7 +4038,7 @@ export class AgentLoop {
             temperature: 0.55,
             max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
             // Keep the tiny narration sidecar on minimal reasoning while
-            // substantive Gemini task turns use the configured x-high effort.
+            // substantive Gemini task turns use the configured medium effort.
             reasoning: MINIMAL_THINKING_REASONING,
             includeTemporalContext: false,
             requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,
@@ -4179,7 +4175,20 @@ export class AgentLoop {
           switch (phase) {
           // ── PLANNING ──────────────────────────────────────────────
           case 'PLANNING': {
-            await planManager.awaitPlan(state)
+            try {
+              await planManager.awaitPlan(state)
+            } catch (planningError) {
+              if (isOutOfCreditsError(planningError) || signal?.aborted) throw planningError
+              const recovered = planManager.recoverFromPlannerFailure(state)
+              if (!recovered) throw planningError
+              this.options.diagnostics?.({
+                type: 'planner_route_recovery',
+                data: {
+                  iteration: state.iterations,
+                  error: planningError instanceof Error ? planningError.message : String(planningError),
+                },
+              })
+            }
 
             if (state.taskComplexity !== complexity) {
               const newLimit = computeIterationLimit(state.taskComplexity)
@@ -4255,6 +4264,10 @@ export class AgentLoop {
               )
               consecutivePaidNoProgressTurns = progressDecision.consecutiveNoProgressTurns
               consecutivePaidInternalRecoveryTurns = progressDecision.consecutiveInternalRecoveryTurns
+
+              if (progressDecision.kind === 'progress') {
+                state.autonomousRecoveryEscalations = 0
+              }
 
               if (progressDecision.kind === 'allow_recovery') {
                 const activeStep =
@@ -4380,13 +4393,11 @@ export class AgentLoop {
                   }
                 }
 
-                if (progressDecision.reason === 'internal_recovery_cap') {
-                  terminalReason = 'paid_internal_recovery_cap'
-                } else {
-                  terminalReason = 'paid_no_progress_cap'
-                }
+                const recoveryReason = progressDecision.reason === 'internal_recovery_cap'
+                  ? 'paid_internal_recovery_cap'
+                  : 'paid_no_progress_cap'
                 this.options.diagnostics?.({
-                  type: terminalReason,
+                  type: recoveryReason,
                   data: {
                     iteration: priorTurn.iteration,
                     step: state.currentStepIdx,
@@ -4406,11 +4417,64 @@ export class AgentLoop {
                   break
                 }
 
-                state.lastModelErrorForUser =
-                  progressDecision.reason === 'internal_recovery_cap'
-                    ? 'The agent could not produce a valid concrete action after two bounded repair attempts. Please retry the task.'
-                    : 'The agent could not continue this task after multiple action retries. Please retry the task.'
-                phase = 'ERROR'
+                // Internal action-selection failures are strategy signals, not
+                // user-facing terminal errors. Reset the stale route memory and
+                // require a materially different tool/source/path. Global
+                // iteration and runtime deadlines still provide hard cost and
+                // safety bounds if every available route remains unavailable.
+                state.autonomousRecoveryEscalations += 1
+                state.lastModelErrorForUser = null
+                state.forceTextNextIteration = false
+                state.phaseEndNarrationPending = false
+                state.consecutiveNoToolCalls = 0
+                state.consecutiveNullStreams = 0
+                state.toolJsonRecoveryCount = 0
+                state.displayContractRepairAttempts = 0
+                state.recentToolCalls = []
+                state.recentToolSequence = []
+                state.stepLoopDetections = 0
+                state.stepCrossToolCycleDetections = 0
+                state.suppressedResearchToolName = null
+                state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                state.dynamicIterationLimit = Math.max(
+                  state.dynamicIterationLimit,
+                  state.iterations + 4,
+                )
+                consecutivePaidNoProgressTurns = 0
+                consecutivePaidInternalRecoveryTurns = 0
+
+                const activeStep =
+                  state.currentPlanItems?.[state.currentStepIdx] ||
+                  'the active task'
+                const routeGuidance = state.currentPhase === 'research'
+                  ? 'Use a different source domain or a different available source tool. If extraction is blocked, use rendered browser content; if the browser route is blocked, use another search result or continue from credible evidence already gathered.'
+                  : state.taskStrategy === 'browse'
+                    ? 'Refresh the page state with a screenshot or content read, then use a different visible control, coordinate, navigation path, or verification method.'
+                    : state.currentPhase === 'build' || state.taskStrategy === 'build' || state.taskStrategy === 'code'
+                      ? 'Inspect the current workspace state, preserve existing work, then use a targeted edit, a different file operation, or a different verification command. Never recreate or append a duplicate module.'
+                      : 'Choose a materially different native action. If enough evidence already exists, finish the answer or deliverable directly instead of retrying the failed route.'
+                pendingActionSelectionRepairPrompt = [
+                  `AUTONOMOUS ROUTE CHANGE ${state.autonomousRecoveryEscalations}: the previous internal action route is exhausted, but the task is still active.`,
+                  `Continue "${activeStep}" without exposing this recovery or asking the user to retry.`,
+                  routeGuidance,
+                  'Make one concrete executable action now; do not repeat the rejected call or another status-only response.',
+                ].join(' ')
+                this.options.diagnostics?.({
+                  type: 'autonomous_route_change',
+                  data: {
+                    iteration: priorTurn.iteration,
+                    step: state.currentStepIdx,
+                    attempt: state.autonomousRecoveryEscalations,
+                    trigger: recoveryReason,
+                  },
+                })
+                console.warn('[AgentDiagnostics] Recovered from paid no-progress cap by changing route', {
+                  step: state.currentStepIdx,
+                  attempt: state.autonomousRecoveryEscalations,
+                  trigger: recoveryReason,
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
                 break
               }
             }

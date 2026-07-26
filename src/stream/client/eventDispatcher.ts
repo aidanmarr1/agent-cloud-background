@@ -502,6 +502,45 @@ export class EventDispatcher {
     })
   }
 
+  private preserveVisibleSourceRecoveryPanel(
+    event: { id: string; name: string; result: unknown },
+  ): boolean {
+    if (event.name !== 'read_document' && event.name !== 'http_request') return false
+
+    const panelId = panelFocusIdForTool(event.name, event.id)
+    const existingItems = useChatStore.getState().conversations
+      .find(c => c.id === this.conversationId)?.messages.slice(-1)[0]?.computerPanelData
+    const previousPanelItem = existingItems?.find(item => item.id === panelId)
+    let panelItem = mapToolResultToPanel(
+      event as {
+        id: string
+        name: string
+        result: SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult
+      },
+      this.conversationId,
+    )
+    if (previousPanelItem?.type === 'browse') {
+      const previousBrowse = previousPanelItem.data as BrowseResult | undefined
+      const nextBrowse = panelItem.data as BrowseResult | undefined
+      if (nextBrowse && previousBrowse?.url && !nextBrowse.url) {
+        panelItem = {
+          ...panelItem,
+          data: { ...nextBrowse, url: previousBrowse.url } satisfies BrowseResult,
+        }
+      }
+    }
+
+    // A visible source action must leave a truthful visible result. Removing
+    // the blocked extraction placeholder made the panel jump backwards to an
+    // older search card while the task stream showed the newer Read action.
+    this.actions.upsertComputerPanelItem(this.conversationId, {
+      ...panelItem,
+      timestamp: Date.now(),
+      streaming: false,
+    })
+    return true
+  }
+
   hasTerminalEvent(): boolean {
     return this.terminalStatus !== null
   }
@@ -1020,7 +1059,9 @@ export class EventDispatcher {
       this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
       this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       this.settleWebIdeTool(event)
-      this.settleHiddenComputerPanelItem(event)
+      if (!this.preserveVisibleSourceRecoveryPanel(event)) {
+        this.settleHiddenComputerPanelItem(event)
+      }
       this.toolStartsById.delete(event.id)
       this.setThinkingIfNoVisibleActionRunning()
       return

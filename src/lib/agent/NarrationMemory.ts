@@ -179,6 +179,21 @@ function isFutureActionOnlyNarration(text: string): boolean {
   return SPECULATIVE_SOURCE_FRAGMENT_RE.test(trimmed) && !COMPLETED_RESULT_SIGNAL_RE.test(trimmed)
 }
 
+function normalizeSingularAgentVoice(text: string): string {
+  return text
+    .replace(/\bwe(?:'|’)re\b/gi, 'I’m')
+    .replace(/\bwe(?:'|’)ve\b/gi, 'I’ve')
+    .replace(/\bwe(?:'|’)ll\b/gi, 'I’ll')
+    .replace(/\bwe(?:'|’)d\b/gi, 'I’d')
+    .replace(/\bwe are\b/gi, 'I am')
+    .replace(/\bwe were\b/gi, 'I was')
+    .replace(/\bwe have\b/gi, 'I have')
+    .replace(/\bwe\b/gi, 'I')
+    .replace(/\bours\b/gi, 'mine')
+    .replace(/\bour\b/gi, 'my')
+    .replace(/\bus\b/gi, 'me')
+}
+
 function stemNarrationToken(token: string): string {
   if (/^\d/.test(token) || token.length < 5) return token
   if (token.endsWith('ies') && token.length > 6) return `${token.slice(0, -3)}y`
@@ -273,12 +288,13 @@ export function reviewProgressNarration(
   content: string,
   options: Pick<ProgressNarrationOptions, 'requireSignal'> = {},
 ): ProgressNarrationReview {
-  const text = sanitizeNarrationText(content, {
+  const sanitizedText = sanitizeNarrationText(content, {
     requireSignal: options.requireSignal ?? true,
     maxSentences: 2,
     maxLength: 300,
   })
-  if (!text) return { status: 'invalid', text: null }
+  if (!sanitizedText) return { status: 'invalid', text: null }
+  const text = normalizeSingularAgentVoice(sanitizedText)
   if (isFutureActionOnlyNarration(text)) return { status: 'invalid', text: null }
 
   const fingerprint = narrationFingerprint(text)

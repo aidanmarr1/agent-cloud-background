@@ -163,8 +163,16 @@ function transformPanelData(
     const status = numberField(httpResult, 'status')
     const statusText = stringField(httpResult, 'statusText')
     const body = firstStringField(httpResult, ['body', 'content', 'text', 'error'])
-    const statusLabel = status !== undefined ? `HTTP ${status}${statusText ? ` ${statusText}` : ''}` : (statusText || 'HTTP response')
     const url = firstStringField(httpResult, ['url', 'source'])
+    const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(body)
+    if (internalRecovery) {
+      return {
+        title: status === 403 ? 'Source needs browser rendering' : 'Source extraction unavailable',
+        content: '',
+        url,
+      } as BrowseResult
+    }
+    const statusLabel = status !== undefined ? `HTTP ${status}${statusText ? ` ${statusText}` : ''}` : (statusText || 'HTTP response')
     return {
       title: statusLabel,
       content: body || statusLabel,

@@ -24,6 +24,7 @@ async function assertSourceContracts() {
     contextManager,
     policyEngine,
     agentState,
+    narrationMemory,
     creditPolicy,
     serverCredits,
     activeTasks,
@@ -125,6 +126,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/ContextManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/PolicyEngine.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/AgentState.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/NarrationMemory.ts'), 'utf8'),
     readFile(join(root, 'src/lib/creditPolicy.ts'), 'utf8'),
     readFile(join(root, 'src/lib/serverCredits.ts'), 'utf8'),
     readFile(join(root, 'src/lib/activeTasks.ts'), 'utf8'),
@@ -252,11 +254,11 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /PLANNER_ACK_THOUGHTFUL_MIN_MS|waitForThoughtfulAcknowledgementWindow/, 'startup acknowledgement must show as soon as usable model text is available')
   assert.match(prompts, /getFastPlanningPrompt/, 'planner must expose a compact first-pass planning prompt')
   assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 520/, 'fast planner should have enough output room to finish structured multi-step JSON')
-  assert.match(planManager, /PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'fast planner must tolerate xhigh reasoning instead of stacking short retries')
-  assert.match(planManager, /PLANNER_JSON_REQUEST_TIMEOUT_MS = 45_000/, 'strict planner JSON calls must tolerate xhigh reasoning')
-  assert.match(planManager, /PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'planner relaxed calls must tolerate xhigh reasoning')
-  assert.match(planManager, /PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000/, 'planner repair calls must tolerate xhigh reasoning')
-  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 90_000/, 'planner startup must preserve one bounded xhigh reasoning window after a parse miss')
+  assert.match(planManager, /PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'fast planner must tolerate medium reasoning instead of stacking short retries')
+  assert.match(planManager, /PLANNER_JSON_REQUEST_TIMEOUT_MS = 45_000/, 'strict planner JSON calls must tolerate medium reasoning')
+  assert.match(planManager, /PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'planner relaxed calls must tolerate medium reasoning')
+  assert.match(planManager, /PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000/, 'planner repair calls must tolerate medium reasoning')
+  assert.match(planManager, /PLANNER_OVERALL_DEADLINE_MS = 90_000/, 'planner startup must preserve one bounded medium reasoning window after a parse miss')
   assert.doesNotMatch(planManager, /PLANNER_START_AFTER_ACK_WAIT_MS/, 'planner startup must not carry a fixed acknowledgement display delay')
   assert.match(planManager, /PLANNER_TIMEOUT_RECOVERY_RETRIES = 0/, 'planner startup timeouts must not stack short retries into long invisible waits')
   assert.doesNotMatch(planManager, /continueAfterPlannerTimeout|timeoutFallbackPlan|Planner timed out inside startup deadline|state\.planEmitted = true[\s\S]{0,240}fallback\.titles/, 'planner startup timeout exhaustion must not fabricate visible local fallback plans')
@@ -299,7 +301,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /repairPlannerResponse/, 'invalid planner output must be repaired by the planner model instead of local visible fallback steps')
   assert.doesNotMatch(agentLoop, /function shouldRunStartupResearchSearch|runStartupResearchSearch|STARTUP SEARCH COMPLETE|IMMEDIATE SOURCE SEARCH COMPLETE|firstReadableSearchResultUrl/, 'research startup must not use local bootstrap/source-search shortcuts')
   assert.match(agentLoop, /const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction\(state\)[\s\S]*let requiredToolIntent = shouldRequireToolCall/, 'research and cadence phases must keep a model-selected tool-action intent instead of opening a prose-only window')
-  assert.match(agentLoop, /function supportsProviderRequiredToolChoice\(model: string\): boolean \{[\s\S]*ASSISTANT_PROVIDER !== 'openrouter' \|\| \/:exacto\$\/i\.test\(model\.trim\(\)\)[\s\S]*\}/, 'the pinned OpenRouter Exacto route must retain provider-required native tool calls while other OpenRouter routes remain optional')
+  assert.ok(agentLoop.includes("return ASSISTANT_PROVIDER !== 'openrouter' || /:(?:exacto|nitro)$/i.test(model.trim())"), 'the pinned OpenRouter Nitro route must retain provider-required native tool calls')
   assert.match(agentLoop, /const useRequiredToolCall = requiredToolIntent[\s\S]*supportsProviderRequiredToolChoice\(model\)/, 'provider-forced tool choice must be gated by the exact active model route separately from the agent tool-action intent')
   assert.match(agentLoop, /compactResearchToolRequiredMessage[\s\S]*Choose the most useful source\/search\/browser\/document action/, 'research repairs must nudge the model to choose the evidence tool itself')
   assert.match(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS[\s\S]*web_search[\s\S]*read_document/, 'compact research recovery must narrow to source-focused model-selected tools after a miss')
@@ -420,7 +422,7 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /AGENT_DEADLINE_HARD_STOP_BUFFER_MS\s*=\s*18_000/, 'agent runtime must keep a hard stop buffer before route termination')
   assert.match(agentConfig, /AGENT_WORKER_RUN_MAX_DURATION_MS\s*=\s*900_000/, 'background workers must have a longer quality window than serverless routes')
   assert.match(agentConfig, /AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS\s*=\s*120_000/, 'background workers must not enter deadline synthesis after only a short research window')
-  assert.match(agentConfig, /AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS\s*=\s*60_000/, 'background workers must tolerate xhigh reasoning while keeping turns bounded')
+  assert.match(agentConfig, /AGENT_WORKER_DEADLINE_MODEL_TURN_TIMEOUT_MS\s*=\s*60_000/, 'background workers must tolerate medium reasoning while keeping turns bounded')
   assert.match(chatTaskRunner, /const runMaxDurationMs = claimedWorkerAttempt === null[\s\S]*AGENT_WORKER_RUN_MAX_DURATION_MS[\s\S]*runMaxDurationMs,/, 'background workers must pass their longer runtime window into AgentLoop')
   assert.match(chatTaskRunner, /const deadlineFinalizationBufferMs = claimedWorkerAttempt === null[\s\S]*AGENT_WORKER_DEADLINE_FINALIZATION_BUFFER_MS[\s\S]*deadlineFinalizationBufferMs,/, 'background workers must pass their deadline buffer into AgentLoop')
   assert.match(agentState, /runStartedAtMs/, 'agent state must track wall-clock start time for long task deadline handling')
@@ -672,10 +674,10 @@ async function assertSourceContracts() {
   assert.match(planManager, /suppressFurtherAcknowledgementDeltas[\s\S]*Promise\.race\(\[[\s\S]*this\.acknowledgementDisplayPromise[\s\S]*PLANNER_ACK_DISPLAY_WAIT_MS[\s\S]*this\.acknowledgementEmitted \|\| displayed/, 'planner must race displayed startup acknowledgement text and stop duplicate/interleaved ack deltas once the plan can show')
   assert.doesNotMatch(planManager, /max_tokens:\s*80/, 'acknowledgement calls must not use a tiny token cap that high reasoning can consume before visible text')
   assert.match(planManager, /max_tokens:\s*PLANNER_ACK_MAX_TOKENS/, 'acknowledgement calls should stay bounded while leaving room for a task-specific paragraph')
-  assert.match(planManager, /sentences\.length < 1 \|\| sentences\.length > 2/, 'startup acknowledgements must be compact direct paragraphs, not long defaults')
-  assert.match(prompts, /one or two short sentences and 12-38 words/, 'planner prompt must request a fast very brief direct acknowledgement paragraph')
+  assert.doesNotMatch(planManager, /sentences\.length < 1 \|\| sentences\.length > \d+/, 'startup acknowledgements must not enforce a mechanical sentence count')
+  assert.match(prompts, /one natural, very brief direct paragraph, roughly 8-48 words[\s\S]*do not enforce or mention a sentence count/, 'planner prompt must request a natural very brief acknowledgement without a sentence cap')
   assert.doesNotMatch(chatRoute, /words\.length < 10|sanitizeStartupAcknowledgement|startupAcknowledgementIsUsable/, 'route startup acknowledgement sanitizer must not return because worker-owned ack is the only startup ack path')
-  assert.match(planManager, /PLANNER_CONTROL_REASONING = \{ effort: 'xhigh' as const, exclude: true \}/, 'planner JSON control calls must use xhigh thinking for plan quality')
+  assert.match(planManager, /PLANNER_CONTROL_REASONING = \{ effort: 'medium' as const, exclude: true \}/, 'planner JSON control calls must use medium reasoning')
   assert.match(planManager, /PLANNER_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'startup acknowledgement must remain minimal and bounded')
   assert.match(planManager, /reasoning:\s*PLANNER_ACK_REASONING/, 'planner startup acknowledgement must use the acknowledgement-specific reasoning setting')
   assert.match(planManager, /suppressFurtherAcknowledgementDeltas = true[\s\S]*settleAcknowledgementDisplay\(false\)/, 'startup acknowledgement delays must not become fatal planner quality failures')
@@ -683,9 +685,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const maxNormalOutputTokens = 8192/, 'normal stream iterations should have enough room for substantial answers')
   assert.match(agentLoop, /const maxDeliverableOutputTokens = 24_576/, 'deliverable and deadline turns should use bounded chunks instead of one huge silent output budget')
   const attemptPlanCallContract = planManager.match(/private async attemptPlanCall[\s\S]*?\n  \/\*\*/)?.[0] || ''
-  assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must surface only through a sanitized terminal error after model repair is exhausted')
+  assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must exhaust model repair before fallback')
   assert.match(planManager, /PLANNER_QUALITY_REPAIR_ATTEMPTS = 1/, 'planner repair must stay bounded so startup does not wait behind repeated repair loops')
   assert.match(planManager, /emitParsedPlanWithModelRepair/, 'planner quality failures must be repaired through the model before the task can fail')
+  assert.match(planManager, /recoverFromPlannerFailure[\s\S]*usePrecomputedPlan/, 'planner/provider failure must recover into a minimal task-specific execution plan instead of stopping the task')
+  assert.match(agentLoop, /planManager\.recoverFromPlannerFailure\(state\)/, 'the agent loop must invoke planner route recovery on non-credit internal planner failures')
   assert.doesNotMatch(planManager, /emitSyntheticPlan/, 'planner must not emit synthetic backup plans when model planning fails')
   assert.doesNotMatch(planManager, /buildEmergencyPlannerResponse|emergencyPlan|emergencyPlanner/, 'planner must not use local emergency fallback plans when model planning fails')
   assert.match(planManager, /repairPlannerResponse/, 'invalid planner JSON must be repaired before failing the task')
@@ -746,6 +750,11 @@ async function assertSourceContracts() {
   assert.doesNotMatch(toolPipeline, /state\.stepResearchCallCount < 2 && !currentStepAllowsTaskTrackingMarkdown/, 'custom-instruction tracking files must not require prior research calls')
   assert.doesNotMatch(eventDispatcher, /runtimeVisibleActionLabel/, 'client action pills must never invent deterministic labels')
   assert.match(eventDispatcher, /const visibleActionLabel = strictActionLabelFromArgs\(event\.args\)/, 'client action pills must use the model-authored label')
+  assert.match(eventDispatcher, /preserveVisibleSourceRecoveryPanel[\s\S]*event\.name !== 'read_document' && event\.name !== 'http_request'[\s\S]*streaming: false/, 'blocked source extraction must remain as the truthful current Computer panel item instead of jumping backwards')
+  assert.match(panelMapper, /internalRecovery[\s\S]*Source needs browser rendering[\s\S]*Source extraction unavailable/, 'internal source recovery must render a user-facing source state instead of raw internal text')
+  assert.match(computerPanel, /hasLiveItem \? activeItemIsLive : isAtLatest[\s\S]*view live/, 'Computer navigation must distinguish the selected historical item from live activity')
+  assert.match(narrationMemory, /normalizeSingularAgentVoice[\s\S]*replace\(\/\\bwe\\b\/gi, 'I'\)/, 'progress narration must normalize accidental team voice into singular agent voice')
+  assert.match(prompts, /Use "I", "me", and "my"[\s\S]*never use "we", "us", or "our"/, 'runtime narration must instruct the agent to speak only for itself')
   assert.match(eventDispatcher, /function shouldPreserveVisibleInternalToolResult/, 'visible recovery results must be eligible to finish existing action pills')
   assert.match(
     eventDispatcher,
@@ -807,8 +816,8 @@ async function assertSourceContracts() {
   assert.match(llm, /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/, 'runtime provider must be statically pinned to OpenRouter')
   assert.match(llm, /function trimmedEnv\(value: string \| undefined\)/, 'runtime must expose shared env trimming for provider settings')
   assert.match(llm, /export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL/, 'stale environment or client model IDs must not change the pinned model')
-  assert.match(llm, /DEFAULT_REASONING_EFFORT = normalizeReasoningEffort\([\s\S]*'xhigh'[\s\S]*\)/, 'reasoning must default to x-high effort')
-  assert.match(llm, /'xhigh'/, 'runtime must preserve xhigh reasoning instead of normalizing it down when explicitly configured')
+  assert.match(llm, /DEFAULT_REASONING_EFFORT = normalizeReasoningEffort\([\s\S]*'medium'[\s\S]*\)/, 'reasoning must default to medium effort')
+  assert.match(llm, /'medium'/, 'runtime must preserve medium reasoning instead of normalizing it down when explicitly configured')
   assert.match(llm, /DEFAULT_REASONING_EXCLUDE = booleanEnv\(process\.env\.OPENROUTER_REASONING_EXCLUDE,\s*true\)/, 'reasoning exclude flag must tolerate whitespace-padded Vercel env values')
   assert.match(llm, /getAssistantApiKey[\s\S]*trimmedEnv\(process\.env\.OPENROUTER_API_KEY\)/, 'provider credentials must be trimmed before request headers are built')
   assert.doesNotMatch(llm, /process\.env\.DEEPSEEK_API_KEY|api\.deepseek\.com/, 'active provider runtime must not retain a DeepSeek credential or endpoint')
@@ -1149,9 +1158,9 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /function isToolExecutionErrorResult[\s\S]*isInternalRecoveryResult/, 'internal extraction recovery must count as a failed evidence action')
   assert.match(policyEngine, /shouldAdvanceResearchForPlanBudget/, 'research phases must preserve runway for remaining plan steps and final synthesis')
   assert.match(policyEngine, /deliverableReserve[\s\S]*MIN_DELIVERABLE_BUDGET \+ 8/, 'global budget protection must reserve usable final-synthesis runway')
-  assert.match(agentLoop, /FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'source-action starts must tolerate Gemini 3.6 Flash xhigh provider selection')
-  assert.match(agentLoop, /FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'non-source action starts must tolerate Gemini 3.6 Flash xhigh provider selection')
-  assert.match(agentLoop, /FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 60_000/, 'hot action retries must avoid rapid null-stream loops during xhigh provider variance')
+  assert.match(agentLoop, /FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'source-action starts must tolerate Gemini 3.5 Flash Lite medium provider selection')
+  assert.match(agentLoop, /FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'non-source action starts must tolerate Gemini 3.5 Flash Lite medium provider selection')
+  assert.match(agentLoop, /FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 60_000/, 'hot action retries must avoid rapid null-stream loops during medium-reasoning provider variance')
   assert.match(agentLoop, /function isFastActionToolTurn/, 'agent loop must classify fast between-tool action turns centrally')
   assert.match(agentLoop, /let fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast minimal-thinking lane by default')
   assert.match(agentLoop, /HOT PATH ACTION TURN:[\s\S]*make exactly one native tool call[\s\S]*speed comes from choosing the next action quickly, not from doing less work/, 'fast action turns must explicitly ask lightweight models for immediate tool selection without reducing depth')
@@ -1367,7 +1376,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /ARTIFACT_MUTATION_TOOLS\.has\(toolName\) && activeStepAuthorizesArtifactMutation\(state\)/, 'an explicitly authoring plan phase must allow its requested file mutation')
   assert.match(agentConfig, /MIN_ITERATION_DELAY_MS = 0/, 'agent loop should not add a sluggish fixed inter-iteration delay')
   assert.match(agentConfig, /PLAN_STARTUP_DELAY_MS = 0/, 'planner startup should not wait before requesting the task plan')
-  assert.match(agentConfig, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 60_000/, 'normal model turns must tolerate xhigh reasoning while remaining bounded')
+  assert.match(agentConfig, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 60_000/, 'normal model turns must tolerate medium reasoning while remaining bounded')
   assert.match(agentConfig, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 3_000/, 'invisible model stalls should recover quickly without converting ordinary provider jitter into false failures')
   assert.match(agentConfig, /checkIntervalMs:\s*150/, 'stream stall checks should poll quickly enough for live UI feedback')
   assert.match(agentConfig, /TOOL_RETRY_MAX = 0/, 'transient tool failures should fail forward instead of spending another turn on retry delay')
@@ -1523,7 +1532,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /function hasBreadthSaturatedResearchEvidence[\s\S]*stepOpenedSourceDomains\(state\)\.size[\s\S]*distinctDomains >= profile\.requiredSourceBreadth/, 'policy recovery must also require opened/read source breadth')
   assert.match(policyEngine, /function hasLoopLimitedResearchEvidence[\s\S]*depth\.complete[\s\S]*state\.stepLoopDetections >= 2 && \([\s\S]*hasStalledResearchEvidence\(state\)[\s\S]*hasFailureLimitedResearchEvidence\(state,\s*depth\)/, 'deep research loop recovery must not advance until the phase is complete or substantially saturated after repeated loop detection')
   assert.doesNotMatch(agentConfig, /source_sweep:\s*2/, 'source_sweep should not have an active per-phase budget because it is no longer in the research menu')
-  assert.match(agentLoop, /const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 60_000/, 'final inline answers must tolerate Gemini 3.6 Flash xhigh provider startup')
+  assert.match(agentLoop, /const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 60_000/, 'final inline answers must tolerate Gemini 3.5 Flash Lite medium provider startup')
   assert.match(agentLoop, /const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600/, 'saved final deliverables must use bounded section chunks with enough room to avoid clipped reports')
   assert.match(agentLoop, /const requestTimeoutMs = useCompactNarration[\s\S]*FORCED_NARRATION_REQUEST_TIMEOUT_MS[\s\S]*isFinalInlineAnswerTurn[\s\S]*FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS[\s\S]*isFinalSavedDeliverableTurn[\s\S]*FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS[\s\S]*state\.deadlineFinalizationStarted/, 'final-answer timeouts must stay short even when deadline finalization is active')
   assert.match(agentLoop, /function finalSavedDeliverableTurn/, 'saved final deliverables must have a dedicated fast path')
@@ -1543,8 +1552,8 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /partialFileWriteRecoveryPending[\s\S]*loopCheck\.rawTool === 'append_file'[\s\S]*return null/, 'generic loop recovery must not fight required append_file continuation chunks')
   assert.match(agentLoop, /finalSavedDeliverableNeedsTool[\s\S]*partialFileContinuationNeedsTool[\s\S]*!hasSavedFinalDeliverableCandidate\(state\)[\s\S]*requiredToolIntent/, 'saved final deliverables and partial continuation actions must keep a file-tool intent until a final file exists')
   assert.doesNotMatch(agentLoop, /finalSavedDeliverableNeedsTool[\s\S]{0,240}state\.stepToolCallCount === 0[\s\S]{0,240}!hasSavedFinalDeliverableCandidate\(state\)/, 'saved final deliverable retries must not stop forcing the file tool after the first failed attempt')
-  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 60_000/, 'saved final deliverables must have a bounded startup window that tolerates Gemini 3.6 Flash xhigh variance')
-  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 60_000/, 'saved final deliverables must allow xhigh reasoning and file-tool arguments to finish clean chunks')
+  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 60_000/, 'saved final deliverables must have a bounded startup window that tolerates Gemini 3.5 Flash Lite medium variance')
+  assert.match(agentLoop, /FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 60_000/, 'saved final deliverables must allow medium reasoning and file-tool arguments to finish clean chunks')
   assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'saved final deliverables must not spend an extra non-stream fallback wait before the next native tool attempt')
   assert.match(streamProcessor, /FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000[\s\S]*isStreamingToolArgs[\s\S]*effectiveIterationMs[\s\S]*FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS/, 'file tool arguments must get a protected post-start window so reports do not break mid-write')
   assert.match(agentLoop, /End cleanly at a sentence or section boundary/, 'saved report chunks must be instructed to stop at clean section boundaries')
@@ -1563,7 +1572,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /state\.partialFileWriteRecoveryPending[\s\S]*FILE_WRITE_TOOLS\.has\(toolName\)[\s\S]*toolName === 'append_file' && requestedPath === pending\.path[\s\S]*INTERNAL_RECOVERY/, 'partial file recovery preflight must block recreate/wrong-path writes before visible tool_start')
   assert.match(tools, /Create a workspace file\. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts\./, 'create_file schema must bias providers toward path-first live file writes')
   assert.match(agentLoop, /Math\.min\(0\.35,\s*state\.strategyConfig\?\.temperature \?\? strategy\.temperature\)/, 'final chat-answer turns should use a calmer temperature to avoid status chatter')
-  assert.match(agentLoop, /const requestReasoning = useCompactNarration[\s\S]*MINIMAL_THINKING_REASONING[\s\S]*isFinalInlineAnswerTurn[\s\S]*TASK_REASONING/, 'narration may stay minimal while substantive task and final-answer turns use x-high reasoning')
+  assert.match(agentLoop, /const requestReasoning = useCompactNarration[\s\S]*MINIMAL_THINKING_REASONING[\s\S]*isFinalInlineAnswerTurn[\s\S]*TASK_REASONING/, 'narration may stay minimal while substantive task and final-answer turns use medium reasoning')
   assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES[\s\S]*The final file write took too long to start/, 'nudgeable final saved deliverable timeouts must error instead of resetting forever when no file exists')
   assert.match(agentLoop, /FINAL_OPTIONAL_RUNTIME_TOOLS/, 'final steps should not pay for optional image/browser/PDF/delete schemas unless relevant')
   assert.match(agentLoop, /finalStepAllowsOptionalTool/, 'final optional tools must be restored when task intent or QA state requires them')

@@ -82,9 +82,9 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'xhigh' as const, exclude: true }
-// Keep the user-facing acknowledgement fast while substantive Gemini planning
-// and task turns use the configured x-high effort (Google's highest level).
+const PLANNER_CONTROL_REASONING = { effort: 'medium' as const, exclude: true }
+// Keep the user-facing acknowledgement fast while substantive planning and
+// task turns use the configured medium effort.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
@@ -349,15 +349,10 @@ function isUsablePlannerAck(ack: string): boolean {
   const normalized = ack.trim().toLowerCase()
   if (!normalized) return false
   if (normalized.length < 45) return false
-  if (normalized.length > 280) return false
+  if (normalized.length > 320) return false
   if (containsPromptInstructionLeak(normalized)) return false
   const words = ackWordCount(normalized)
-  if (words < 10 || words > 38) return false
-  const sentences = normalized
-    .split(/(?<=[.!?])\s+/)
-    .map(sentence => sentence.trim())
-    .filter(Boolean)
-  if (sentences.length < 1 || sentences.length > 2) return false
+  if (words < 8 || words > 48) return false
   if (/^(?:next|now|then|after that|moving forward|from here)[,\s]+(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b/.test(normalized)) return false
   if (!/\b(?:research|source|compare|check|verify|read|gather|analy[sz]e|assess|review|build|create|write|draft|fix|test|inspect|summari[sz]e|deliver|report|answer|find|produce)\b/.test(normalized)) return false
   if (!/\b(?:then|and|so|before|while|with|into|using|based on|against|across)\b/.test(normalized)) return false
@@ -740,6 +735,36 @@ export class PlanManager {
     }
   }
 
+  recoverFromPlannerFailure(state: AgentStateData): boolean {
+    if (state.planEmitted || this.emitter.isClosed) return state.planEmitted
+
+    const target = conciseTopicLabel(requestedTargetLabel(this.messages))
+    const recoveryTitle = `Complete ${target}`
+    const recoveryScope = [
+      `Complete the user's requested work for ${target}.`,
+      'Preserve explicit constraints, use available native tools, change route when a source/action fails, verify the result, and deliver it in the requested form.',
+    ].join(' ')
+    const acknowledgement = `I’ll work through ${target}, adapt around blocked routes or unavailable tools, verify the result, and deliver it in the requested form.`
+
+    this.suppressFurtherAcknowledgementDeltas = true
+    this.emitter.textDelta(acknowledgement)
+    this.acknowledgementEmitted = true
+    this.settleAcknowledgementFirstVisible(true)
+    this.settleAcknowledgementDisplay(true)
+
+    const recovered = this.usePrecomputedPlan(
+      state,
+      { items: [recoveryTitle], scopes: [recoveryScope] },
+      { emitPlan: true },
+    )
+    if (recovered) {
+      console.warn('[AgentDiagnostics] Recovered from planner failure with a minimal task-specific execution plan', {
+        target,
+      })
+    }
+    return recovered
+  }
+
   private async recordCompletionUsage(usage: RawCompletionUsage, label: string): Promise<void> {
     const normalized = normalizeCompletionUsage(usage)
     if (!normalized) throw new Error(BILLABLE_USAGE_ERROR)
@@ -817,7 +842,7 @@ export class PlanManager {
           role: 'system' as const,
           content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts a ${taskShape} task.
 Requirements:
-- One very brief paragraph, one or two short sentences, 12-38 words total.
+- One natural, very brief paragraph, roughly 8-48 words. Do not force or mention a sentence count.
 - Use plain words. Avoid fancy, inflated or formal phrasing.
 - Specific to the user's concrete target/topic/artifact and requested output.
 - Say what Agent will actually do for this task and the final answer/artifact shape.
@@ -1262,7 +1287,7 @@ Rules:
 - Preserve explicit user-authored steps in their stated order. Carry required, exclusive, and forbidden named-tool instructions into every relevant scope and do not insert substitute phases that violate them.
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
-- The ack must be one very brief direct paragraph, one or two short sentences and 12-38 words, using plain words and saying what Agent will do for the exact task and what it will deliver.
+- The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, but do not enforce or mention a sentence count. Say what Agent will do for the exact task and what it will deliver.
 - The planning model owns the visible plan's wording, step count, boundaries, and order. Preserve explicit user order and real dependencies, but do not force "research → analyze → synthesize → deliver", a phase named "Analyze", or any preferred verb/template.
 - Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
 - Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.

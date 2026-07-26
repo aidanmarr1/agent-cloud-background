@@ -306,7 +306,8 @@ function assertBrowserStepPolicyFixtures() {
   actionableNoToolState.browserNoToolRecoveryAttempts = 3
   actionableNoToolState.consecutiveNoToolCalls = 5
   const exhausted = policy.evaluate(actionableNoToolState, new Map(), '', false, 20)
-  assert.ok(exhausted.some(action => action.type === 'terminate' && action.reason === 'browser_no_tool_recovery_exhausted'), 'repeated ignored browser recovery must stop instead of burning unlimited model turns')
+  assert.ok(exhausted.some(action => action.type === 'inject_message' && /BROWSER ROUTE RESET/.test(action.message?.content || '')), 'repeated ignored browser recovery must reset the visible route and choose a different browser action')
+  assert.ok(!exhausted.some(action => action.type === 'terminate'), 'recoverable browser action selection must not terminate the task')
 }
 
 export async function runSmoke() {

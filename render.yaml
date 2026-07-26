@@ -34,9 +34,9 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.6-flash:exacto
+        value: google/gemini-3.5-flash-lite:nitro
       - key: OPENROUTER_REASONING_EFFORT
-        value: xhigh
+        value: medium
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER
@@ -122,9 +122,9 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.6-flash:exacto
+        value: google/gemini-3.5-flash-lite:nitro
       - key: OPENROUTER_REASONING_EFFORT
-        value: xhigh
+        value: medium
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER

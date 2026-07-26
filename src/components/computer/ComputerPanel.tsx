@@ -524,8 +524,8 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                 <button
                   onClick={jumpToLive}
                   className="w-8 h-8 rounded-md flex items-center justify-center text-text-muted hover:text-text-primary hover:bg-bg-secondary disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-muted transition-all duration-150"
-                  disabled={isAtLatest}
-                  aria-label="Last item"
+                  disabled={hasLiveItem ? activeItemIsLive : isAtLatest}
+                  aria-label={hasLiveItem ? 'Jump to live activity' : 'Last item'}
                 >
                   <SkipForward size={13} strokeWidth={2.25} />
                 </button>
@@ -543,7 +543,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
                   >
                     <span className="text-text-muted">{safeIndex + 1}/{filteredItems.length}</span>
                     <span className="w-1.5 h-1.5 rounded-full bg-text-secondary animate-pulse" />
-                    <span>live</span>
+                    <span>view live</span>
                   </button>
                 ) : (
                   <span className="text-[11px] text-text-secondary font-semibold tabular-nums ml-1.5 min-w-[44px] text-right">

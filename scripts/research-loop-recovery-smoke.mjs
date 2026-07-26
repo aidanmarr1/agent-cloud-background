@@ -8,7 +8,7 @@ const root = process.cwd()
 const loopSource = await readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8')
 const paidProgressBranch = loopSource.slice(
   loopSource.indexOf("if (progressDecision.kind === 'stop')"),
-  loopSource.indexOf("terminalReason = 'paid_no_progress_cap'") + "terminalReason = 'paid_no_progress_cap'".length,
+  loopSource.indexOf("console.warn('[AgentDiagnostics] Recovered from paid no-progress cap by changing route") + 500,
 )
 
 assert.ok(
@@ -17,13 +17,23 @@ assert.ok(
 )
 assert.ok(
   paidProgressBranch.indexOf('canAdvanceResearchAfterPaidNoProgress(state)') <
-    paidProgressBranch.indexOf("terminalReason = 'paid_no_progress_cap'"),
-  'credible research recovery must run before the paid no-progress terminal error',
+    paidProgressBranch.indexOf("type: 'autonomous_route_change'"),
+  'credible research recovery must run before the broader autonomous route change',
 )
 assert.match(
   paidProgressBranch,
   /planManager\.handleStepAdvance\(state\)[\s\S]*paid_no_progress_research_advance/,
   'paid no-progress recovery must use the normal plan transition and emit diagnostics',
+)
+assert.match(
+  loopSource,
+  /state\.autonomousRecoveryEscalations \+= 1[\s\S]*pendingActionSelectionRepairPrompt[\s\S]*phase = 'STREAMING'/,
+  'paid internal/no-progress exhaustion must change route and keep the task streaming',
+)
+assert.doesNotMatch(
+  paidProgressBranch,
+  /state\.lastModelErrorForUser\s*=[\s\S]*phase = 'ERROR'/,
+  'paid internal recovery exhaustion must not surface a retry-task error',
 )
 assert.match(
   loopSource,
