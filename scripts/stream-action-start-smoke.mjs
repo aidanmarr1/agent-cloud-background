@@ -54,6 +54,11 @@ async function* chunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}\\\"}' } }] } }] }
 }
 
+async function* missingDisplayFileChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_missing_file_label', function: { name: 'create_file', arguments: '{\\"plan_step_index\\":1,\\"path\\":\\"deliverables/report.md\\",\\"content\\":\\"# Report\\\\n\\\\n' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'The opening section is already visible while the report body continues streaming.\\"}' } }] } }] }
+}
+
 async function* bufferedFinalReportChunks(gate: Promise<void>) {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_final_report', function: { name: 'create_file', arguments: '{\\"action_label\\":\\"Write final research report\\",\\"plan_step_index\\":2,\\"path\\":\\"deliverables/final-report.md\\",\\"content\\":\\"# Final report\\\\n\\\\nThe evidence from three independent sources now supports the opening conclusion and makes this preview visibly live.\\\\n' } }] } }] }
   await gate
@@ -250,6 +255,17 @@ export async function runSmoke() {
     'export default function Page() {\\n  return <main>Hello</main>\\n}',
     'file content deltas must stream the generated file body incrementally',
   )
+
+  const missingDisplayEmitter = makeEmitter()
+  const missingDisplayState = createInitialState(true, timeouts)
+  missingDisplayState.currentPlanItems = ['Write the report']
+  missingDisplayState.currentStepIdx = 0
+  const missingDisplayResult = await new StreamProcessor(missingDisplayEmitter as any, timeouts)
+    .processStream(missingDisplayFileChunks() as any, missingDisplayState)
+  assert.equal(missingDisplayResult.toolCalls.size, 1)
+  const missingDisplayStart = missingDisplayEmitter.events.find(e => e.type === 'tool_start')
+  assert.equal((missingDisplayStart?.args as any)?.action_label, 'Create report.md', 'file starts should get a concise path-derived label when the provider omits display metadata')
+  assert.ok(missingDisplayEmitter.events.findIndex(e => e.type === 'tool_start') < missingDisplayEmitter.events.findIndex(e => e.type === 'file_content_delta'), 'a missing-label file action must still appear before content is written')
 
   let releaseFinalReport: () => void = () => {}
   const finalReportGate = new Promise<void>(resolve => {

@@ -348,7 +348,7 @@ const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'medium' as const, exclude: true }
+const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -365,11 +365,11 @@ function isTransientAssistantStreamError(error: unknown): boolean {
 }
 
 function supportsProviderRequiredToolChoice(model: string): boolean {
-  // Explicit OpenRouter route variants are pinned model routes rather than the
-  // broad auto-router. Keep native action turns required on both accuracy and
-  // throughput variants so a Nitro task cannot silently return an empty prose
-  // turn instead of the concrete tool call the active phase requires.
-  return ASSISTANT_PROVIDER !== 'openrouter' || /:(?:exacto|nitro)$/i.test(model.trim())
+  // The model ID is centrally pinned, including the balanced OpenRouter route.
+  // Keep native action turns required for every pinned OpenRouter variant so a
+  // provider route cannot silently return an empty prose turn instead of the
+  // concrete tool call the active phase requires.
+  return ASSISTANT_PROVIDER !== 'openrouter' || model.trim().length > 0
 }
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
@@ -1467,7 +1467,7 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     `Current final task: ${step}.`,
     'Begin the tool call immediately; do not internally outline, narrate, or wait to draft the whole deliverable before starting the file-tool arguments.',
     'Do not write a status update, plan, source summary, or permission question.',
-    'Use create_file for the first saved output; use append_file only after a file exists; use edit_file only for a targeted fix.',
+    'Use create_file for the first saved output; use append_file only after that file exists and only when additional content is genuinely needed; use edit_file only for a targeted fix.',
     'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
     'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
     'For the first create_file call, write a concise complete Markdown deliverable when the scope is small. For longer reports, write the title, short intro, and first useful complete section. Always end cleanly at a sentence or section boundary; the worker will continue with append_file chunks until the saved output is complete.',
@@ -3134,7 +3134,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             'FINAL SAVED DELIVERABLE TOOL CALL ONLY.',
             'Make exactly one native create_file or append_file call now; do not write visible prose before it.',
             'Start the file tool call immediately; do not spend a hidden pass outlining the deliverable first.',
-            'For the first saved output, use create_file with action_label, plan_step_index, and path before content.',
+            'For the first saved output, use create_file with action_label, plan_step_index, and path before content. Do not choose append_file unless the same file was already created and more content is actually required.',
             'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
             state.stepToolCallCount > 0 && !hasSavedFinalDeliverableCandidate(state)
               ? 'A previous final-write turn did not save a deliverable; make a shorter complete create_file call now instead of continuing to reason.'
@@ -4038,7 +4038,7 @@ export class AgentLoop {
             temperature: 0.55,
             max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
             // Keep the tiny narration sidecar on minimal reasoning while
-            // substantive Gemini task turns use the configured medium effort.
+            // substantive Gemini task turns use the configured minimal effort.
             reasoning: MINIMAL_THINKING_REASONING,
             includeTemporalContext: false,
             requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,

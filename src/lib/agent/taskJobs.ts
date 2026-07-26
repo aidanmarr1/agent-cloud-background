@@ -74,6 +74,7 @@ interface TaskJob {
   nextBrowserFrameVersion: number
   latestBrowserFrame: SSEEvent | null
   events: RecordedTaskEvent[]
+  livePublishedSubscriberIdsBySeq: Map<number, Set<string>>
   subscribers: Map<string, TaskJobSubscriber>
   abortController: AbortController
   emitter: TaskJobEmitter | null
@@ -721,9 +722,34 @@ function queuePersistence(
 function publishPersistedRecords(job: TaskJob, records: RecordedTaskEvent[]): void {
   for (const record of records) {
     if (record.event.type === 'done' || record.event.type === 'error') continue
+    const alreadyPublishedSubscriberIds = job.livePublishedSubscriberIdsBySeq.get(record.seq)
+    job.livePublishedSubscriberIdsBySeq.delete(record.seq)
     for (const subscriber of job.subscribers.values()) {
+      if (alreadyPublishedSubscriberIds?.has(subscriber.id)) continue
       sendEventToSubscriber(subscriber, record.event)
     }
+  }
+}
+
+function shouldPublishFileEventLive(event: SSEEvent): boolean {
+  if (event.type === 'file_content_start' || event.type === 'file_content_delta') return true
+  return event.type === 'tool_start' && (
+    event.name === 'create_file' ||
+    event.name === 'append_file' ||
+    event.name === 'edit_file'
+  )
+}
+
+function publishFileEventLive(job: TaskJob, record: RecordedTaskEvent): void {
+  if (!shouldUseDatabaseTaskJobs() || !shouldPublishFileEventLive(record.event)) return
+  const publishedSubscriberIds = new Set<string>()
+  for (const subscriber of job.subscribers.values()) {
+    if (subscriber.closed) continue
+    sendEventToSubscriber(subscriber, record.event)
+    if (!subscriber.closed) publishedSubscriberIds.add(subscriber.id)
+  }
+  if (publishedSubscriberIds.size > 0) {
+    job.livePublishedSubscriberIdsBySeq.set(record.seq, publishedSubscriberIds)
   }
 }
 
@@ -1901,6 +1927,13 @@ function recordTaskJobEvent(job: TaskJob, event: SSEEvent): void {
     job.events.splice(0, job.events.length - TASK_JOB_MEMORY_EVENT_LIMIT)
   }
 
+  // File starts and body deltas are a live transparency surface. Publish them
+  // to already-connected task streams immediately, while the same sequenced
+  // records continue through the durable persistence chain for reconnects and
+  // crash recovery. publishPersistedRecords skips only these already-delivered
+  // sequence numbers, so ordinary narration remains debit/persistence gated.
+  publishFileEventLive(job, record)
+
   if (batchableEventChars(eventWithMeta) !== null) {
     flushPendingBrowserFramePersistence(job)
     queueDeltaPersistence(job, record)
@@ -2403,6 +2436,7 @@ export async function startTaskJob(input: {
     nextBrowserFrameVersion: 1,
     latestBrowserFrame: null,
     events: [],
+    livePublishedSubscriberIdsBySeq: new Map(),
     subscribers: new Map(),
     abortController: new AbortController(),
     emitter: null,
@@ -4174,6 +4208,7 @@ export async function runClaimedTaskJob(
       : 1,
     latestBrowserFrame: null,
     events: [],
+    livePublishedSubscriberIdsBySeq: new Map(),
     subscribers: new Map(),
     abortController: new AbortController(),
     emitter: null,

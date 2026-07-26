@@ -1,4 +1,6 @@
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite:nitro'
+// Plain model IDs use OpenRouter's balanced provider routing (price + speed).
+// Route-specific suffixes such as :nitro/:exacto are opt-in, not the default.
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,

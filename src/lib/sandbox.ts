@@ -667,7 +667,14 @@ export async function appendFileInSandbox(
     }
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code
-    if (code !== 'ENOENT') throw err
+    if (code === 'ENOENT') {
+      return {
+        action: 'appended',
+        path: filePath,
+        error: 'INTERNAL_RECOVERY: append_file requires an existing file. Start a new report with create_file, then append only continuation sections.',
+      }
+    }
+    throw err
   }
 
   if (!appendContent) {

@@ -97,6 +97,22 @@ export async function runSmoke() {
   const pipeline = new ToolPipeline(emitter as any, conversationId)
 
   try {
+    const initialAppendState = createInitialState(true, timeouts)
+    initialAppendState.currentPlanItems = ['Write the report']
+    initialAppendState.currentStepIdx = 0
+    const initialAppend = await call(
+      pipeline,
+      initialAppendState,
+      'initial-append',
+      'append_file',
+      JSON.stringify({
+        path: 'new-report.md',
+        content: '# This must not become an implicit first write\\\\n\\\\nThe initial report write belongs to create_file.',
+      }),
+    )
+    assert.equal(initialAppend.isError, true, 'append_file must not create the first saved report')
+    assert.match(String((initialAppend.result as any).error), /has not been created in this task|requires an existing file/)
+
     const partialContent = '# Draft\\\\nThis is the first recovered section.\\\\nIt is intentionally incomplete but substantive enough to save.\\\\n'
     const recovered = await call(
       pipeline,

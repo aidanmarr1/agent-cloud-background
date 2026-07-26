@@ -30,7 +30,7 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*30/, 'credit policy must preserve margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.5-flash-lite:nitro'/, 'default model must be Gemini 3.5 Flash Lite through OpenRouter Nitro')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.5-flash-lite'/, 'default model must be Gemini 3.5 Flash Lite through OpenRouter balanced routing')
   assert.match(modelPricing, /inputUsdPer1M:\s*0\.30/, 'Gemini 3.5 Flash Lite input pricing must match OpenRouter')
   assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.03/, 'Gemini 3.5 Flash Lite cache pricing must match OpenRouter')
   assert.match(modelPricing, /outputUsdPer1M:\s*2\.50/, 'Gemini 3.5 Flash Lite output pricing must match OpenRouter')

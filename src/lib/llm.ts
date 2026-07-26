@@ -41,7 +41,7 @@ function normalizeReasoningEffort(value: string | undefined, fallback: Reasoning
 
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
   trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT),
-  'medium',
+  'minimal',
 )
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
 

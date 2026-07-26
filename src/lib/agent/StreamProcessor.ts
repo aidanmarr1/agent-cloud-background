@@ -3,7 +3,7 @@ import type { AgentStateData } from './AgentState'
 import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
-import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { defaultFileActionLabel, formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { NARRATION_THRESHOLD_DEFAULT } from './config'
 import { sanitizeToolStartArgs } from './toolEventSanitizer'
 import {
@@ -361,6 +361,18 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       }
   }
 
+  // Providers sometimes place action_label after a large file body (or omit
+  // it on a recovery turn). The path is enough to open a truthful live action
+  // and preview immediately; execution applies the same fallback contract.
+  if (
+    (toolName === 'create_file' || toolName === 'append_file' || toolName === 'edit_file') &&
+    typeof args.path === 'string' &&
+    args.path.length > 0 &&
+    !strictActionLabelFromArgs(args)
+  ) {
+    args.action_label = defaultFileActionLabel(toolName, args.path)
+  }
+
   return sanitizeToolStartArgs(toolName, args)
 }
 
@@ -376,7 +388,8 @@ function searchWouldBePreflightBlocked(toolName: string, args: Record<string, un
 }
 
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
-  if (!strictActionLabelFromArgs(args)) return false
+  const isFileWrite = toolName === 'create_file' || toolName === 'append_file' || toolName === 'edit_file'
+  if (!strictActionLabelFromArgs(args) && !isFileWrite) return false
 
   if (toolName === 'web_search' || toolName === 'image_search') {
     if (searchWouldBePreflightBlocked(toolName, args, state)) return false

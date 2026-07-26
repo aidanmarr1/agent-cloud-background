@@ -93,7 +93,7 @@ import {
   isNextWebsiteProjectPath,
 } from '@/lib/tsxWebsitePreview'
 import { analyzeScreenshotQuality } from '@/lib/visualQuality'
-import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { defaultFileActionLabel, formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { visibleNarrationActionHeadroom } from './NarrationMemory'
 import { isNonIdempotentToolCall, type InflightToolDrain, type InflightToolDrainResult } from './toolSafety'
 import { redactTerminalOutputSecrets, sanitizeToolResultForEvent, sanitizeToolStartArgs } from './toolEventSanitizer'
@@ -520,6 +520,25 @@ function fileWritePreflightBlockReason(
       }
       return `INTERNAL_RECOVERY: append_file was blocked for code file "${requestedPath}" because appending another module commonly creates duplicate imports, declarations, or default exports. Read that exact file once, then make one targeted edit_file replacement. append_file is reserved for a runtime-confirmed partial streamed write. Do not expose this recovery message to the user.`
     }
+
+    // A first report write must have a create checkpoint. The sandbox also
+    // enforces this at the filesystem boundary, but catching it here avoids a
+    // needless write attempt and tells the model exactly which action is
+    // required. Explicit requests to extend an existing report remain valid.
+    const isFinalStep = isCurrentPlanDeliverableStep(state)
+    const knownInRun = !!requestedPath && (
+      state.createdFiles.has(requestedPath) ||
+      state.fileCreateCounts.has(requestedPath) ||
+      state.partialFileWriteRecoveryPending?.path === requestedPath ||
+      state.pendingDeliverableRevision?.path === requestedPath ||
+      state.workLedger.deliverableCandidates.some(candidate => candidate.path === requestedPath)
+    )
+    const requestText = `${state.originalUserRequest || ''} ${currentStepText(state)}`
+    const explicitContinuation = /\b(?:append|continue|extend|amend|revise|update|existing|add\s+to)\b/i.test(requestText)
+    if (isFinalStep && requestedPath && !knownInRun && !explicitContinuation) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: 'append_file' }
+      return `INTERNAL_RECOVERY: "${requestedPath}" has not been created in this task. Start the saved report with exactly one create_file call first; use append_file only for later continuation chunks. Do not expose this correction to the user.`
+    }
   }
 
   if (
@@ -825,6 +844,14 @@ function actionLabelBlockReason(args: Record<string, unknown>, state: AgentState
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (strictActionLabelFromArgs(args)) return null
   return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh 2-12 word purpose label from the task context. Start with a capital letter and do not end with a period. The label must say what the action is for, not expose raw JSON or tool syntax. No first person, no tool names, no raw URL, and no past-tense summary.'
+}
+
+function repairFileActionLabel(toolName: string, args: Record<string, unknown>): boolean {
+  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return false
+  const path = typeof args.path === 'string' ? args.path.trim() : ''
+  if (!path || strictActionLabelFromArgs(args)) return false
+  args.action_label = defaultFileActionLabel(toolName, path)
+  return true
 }
 
 function narrationCadenceBlockReason(
@@ -4043,7 +4070,16 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
-    const actionLabelReason = actionLabelBlockReason(args, state)
+    const repairedFileActionLabel = repairFileActionLabel(tc.name, args)
+    if (repairedFileActionLabel) {
+      tc.arguments = JSON.stringify(args)
+      console.log('[ToolPipeline] Repaired missing file action label', {
+        tool: tc.name,
+        path: args.path,
+        step: state.currentStepIdx + 1,
+      })
+    }
+    const actionLabelReason = repairedFileActionLabel ? null : actionLabelBlockReason(args, state)
     if (actionLabelReason) {
       state.displayContractRepairAttempts = (state.displayContractRepairAttempts || 0) + 1
       const rawLabel = typeof args.action_label === 'string' ? args.action_label.replace(/\s+/g, ' ').trim() : ''

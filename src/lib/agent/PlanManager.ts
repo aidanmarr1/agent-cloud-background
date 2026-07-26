@@ -82,9 +82,9 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'medium' as const, exclude: true }
-// Keep the user-facing acknowledgement fast while substantive planning and
-// task turns use the configured medium effort.
+const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
+// Keep acknowledgement, planning, and task turns on the configured minimal
+// reasoning route so the balanced provider mode stays responsive.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
@@ -1028,7 +1028,7 @@ Requirements:
       const stepGuidance = imageOnlyStep
         ? `RULES:\n- This is a direct image retrieval step. Call image_search once with the user's requested subject.\n- When image_search downloads or returns images, you are DONE. Do NOT add separate browser, selection, file, or compile steps.`
         : isFirstStepDeliverable
-        ? `RULES:\n- This is the deliverable step. ${strategyGuidance?.deliverable || 'Create the actual final output file using create_file and append_file for large output. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'}\n- For long manuscripts, assemble/collate chapter files into deliverables/final-manuscript.md instead of trying one giant write.\n- When the file is created and complete, you are DONE.`
+        ? `RULES:\n- This is the deliverable step. ${strategyGuidance?.deliverable || 'Create the actual final output file using create_file. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'}\n- For long manuscripts, assemble/collate chapter files into deliverables/final-manuscript.md instead of trying one giant write.\n- When the file is created and complete, you are DONE.`
         : nonDeliverableStepGuidance(state, resolvedPlan[0], this.taskComplexity)
       const msg = {
         role: 'system',
@@ -1181,7 +1181,7 @@ Requirements:
     )
     const stepHint = isLastStep
       ? lastStepNeedsSavedArtifact
-        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file and append_file for large output. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
+        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
         : 'This is the final answer step. Deliver the requested answer directly in chat from completed work. Do not create a file unless the user explicitly requested one.'
       : nonDeliverableStepGuidance(state, state.currentPlanItems[state.currentStepIdx], this.taskComplexity)
     return {

@@ -1703,7 +1703,19 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
   if (!target) return { action: 'appended', path: filePath, content: 'Error: path traversal not allowed' }
 
   const sandbox = await getOrCreateE2BSandbox(conversationId)
-  const existing = await sandbox.files.read(target.absolutePath).catch(() => '')
+  // Do not let an initial append silently create a new report. A separate
+  // create_file checkpoint makes the task stream and durable recovery state
+  // truthful; append is reserved for a file that already exists.
+  try {
+    await sandbox.files.getInfo(target.absolutePath)
+  } catch {
+    return {
+      action: 'appended',
+      path: target.relativePath,
+      error: 'INTERNAL_RECOVERY: append_file requires an existing file. Start a new report with create_file, then append only continuation sections.',
+    }
+  }
+  const existing = await sandbox.files.read(target.absolutePath)
   const appendContent = trimReplayedAppendOverlap(existing, content)
   if (!appendContent) {
     return {

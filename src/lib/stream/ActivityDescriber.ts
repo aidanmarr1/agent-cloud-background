@@ -48,6 +48,22 @@ export function strictActionLabelFromArgs(args: Record<string, unknown>): string
   return formatVisibleActionLabel(ellipsize(cleaned, 88))
 }
 
+/**
+ * File writes are streamed before the model has necessarily finished its
+ * display metadata. Keep the live task stream useful by deriving a short,
+ * truthful label from the already-known target path. This is only a display
+ * fallback; it never exposes file contents or changes the requested path.
+ */
+export function defaultFileActionLabel(toolName: string, filePath: string): string {
+  const base = filePath.replace(/\\/g, '/').split('/').filter(Boolean).pop() || 'file'
+  const verb = toolName === 'append_file'
+    ? 'Continue'
+    : toolName === 'edit_file'
+      ? 'Update'
+      : 'Create'
+  return `${verb} ${base}`
+}
+
 export function describeActivity(toolName: string, args: Record<string, unknown>): string {
   void toolName
   return strictActionLabelFromArgs(args) || ''

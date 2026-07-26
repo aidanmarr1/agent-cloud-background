@@ -111,7 +111,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'append_file',
-      description: 'Append a complete continuation section to an existing workspace file. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts. Do not repeat already-written content.',
+      description: 'Append a complete continuation section to an existing workspace file. The target must already exist: use create_file for the first report/file write, and use append_file only when additional content is genuinely needed. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts. Do not repeat already-written content.',
       parameters: {
         type: 'object',
         properties: {
