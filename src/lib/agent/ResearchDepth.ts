@@ -38,7 +38,7 @@ const SOURCE_COUNT_WORDS: Record<string, number> = {
   ten: 10,
 }
 
-function explicitSourceCount(text: string): number | null {
+export function explicitResearchSourceCount(text: string): number | null {
   const match = text.match(EXPLICIT_SOURCE_COUNT_RE)
   if (!match?.[1]) return null
   const parsed = /^\d+$/.test(match[1])
@@ -46,6 +46,15 @@ function explicitSourceCount(text: string): number | null {
     : SOURCE_COUNT_WORDS[match[1].toLowerCase()]
   if (!Number.isFinite(parsed)) return null
   return Math.min(20, Math.max(1, parsed))
+}
+
+export function hasUserAuthoredResearchEvidenceFloor(text: string): boolean {
+  return explicitResearchSourceCount(text) !== null ||
+    DEEP_RE.test(text) ||
+    EXTREME_RE.test(text) ||
+    WIDE_RE.test(text) ||
+    COMPARISON_RE.test(text) ||
+    EVIDENCE_RE.test(text)
 }
 
 function plannedResearchPhaseCount(state: AgentStateData): number {
@@ -149,9 +158,9 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
 
   const quick = QUICK_RE.test(originalRequest) &&
     !taskDefaultsToMarkdownDeliverable(originalRequest) &&
-    !DEEP_RE.test(text) &&
-    !WIDE_RE.test(text) &&
-    !BROAD_SYNTHESIS_RE.test(text)
+    !DEEP_RE.test(originalRequest) &&
+    !WIDE_RE.test(originalRequest) &&
+    !BROAD_SYNTHESIS_RE.test(originalRequest)
   if (quick) {
     return { requiredCalls: 3, requiredSourceBreadth: 2, label: 'light' }
   }
@@ -160,27 +169,31 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
   let requiredSourceBreadth: number = baseBreadth
   let label: ResearchDepthProfile['label'] = 'standard'
 
-  if (DEEP_RE.test(text)) {
+  // Depth modifiers belong to the user-authored request. Model-authored plan
+  // titles such as "technical specifications", "detailed findings", or
+  // "market landscape" must not silently turn an ordinary task into a much
+  // more expensive deep/wide research run.
+  if (DEEP_RE.test(originalRequest)) {
     requiredCalls += 3
     requiredSourceBreadth += 2
     label = 'deep'
   }
 
-  if (EXTREME_RE.test(text)) {
+  if (EXTREME_RE.test(originalRequest)) {
     requiredCalls += 5
     requiredSourceBreadth += 3
     label = 'deep'
   }
 
-  if (COMPARISON_RE.test(text)) {
+  if (COMPARISON_RE.test(originalRequest)) {
     requiredCalls += 4
     requiredSourceBreadth += 2
   }
 
-  if (REPORT_RE.test(text)) {
+  if (REPORT_RE.test(originalRequest)) {
     requiredCalls += 2
     requiredSourceBreadth += 1
-    if (complexity >= 3 || DEEP_RE.test(text) || COMPARISON_RE.test(text)) label = 'deep'
+    if (complexity >= 3 || DEEP_RE.test(originalRequest) || COMPARISON_RE.test(originalRequest)) label = 'deep'
   }
 
   if (CURRENT_RE.test(text)) {
@@ -188,31 +201,31 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
     requiredSourceBreadth += 1
   }
 
-  if (EVIDENCE_RE.test(text)) {
+  if (EVIDENCE_RE.test(originalRequest)) {
     requiredCalls += 2
     requiredSourceBreadth += 1
   }
 
-  if (BROAD_SYNTHESIS_RE.test(text)) {
+  if (BROAD_SYNTHESIS_RE.test(originalRequest)) {
     requiredCalls += 3
     requiredSourceBreadth += 2
-    if (complexity >= 2 || CURRENT_RE.test(text)) label = 'deep'
+    if (complexity >= 2 || CURRENT_RE.test(originalRequest)) label = 'deep'
   }
 
-  const angleMatches = text.match(MULTI_ANGLE_RE) || []
+  const angleMatches = originalRequest.match(MULTI_ANGLE_RE) || []
   if (angleMatches.length >= 4) {
     requiredCalls += Math.min(8, Math.ceil(angleMatches.length / 2))
     requiredSourceBreadth += Math.min(4, Math.ceil(angleMatches.length / 4))
     label = 'deep'
   }
 
-  if (WIDE_RE.test(text)) {
+  if (WIDE_RE.test(originalRequest)) {
     requiredCalls += 7
     requiredSourceBreadth += 4
     label = 'wide'
   }
 
-  const requestedSourceCount = explicitSourceCount(originalRequest)
+  const requestedSourceCount = explicitResearchSourceCount(originalRequest)
   if (requestedSourceCount !== null && label !== 'wide') {
     // An explicit source count is a user-authored evidence floor, not an
     // invitation to silently multiply it across every plan phase. Allow a

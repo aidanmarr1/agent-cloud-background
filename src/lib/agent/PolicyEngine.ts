@@ -6,7 +6,7 @@ import {
   deferNarrationCadenceAttempt,
   narrationAcceptedThisIteration,
 } from './NarrationMemory'
-import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { currentStepHasSingleWebSearchLimit, currentStepWebSearchLimit, explicitWebSearchLimitFromText, hasSingleWebSearchLimit, isFixedWebSearchInlineAnswerState, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import type { ToolCallData } from './StreamProcessor'
 import {
   NO_TOOL_FORCE_ADVANCE,
@@ -38,6 +38,7 @@ import {
 } from './config'
 import {
   hasCredibleResearchRecoveryPacket,
+  hasUserAuthoredResearchEvidenceFloor,
   isExactSingleSourceLookupText,
   researchDepthProfileForState,
 } from './ResearchDepth'
@@ -641,6 +642,61 @@ function shouldAdvanceResearchAtBudgetBoundary(
     hasFailureLimitedResearchEvidence(state, depth)
 }
 
+/**
+ * Bound the number of paid action-selection turns a research phase can consume
+ * before preserving the remaining task budget for synthesis. The depth profile
+ * still scales explicit deep/wide work up, while ordinary research phases stop
+ * after a compact evidence packet instead of treating tool ceilings as targets.
+ */
+function researchActionBudgetCeiling(
+  depth: ReturnType<typeof researchDepthStatus>,
+  label: ReturnType<typeof researchDepthProfileForState>['label'],
+): number {
+  if (label === 'single-source') return Math.min(3, depth.requiredCalls + 2)
+  if (label === 'light') return Math.max(4, Math.min(6, depth.requiredCalls + 2))
+  if (label === 'wide') return Math.max(14, Math.min(22, depth.requiredCalls + 3))
+  if (label === 'deep') return Math.max(10, Math.min(16, depth.requiredCalls + 2))
+  return Math.max(7, Math.min(10, depth.requiredCalls + 1))
+}
+
+function shouldAdvanceResearchAtActionBudget(
+  state: AgentStateData,
+  depth: ReturnType<typeof researchDepthStatus>,
+): boolean {
+  if (
+    explicitWebSearchLimitFromText(state.originalUserRequest || '') !== null ||
+    currentStepWebSearchLimit(state) !== null ||
+    currentStepHasSingleWebSearchLimit(state)
+  ) return false
+  if (hasUserAuthoredResearchEvidenceFloor(state.originalUserRequest || '')) return false
+
+  const profile = researchDepthProfileForState(state)
+  if (profile.label === 'deep' || profile.label === 'wide') return false
+  const actionCeiling = researchActionBudgetCeiling(depth, profile.label)
+  if (state.stepToolCallCount < actionCeiling) return false
+
+  const calls = state.stepResearchCallCount
+  const searches = state.stepSearchQueries.size
+  const candidateDomains = state.stepSourceDomainCounts.size
+  const openedPages = state.stepVisitedUrls.size
+  const openedDomains = stepOpenedSourceDomains(state).size
+  const openedBreadthFloor =
+    profile.label === 'light' || profile.label === 'single-source'
+      ? 1
+      : 2
+  const hasOpenedEvidence =
+    openedPages >= openedBreadthFloor &&
+    openedDomains >= openedBreadthFloor
+
+  const usefulCallFloor = profile.label === 'light' || profile.label === 'single-source'
+    ? Math.min(2, depth.requiredCalls)
+    : Math.max(3, Math.ceil(depth.requiredCalls * 0.45))
+  if (calls < usefulCallFloor) return false
+
+  return hasOpenedEvidence &&
+    (searches >= 1 || candidateDomains >= 2)
+}
+
 function shouldAdvanceResearchForPlanBudget(
   state: AgentStateData,
   depth: ReturnType<typeof researchDepthStatus>,
@@ -992,6 +1048,23 @@ export class PolicyEngine {
     // ── Tier 3: Guidance and nudges (accumulated, never contradict tier 1/2) ──
 
     const tier3Actions: PolicyAction[] = []
+
+    if (
+      !stepAdvancedThisIteration &&
+      state.currentPlanItems &&
+      state.currentStepIdx < state.currentPlanItems.length - 1 &&
+      isResearchLikeStep(state)
+    ) {
+      const depth = researchDepthStatus(state)
+      if (shouldAdvanceResearchAtActionBudget(state, depth)) {
+        return advanceStalledResearchWithGap(
+          state,
+          tier3Actions,
+          'Advanced from a bounded evidence packet to preserve final synthesis',
+          assistantContent,
+        )
+      }
+    }
 
     if (
       !stepAdvancedThisIteration &&

@@ -2002,6 +2002,15 @@ export async function runLedgerSmoke() {
   assert.ok(bareResearchDepth.requiredCalls >= 7, 'bare research prompts must keep the default source-work floor: ' + JSON.stringify(bareResearchDepth))
   assert.ok(bareResearchDepth.requiredSourceBreadth >= 4, 'bare research prompts must keep default domain breadth: ' + JSON.stringify(bareResearchDepth))
 
+  const iphoneResearchDepth = researchDepthProfileForState(makeDepthState(
+    'Research about iphone 16',
+    2,
+    ['Gather technical specifications and new features', 'Analyze pricing and release details', 'Synthesize findings and compile report'],
+    ['Find current specifications and features', 'Find pricing and availability', 'Write the report'],
+  ))
+  assert.equal(iphoneResearchDepth.label, 'standard', 'planner-authored "technical" wording must not silently promote an ordinary user request to deep research: ' + JSON.stringify(iphoneResearchDepth))
+  assert.ok(iphoneResearchDepth.requiredCalls <= 8, 'ordinary product research must retain enough evidence depth without turning one phase into an open-ended credit drain: ' + JSON.stringify(iphoneResearchDepth))
+
   const normalResearchDepth = researchDepthProfileForState(makeDepthState(
     'Research report about iPhone 17',
     2,

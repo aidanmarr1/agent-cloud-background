@@ -223,6 +223,256 @@ const weakActions = policy.evaluate(weak, addRepeatedRead(weak), '', false, 40)
 assert.equal(weak.currentStepIdx, 0, 'a repeated read without opened evidence must stay in the research phase')
 assert.ok(!weakActions.some(action => action.type === 'step_advance'), 'weak evidence must not advance the plan')
 assert.ok(!weakActions.some(action => action.type === 'terminate'), 'the first weak-evidence loop must redirect rather than terminate')
+
+const bounded = makeResearchState()
+bounded.originalUserRequest = 'Research about iphone 16'
+bounded.planItems = [
+  'Gather technical specifications and new features',
+  'Analyze pricing and release details',
+  'Synthesize findings and compile report',
+]
+bounded.currentPlanItems = [...bounded.planItems]
+bounded.planScopes = [
+  'Find specifications and features.',
+  'Find pricing and availability.',
+  'Write the report.',
+]
+bounded.currentPlanScopes = [...bounded.planScopes]
+bounded.currentStepIdx = 1
+bounded.taskComplexity = 3
+bounded.stepResearchCallCount = 6
+bounded.stepToolCallCount = 10
+bounded.stepSearchQueries.add('iphone 16 pricing release availability')
+bounded.visitedUrls.add('https://www.apple.com/iphone-16/specs/')
+trackSourceDomain(bounded, [
+  { url: 'https://www.apple.com/shop/buy-iphone/iphone-16' },
+  { url: 'https://www.macworld.com/article/iphone-16-price-release-date.html' },
+  { url: 'https://www.gsmarena.com/apple_iphone_16-13317.php' },
+])
+for (const url of [
+  'https://www.apple.com/shop/buy-iphone/iphone-16',
+  'https://www.macworld.com/article/iphone-16-price-release-date.html',
+]) {
+  bounded.stepVisitedUrls.add(url)
+  bounded.visitedUrls.add(url)
+  trackVisitedSourceDomain(bounded, url)
+}
+const boundedActions = policy.evaluate(
+  bounded,
+  new Map([[0, {
+    id: 'bounded-source-read',
+    name: 'read_document',
+    arguments: JSON.stringify({ url: 'https://www.macworld.com/article/iphone-16-price-release-date.html' }),
+  }]]),
+  '',
+  false,
+  40,
+)
+assert.equal(bounded.currentStepIdx, 2, 'the exact later production phase must advance once its paid action budget has a useful evidence packet')
+assert.ok(boundedActions.some(action => action.type === 'step_advance'), 'bounded evidence recovery must emit a step advance')
+assert.ok(!boundedActions.some(action => action.type === 'terminate'), 'bounded evidence recovery must preserve the final synthesis step')
+
+const blockedSources = makeResearchState()
+blockedSources.originalUserRequest = 'Research about iphone 16'
+blockedSources.planItems = [...bounded.planItems]
+blockedSources.currentPlanItems = [...bounded.planItems]
+blockedSources.planScopes = [...bounded.planScopes]
+blockedSources.currentPlanScopes = [...bounded.planScopes]
+blockedSources.currentStepIdx = 1
+blockedSources.taskComplexity = 3
+blockedSources.stepResearchCallCount = 1
+blockedSources.stepToolCallCount = 10
+blockedSources.stepSearchQueries.add('iphone 16 pricing release availability')
+blockedSources.visitedUrls.add('https://www.apple.com/iphone-16/specs/')
+trackSourceDomain(blockedSources, [
+  { url: 'https://www.apple.com/shop/buy-iphone/iphone-16' },
+  { url: 'https://www.macworld.com/article/iphone-16-price-release-date.html' },
+  { url: 'https://www.gsmarena.com/apple_iphone_16-13317.php' },
+])
+blockedSources.stepFailureCount = 2
+blockedSources.stepFailedSourceTargets.add('https://www.apple.com/shop/buy-iphone/iphone-16')
+blockedSources.stepFailedSourceTargets.add('https://www.macworld.com/article/iphone-16-price-release-date.html')
+const blockedActions = policy.evaluate(
+  blockedSources,
+  new Map([[0, {
+    id: 'blocked-source-read',
+    name: 'read_document',
+    arguments: JSON.stringify({ url: 'https://www.macworld.com/article/iphone-16-price-release-date.html' }),
+  }]]),
+  '',
+  false,
+  40,
+)
+assert.equal(blockedSources.currentStepIdx, 1, 'search snippets plus two blocked sources must not count as opened evidence')
+assert.ok(!blockedActions.some(action => action.type === 'step_advance'), 'the action budget must not synthesize from snippets-only current-phase evidence')
+
+const underBudget = makeResearchState()
+underBudget.originalUserRequest = 'Research about iphone 16'
+underBudget.planItems = [...bounded.planItems]
+underBudget.currentPlanItems = [...bounded.planItems]
+underBudget.planScopes = [...bounded.planScopes]
+underBudget.currentPlanScopes = [...bounded.planScopes]
+underBudget.currentStepIdx = 1
+underBudget.taskComplexity = 3
+underBudget.stepResearchCallCount = 2
+underBudget.stepToolCallCount = 3
+underBudget.stepSearchQueries.add('iphone 16 pricing release availability')
+trackSourceDomain(underBudget, [
+  { url: 'https://www.apple.com/shop/buy-iphone/iphone-16' },
+  { url: 'https://www.macworld.com/article/iphone-16-price-release-date.html' },
+])
+const underBudgetActions = policy.evaluate(
+  underBudget,
+  new Map([[0, {
+    id: 'early-source-read',
+    name: 'read_document',
+    arguments: JSON.stringify({ url: 'https://www.apple.com/shop/buy-iphone/iphone-16' }),
+  }]]),
+  '',
+  false,
+  40,
+)
+assert.equal(underBudget.currentStepIdx, 1, 'a thin early packet must remain in the active research phase')
+assert.ok(!underBudgetActions.some(action => action.type === 'step_advance'), 'the action budget must not cut ordinary research off early')
+
+const oneDomain = makeResearchState()
+oneDomain.originalUserRequest = 'Research about iphone 16'
+oneDomain.planItems = [...bounded.planItems]
+oneDomain.currentPlanItems = [...bounded.planItems]
+oneDomain.planScopes = [...bounded.planScopes]
+oneDomain.currentPlanScopes = [...bounded.planScopes]
+oneDomain.currentStepIdx = 1
+oneDomain.taskComplexity = 3
+oneDomain.stepResearchCallCount = 6
+oneDomain.stepToolCallCount = 10
+oneDomain.stepSearchQueries.add('iphone 16 pricing release availability')
+trackSourceDomain(oneDomain, [
+  { url: 'https://www.apple.com/shop/buy-iphone/iphone-16' },
+  { url: 'https://support.apple.com/en-au/121029' },
+])
+for (const url of [
+  'https://www.apple.com/shop/buy-iphone/iphone-16',
+  'https://www.apple.com/iphone-16/specs/',
+]) {
+  oneDomain.stepVisitedUrls.add(url)
+  oneDomain.visitedUrls.add(url)
+  trackVisitedSourceDomain(oneDomain, url)
+}
+const oneDomainActions = policy.evaluate(
+  oneDomain,
+  new Map([[0, {
+    id: 'same-domain-read',
+    name: 'browser_find_text',
+    arguments: JSON.stringify({ query: 'price' }),
+  }]]),
+  '',
+  false,
+  40,
+)
+assert.equal(oneDomain.currentStepIdx, 1, 'a standard phase must not auto-advance from repeated work on one opened domain')
+assert.ok(!oneDomainActions.some(action => action.type === 'step_advance'), 'standard action budgeting must retain the two-domain cross-source floor')
+
+function makeEvidenceFloorState(request, title, scope) {
+  const state = makeResearchState()
+  state.originalUserRequest = request
+  state.planItems = ['Gather background evidence', title, 'Write the final report']
+  state.currentPlanItems = [...state.planItems]
+  state.planScopes = ['Open initial sources', scope, 'Synthesize the evidence']
+  state.currentPlanScopes = [...state.planScopes]
+  state.currentStepIdx = 1
+  state.taskComplexity = 3
+  state.stepToolCallCount = 22
+  state.stepResearchCallCount = 1
+  state.stepSearchQueries.add('targeted evidence query')
+  trackSourceDomain(state, [
+    { url: 'https://source-a.example/article' },
+    { url: 'https://source-b.example/article' },
+    { url: 'https://source-c.example/article' },
+    { url: 'https://source-d.example/article' },
+  ])
+  state.stepFailureCount = 2
+  state.stepFailedSourceTargets.add('https://source-a.example/article')
+  state.stepFailedSourceTargets.add('https://source-b.example/article')
+  return state
+}
+
+const deepFloor = makeEvidenceFloorState(
+  'Conduct deep, comprehensive research and write a cited report.',
+  'Investigate the remaining evidence',
+  'Open authoritative sources and evaluate contradictions.',
+)
+const deepFloorActions = policy.evaluate(
+  deepFloor,
+  new Map([[0, {
+    id: 'deep-floor-read',
+    name: 'read_document',
+    arguments: JSON.stringify({ url: 'https://source-b.example/article' }),
+  }]]),
+  '',
+  false,
+  60,
+)
+assert.equal(deepFloor.currentStepIdx, 1, 'deep research must never use the ordinary action-budget shortcut')
+assert.ok(!deepFloorActions.some(action => action.type === 'step_advance'), 'deep research must preserve its user-authored evidence floor')
+
+for (const request of [
+  'Compare at least five credible sources and save a cited Markdown report.',
+  'Research the topic using six independent sources and write a report.',
+]) {
+  const explicitFloor = makeEvidenceFloorState(
+    request,
+    'Gather the remaining independent sources',
+    'Open each requested source before synthesis.',
+  )
+  explicitFloor.stepToolCallCount = 10
+  explicitFloor.stepResearchCallCount = 5
+  for (const url of [
+    'https://source-a.example/article',
+    'https://source-b.example/article',
+  ]) {
+    explicitFloor.stepVisitedUrls.add(url)
+    explicitFloor.visitedUrls.add(url)
+    trackVisitedSourceDomain(explicitFloor, url)
+  }
+  explicitFloor.stepFailureCount = 0
+  explicitFloor.stepFailedSourceTargets.clear()
+  const explicitActions = policy.evaluate(
+    explicitFloor,
+    new Map([[0, {
+      id: 'explicit-floor-read',
+      name: 'read_document',
+      arguments: JSON.stringify({ url: 'https://source-b.example/article' }),
+    }]]),
+    '',
+    false,
+    60,
+  )
+  assert.equal(explicitFloor.currentStepIdx, 1, 'explicit source-count requests must not advance below their source floor: ' + request)
+  assert.ok(!explicitActions.some(action => action.type === 'step_advance'), 'explicit source-count evidence floors must bypass ordinary action budgeting: ' + request)
+}
+
+const fixedSearchFloor = makeEvidenceFloorState(
+  'Research the topic with exactly five web searches, then write a report.',
+  'Run exactly five web searches',
+  'Use the five result sets before moving to synthesis.',
+)
+fixedSearchFloor.stepToolCallCount = 10
+fixedSearchFloor.stepResearchCallCount = 1
+fixedSearchFloor.stepFailureCount = 0
+fixedSearchFloor.stepFailedSourceTargets.clear()
+const fixedSearchActions = policy.evaluate(
+  fixedSearchFloor,
+  new Map([[0, {
+    id: 'fixed-search',
+    name: 'web_search',
+    arguments: JSON.stringify({ query: 'second required search' }),
+  }]]),
+  '',
+  false,
+  60,
+)
+assert.equal(fixedSearchFloor.currentStepIdx, 1, 'fixed multi-search phases must stay active until their exact count is met')
+assert.ok(!fixedSearchActions.some(action => action.type === 'step_advance'), 'all fixed-search-count tasks must bypass ordinary action budgeting')
 `, 'utf8')
 
   await build({
