@@ -1208,6 +1208,36 @@ function browserProgressKind(resultObj: Record<string, unknown> | null): string 
   return typeof kind === 'string' ? kind : ''
 }
 
+function cachedBrowserReplayResult(toolName: string, cached: unknown): unknown {
+  if (
+    !toolName.startsWith('browser_') ||
+    !cached ||
+    typeof cached !== 'object' ||
+    Array.isArray(cached) ||
+    isToolExecutionErrorResult(toolName, cached)
+  ) {
+    return cached
+  }
+
+  const result = cached as Record<string, unknown>
+  const previousProgress =
+    result.browserProgress && typeof result.browserProgress === 'object'
+      ? result.browserProgress as Record<string, unknown>
+      : {}
+  const targetKey = typeof previousProgress.targetKey === 'string'
+    ? previousProgress.targetKey
+    : null
+
+  return {
+    ...result,
+    browserProgress: {
+      ...previousProgress,
+      kind: targetKey ? 'no_progress_same_target' : 'no_progress_same_page',
+      reason: 'Cached duplicate returned the same browser evidence; choose a materially different action or advance the phase.',
+    },
+  }
+}
+
 function browserVisualBypassesBudget(
   toolName: string,
   resultObj: Record<string, unknown> | null,
@@ -3236,7 +3266,7 @@ export class ToolPipeline {
       })
     }
 
-    if (recoveryUsed || outcome.kind === 'progress') {
+    if (outcome.kind === 'progress') {
       state.browserRecoveryRequired = false
       state.lastNoProgressTargetKey = null
       state.consecutiveNoProgressClicks = 0
@@ -4167,14 +4197,15 @@ export class ToolPipeline {
         const cached = this.cache.get(tc.name, args)
         if (cached !== undefined && !isToolExecutionErrorResult(tc.name, cached)) {
           this.logger?.info(`Returning cached source result for duplicate ${tc.name}`)
-          closeVisibleProvisionalStart(cached as Record<string, unknown>)
-          const cachedIsError = await this.recordCachedToolProgress(tc, args, cached, state, {
+          const replay = cachedBrowserReplayResult(tc.name, cached)
+          closeVisibleProvisionalStart(replay as Record<string, unknown>)
+          const cachedIsError = await this.recordCachedToolProgress(tc, args, replay, state, {
             kind: activityKind,
             query: activityQuery,
             url: activityUrl,
             repeatReason: activityRepeatReason,
           })
-          return { tc, result: cached, isError: cachedIsError, acceptedForExecution: true, cached: true, durationMs: Date.now() - startTime }
+          return { tc, result: replay, isError: cachedIsError, acceptedForExecution: true, cached: true, durationMs: Date.now() - startTime }
         }
       }
       const errorResult = { error: duplicateSourceOpenReason }
@@ -4438,14 +4469,15 @@ export class ToolPipeline {
       const cached = this.cache.get(tc.name, args)
       if (cached !== undefined) {
         this.logger?.info(`Cache hit for ${tc.name}`)
-        this.emitter.toolResult(tc.id, tc.name, sanitizeToolResultForEvent(tc.name, cached) as never)
-        const cachedIsError = await this.recordCachedToolProgress(tc, args, cached, state, {
+        const replay = cachedBrowserReplayResult(tc.name, cached)
+        this.emitter.toolResult(tc.id, tc.name, sanitizeToolResultForEvent(tc.name, replay) as never)
+        const cachedIsError = await this.recordCachedToolProgress(tc, args, replay, state, {
           kind: activityKind,
           query: activityQuery,
           url: activityUrl,
           repeatReason: activityRepeatReason,
         })
-        return { tc, result: cached, isError: cachedIsError, acceptedForExecution: true, cached: true, durationMs: Date.now() - startTime }
+        return { tc, result: replay, isError: cachedIsError, acceptedForExecution: true, cached: true, durationMs: Date.now() - startTime }
       }
     }
 

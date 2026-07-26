@@ -27,6 +27,11 @@ assert.match(
 )
 assert.match(
   loopSource,
+  /singleAuthoritativeClaimsPacket[\s\S]*\\bextract\\b[\s\S]*stepResearchCallCount >= 2[\s\S]*stepVisitedUrls\.size >= 1/,
+  'a bounded first-party claims extraction phase must advance after one authoritative page is opened and read',
+)
+assert.match(
+  loopSource,
   /const multiSourcePacket[\s\S]*state\.stepResearchCallCount >= 4[\s\S]*state\.stepToolCallCount >= 6[\s\S]*state\.stepVisitedUrls\.size >= 1[\s\S]*stepOpenedSourceDomains\(state\)\.size >= 1[\s\S]*state\.stepSourceDomainCounts\.size >= 2[\s\S]*state\.stepFailureCount >= 1/,
   'ordinary paid no-progress recovery must preserve one authoritative opened source after a broad mixed success/failure packet',
 )

@@ -624,6 +624,24 @@ export function classifyBrowserProgress(
     return { kind: 'progress', reason: 'First browser state recorded.', pageSignature, targetKey, recoveryUsed }
   }
 
+  // A recovery action may provide a fresh decision surface once, but repeating
+  // the exact same recovery against an unchanged page is not new progress.
+  // In particular, cached browser_get_content/browser_screenshot calls must
+  // not keep clearing the stuck-state fence indefinitely.
+  if (
+    recoveryUsed &&
+    previous.recoveryUsed &&
+    previous.toolName === toolName &&
+    previous.pageSignature === pageSignature
+  ) {
+    if (targetKey && previous.targetKey === targetKey) {
+      return { kind: 'no_progress_same_target', reason: 'Repeated recovery targeted the same unchanged browser state.', pageSignature, targetKey, recoveryUsed }
+    }
+    if (!targetKey && !previous.targetKey) {
+      return { kind: 'no_progress_same_page', reason: 'Repeated recovery returned the same unchanged page.', pageSignature, targetKey, recoveryUsed }
+    }
+  }
+
   if (recoveryUsed) {
     return { kind: 'progress', reason: 'Recovery tactic used; allow a new target decision.', pageSignature, targetKey, recoveryUsed }
   }

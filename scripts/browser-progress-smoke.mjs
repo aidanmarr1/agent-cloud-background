@@ -15,7 +15,9 @@ import { rm } from 'node:fs/promises'
 import { createFileInSandbox, getSandboxDirPath } from ${JSON.stringify(join(root, 'src/lib/sandbox.ts'))}
 import { buildLocalWebsiteLaunch, stopLocalWebsiteServer } from ${JSON.stringify(join(root, 'src/lib/localWebsiteServer.ts'))}
 import { browserActionPreflight, destroyBrowserSession } from ${JSON.stringify(join(root, 'src/lib/browser.ts'))}
+import { classifyBrowserProgress } from ${JSON.stringify(join(root, 'src/lib/browserIntelligence.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
+import { ToolCache } from ${JSON.stringify(join(root, 'src/lib/agent/ToolCache.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
 
 const timeouts = {
@@ -85,7 +87,7 @@ export async function runSmoke() {
   state.currentPlanItems = ['Interact with the smoke test website', 'Report result']
   state.currentPlanScopes = ['Use live browser controls only', 'Summarize']
 
-  const pipeline = new ToolPipeline(emitter as any, conversationId)
+  const pipeline = new ToolPipeline(emitter as any, conversationId, { cache: new ToolCache() })
 
   try {
     const launch = await writePage(conversationId, 'index.html', \`
@@ -95,6 +97,16 @@ export async function runSmoke() {
 
     const nav1 = await call(pipeline, state, 'nav1', 'browser_navigate', { url: launch.url })
     assert.equal(nav1.isError, false, 'navigation failed: ' + JSON.stringify(nav1.result))
+    const content1 = await call(pipeline, state, 'content1', 'browser_get_content', {})
+    assert.equal(content1.isError, false)
+    assert.equal((content1.result as any).browserProgress?.kind, 'progress')
+    const content2 = await call(pipeline, state, 'content2', 'browser_get_content', {})
+    assert.equal(content2.cached, true)
+    assert.equal(
+      (content2.result as any).browserProgress?.kind,
+      'no_progress_same_page',
+      'cached duplicate page reads must be reported as no progress',
+    )
     const firstSnapshot = await browserActionPreflight(conversationId)
     const noop = firstSnapshot.elements.find(element => /no-?op|noop/i.test(String(element.label || '') + ' ' + String(element.primary || '')))
     const next = firstSnapshot.elements.find(element => /next/i.test(element.label || element.primary))
@@ -114,6 +126,20 @@ export async function runSmoke() {
     const recovery = await call(pipeline, state, 'shot1', 'browser_screenshot', {})
     assert.equal(recovery.isError, false)
     assert.equal(state.browserRecoveryRequired, false, 'screenshot recovery should clear repeat block')
+
+    const repeatedRecovery = classifyBrowserProgress(
+      state.browserActionHistory,
+      'browser_screenshot',
+      {},
+      {
+        success: true,
+        url: String((recovery.result as any).url || ''),
+        title: String((recovery.result as any).title || ''),
+        content: String((recovery.result as any).content || ''),
+      },
+      null,
+    )
+    assert.equal(repeatedRecovery.kind, 'no_progress_same_page', 'an identical recovery read must not count as fresh progress')
 
     const allowedAfterRecovery = await call(pipeline, state, 'noop3', 'browser_click_at', { index: noop.index })
     assert.equal(allowedAfterRecovery.isError, false)
