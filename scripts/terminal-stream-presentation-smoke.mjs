@@ -236,6 +236,62 @@ function storeBackedActions(): StoreActions {
 }
 
 {
+  const conversationId = 'neutral-final-handoff-fallback'
+  const initialMessage: Message = {
+    id: 'assistant-handoff-fallback',
+    role: 'assistant',
+    content: 'I’ll synthesize the research into a structured report.',
+    timestamp: now,
+  }
+  const conversation: Conversation = {
+    id: conversationId,
+    title: 'Neutral handoff fallback',
+    starred: false,
+    createdAt: now,
+    updatedAt: now,
+    messages: [initialMessage],
+  }
+  useChatStore.setState({ conversations: [conversation], activeId: conversationId, folders: [] })
+  useUIStore.setState({ isStreaming: true })
+  const dispatcher = new EventDispatcher(conversationId, storeBackedActions(), () => {})
+  dispatcher.dispatch({ type: 'plan', items: ['Synthesize findings into a structured report'] })
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'global-warming-report',
+    name: 'create_file',
+    args: {
+      path: 'global_warming_report.md',
+      action_label: 'Create global warming report',
+      plan_step_index: 1,
+    },
+  })
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'global-warming-report',
+    name: 'create_file',
+    result: {
+      action: 'created',
+      path: 'global_warming_report.md',
+      content: '# Global Warming Report\\n\\nVerified content.',
+    },
+  })
+  dispatcher.dispatch({ type: 'done' })
+  dispatcher.flushPendingUpdates()
+
+  const finalMessage = useChatStore.getState().conversations[0]?.messages[0]?.content || ''
+  assert.doesNotMatch(
+    finalMessage,
+    /I finished synthesize/i,
+    'an emergency final fallback must never splice an imperative plan label into broken completion grammar',
+  )
+  assert.match(
+    finalMessage,
+    /requested deliverable is ready to open as .*global_warming_report\.md.* below/i,
+    'when the model handoff is unavailable, the UI should use a neutral artifact fallback without pretending it is model-authored task synthesis',
+  )
+}
+
+{
   const conversationId = 'suppress-duplicated-saved-report'
   const initialMessage: Message = {
     id: 'assistant-duplicate-report',

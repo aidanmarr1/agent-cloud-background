@@ -391,7 +391,14 @@ async function assertSourceContracts() {
   assert.match(agentState, /finalDeliverableHandoffPending/, 'successful artifacts must reserve a personalized final handoff turn')
   assert.match(agentLoop, /PERSONALIZED FINAL HANDOFF NOW/, 'the final model turn must be explicitly grounded in the completed task')
   assert.match(agentLoop, /Tailor it to this exact task/, 'the final handoff must request task-specific findings and usage detail')
+  assert.match(agentLoop, /This final handoff is more flexible than the opening acknowledgement[\s\S]*It does not need to be one sentence/, 'final handoffs must allow task-shaped paragraphs or bullets instead of inheriting strict acknowledgement structure')
+  assert.ok(
+    agentLoop.includes('finalDeliverableHandoffHasInvalidForm') &&
+      agentLoop.includes('finished\\s+(?:synthesize|write|create'),
+    'the backend must reject broken plan-label completion grammar before it reaches the user',
+  )
   assert.doesNotMatch(eventDispatcher, /The completed file,\s*.*is attached below/, 'the client must not replace the model handoff with the old canned attachment sentence')
+  assert.doesNotMatch(eventDispatcher, /I finished \$\{topicHint\}/, 'the emergency UI fallback must never construct completion prose from an imperative plan title')
   assert.match(eventDispatcher, /hasDedicatedFinalHandoff[\s\S]*discardNarrationBuffer\(\)/, 'the final handoff must render once instead of repeating inside the last task group')
   assert.match(policyEngine, /!hasRewrite \|\| !state\.fileWriteRepairPending/, 'a resolved file conflict must not inject stale rewrite warnings into every later phase')
   assert.match(goalTracker, /hasVerifiedCommandEvidence[\s\S]*state\.createdFiles\.size > 0/, 'a setup command alone must not complete a website build phase before any implementation exists')
@@ -1393,7 +1400,7 @@ async function assertSourceContracts() {
   assert.match(contextManager, /assistant narration compacted|stale assistant narration compacted/, 'stale assistant prose should be compacted after tool evidence is captured')
   assert.doesNotMatch(eventDispatcher, /Done - I completed the task and prepared the deliverable/, 'completed task messages must not force a canned completion sentence')
   assert.doesNotMatch(eventDispatcher, /\*\*Deliverables\*\*[\s\S]*Below you can find:/, 'completed task messages must not force deliverables headings when artifact cards already exist')
-  assert.match(eventDispatcher, /a short natural fallback only when the model did not provide/, 'client completion fallback must be natural and only used when needed')
+  assert.match(eventDispatcher, /a short neutral fallback only when the model did not provide/, 'client completion fallback must be neutral and only used when the LLM handoff is unavailable')
   assert.match(policyEngine, /Write a natural final response/, 'backend final prompts must request a natural final response')
   assert.match(planManager, /Write a natural final response/, 'plan completion prompts must request a natural final response')
   assert.match(policyEngine, /Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed/, 'backend final prompts must not report process metrics in final answers')

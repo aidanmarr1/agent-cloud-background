@@ -1483,36 +1483,18 @@ export class EventDispatcher {
       const currentAck = this.cleanAcknowledgmentCandidate(currentContent)
       const ack = selectBestStartupAcknowledgment(this.startupAcknowledgment, currentAck)
 
-      // Build a short natural fallback only when the model did not provide
-      // a useful final answer. Artifact cards already show deliverables.
+      // Build a short neutral fallback only when the model did not provide a
+      // usable final handoff. The model owns normal completion prose; this
+      // emergency path must not manufacture grammar from imperative plan
+      // labels such as "Synthesize findings".
       let summary = ''
       if (uniqueFiles.length > 0) {
-        // Extract topic context from the deliverable group title (last group with a create_file)
-        let topicHint = ''
-        for (let i = this.parsedGroups.length - 1; i >= 0; i--) {
-          const g = this.parsedGroups[i]
-          if (safeSubtasks(g).some(s => s.type === 'create_file' || s.type === 'append_file' || s.type === 'export_pdf')) {
-            // Strip leading verbs like "Write a...", "Create a...", "Compile a..."
-            const cleaned = g.title
-              .replace(/^(?:write|create|compile|generate|produce|build|draft|prepare)\s+(?:a\s+)?(?:comprehensive\s+|detailed\s+|concise\s+|quick\s+|brief\s+)?(?:markdown\s+)?(?:report|document|file|analysis|summary)\s*/i, '')
-              .replace(/^(?:covering|summarizing|about|on|detailing|outlining)\s*/i, '')
-              .trim()
-            if (cleaned.length > 10) {
-              topicHint = cleaned.charAt(0).toLowerCase() + cleaned.slice(1)
-              // Trim trailing ellipsis from truncated titles
-              topicHint = topicHint.replace(/\.{2,}$/, '')
-              if (topicHint.length > 150) topicHint = topicHint.slice(0, 150).replace(/,?\s+\S*$/, '')
-            }
-            break
-          }
-        }
-
         const artifactLabel = uniqueFiles.length === 1
           ? `\`${uniqueFiles[0]}\``
           : uniqueFiles.map(fileName => `\`${fileName}\``).join(', ')
-        summary = topicHint
-          ? `I finished ${topicHint}. You can open ${artifactLabel} below.`
-          : `Your requested deliverable is ready in ${artifactLabel} below.`
+        summary = uniqueFiles.length === 1
+          ? `The requested deliverable is ready to open as ${artifactLabel} below.`
+          : `The requested deliverables are ready to open as ${artifactLabel} below.`
       }
 
       // Text after the last tool is the model's dedicated final handoff, not

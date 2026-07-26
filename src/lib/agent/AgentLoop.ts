@@ -1386,25 +1386,58 @@ function finalDeliverableHandoffPrompt(state: AgentStateData): string {
     'Write the user-facing final response now with no tool call.',
     'Tailor it to this exact task: lead with the real outcome, then mention the most useful concrete findings, design choices, behavior, caveats, or usage detail from the completed work.',
     'Mention the artifact and format naturally so the attachment card below is understandable.',
+    'This final handoff is more flexible than the opening acknowledgement: use one to three short paragraphs, a compact heading, or a few bullets when that best fits the result. It does not need to be one sentence.',
+    'Write natural completion prose in your own words. Do not copy a plan-step title or form broken phrases such as "I finished synthesize"; use grammatical past-tense wording.',
     'Do not use a fixed handoff sentence such as "The completed file is attached below", do not repeat the whole deliverable, and do not narrate internal steps, source counts, tool calls, verification mechanics, or phases.',
     'Keep it concise but substantive, use natural Markdown only when it helps, and finish with a complete sentence.',
   ].filter(Boolean).join(' ')
 }
 
-function finalDeliverableHandoffLooksUseful(content: string): boolean {
+function finalDeliverableHandoffHasInvalidForm(
+  content: string,
+  state: AgentStateData,
+): boolean {
   const text = content.trim()
-  if (text.length < 80) return false
-  if (!/[.!?)]\s*$/.test(text)) return false
-  if (/^(?:the completed file|the completed files|here(?:'|’)?s the completed deliverable)\b/i.test(text)) return false
-  if (/^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)) return false
+  if (!text || !/[A-Za-z0-9]/.test(text)) return true
+  if (/^(?:the completed file|the completed files|here(?:'|’)?s the completed deliverable)\b/i.test(text)) return true
+  if (/^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)) return true
+  if (/\bi (?:have )?finished\s+(?:synthesize|write|create|compile|generate|produce|build|draft|prepare|research|analyze|summarize)\b/i.test(text)) {
+    return true
+  }
+
+  const normalize = (value: string) => value
+    .toLowerCase()
+    .replace(/[*_`#()[\]{}.!?:;,/\\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const activeStep = state.currentPlanItems?.[state.currentStepIdx] || ''
+  if (activeStep && normalize(text) === normalize(activeStep)) return true
+
+  return false
+}
+
+function finalDeliverableHandoffLooksUseful(
+  content: string,
+  state: AgentStateData,
+): boolean {
+  const text = content.trim()
+  if (text.length < 24) return false
+  if (finalDeliverableHandoffHasInvalidForm(text, state)) return false
   return true
 }
 
-function shouldAcceptFinalDeliverableHandoff(content: string, attemptNumber: number): boolean {
+function shouldAcceptFinalDeliverableHandoff(
+  content: string,
+  attemptNumber: number,
+  state: AgentStateData,
+): boolean {
   const text = content.trim()
-  const futureOnly = /^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)
-  return finalDeliverableHandoffLooksUseful(text) ||
-    (text.length >= 40 && attemptNumber >= 2 && !futureOnly)
+  return finalDeliverableHandoffLooksUseful(text, state) ||
+    (
+      text.length >= 16 &&
+      attemptNumber >= 2 &&
+      !finalDeliverableHandoffHasInvalidForm(text, state)
+    )
 }
 
 function shouldRejectBuildTextOnlyEmission(
@@ -3426,7 +3459,7 @@ const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
 const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
 const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
-const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 240
+const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 420
 const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = 700
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
@@ -4970,6 +5003,7 @@ export class AgentLoop {
               !shouldAcceptFinalDeliverableHandoff(
                 pendingHandoffText,
                 state.finalDeliverableHandoffAttempts + 1,
+                state,
               )
             const rejectedBuildTextOnlyEmission = shouldRejectBuildTextOnlyEmission(
               state,
@@ -5078,7 +5112,7 @@ export class AgentLoop {
               const handoffText = lastStreamResult.assistantContent.trim()
               state.finalDeliverableHandoffAttempts += 1
 
-              if (shouldAcceptFinalDeliverableHandoff(handoffText, state.finalDeliverableHandoffAttempts)) {
+              if (shouldAcceptFinalDeliverableHandoff(handoffText, state.finalDeliverableHandoffAttempts, state)) {
                 const stepBeforeComplete = state.currentStepIdx
                 contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
                 state.finalDeliverableHandoffPending = null
@@ -7877,7 +7911,7 @@ export class AgentLoop {
       if (state.finalDeliverableHandoffPending) {
         const partialContent = (error.partialContent || '').trim()
         state.finalDeliverableHandoffAttempts += 1
-        if (shouldAcceptFinalDeliverableHandoff(partialContent, state.finalDeliverableHandoffAttempts)) {
+        if (shouldAcceptFinalDeliverableHandoff(partialContent, state.finalDeliverableHandoffAttempts, state)) {
           const stepBeforeComplete = state.currentStepIdx
           this.emitter.textDelta(partialContent)
           contextManager.push({ role: 'assistant', content: partialContent } as ChatMessageParam)

@@ -181,6 +181,7 @@ function hasStableToolArgumentEnvelope(
 }
 
 function inlineFinalAnswerAllowsLongText(state: AgentStateData): boolean {
+  if (state.finalDeliverableHandoffPending) return true
   if (state.currentPhase !== 'deliver') return false
   if (!state.currentPlanItems || state.currentStepIdx !== state.currentPlanItems.length - 1) return false
   const text = [
