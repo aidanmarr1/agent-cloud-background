@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import platform
+import shutil
+import subprocess
+from pathlib import Path
+
+
+COMMANDS = (
+    "bash", "python3", "uv", "node", "npm", "pnpm", "yarn", "java", "git", "gh",
+    "curl", "wget", "socat", "ffmpeg", "typst", "d2", "rclone", "gws", "mysql",
+    "chromium", "tesseract", "agent-render-diagram", "agent-md-to-pdf",
+    "agent-speech-to-text", "agent-analyze-video", "agent-upload-file",
+)
+
+
+def version(command: str) -> str | None:
+    executable = shutil.which(command)
+    if not executable:
+        return None
+    probes = ([executable, "--version"], [executable, "-version"], [executable, "version"])
+    for args in probes:
+        try:
+            result = subprocess.run(
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=5, check=False, text=True,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        first_line = (result.stdout or "").strip().splitlines()
+        if first_line:
+            return first_line[0][:240]
+    return "installed"
+
+
+def memory() -> dict[str, int | None]:
+    values: dict[str, int | None] = {"totalBytes": None, "swapBytes": None}
+    try:
+        fields: dict[str, int] = {}
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            key, raw = line.split(":", 1)
+            fields[key] = int(raw.strip().split()[0]) * 1024
+        values["totalBytes"] = fields.get("MemTotal")
+        values["swapBytes"] = fields.get("SwapTotal")
+    except (OSError, ValueError):
+        pass
+    return values
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Inspect the actual agent sandbox capability profile.")
+    parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON")
+    args = parser.parse_args()
+    disk = shutil.disk_usage("/")
+    payload = {
+        "profile": os.environ.get("AGENT_SANDBOX_PROFILE", "agent-parity-v1"),
+        "os": {
+            "platform": platform.platform(),
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "resources": {
+            "cpuCount": os.cpu_count(),
+            **memory(),
+            "rootDiskBytes": disk.total,
+            "rootDiskFreeBytes": disk.free,
+        },
+        "identity": {
+            "user": os.environ.get("USER"),
+            "home": os.environ.get("HOME"),
+            "shell": os.environ.get("SHELL"),
+            "display": os.environ.get("DISPLAY"),
+            "locale": os.environ.get("AGENT_LOCALE"),
+            "timezone": os.environ.get("AGENT_TIMEZONE"),
+        },
+        "paths": {
+            "workspaceRoot": os.environ.get("AGENT_E2B_WORKSPACE_ROOT"),
+            "webTemplates": os.environ.get("WEBDEV_TEMPLATES_PATH"),
+            "crashState": os.environ.get("RUNTIME_CRASH_STATE_DIR"),
+        },
+        "commands": {name: version(name) for name in COMMANDS},
+        "hostControlled": [
+            "kernel build",
+            "swap allocation",
+            "root disk capacity",
+            "microVM CPU model",
+        ],
+    }
+    print(json.dumps(payload, indent=2 if args.pretty else None, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
+

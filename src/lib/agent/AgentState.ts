@@ -175,6 +175,7 @@ export interface AgentStateData {
   stepResearchCallCount: number  // ONLY real research calls (search/browse/read/http) — excludes note files
   stepSearchQueries: Set<string>  // search queries in current step (for fuzzy dedup)
   stepVisitedUrls: Set<string>    // unique rendered/read URLs visited in current step
+  stepFailedSourceTargets: Set<string> // distinct failed source URLs since the latest executed search
   // Search-result count at which the model last chose a direct 1–3 source
   // extraction batch. One result set gets one model-selected batch by default.
   stepLastSourceExtractionSearchCount: number
@@ -480,6 +481,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     stepResearchCallCount: 0,
     stepSearchQueries: new Set(),
     stepVisitedUrls: new Set(),
+    stepFailedSourceTargets: new Set(),
     stepLastSourceExtractionSearchCount: -1,
     pendingConditions: [],
     loopDetectionCount: 0,
@@ -650,6 +652,7 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.stepFailureCount = 0
   state.stepSearchQueries = new Set()
   state.stepVisitedUrls = new Set()
+  state.stepFailedSourceTargets = new Set()
   state.stepLastSourceExtractionSearchCount = -1
   state.stepSourceDomainCounts = new Map()
   state.stepOpenedSourceDomainCounts = new Map()

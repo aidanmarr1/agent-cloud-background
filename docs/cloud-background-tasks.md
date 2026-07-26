@@ -143,7 +143,7 @@ When E2B is enabled:
 
 If the selected E2B template does not include Chromium, either set `E2B_TEMPLATE_ID` to a custom template with Chromium installed or provide a bootstrap command through `AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND`. A custom template is better for production because installing Chromium at task runtime is slower and increases sandbox runtime cost.
 
-This repo includes [e2b.Dockerfile](/e2b.Dockerfile) for that custom template. It uses a Debian-based Node image and installs Chromium, Python, Git, curl, build tools, fonts, and the `/home/user/agent-workspaces` directory expected by the runtime.
+This repo includes [e2b.Dockerfile](/e2b.Dockerfile) for that custom template. It uses a Python 3.12 Debian image and installs Node 22, Java 21, Chromium, the scientific Python baseline, media/document tooling, cloud CLIs, a supervised virtual display, and the `/home/user/agent-workspaces` directory expected by the runtime. See [Agent Sandbox Runtime](./sandbox-runtime.md) for the full capability matrix, first-party `agent-*` commands, security boundaries, and provider-controlled limits.
 
 Build it with the E2B CLI:
 
@@ -167,7 +167,7 @@ To verify the E2B template before deploying, run:
 npm run cloud:e2b-smoke
 ```
 
-This creates a short-lived E2B sandbox, verifies the expected workspace, Node, Python, Git, curl, Chromium, and the remote Chromium debugging endpoint, then destroys the sandbox. It does not call the LLM, but it may use a small amount of E2B runtime credit.
+This creates a short-lived E2B sandbox, verifies the expected workspace, language runtimes, CLIs, virtual display, first-party media/document commands, Chromium, and the remote Chromium debugging endpoint, then destroys the sandbox. It does not call the LLM, but it may use a small amount of E2B runtime credit.
 
 For production workers, keep `AGENT_E2B_VERIFY_ON_WORKER_STARTUP=true`. The guarded worker startup creates and destroys a short-lived E2B sandbox before the first worker heartbeat, so an invalid `E2B_API_KEY` or bad template fails before the web app sees the worker as live. Keep `AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP=true` when browser tools are required; this also verifies the Chromium debugging endpoint before the worker can claim jobs. These checks spend a small amount of E2B runtime on worker deploy/restart, not per task.
 
@@ -406,4 +406,4 @@ Illustrative E2B budgeting examples at roughly $0.12 per sandbox running hour:
 1,000 tasks x 15 minutes = 250 running hours -> about $29.25 E2B usage
 ```
 
-The expensive part is usually LLM usage plus sandbox runtime. Keep `AGENT_E2B_PAUSE_ON_TASK_END=false`, keep command timeouts bounded, and start with E2B's default CPU/RAM before paying for heavier sandbox resources.
+The expensive part is usually LLM usage plus sandbox runtime. Keep `AGENT_E2B_PAUSE_ON_TASK_END=false` and command timeouts bounded. The included parity template targets 6 CPU and 4096 MB RAM; lower `E2B_TEMPLATE_BUILD_CPU` and `E2B_TEMPLATE_BUILD_MEMORY_MB` before rebuilding when that capacity or cost is unnecessary.

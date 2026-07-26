@@ -37,6 +37,7 @@
     ".next.*",
     ".next.*/**",
     ".next-stale-*",
-    ".next-stale-*/**"
+    ".next-stale-*/**",
+    "sandbox-runtime/templates/**"
   ]
 }

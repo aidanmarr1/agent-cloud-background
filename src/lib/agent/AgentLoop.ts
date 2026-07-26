@@ -145,6 +145,7 @@ import {
 } from './BriefInlineResearch'
 import { toolTypeRateLimitForState } from './ToolLimits'
 import { persistSandboxTaskFile } from '@/lib/taskFiles'
+import { researchSourceBalanceBlockReason } from './ResearchPreflightRecovery'
 
 const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request'])
 
@@ -229,6 +230,31 @@ function isMalformedToolArgumentsRecovery(result: ToolExecutionResult): boolean 
     ? (result.result as { error?: unknown }).error
     : null
   return typeof error === 'string' && /^INTERNAL_RECOVERY:\s*malformed tool arguments\b/i.test(error)
+}
+
+function isPreflightRejectionRecovery(result: ToolExecutionResult): boolean {
+  return result.internalRecovery === 'preflight_rejection' &&
+    result.acceptedForExecution !== true &&
+    !!result.preflightRejection?.code
+}
+
+function preflightRejectionRecoveryMessage(
+  state: AgentStateData,
+  results: ToolExecutionResult[],
+): string {
+  const rejectedTools = [...new Set(results.map(result => result.tc.name))].join(', ')
+  const sourceBalanceRejected = results.some(
+    result => result.preflightRejection?.code === 'research_source_balance',
+  )
+  return [
+    'ACTION ROUTE RECOVERY: the previous model-selected action was rejected before execution, so it produced no new evidence and must not be selected again on this turn.',
+    rejectedTools ? `Rejected route: ${rejectedTools}.` : '',
+    sourceBalanceRejected
+      ? 'A search result set already exists but still needs a usable opened source. The rejected web_search route is temporarily unavailable. Open a different unfailed URL from the Remaining candidate URLs with an available source reader or browser navigation tool. After two distinct source-opening failures, one fresh search route may reopen.'
+      : 'Choose one materially different available action that satisfies the active phase and current runtime constraints.',
+    `Continue active phase ${state.currentStepIdx + 1} now with exactly one executable native tool call.`,
+    'Do not write ordinary prose, repeat the rejected action, expose this recovery, or ask permission.',
+  ].filter(Boolean).join(' ')
 }
 
 function paidTurnProgressForIteration(
@@ -843,6 +869,7 @@ const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
 const SOURCE_OPENING_RUNTIME_TOOLS = new Set([
   'read_document',
   'http_request',
+  'browser_navigate',
   'browser_get_content',
   'browser_find_text',
 ])
@@ -1467,7 +1494,11 @@ function fastSourceActionToolsForState(
     if (state.suppressedResearchToolName && name === state.suppressedResearchToolName) return false
     return allowed.has(name)
   })
-  return narrowed.length > 0 ? narrowed : tools
+  return narrowed.length > 0
+    ? narrowed
+    : state.suppressedResearchToolName
+      ? []
+      : tools
 }
 
 function userRequestedRepeatedSourceExtraction(state: AgentStateData): boolean {
@@ -1482,29 +1513,8 @@ function sourceExtractionBatchConsumedForLatestSearch(state: AgentStateData): bo
     state.stepLastSourceExtractionSearchCount === searchCount
 }
 
-function totalOpenedSourceReadsForStep(state: AgentStateData): number {
-  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
-}
-
 function researchSearchNeedsOpenedSourceBeforeMoreSearch(state: AgentStateData): boolean {
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return false
-  if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
-
-  const stepText = currentStepText(state)
-  const isResearchPhase =
-    state.currentPhase === 'research' ||
-    state.taskStrategy === 'research' ||
-    state.taskStrategy === 'analysis' ||
-    isResearchStepText(stepText)
-  if (!isResearchPhase) return false
-
-  const completedSearches = Math.max(
-    state.stepSearchQueries.size,
-    state.stepToolTypeCounts.get('web_search') || 0,
-  )
-  const openedSourceReads = totalOpenedSourceReadsForStep(state)
-  return completedSearches >= 1 && openedSourceReads === 0
+  return researchSourceBalanceBlockReason('web_search', state) !== null
 }
 
 function shouldUseNaturalCadenceNarration(
@@ -1709,7 +1719,11 @@ function compactResearchRecoveryToolsForState(
     allowed.delete('browser_navigate')
   }
   const narrowed = filterToolDefinitions(tools, allowed)
-  return narrowed.length > 0 ? narrowed : tools
+  return narrowed.length > 0
+    ? narrowed
+    : state.suppressedResearchToolName
+      ? []
+      : tools
 }
 
 function compactResearchOpenedSourceToolsForState(
@@ -1767,7 +1781,14 @@ function compactResearchOpenedSourceToolsForState(
     allowed.delete('browser_scroll')
   }
   const narrowed = filterToolDefinitions(tools, allowed)
-  return narrowed.length > 0 ? narrowed : tools
+  const mustKeepSourceOnlyMenu =
+    hasSearchCandidatesAwaitingOpen ||
+    !!state.suppressedResearchToolName
+  return narrowed.length > 0
+    ? narrowed
+    : mustKeepSourceOnlyMenu
+      ? []
+      : tools
 }
 
 function compactResearchSourceRecoveryToolsForState(
@@ -2805,6 +2826,10 @@ function compactResearchNeedsOpenedSource(state: AgentStateData): boolean {
   const depth = researchDepthProfileForState(state)
   if (depth.label === 'single-source' || depth.label === 'light') return false
   if (compactResearchEvidenceComplete(state)) return false
+  // Two distinct failures from the current candidate pool reopen discovery.
+  // The next executed search clears this set and makes its new pool eligible
+  // for source-opening requirements again.
+  if (state.stepFailedSourceTargets.size >= 2) return false
   const openedPages = state.stepVisitedUrls.size
   const candidateDomains = state.stepSourceDomainCounts.size
   const evidenceDomains = Math.max(stepOpenedSourceDomains(state).size, candidateDomains)
@@ -5187,6 +5212,50 @@ export class AgentLoop {
             }
 
             if (
+              lastToolResults.length > 0 &&
+              lastToolResults.every(isPreflightRejectionRecovery)
+            ) {
+              if (currentPaidTurnProgress) {
+                currentPaidTurnProgress.internalRecoveryScheduled = 'preflight_rejection'
+              }
+              state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
+              state.forceTextNextIteration = false
+              state.phaseEndNarrationPending = false
+              state.recentToolCalls = []
+              state.recentToolSequence = []
+
+              const rejectionDetails = lastToolResults.map(result => ({
+                tool: result.tc.name,
+                code: result.preflightRejection?.code || 'preflight',
+              }))
+              contextManager.push({
+                role: 'system',
+                content: preflightRejectionRecoveryMessage(state, lastToolResults),
+              } as ChatMessageParam)
+              const rejectionDiagnostic = {
+                iteration: state.iterations,
+                step: state.currentStepIdx,
+                recoveryCount: state.stepLoopDetections,
+                rejections: rejectionDetails,
+              }
+              this.emitter.diagnostic?.('action_rejected', rejectionDiagnostic)
+              this.options.diagnostics?.({
+                type: 'action_rejected',
+                data: rejectionDiagnostic,
+              })
+              console.warn('[AgentDiagnostics] Rejected model action before execution and changed route', {
+                iteration: state.iterations,
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems?.length || 0,
+                suppressedTool: state.suppressedResearchToolName || null,
+                rejections: rejectionDetails,
+              })
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
+
+            if (
               (lastToolResults.length === 0 || state.stepResearchCallCount === 0) &&
               shouldUseCompactResearchTurn(state) &&
               state.currentPlanItems &&
@@ -6647,18 +6716,18 @@ export class AgentLoop {
         ) {
           const suppressed = state.suppressedResearchToolName
           const filtered = activeTools.filter(tool => tool.function?.name !== suppressed)
-          if (filtered.length > 0) {
-            const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-            activeTools = loopRecoveryToolForState(state, filtered)
-            console.log('[AgentDiagnostics] Suppressed looped research tool for recovery', {
-              step: state.currentStepIdx,
-              totalSteps: state.currentPlanItems?.length || 0,
-              suppressed,
-              loopDetections: state.stepLoopDetections,
-              beforeTools,
-              afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-            })
-          }
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = filtered.length > 0
+            ? loopRecoveryToolForState(state, filtered)
+            : []
+          console.log('[AgentDiagnostics] Suppressed looped research tool for recovery', {
+            step: state.currentStepIdx,
+            totalSteps: state.currentPlanItems?.length || 0,
+            suppressed,
+            loopDetections: state.stepLoopDetections,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
         }
         if (partialFileContinuationNeedsTool) {
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
@@ -6934,14 +7003,20 @@ export class AgentLoop {
               )
             )
           )
-        const requiredToolIntent = shouldRequireToolCall
-        const fastActionTurn = activeTools.length > 0 &&
+        let requiredToolIntent = shouldRequireToolCall
+        let fastActionTurn = activeTools.length > 0 &&
           !isPostCompletion &&
           isFastActionToolTurn(state, this.options.messages)
-        const fastSourceActionTurn = !explicitTaskToolNeedsInitialAction &&
+        let fastSourceActionTurn = !explicitTaskToolNeedsInitialAction &&
           !hasPersistentExplicitTaskToolRestriction &&
           fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
+        if (fastSourceActionTurn) {
+          const fastSourceTools = fastSourceActionToolsForState(state, activeTools)
+          if (fastSourceTools !== activeTools) activeTools = fastSourceTools
+        }
+        fastActionTurn = fastActionTurn && activeTools.length > 0
+        fastSourceActionTurn = fastSourceActionTurn && activeTools.length > 0
         // A source batch can contain up to three visible actions. It is one
         // optional model-selected batch for the latest result set, and it must
         // stay within the max-four narration frontier.
@@ -6951,10 +7026,10 @@ export class AgentLoop {
         const maxParallelSourceExtractionCalls = allowParallelSourceToolCalls
           ? Math.min(3, visibleNarrationActionHeadroom(state))
           : 1
-        if (fastSourceActionTurn) {
-          const fastSourceTools = fastSourceActionToolsForState(state, activeTools)
-          if (fastSourceTools !== activeTools) activeTools = fastSourceTools
-        }
+        // Source recovery can deliberately remove the last unsafe route after
+        // the initial requirement calculation. Never ask a provider to require
+        // a tool call when the final tool menu is empty.
+        requiredToolIntent = requiredToolIntent && activeTools.length > 0
         if (fastActionTurn && !useCompactNarration) {
           requestMessages = [
             ...requestMessages,

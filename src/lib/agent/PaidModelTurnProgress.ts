@@ -4,7 +4,7 @@ export interface PaidModelTurnProgressSnapshot {
   visibleText: boolean
   acceptedToolCall: boolean
   terminalAction?: boolean
-  internalRecoveryScheduled?: 'malformed_tool_arguments' | 'display_contract'
+  internalRecoveryScheduled?: 'malformed_tool_arguments' | 'display_contract' | 'preflight_rejection'
 }
 
 export type PaidModelTurnProgressDecision =

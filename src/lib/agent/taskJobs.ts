@@ -2027,6 +2027,10 @@ class TaskJobEmitter implements AgentEventEmitter {
     recordTaskJobEvent(this.job, { type: 'credit_event', entry })
   }
 
+  diagnostic(name: string, data: Record<string, unknown>): void {
+    recordTaskJobEvent(this.job, { type: 'diagnostic', name, data })
+  }
+
   stepAdvance(status: StepAdvanceStatus = 'done', reason?: string): void {
     recordTaskJobEvent(this.job, { type: 'step_advance', status, reason })
   }

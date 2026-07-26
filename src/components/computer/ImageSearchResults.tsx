@@ -60,9 +60,14 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
     return (
       <>
         <ImageSearchContextHeader title={title} count={items.length} streaming />
-        <div className="p-4 grid grid-cols-2 gap-2.5">
+        <div
+          className="p-4 grid grid-cols-2 gap-2.5"
+          role="status"
+          aria-busy="true"
+          aria-label="Searching for images"
+        >
           {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="aspect-square bg-bg-secondary rounded-2xl animate-pulse" />
+            <div key={i} aria-hidden="true" className="aspect-square bg-bg-secondary rounded-2xl animate-pulse" />
           ))}
           <div className="col-span-2 text-center text-[12px] text-text-muted [font-family:var(--font-display)] animate-pulse mt-1">
             Searching images...
@@ -76,7 +81,7 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
     return (
       <>
         <ImageSearchContextHeader title={title} count={items.length} streaming={streaming} />
-        <div className="flex-1 flex flex-col items-center justify-center h-full py-16">
+        <div className="flex-1 flex flex-col items-center justify-center h-full py-16" role="status">
           <div className="w-12 h-12 rounded-2xl bg-bg-secondary border border-border-primary flex items-center justify-center mb-4">
             <ImageIcon size={18} className="text-text-tertiary" strokeWidth={1.75} />
           </div>

@@ -31,6 +31,7 @@ export interface AgentEventEmitter {
   plan(items: string[]): void
   artifactCreated(artifact: Artifact): void
   creditEvent(entry: CreditLedgerEvent): void
+  diagnostic?(name: string, data: Record<string, unknown>): void
   stepAdvance(status?: StepAdvanceStatus, reason?: string): void
   done(usage?: CreditTokenUsage): void
   error(message: unknown): void
@@ -76,6 +77,7 @@ export function sanitizeAgentEventEmitter(emitter: AgentEventEmitter): AgentEven
     plan(items) { emitter.plan(items) },
     artifactCreated(artifact) { emitter.artifactCreated(artifact) },
     creditEvent(entry) { emitter.creditEvent(entry) },
+    diagnostic(name, data) { emitter.diagnostic?.(name, data) },
     stepAdvance(status, reason) { emitter.stepAdvance(status, reason) },
     done(usage) { emitter.done(usage) },
     error(message) { emitter.error(message) },
@@ -219,6 +221,10 @@ export class SSEEmitter implements AgentEventEmitter {
 
   creditEvent(entry: CreditLedgerEvent): void {
     this.emit({ type: 'credit_event', entry } as SSEEvent)
+  }
+
+  diagnostic(name: string, data: Record<string, unknown>): void {
+    this.emit({ type: 'diagnostic', name, data } as SSEEvent, { countAsActivity: false })
   }
 
   stepAdvance(status: StepAdvanceStatus = 'done', reason?: string): void {

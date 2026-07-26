@@ -67,9 +67,14 @@ export function SearchResults({ results, streaming, title }: SearchResultsProps)
     return (
       <>
         <SearchContextHeader title={title} count={items.length} streaming />
-        <div className="p-3 space-y-1">
+        <div
+          className="p-3 space-y-1"
+          role="status"
+          aria-busy="true"
+          aria-label="Searching for results"
+        >
           {[1, 2, 3].map((i) => (
-            <div key={i} className="flex items-start gap-3 py-3 px-3 rounded-lg border border-border-primary bg-bg-secondary">
+            <div key={i} aria-hidden="true" className="flex items-start gap-3 py-3 px-3 rounded-lg border border-border-primary bg-bg-secondary">
               <div className="w-8 h-8 rounded-lg bg-bg-tertiary border border-border-primary flex-shrink-0 animate-pulse" />
               <div className="flex-1 space-y-2 pt-1">
                 <div className="h-3 bg-bg-tertiary rounded-md animate-pulse w-3/4" />
@@ -90,7 +95,7 @@ export function SearchResults({ results, streaming, title }: SearchResultsProps)
     return (
       <>
         <SearchContextHeader title={title} count={0} streaming={streaming} />
-        <div className="flex items-center justify-center h-full py-16 px-6">
+        <div className="flex items-center justify-center h-full py-16 px-6" role="status">
           <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
             Search result is unavailable
           </p>
@@ -103,7 +108,7 @@ export function SearchResults({ results, streaming, title }: SearchResultsProps)
     return (
       <>
         <SearchContextHeader title={title} count={items.length} streaming={streaming} />
-        <div className="flex items-center justify-center h-full py-16 px-6">
+        <div className="flex items-center justify-center h-full py-16 px-6" role="status">
           <p className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">
             No results found
           </p>

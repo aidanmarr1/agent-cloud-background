@@ -5,6 +5,7 @@ import { ComputerPanelItem } from '@/types'
 import { PanelHeader } from './PanelHeader'
 import { SearchResults } from './SearchResults'
 import { ImageSearchResults } from './ImageSearchResults'
+import { isSearchResultPending } from './searchLoadingState'
 import { BrowseView } from './BrowseView'
 import { BrowserView } from './BrowserView'
 import { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, BrowserResult } from '@/types'
@@ -127,6 +128,7 @@ interface ComputerPanelProps {
 
 export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   const computerPanelOpen = useUIStore((s) => s.computerPanelOpen)
+  const taskStreaming = useUIStore((s) => s.isStreaming)
   const computerActiveTab = useUIStore((s) => s.computerActiveTab)
   const computerPanelActiveItemId = useUIStore((s) => s.computerPanelActiveItemId)
   const setComputerActiveTab = useUIStore((s) => s.setComputerActiveTab)
@@ -201,6 +203,13 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   ])
 
   const isAtLatest = safeIndex === filteredItems.length - 1
+  const activeSearchPending = isSearchResultPending({
+    itemStreaming: activeItem?.streaming,
+    itemEmpty: Array.isArray(activeItem?.data) && activeItem.data.length === 0,
+    taskStreaming,
+    activeItemId: activeItem?.id,
+    latestItemId: lastItem?.id,
+  })
   const liveIndex = filteredItems.reduce((latest, item, idx) => isLivePanelItem(item) ? idx : latest, -1)
   const hasLiveItem = liveIndex >= 0
   const activeItemIsLive = !!activeItem && isLivePanelItem(activeItem)
@@ -450,9 +459,9 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
             {/* Content */}
             <div ref={contentRef} className="flex-1 overflow-y-auto overflow-x-hidden">
               {activeItem ? (activeItem.type === 'image_search' ? (
-                <ImageSearchResults results={activeItem.data as ImageSearchPanelItem[]} streaming={activeItem.streaming} title={activeItem.title} />
+                <ImageSearchResults key={activeItem.id} results={activeItem.data as ImageSearchPanelItem[]} streaming={activeSearchPending} title={activeItem.title} />
               ) : activeItem.type === 'search' ? (
-                <SearchResults results={activeItem.data as SearchResult[]} streaming={activeItem.streaming} title={activeItem.title} />
+                <SearchResults key={activeItem.id} results={activeItem.data as SearchResult[]} streaming={activeSearchPending} title={activeItem.title} />
               ) : activeItem.type === 'terminal' ? (
                 <TerminalView result={activeItem.data as TerminalResult} streaming={activeItem.streaming} />
               ) : activeItem.type === 'file' ? (

@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+LIB = Path("/opt/agent/lib")
+if not LIB.is_dir():
+    LIB = HERE.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from agent_tools.common import (  # noqa: E402
+    AgentToolError,
+    atomic_output_path,
+    command_path,
+    emit_result,
+    existing_file,
+    fail_cleanly,
+    finish_atomic_output,
+    positive_int_env,
+    run_checked,
+)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Convert GitHub-flavoured Markdown to a PDF with Pandoc and sandbox Chromium."
+    )
+    result.add_argument("input", help="Input Markdown file")
+    result.add_argument("output", nargs="?", help="Output PDF path")
+    result.add_argument("--json", action="store_true", help="Print a JSON result")
+    result.add_argument(
+        "--timeout",
+        type=int,
+        default=positive_int_env("AGENT_TOOL_TIMEOUT_SECONDS", 120),
+        help="Per-stage safety timeout in seconds",
+    )
+    return result
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if args.timeout <= 0:
+        raise AgentToolError("--timeout must be positive.")
+    source = existing_file(args.input)
+    if source.suffix.lower() not in {".md", ".markdown"}:
+        raise AgentToolError("Input must be a .md or .markdown file.")
+    output = Path(args.output).expanduser().resolve() if args.output else source.with_suffix(".pdf")
+    if output.suffix.lower() != ".pdf":
+        raise AgentToolError("Output must end in .pdf.")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="agent-md-pdf-", dir=output.parent) as temp_name:
+        temp_dir = Path(temp_name)
+        html = temp_dir / "document.html"
+        partial = atomic_output_path(output)
+        try:
+            pandoc_args = [
+                command_path("pandoc"),
+                source,
+                "--from=gfm-raw_html",
+                "--to=html5",
+                "--standalone",
+                f"--resource-path={source.parent}",
+                f"--metadata=title:{source.stem}",
+                f"--output={html}",
+            ]
+            stylesheet = Path("/etc/agent/markdown.css")
+            if stylesheet.is_file():
+                pandoc_args.append(f"--css={stylesheet}")
+            run_checked(pandoc_args, timeout=args.timeout)
+            html_body = html.read_text(encoding="utf-8", errors="replace")
+            csp = (
+                "<meta http-equiv=\"Content-Security-Policy\" "
+                "content=\"default-src 'none'; img-src data: file:; "
+                "style-src 'unsafe-inline' file:; font-src data: file:\">"
+            )
+            if "<head>" in html_body:
+                html_body = html_body.replace("<head>", f"<head>{csp}", 1)
+            else:
+                html_body = f"{csp}{html_body}"
+            html.write_text(html_body, encoding="utf-8")
+
+            chromium = command_path(
+                "chromium", "chromium-browser", "google-chrome", "google-chrome-stable"
+            )
+            chrome_env = os.environ.copy()
+            chrome_env.setdefault("HOME", str(temp_dir / "home"))
+            Path(chrome_env["HOME"]).mkdir(parents=True, exist_ok=True)
+            run_checked(
+                [
+                    chromium,
+                    "--headless",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-javascript",
+                    "--blink-settings=scriptEnabled=false",
+                    "--allow-file-access-from-files",
+                    "--no-pdf-header-footer",
+                    f"--user-data-dir={temp_dir / 'chrome'}",
+                    f"--print-to-pdf={partial}",
+                    html.as_uri(),
+                ],
+                timeout=args.timeout,
+                env=chrome_env,
+            )
+            finish_atomic_output(partial, output)
+        finally:
+            partial.unlink(missing_ok=True)
+
+    emit_result(
+        {
+            "ok": True,
+            "input": str(source),
+            "output": str(output),
+            "bytes": output.stat().st_size,
+            "rawHtml": False,
+            "javascript": False,
+        },
+        as_json=args.json,
+        text_key="output",
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        fail_cleanly(error)

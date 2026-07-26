@@ -2,7 +2,8 @@
 
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { Template, defaultBuildLogger } from 'e2b'
+import { join } from 'node:path'
+import { Template, defaultBuildLogger, waitForFile } from 'e2b'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
@@ -32,14 +33,19 @@ if (!apiKey) {
 }
 
 const dockerfileContent = await readFile(`${root}/${dockerfile}`, 'utf8')
-const template = Template().fromDockerfile(dockerfileContent)
+// Upload only the dedicated sandbox build assets. The application source,
+// local environment files, attachments, and unrelated workspace content are
+// not part of the third-party E2B build context.
+const template = Template({ fileContextPath: join(root, 'sandbox-runtime') })
+  .fromDockerfile(dockerfileContent)
+  .setStartCmd('/usr/local/bin/agent-sandbox-init', waitForFile('/tmp/agent-sandbox-ready'))
 
 console.log(`Building E2B template ${name} from ${dockerfile}.`)
 console.log('Secret values are not printed.')
 
 const buildInfo = await Template.build(template, name, {
-  cpuCount: Number.parseInt(readArg('--cpu') || env('E2B_TEMPLATE_BUILD_CPU') || '2', 10),
-  memoryMB: Number.parseInt(readArg('--memory-mb') || env('E2B_TEMPLATE_BUILD_MEMORY_MB') || '2048', 10),
+  cpuCount: Number.parseInt(readArg('--cpu') || env('E2B_TEMPLATE_BUILD_CPU') || '6', 10),
+  memoryMB: Number.parseInt(readArg('--memory-mb') || env('E2B_TEMPLATE_BUILD_MEMORY_MB') || '4096', 10),
   apiKey,
   onBuildLogs: defaultBuildLogger(),
 })

@@ -224,10 +224,6 @@ function isComputerPanelTool(name: string): boolean {
     BROWSE_TOOLS.includes(name)
 }
 
-function hasStreamingLiveBrowser(conversationId: string): boolean {
-  return latestBrowserPanelItem(conversationId)?.streaming === true
-}
-
 function isCreditCutoffMessage(message: string): boolean {
   return message === OUT_OF_CREDITS_MESSAGE ||
     /\b(?:credits ran out|out of credits)\b/i.test(message)
@@ -368,6 +364,10 @@ export class EventDispatcher {
         break
       case 'credit_event':
         this.handleCreditEvent(event.entry)
+        break
+      case 'diagnostic':
+        // Diagnostics are persisted for support and recovery analysis but are
+        // intentionally hidden from the user-facing task stream.
         break
       case 'tool_start':
         this.handleToolStart(event)
@@ -732,13 +732,6 @@ export class EventDispatcher {
       : 'analyzing' as const
     const uiState = useUIStore.getState()
     if (this.isActiveConversation()) uiState.setStreamingStatus(s)
-    const browserLiveActive = hasStreamingLiveBrowser(this.conversationId)
-    const shouldFocusComputerPanel = isComputerPanelTool(event.name) &&
-      (BROWSER_TOOLS.includes(event.name) || !browserLiveActive)
-    if (shouldFocusComputerPanel && this.isActiveConversation()) {
-      uiState.setComputerActiveTab('activity')
-      uiState.setComputerPanelActiveItemId(panelFocusIdForTool(event.name, event.id))
-    }
 
     if (this.currentGroupIdx >= 0 && this.currentGroupIdx < this.parsedGroups.length) {
       if (this.parsedGroups[this.currentGroupIdx].status === 'pending') {
@@ -789,11 +782,16 @@ export class EventDispatcher {
         this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: [...closedSubtasks, subtask] }
         this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       }
-      if (isComputerPanelTool(event.name)) {
-        this.openComputerPanel()
-      }
+    }
 
-      if ((event.name === 'create_file' || event.name === 'append_file' || event.name === 'edit_file') && event.args.path) {
+    // Computer activity is independent of plan parsing. Tool starts can race
+    // ahead of the plan event, and the live panel still needs a real item to
+    // follow rather than an active ID that does not exist yet.
+    if (isComputerPanelTool(event.name)) {
+      this.openComputerPanel()
+    }
+
+    if ((event.name === 'create_file' || event.name === 'append_file' || event.name === 'edit_file') && event.args.path) {
         this.webIde.handleFileContentStart(
           event.id,
           event.args.path as string,
@@ -841,14 +839,16 @@ export class EventDispatcher {
         })
       }
 
-      // read_file
-      if (event.name === 'read_file') {
+      // read_file / read_attachment
+      if (event.name === 'read_file' || event.name === 'read_attachment') {
         const filePath = (event.args.path as string) || ''
         const fileName = filePath.split('/').pop() || 'file'
         this.actions.upsertComputerPanelItem(this.conversationId, {
           id: event.id,
           type: 'file',
-          title: `Reading: ${fileName}`,
+          title: event.name === 'read_attachment'
+            ? `Reading attachment: ${fileName}`
+            : `Reading: ${fileName}`,
           data: { action: 'read' as const, path: filePath, content: '' } as FileResult,
           timestamp: Date.now(),
           streaming: true,
@@ -971,6 +971,15 @@ export class EventDispatcher {
           streaming: true,
         })
       }
+
+    // A newly visible task-stream action owns the Computer view until another
+    // visible action starts. Browser frames may keep arriving after a search,
+    // terminal, or file action starts, so a still-streaming browser item must
+    // not pin focus to browser_live. Focus after creating the placeholder so
+    // the selected item always exists, including pre-plan startup races.
+    if (isComputerPanelTool(event.name) && this.isActiveConversation()) {
+      uiState.setComputerActiveTab('activity')
+      uiState.setComputerPanelActiveItemId(panelFocusIdForTool(event.name, event.id))
     }
   }
 
@@ -1075,11 +1084,8 @@ export class EventDispatcher {
       this.actions.upsertComputerPanelItem(this.conversationId, panelItem)
     }
     if (!isBrowserPreflightBlock) {
-      if (isComputerPanelTool(event.name) && this.isActiveConversation()) {
-        const uiState = useUIStore.getState()
-        uiState.setComputerActiveTab('activity')
-        uiState.setComputerPanelActiveItemId(panelFocusIdForTool(event.name, event.id))
-      }
+      // Tool starts establish the live focus order. Parallel results may finish
+      // out of order, so completion must not steal focus from a newer action.
       this.openComputerPanel()
     }
 

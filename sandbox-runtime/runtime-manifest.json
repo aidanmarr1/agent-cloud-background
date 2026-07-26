@@ -1,0 +1,36 @@
+{
+  "profile": "agent-parity-v1",
+  "compatibilityTarget": "Manus-style general-purpose Linux sandbox",
+  "baseImage": "python:3.12-slim-bookworm",
+  "resourceTarget": {
+    "cpuCount": 6,
+    "memoryMB": 4096
+  },
+  "workspaceRoot": "/home/user/agent-workspaces",
+  "environment": {
+    "AGENT_LOCALE": "en",
+    "AGENT_TIMEZONE": "Australia/Sydney",
+    "APP_DOMAIN": "agent1-0.vercel.app",
+    "DISPLAY": ":0",
+    "HOME": "/home/user",
+    "USER": "user",
+    "SHELL": "/bin/bash",
+    "RUNTIME_CRASH_STATE_DIR": "/home/user/.local/state/agent",
+    "WEBDEV_TEMPLATES_PATH": "/opt/agent/webdev/templates"
+  },
+  "firstPartyCommands": [
+    "agent-render-diagram",
+    "agent-md-to-pdf",
+    "agent-speech-to-text",
+    "agent-analyze-video",
+    "agent-upload-file",
+    "agent-sandbox-info",
+    "agent-scaffold-web"
+  ],
+  "providerControlled": [
+    "Linux kernel build",
+    "CPU model",
+    "swap allocation",
+    "root disk capacity"
+  ]
+}

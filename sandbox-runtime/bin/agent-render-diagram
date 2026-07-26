@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+LIB = Path("/opt/agent/lib")
+if not LIB.is_dir():
+    LIB = HERE.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from agent_tools.common import (  # noqa: E402
+    AgentToolError,
+    atomic_output_path,
+    command_path,
+    emit_result,
+    existing_file,
+    fail_cleanly,
+    finish_atomic_output,
+    positive_int_env,
+    run_checked,
+)
+
+FENCE_RE = re.compile(
+    r"(?:```|~~~)\s*(mermaid|mmd|d2|plantuml|puml)\s*\r?\n"
+    r"(.*?)\r?\n(?:```|~~~)",
+    re.IGNORECASE | re.DOTALL,
+)
+SUPPORTED_INPUTS = {".mmd": "mermaid", ".mermaid": "mermaid", ".d2": "d2",
+                    ".puml": "plantuml", ".plantuml": "plantuml"}
+SUPPORTED_OUTPUTS = {".png", ".svg"}
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Render Mermaid, D2, PlantUML, or fenced Markdown diagrams."
+    )
+    result.add_argument("input", help="Diagram source (.mmd, .d2, .puml, or .md)")
+    result.add_argument("output", nargs="?", help="Output .png or .svg path")
+    result.add_argument("--json", action="store_true", help="Print a JSON result")
+    result.add_argument(
+        "--timeout",
+        type=int,
+        default=positive_int_env("AGENT_TOOL_TIMEOUT_SECONDS", 120),
+        help="Per-render safety timeout in seconds",
+    )
+    return result
+
+
+def source_from_markdown(path: Path, temp_dir: Path) -> tuple[str, Path]:
+    body = path.read_text(encoding="utf-8", errors="replace")
+    match = FENCE_RE.search(body)
+    if not match:
+        raise AgentToolError(
+            "Markdown input must contain a mermaid, d2, plantuml, or puml fenced block."
+        )
+    language = match.group(1).lower()
+    kind = "mermaid" if language in {"mermaid", "mmd"} else (
+        "plantuml" if language in {"plantuml", "puml"} else "d2"
+    )
+    suffix = {"mermaid": ".mmd", "plantuml": ".puml", "d2": ".d2"}[kind]
+    extracted = temp_dir / f"diagram{suffix}"
+    extracted.write_text(match.group(2).strip() + "\n", encoding="utf-8")
+    return kind, extracted
+
+
+def render_mermaid(source: Path, partial: Path, timeout: int) -> None:
+    mmdc = command_path("mmdc")
+    config = Path("/etc/agent/puppeteer.json")
+    args = [mmdc, "--input", source, "--output", partial]
+    if config.is_file():
+        args.extend(["--puppeteerConfigFile", config])
+    env = os.environ.copy()
+    env.setdefault("PUPPETEER_EXECUTABLE_PATH", command_path(
+        "chromium", "chromium-browser", "google-chrome", "google-chrome-stable"
+    ))
+    run_checked(args, timeout=timeout, env=env)
+
+
+def render_d2(source: Path, partial: Path, timeout: int) -> None:
+    run_checked(
+        [command_path("d2"), "--layout", "dagre", source, partial],
+        timeout=timeout,
+    )
+
+
+def render_plantuml(source: Path, partial: Path, timeout: int) -> None:
+    plantuml = command_path("plantuml")
+    output_format = partial.suffix.lstrip(".")
+    try:
+        result = subprocess.run(
+            [plantuml, f"-t{output_format}", "-charset", "UTF-8", "-pipe"],
+            input=source.read_bytes(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AgentToolError(
+            f"PlantUML exceeded the {timeout}-second safety limit."
+        ) from error
+    if result.returncode != 0:
+        message = result.stderr.decode("utf-8", errors="replace").strip()
+        raise AgentToolError(f"PlantUML failed: {message or result.returncode}")
+    partial.write_bytes(result.stdout)
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if args.timeout <= 0:
+        raise AgentToolError("--timeout must be positive.")
+    source = existing_file(args.input)
+    output = Path(args.output).expanduser().resolve() if args.output else source.with_suffix(".png")
+    if output.suffix.lower() not in SUPPORTED_OUTPUTS:
+        raise AgentToolError("Output must end in .png or .svg.")
+
+    with tempfile.TemporaryDirectory(prefix="agent-diagram-") as temp_name:
+        temp_dir = Path(temp_name)
+        if source.suffix.lower() == ".md":
+            kind, render_source = source_from_markdown(source, temp_dir)
+        else:
+            kind = SUPPORTED_INPUTS.get(source.suffix.lower(), "")
+            render_source = source
+        if not kind:
+            raise AgentToolError("Input must end in .mmd, .mermaid, .d2, .puml, .plantuml, or .md.")
+
+        partial = atomic_output_path(output)
+        partial = partial.with_suffix(output.suffix)
+        try:
+            if kind == "mermaid":
+                render_mermaid(render_source, partial, args.timeout)
+            elif kind == "d2":
+                render_d2(render_source, partial, args.timeout)
+            else:
+                render_plantuml(render_source, partial, args.timeout)
+            finish_atomic_output(partial, output)
+        finally:
+            partial.unlink(missing_ok=True)
+
+    emit_result(
+        {
+            "ok": True,
+            "kind": kind,
+            "input": str(source),
+            "output": str(output),
+            "bytes": output.stat().st_size,
+        },
+        as_json=args.json,
+        text_key="output",
+    )
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        fail_cleanly(error)
+

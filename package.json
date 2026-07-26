@@ -21,6 +21,7 @@
     "cloud:vercel-env": "node scripts/vercel-cloud-env.mjs",
     "cloud:render-worker-env": "node scripts/render-worker-env.mjs",
     "cloud:e2b-smoke": "node scripts/e2b-template-smoke.mjs",
+    "sandbox:contract-smoke": "node scripts/sandbox-runtime-contract-smoke.mjs",
     "cloud:queue": "node scripts/cloud-queue.mjs",
     "cloud:status": "node scripts/cloud-production-status.mjs",
     "cloud:finish-setup": "node scripts/cloud-finish-setup.mjs",

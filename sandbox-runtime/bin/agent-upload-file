@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import mimetypes
+import os
+import re
+import shutil
+import sys
+import time
+import uuid
+from pathlib import Path
+from urllib.parse import urlparse
+
+HERE = Path(__file__).resolve()
+LIB = Path("/opt/agent/lib")
+if not LIB.is_dir():
+    LIB = HERE.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from agent_tools.common import (  # noqa: E402
+    AgentToolError,
+    command_path,
+    existing_file,
+    fail_cleanly,
+    positive_int_env,
+    run_checked,
+)
+
+SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description=(
+            "Stage a file as a durable agent artifact, or upload it to a configured "
+            "first-party HTTPS endpoint."
+        )
+    )
+    result.add_argument("input", help="File to stage or upload")
+    result.add_argument("--name", help="Safe output filename")
+    result.add_argument("--public", action="store_true", help="Require a public HTTPS URL")
+    result.add_argument("--json", action="store_true", help="Print structured JSON")
+    result.add_argument(
+        "--max-bytes",
+        type=int,
+        default=positive_int_env("AGENT_UPLOAD_MAX_BYTES", 100 * 1024 * 1024),
+    )
+    result.add_argument(
+        "--timeout",
+        type=int,
+        default=positive_int_env("AGENT_UPLOAD_TIMEOUT_SECONDS", 120),
+    )
+    return result
+
+
+def safe_name(value: str) -> str:
+    cleaned = SAFE_NAME_RE.sub("-", Path(value).name).strip(".-")
+    if not cleaned:
+        raise AgentToolError("The artifact filename is empty after sanitisation.")
+    return cleaned[:180]
+
+
+def extract_url(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    candidates = [
+        payload.get("url"),
+        payload.get("downloadUrl"),
+        payload.get("publicUrl"),
+    ]
+    artifact = payload.get("artifact")
+    if isinstance(artifact, dict):
+        candidates.extend([artifact.get("url"), artifact.get("downloadUrl")])
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            parsed = urlparse(candidate)
+            if parsed.scheme == "https" and parsed.netloc:
+                return candidate
+    return ""
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if args.max_bytes <= 0 or args.timeout <= 0:
+        raise AgentToolError("--max-bytes and --timeout must be positive.")
+    source = existing_file(args.input)
+    size = source.stat().st_size
+    if size > args.max_bytes:
+        raise AgentToolError(
+            f"File is {size} bytes; the configured upload limit is {args.max_bytes} bytes."
+        )
+
+    workspace = Path(os.environ.get("AGENT_WORKSPACE", os.getcwd())).resolve()
+    export_dir = workspace / "agent-exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    name = safe_name(args.name or source.name)
+    destination = export_dir / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}-{name}"
+    shutil.copy2(source, destination)
+    artifact_uri = f"agent-artifact://{destination.relative_to(workspace).as_posix()}"
+    public_url = ""
+    endpoint = os.environ.get("AGENT_UPLOAD_ENDPOINT", "").strip()
+
+    if endpoint:
+        parsed_endpoint = urlparse(endpoint)
+        if parsed_endpoint.scheme != "https" or not parsed_endpoint.netloc:
+            raise AgentToolError("AGENT_UPLOAD_ENDPOINT must be an absolute HTTPS URL.")
+        curl_args = [
+            command_path("curl"),
+            "--fail-with-body",
+            "--silent",
+            "--show-error",
+            "--max-time", str(args.timeout),
+            "--request", "POST",
+            "--header", "Accept: application/json",
+        ]
+        token = os.environ.get("AGENT_UPLOAD_TOKEN", "")
+        if token:
+            curl_args.extend(["--header", f"Authorization: Bearer {token}"])
+        mime = mimetypes.guess_type(destination.name)[0] or "application/octet-stream"
+        curl_args.extend([
+            "--form", f"file=@{destination};type={mime}",
+            "--form", f"name={name}",
+            endpoint,
+        ])
+        try:
+            response = run_checked(curl_args, timeout=args.timeout)
+        except AgentToolError as error:
+            raise AgentToolError(
+                "The configured first-party upload endpoint rejected the file."
+            ) from error
+        try:
+            payload = json.loads(response.stdout.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise AgentToolError("Upload endpoint did not return JSON.") from error
+        public_url = extract_url(payload)
+        if not public_url:
+            raise AgentToolError("Upload endpoint response did not contain a public HTTPS URL.")
+    elif args.public:
+        raise AgentToolError(
+            "--public requires an operator-configured AGENT_UPLOAD_ENDPOINT. "
+            f"The file was staged at {artifact_uri}."
+        )
+
+    result = {
+        "ok": True,
+        "input": str(source),
+        "path": str(destination),
+        "bytes": size,
+        "artifactUri": artifact_uri,
+        "url": public_url or None,
+        "public": bool(public_url),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(public_url or artifact_uri)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        fail_cleanly(error)

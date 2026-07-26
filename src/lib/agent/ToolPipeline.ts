@@ -109,6 +109,11 @@ import {
   type ResearchActivityEntry,
   type ResearchActivityKind,
 } from './ResearchActivityLog'
+import {
+  applyResearchPreflightRouteRecovery,
+  releaseSearchAfterDistinctSourceFailures,
+  researchSourceBalanceBlockReason,
+} from './ResearchPreflightRecovery'
 
 export interface ToolExecutionResult {
   tc: ToolCallData
@@ -118,7 +123,11 @@ export interface ToolExecutionResult {
   acceptedForExecution?: boolean
   cached?: boolean
   durationMs?: number
-  internalRecovery?: 'malformed_tool_arguments'
+  internalRecovery?: 'malformed_tool_arguments' | 'preflight_rejection'
+  /** Stable, non-secret metadata for a model action rejected before execution. */
+  preflightRejection?: {
+    code: string
+  }
 }
 
 import {
@@ -1000,45 +1009,6 @@ function singleWebSearchLimitBlockReason(
     return completedSearches >= fixedLimit || isFinalStep
       ? `INTERNAL_RECOVERY: ${toolName} was skipped because the user explicitly requested exactly ${fixedLimit} web ${plural}, not browsing or additional page reading. Do not mention this to the user. Use the existing search result data and finish the requested answer or deliverable.`
       : `INTERNAL_RECOVERY: ${toolName} was skipped because the user explicitly requested exactly ${fixedLimit} web ${plural}. Do not mention this to the user. Call web_search ${fixedLimit - completedSearches} more time${fixedLimit - completedSearches === 1 ? '' : 's'}, then finish without browsing result URLs.`
-  }
-
-  return null
-}
-
-function totalOpenedSourceReads(state: AgentStateData): number {
-  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
-}
-
-function researchSourceBalanceBlockReason(
-  toolName: string,
-  state: AgentStateData,
-): string | null {
-  if (toolName !== 'web_search') return null
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
-  if (currentStepWebSearchLimit(state) !== null || hasSingleWebSearchLimit(state)) return null
-  if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return null
-
-  const stepText = currentStepText(state)
-  const isResearchPhase =
-    state.currentPhase === 'research' ||
-    state.taskStrategy === 'research' ||
-    state.taskStrategy === 'analysis' ||
-    isResearchStepText(stepText)
-  if (!isResearchPhase) return null
-
-  const completedSearches = Math.max(
-    state.stepSearchQueries.size,
-    state.stepToolTypeCounts.get('web_search') || 0,
-  )
-  const openedSourceReads = totalOpenedSourceReads(state)
-  const sourceReadTools = [...SOURCE_EXTRACTION_TOOLS].join(', ')
-
-  if (completedSearches >= 1 && openedSourceReads === 0 && state.stepFailureCount < 2) {
-    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase has ${completedSearches} search result sets but no opened or extracted source pages yet. Use one of these source-reading tools next: ${sourceReadTools}. Extract concrete facts from the strongest result before searching again.`
-  }
-
-  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2) && state.stepFailureCount < 2) {
-    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase is leaning too heavily on search previews (${completedSearches} searches, ${openedSourceReads} opened/extracted sources). Read or extract another strong source page with ${sourceReadTools} before searching again.`
   }
 
   return null
@@ -2605,6 +2575,7 @@ export class ToolPipeline {
       const count = Array.isArray(resultArr) ? resultArr.length : 0
       trackSearchResult(state, count === 0)
       trackSearchQuery(state, query)
+      state.stepFailedSourceTargets.clear()
       logWork(state, `Used cached search: "${query}" → ${count} results`)
       this.recordResearchActivity(state, {
         tool: tc.name,
@@ -3749,9 +3720,28 @@ export class ToolPipeline {
         )
       }
     }
-    const preflightResult = (result: Record<string, unknown>, isError = true): ToolExecutionResult => {
+    const preflightResult = (
+      result: Record<string, unknown>,
+      isError = true,
+      rejectionCode = 'preflight',
+    ): ToolExecutionResult => {
       closeVisibleProvisionalStart(result)
-      return { tc, result, isError, durationMs: Date.now() - startTime }
+      const schedulesRouteRecovery = rejectionCode === 'research_source_balance'
+      if (schedulesRouteRecovery) {
+        applyResearchPreflightRouteRecovery(state, tc.name, rejectionCode)
+      }
+      return {
+        tc,
+        result,
+        isError,
+        durationMs: Date.now() - startTime,
+        ...(schedulesRouteRecovery
+          ? { internalRecovery: 'preflight_rejection' as const }
+          : {}),
+        preflightRejection: {
+          code: rejectionCode,
+        },
+      }
     }
 
     const explicitTaskToolConstraint = explicitTaskToolConstraintFromText(
@@ -4159,7 +4149,7 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
+      return preflightResult(errorResult, true, 'research_source_balance')
     }
 
     const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
@@ -4730,13 +4720,15 @@ export class ToolPipeline {
     }
 
     if (isError) {
-      // This counter is the shared escape hatch for research/source routing.
-      // Preflight rejections already increment it at their return sites; real
-      // handler failures must do the same so two blocked/exhausted source
-      // attempts can reopen web_search instead of trapping later paid turns
-      // inside source-only tools.
+      // General failure accounting remains separate from the distinct failed
+      // source URLs used by research route recovery below.
       state.stepFailureCount++
       const activityFailureUrl = researchUrlFromToolCall(tc.name, args, result) || activityUrl
+      releaseSearchAfterDistinctSourceFailures(
+        state,
+        tc.name,
+        activityFailureUrl || toolTargetFromArgs(args, result),
+      )
       if (activityKind && (activityQuery || activityFailureUrl)) {
         this.recordResearchActivity(state, {
           tool: tc.name,
@@ -4775,6 +4767,9 @@ export class ToolPipeline {
     if (tc.name === 'web_search') {
       const query = (args.query as string) || ''
       trackSearchQuery(state, query)
+      // A newly executed discovery search starts a new candidate pool. Source
+      // failures from the previous result set must not unlock another search.
+      state.stepFailedSourceTargets.clear()
       const resultArr = result as Array<{ title: string; url?: string; snippet?: string }> | undefined
       const count = Array.isArray(resultArr) ? resultArr.length : 0
       logWork(state, `Searched: "${query}" → ${count} results`)

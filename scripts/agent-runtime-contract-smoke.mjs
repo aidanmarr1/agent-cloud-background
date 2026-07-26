@@ -10,6 +10,7 @@ async function assertSourceContracts() {
   const [
     planManager,
     toolPipeline,
+    researchPreflightRecovery,
     browser,
     documentReader,
     streamConstants,
@@ -110,6 +111,7 @@ async function assertSourceContracts() {
   ] = await Promise.all([
     readFile(join(root, 'src/lib/agent/PlanManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/ResearchPreflightRecovery.ts'), 'utf8'),
     readFile(join(root, 'src/lib/browser.ts'), 'utf8'),
     readFile(join(root, 'src/lib/document.ts'), 'utf8'),
     readFile(join(root, 'src/lib/stream/constants.ts'), 'utf8'),
@@ -295,7 +297,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /emitFastStartPlan|fastStartPlannerSteps|fastStartAck/, 'planner must not emit local canned acknowledgement or plan fallbacks')
   assert.match(planManager, /repairPlannerResponse/, 'invalid planner output must be repaired by the planner model instead of local visible fallback steps')
   assert.doesNotMatch(agentLoop, /function shouldRunStartupResearchSearch|runStartupResearchSearch|STARTUP SEARCH COMPLETE|IMMEDIATE SOURCE SEARCH COMPLETE|firstReadableSearchResultUrl/, 'research startup must not use local bootstrap/source-search shortcuts')
-  assert.match(agentLoop, /const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction\(state\)[\s\S]*const requiredToolIntent = shouldRequireToolCall/, 'research and cadence phases must keep a model-selected tool-action intent instead of opening a prose-only window')
+  assert.match(agentLoop, /const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction\(state\)[\s\S]*let requiredToolIntent = shouldRequireToolCall/, 'research and cadence phases must keep a model-selected tool-action intent instead of opening a prose-only window')
   assert.match(agentLoop, /function supportsProviderRequiredToolChoice\(model: string\): boolean \{[\s\S]*ASSISTANT_PROVIDER !== 'openrouter' \|\| \/:exacto\$\/i\.test\(model\.trim\(\)\)[\s\S]*\}/, 'the pinned OpenRouter Exacto route must retain provider-required native tool calls while other OpenRouter routes remain optional')
   assert.match(agentLoop, /const useRequiredToolCall = requiredToolIntent[\s\S]*supportsProviderRequiredToolChoice\(model\)/, 'provider-forced tool choice must be gated by the exact active model route separately from the agent tool-action intent')
   assert.match(agentLoop, /compactResearchToolRequiredMessage[\s\S]*Choose the most useful source\/search\/browser\/document action/, 'research repairs must nudge the model to choose the evidence tool itself')
@@ -705,12 +707,16 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /synthesisPhaseResearchBlockReason/, 'tool pipeline must block research tools inside synthesis/write/deliverable phases')
   assert.match(toolPipeline, /is for synthesizing, writing, or delivering from existing work/, 'synthesis-phase recovery must tell the model to use existing work instead of gathering new sources')
   assert.match(toolPipeline, /researchSourceBalanceBlockReason/, 'research phases must balance search discovery with opened or extracted source pages')
-  assert.match(toolPipeline, /search result sets but no opened or extracted source pages yet/, 'research source balance must stop search-only chains before more searches')
-  assert.match(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch[\s\S]*completedSearches >= 1 && openedSourceReads === 0/, 'hot-path source tools must mirror the search/source balance guard')
+  assert.match(researchPreflightRecovery, /search result sets but no opened or extracted source pages yet/, 'research source balance must stop search-only chains before more searches')
+  assert.match(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch[\s\S]*researchSourceBalanceBlockReason\('web_search', state\) !== null/, 'hot-path source tools must use the same search/source balance decision as execution preflight')
   assert.match(agentLoop, /fastSourceActionToolsForState[\s\S]*needsOpenedSourceBeforeMoreSearch[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)/, 'hot-path source turns must remove web_search when an opened source is required next')
   assert.match(agentLoop, /hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'compact source-opening recovery must remove web_search while known result URLs are still unopened')
   assert.match(agentLoop, /SOURCE OPENING REQUIRED:[\s\S]*Do not call web_search again/, 'source-opening recovery prompt must forbid another search when known candidate URLs need opening')
-  assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request/, 'source-opening turns must expose the supported parallel extraction tools')
+  assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*browser_navigate/, 'source-opening turns must expose extraction and alternate rendered-navigation routes')
+  assert.match(researchPreflightRecovery, /latestSearchCandidateCount[\s\S]*latestCandidateCount > 0/, 'empty or failed searches must not demand an impossible source-opening action')
+  assert.match(researchPreflightRecovery, /stepFailedSourceTargets\.add\(normalizedTarget\)[\s\S]*stepFailedSourceTargets\.size < 2/, 'fresh search recovery must require two distinct normalized source failures')
+  assert.match(toolPipeline, /state\.stepFailedSourceTargets\.clear\(\)/, 'an executed discovery search must reset failures from the previous candidate pool')
+  assert.match(streamProcessor, /researchSourceBalanceBlockReason\(toolName, state\) !== null/, 'provisional search visibility must use the same source-balance decision as execution')
   assert.doesNotMatch(agentLoop, /youtube_transcript/, 'removed YouTube transcript tooling must not remain in runtime prompts or tool sets')
   assert.match(prompts, /After one or two good searches, read or extract the strongest result pages before searching more/, 'runtime prompt must frame web search as source discovery before extraction')
   assert.match(stepMessages, /Use web_search to discover candidates, then read\/extract the strongest source pages before searching more/, 'per-step research prompt must require source extraction after search discovery')
@@ -846,6 +852,10 @@ async function assertSourceContracts() {
   assert.doesNotMatch(eventDispatcher, /handleStepAdvance[\s\S]{0,180}this\.toolsSinceLastNarration = 0/, 'normal step transitions must not reset the global narration cadence')
   assert.match(eventDispatcher, /panelFocusIdForTool/, 'tool starts must resolve the active computer panel item id')
   assert.match(eventDispatcher, /setComputerPanelActiveItemId\(panelFocusIdForTool\(event\.name,\s*event\.id\)\)/, 'tool starts must focus their live computer panel item')
+  assert.doesNotMatch(eventDispatcher, /browserLiveActive|hasStreamingLiveBrowser/, 'a stale streaming browser item must not pin the Computer panel away from a newer visible action')
+  assert.equal((eventDispatcher.match(/setComputerPanelActiveItemId\(panelFocusIdForTool/g) || []).length, 1, 'parallel tool results must not reorder the live Computer focus')
+  assert.match(eventDispatcher, /Computer activity is independent of plan parsing[\s\S]*if \(isComputerPanelTool\(event\.name\)\)[\s\S]*openComputerPanel\(\)/, 'Computer placeholders must be created even when a tool start races ahead of the parsed plan')
+  assert.match(eventDispatcher, /event\.name === 'read_file' \|\| event\.name === 'read_attachment'/, 'attachment reads must get the same live file placeholder as ordinary reads')
   assert.match(eventDispatcher, /completedSearchPanelTitle/, 'completed search panel items must preserve the query-specific streaming title')
   assert.match(eventDispatcher, /concisePanelSubject\(event\.args\.query\)/, 'search panel placeholders must include the query that is being searched')
   assert.match(computerPanel, /computerPanelActiveItemId/, 'computer panel must honor explicit active item focus')
@@ -1131,7 +1141,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /FAST_ACTION_REQUEST_TIMEOUT_MS = 10_000/, 'non-source action starts must tolerate Gemini 3.5 Flash Lite provider selection without becoming long stalls')
   assert.match(agentLoop, /FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 12_000/, 'hot action retries must avoid rapid null-stream loops during ordinary provider variance')
   assert.match(agentLoop, /function isFastActionToolTurn/, 'agent loop must classify fast between-tool action turns centrally')
-  assert.match(agentLoop, /const fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast minimal-thinking lane by default')
+  assert.match(agentLoop, /let fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast minimal-thinking lane by default')
   assert.match(agentLoop, /HOT PATH ACTION TURN:[\s\S]*make exactly one native tool call[\s\S]*speed comes from choosing the next action quickly, not from doing less work/, 'fast action turns must explicitly ask lightweight models for immediate tool selection without reducing depth')
   assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*parallel batch of up to 3 source extraction calls[\s\S]*read_document or http_request/, 'source-action turns must allow one batch of three independent supported stateless source extractions')
   assert.match(agentLoop, /parallel_tool_calls:\s*allowParallelSourceToolCalls/, 'model parallel tool calls must be enabled only for source-action turns')
@@ -1428,7 +1438,7 @@ async function assertSourceContracts() {
   assert.match(agentState, /rawTool/, 'loop detection must expose the canonical internal tool name separately from the display label')
   assert.doesNotMatch(policyEngine, /sameTargetSourceReadLoop[\s\S]*state\.suppressedResearchToolName = sameTargetSourceReadLoop/, 'same-source read loops must not bypass research tool suppression and keep rereading the same source')
   assert.match(policyEngine, /state\.suppressedResearchToolName = loopCheck\.rawTool \|\| loopCheck\.tool/, 'research loop detection must suppress the canonical internal tool name, including same-source read_document loops')
-  assert.match(agentLoop, /state\.suppressedResearchToolName[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*activeTools = loopRecoveryToolForState\(state,\s*filtered\)/, 'compact research recovery must remove the repeated tool and keep the model on a different evidence route while the evidence floor is still incomplete')
+  assert.match(agentLoop, /state\.suppressedResearchToolName[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*activeTools = filtered\.length > 0[\s\S]*loopRecoveryToolForState\(state,\s*filtered\)[\s\S]*:\s*\[\]/, 'compact research recovery must remove the repeated tool and keep the model on a different evidence route while the evidence floor is still incomplete')
   assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*state\.suppressedResearchToolName === 'read_document'[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)[\s\S]*allowed\.delete\(state\.suppressedResearchToolName\)/, 'opened-source narrowing must widen to alternate source routes when read_document is the looped tool')
   assert.match(agentLoop, /!needsAlternateSourceRoute[\s\S]*hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'known candidate URLs must not hide web_search after a cached or failed source route needs alternate discovery')
   assert.match(agentLoop, /SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD\s*=\s*6/, 'source-opening loops must have a bounded escape threshold instead of alternating forever')
@@ -1442,7 +1452,7 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /failure\.tool === toolName[\s\S]*state\.stepLoopDetections >= 2[\s\S]*Do not alternate source-opening tools on the same URL/, 'same-source failures must not alternate between read and browser-open routes indefinitely')
   assert.match(toolPipeline, /const usefulResearchProgress =[\s\S]*usableBrowserEvidence[\s\S]*if \(usefulResearchProgress\)[\s\S]*state\.stepResearchCallCount\+\+[\s\S]*usefulResearchProgress[\s\S]*state\.suppressedResearchToolName/, 'loop suppression must clear only after useful evidence, not a bare source-open attempt')
   assert.match(toolPipeline, /A cache hit replays evidence already counted[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = tc\.name[\s\S]*state\.stepLoopDetections \+= 1/, 'a cached research replay must immediately suppress the repeated route so the next paid turn can select alternate evidence')
-  assert.match(toolPipeline, /if \(isError\) \{\s*\/\/ This counter is the shared escape hatch[\s\S]*?state\.stepFailureCount\+\+[\s\S]*?trackFailure\(state, tc\.name/, 'real tool failures must feed the existing per-step alternate-route escape instead of leaving research source-locked')
+  assert.match(toolPipeline, /if \(isError\) \{[\s\S]*?state\.stepFailureCount\+\+[\s\S]*?releaseSearchAfterDistinctSourceFailures\([\s\S]*?trackFailure\(state, tc\.name/, 'real tool failures must feed distinct-target alternate-route recovery instead of leaving research source-locked')
   assert.match(toolPipeline, /tc\.name !== state\.suppressedResearchToolName[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = null/, 'successful different research tools must clear temporary loop suppression')
   assert.match(agentLoop, /MINIMAL_THINKING_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'non-narration agent turns must stay on minimal thinking')
   assert.doesNotMatch(agentLoop, /enabled: false as const, exclude: true/, 'Gemini 3.5 Flash Lite requests must not disable its mandatory reasoning mode')
@@ -1467,7 +1477,10 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /EXACT EXTRACTION REQUIRED BEFORE NARRATION/, 'exact wording/date extraction risk must be handled before progress narration')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*state\.exactExtractionGuardPending\) return false/, 'exact extraction guard must be evaluated before compact cadence narration')
   assert.match(agentLoop, /EXACT_EXTRACTION_TOOLS[\s\S]*?browser_find_text[\s\S]*?browser_screenshot[\s\S]*?browser_get_content/, 'exact extraction guard must restrict the model to visual/text extraction tools')
-  assert.match(agentLoop, /state\.exactExtractionGuardPending[\s\S]*const requiredToolIntent = shouldRequireToolCall/, 'exact extraction and cadence turns must keep a concrete extraction tool intent')
+  assert.match(agentLoop, /state\.exactExtractionGuardPending[\s\S]*let requiredToolIntent = shouldRequireToolCall/, 'exact extraction and cadence turns must keep a concrete extraction tool intent')
+  assert.match(agentLoop, /requiredToolIntent = requiredToolIntent && activeTools\.length > 0/, 'final tool narrowing must not leave provider-required tool choice enabled with an empty menu')
+  assert.match(agentLoop, /compactResearchNeedsOpenedSource[\s\S]*stepFailedSourceTargets\.size >= 2[\s\S]*return false/, 'two distinct source failures must remove the stale source-opening-only prompt before discovery reopens')
+  assert.match(agentLoop, /fastActionTurn = fastActionTurn && activeTools\.length > 0[\s\S]*fastSourceActionTurn = fastSourceActionTurn && activeTools\.length > 0/, 'empty final tool menus must disable hot-path tool-only prompts and request limits')
   assert.match(agentLoop, /state\.exactExtractionGuardPending = true[\s\S]*state\.exactExtractionGuardPrompt =/, 'arming exact extraction must retain a concrete guard that suppresses narration until evidence is extracted')
   assert.match(agentLoop, /tool_choice:\s*'required'/, 'provider-forced tool choice should remain available only when the active provider supports it')
   assert.match(agentLoop, /isLeanFinalSynthesisStep/, 'final research synthesis must use a lean deliverable-only tool set')
@@ -2933,6 +2946,13 @@ export async function runLedgerSmoke() {
   searchBalanceState.stepSearchQueries.add('agentic ai market size 2026')
   searchBalanceState.stepSearchQueries.add('agentic ai enterprise adoption 2026')
   searchBalanceState.stepToolTypeCounts.set('web_search', 2)
+  searchBalanceState.workLedger.searchResults.push({
+    stepIdx: 0,
+    query: 'agentic ai enterprise adoption 2026',
+    domain: 'example.com',
+    url: 'https://example.com/agentic-ai-adoption',
+    createdAt: Date.now(),
+  })
   const searchBalancePipeline = new ToolPipeline(searchBalanceEmitter as any, 'search-balance-smoke')
   const searchBalanceResults = await searchBalancePipeline.executeAll(new Map([[0, {
     id: 'search-balance-extra-search',

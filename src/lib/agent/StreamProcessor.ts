@@ -1,6 +1,5 @@
 import type { AgentEventEmitter } from './SSEEmitter'
 import type { AgentStateData } from './AgentState'
-import { stepOpenedSourceDomains } from './AgentState'
 import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
@@ -12,6 +11,7 @@ import {
   reviewProgressNarration,
   stripCadenceProgressUpdateFromArguments,
 } from './NarrationMemory'
+import { researchSourceBalanceBlockReason } from './ResearchPreflightRecovery'
 
 export interface ToolCallData {
   id: string
@@ -364,10 +364,6 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
   return sanitizeToolStartArgs(toolName, args)
 }
 
-function totalOpenedSourceReads(state: AgentStateData): number {
-  return [...stepOpenedSourceDomains(state).values()].reduce((sum, count) => sum + count, 0)
-}
-
 function searchWouldBePreflightBlocked(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
   if (toolName !== 'web_search') return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
@@ -376,15 +372,7 @@ function searchWouldBePreflightBlocked(toolName: string, args: Record<string, un
   const query = typeof args.query === 'string' ? args.query.toLowerCase().trim() : ''
   if (query && state.stepSearchQueries.has(query)) return true
 
-  const completedSearches = Math.max(
-    state.stepSearchQueries.size,
-    state.stepToolTypeCounts.get('web_search') || 0,
-  )
-  const openedSourceReads = totalOpenedSourceReads(state)
-
-  if (completedSearches >= 1 && openedSourceReads === 0 && state.stepFailureCount < 2) return true
-  if (completedSearches >= 4 && openedSourceReads < Math.floor(completedSearches / 2) && state.stepFailureCount < 2) return true
-  return false
+  return researchSourceBalanceBlockReason(toolName, state) !== null
 }
 
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {

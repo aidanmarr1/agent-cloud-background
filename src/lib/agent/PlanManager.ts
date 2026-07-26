@@ -1563,6 +1563,7 @@ Generate an updated list of remaining steps (including a revised current step if
           }
           state.replanCount++
           state.stepFailureCount = 0
+          state.stepFailedSourceTargets = new Set()
           updatePhase(state)
           setWorkLedgerObjective(state)
           setWorkLedgerRequirements(state, this.buildInitialRequirements(updatedPlan, state.currentPlanScopes || null))
@@ -1810,6 +1811,7 @@ Generate an updated list of remaining steps (starting from a revised current ste
           }
           state.replanCount++
           state.stepFailureCount = 0
+          state.stepFailedSourceTargets = new Set()
           state.infoReplanCooldown = INFO_REPLAN_COOLDOWN_ITERATIONS
           state.lastInfoReplanIteration = state.iterations
           updatePhase(state)

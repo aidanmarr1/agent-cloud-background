@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve()
+LIB = Path("/opt/agent/lib")
+if not LIB.is_dir():
+    LIB = HERE.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from agent_tools.common import (  # noqa: E402
+    AgentToolError,
+    command_path,
+    existing_file,
+    fail_cleanly,
+    positive_int_env,
+    run_checked,
+    write_text_atomic,
+)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description="Transcribe an audio or video file locally with whisper.cpp."
+    )
+    result.add_argument("input", help="Input audio or video file")
+    result.add_argument("-o", "--output", help="Write transcript to this path; defaults to stdout")
+    result.add_argument(
+        "--model",
+        default=os.environ.get("AGENT_WHISPER_MODEL", "/opt/agent/models/ggml-base.en.bin"),
+        help="whisper.cpp GGML model path",
+    )
+    result.add_argument("--language", default=os.environ.get("AGENT_TRANSCRIPTION_LANGUAGE", "en"))
+    result.add_argument("--timestamps", action="store_true", help="Keep segment timestamps")
+    result.add_argument("--json", action="store_true", help="Print structured JSON")
+    result.add_argument(
+        "--threads",
+        type=int,
+        default=min(positive_int_env("AGENT_TRANSCRIPTION_THREADS", os.cpu_count() or 2), 12),
+    )
+    result.add_argument(
+        "--timeout",
+        type=int,
+        default=positive_int_env("AGENT_MEDIA_TIMEOUT_SECONDS", 600),
+        help="Transcription safety timeout in seconds",
+    )
+    result.add_argument(
+        "--max-seconds",
+        type=int,
+        default=positive_int_env("AGENT_MEDIA_MAX_SECONDS", 7_200),
+        help="Reject media longer than this many seconds",
+    )
+    return result
+
+
+def media_duration(source: Path, timeout: int) -> float:
+    result = run_checked(
+        [
+            command_path("ffprobe"),
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            source,
+        ],
+        timeout=min(timeout, 30),
+    )
+    try:
+        return max(0.0, float(result.stdout.decode().strip()))
+    except ValueError:
+        return 0.0
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if args.threads <= 0 or args.timeout <= 0 or args.max_seconds <= 0:
+        raise AgentToolError("--threads, --timeout, and --max-seconds must be positive.")
+    source = existing_file(args.input)
+    model = existing_file(args.model)
+    duration = media_duration(source, args.timeout)
+    if duration > args.max_seconds:
+        raise AgentToolError(
+            f"Media is {duration:.1f}s; the configured limit is {args.max_seconds}s."
+        )
+
+    with tempfile.TemporaryDirectory(prefix="agent-stt-") as temp_name:
+        temp_dir = Path(temp_name)
+        wav = temp_dir / "audio.wav"
+        run_checked(
+            [
+                command_path("ffmpeg"),
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-i", source,
+                "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+                wav,
+            ],
+            timeout=min(args.timeout, 120),
+        )
+        prefix = temp_dir / "transcript"
+        whisper_args = [
+            command_path("whisper-cli"),
+            "--model", model,
+            "--file", wav,
+            "--language", args.language,
+            "--threads", str(args.threads),
+            "--output-txt",
+            "--output-file", prefix,
+        ]
+        if not args.timestamps:
+            whisper_args.append("--no-timestamps")
+        run_checked(whisper_args, timeout=args.timeout)
+        transcript_path = prefix.with_suffix(".txt")
+        if not transcript_path.is_file():
+            raise AgentToolError("whisper.cpp completed without producing a transcript.")
+        transcript = transcript_path.read_text(encoding="utf-8", errors="replace").strip()
+
+    if args.output:
+        output = Path(args.output).expanduser().resolve()
+        write_text_atomic(output, transcript + ("\n" if transcript else ""))
+    else:
+        output = None
+
+    if args.json:
+        print(json.dumps({
+            "ok": True,
+            "input": str(source),
+            "output": str(output) if output else None,
+            "model": str(model),
+            "language": args.language,
+            "durationSeconds": round(duration, 3),
+            "text": transcript,
+        }, ensure_ascii=False, indent=2))
+    elif output:
+        print(output)
+    else:
+        print(transcript)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        fail_cleanly(error)
+

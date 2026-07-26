@@ -39,6 +39,7 @@ export type SSEEventPayload =
   | { type: 'follow_ups'; suggestions: FollowUpSuggestion[] }
   | { type: 'artifact_created'; artifact: Artifact }
   | { type: 'credit_event'; entry: CreditLedgerEvent }
+  | { type: 'diagnostic'; name: string; data: Record<string, unknown> }
   | { type: 'step_advance'; status?: StepAdvanceStatus; reason?: string }
   | { type: 'done'; usage?: CreditTokenUsage }
   | { type: 'error'; message: string }

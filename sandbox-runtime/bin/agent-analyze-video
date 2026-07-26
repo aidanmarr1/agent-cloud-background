@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import math
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve()
+LIB = Path("/opt/agent/lib")
+if not LIB.is_dir():
+    LIB = HERE.parents[1] / "lib"
+sys.path.insert(0, str(LIB))
+
+from agent_tools.common import (  # noqa: E402
+    AgentToolError,
+    bounded_join,
+    command_path,
+    existing_file,
+    fail_cleanly,
+    positive_int_env,
+    run_checked,
+    write_text_atomic,
+)
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(
+        description=(
+            "Build a bounded video evidence report from metadata, sampled frames, OCR, "
+            "and local speech transcription; optionally add an OpenAI-compatible vision summary."
+        )
+    )
+    result.add_argument("input", help="Input video file")
+    result.add_argument("-o", "--output", help="Markdown report path")
+    result.add_argument(
+        "--frames",
+        type=int,
+        default=positive_int_env("AGENT_VIDEO_SAMPLE_FRAMES", 8),
+        help="Number of evenly sampled frames (maximum 16)",
+    )
+    result.add_argument(
+        "--ai",
+        choices=("auto", "required", "off"),
+        default="auto",
+        help="Use a configured OpenAI-compatible vision model",
+    )
+    result.add_argument(
+        "--model",
+        default=os.environ.get("AGENT_VISION_MODEL", "gpt-4o-mini"),
+        help="Vision model when --ai is enabled",
+    )
+    result.add_argument("--json", action="store_true", help="Print structured JSON")
+    result.add_argument(
+        "--timeout",
+        type=int,
+        default=positive_int_env("AGENT_MEDIA_TIMEOUT_SECONDS", 600),
+    )
+    result.add_argument(
+        "--max-seconds",
+        type=int,
+        default=positive_int_env("AGENT_MEDIA_MAX_SECONDS", 7_200),
+    )
+    return result
+
+
+def probe(source: Path, timeout: int) -> dict[str, Any]:
+    result = run_checked(
+        [
+            command_path("ffprobe"),
+            "-v", "error",
+            "-show_format",
+            "-show_streams",
+            "-of", "json",
+            source,
+        ],
+        timeout=min(timeout, 30),
+    )
+    try:
+        payload = json.loads(result.stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AgentToolError("ffprobe returned invalid metadata.") from error
+    return payload if isinstance(payload, dict) else {}
+
+
+def duration_from_probe(payload: dict[str, Any]) -> float:
+    try:
+        return max(0.0, float(payload.get("format", {}).get("duration", 0)))
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+
+
+def video_stream(payload: dict[str, Any]) -> dict[str, Any]:
+    streams = payload.get("streams")
+    if not isinstance(streams, list):
+        return {}
+    return next(
+        (item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"),
+        {},
+    )
+
+
+def frame_times(duration: float, count: int) -> list[float]:
+    if duration <= 0:
+        return [0.0]
+    return [duration * (index + 1) / (count + 1) for index in range(count)]
+
+
+def sample_frames(
+    source: Path,
+    temp_dir: Path,
+    duration: float,
+    count: int,
+    timeout: int,
+) -> list[tuple[float, Path]]:
+    frames: list[tuple[float, Path]] = []
+    for index, timestamp in enumerate(frame_times(duration, count), start=1):
+        frame = temp_dir / f"frame-{index:02d}.jpg"
+        run_checked(
+            [
+                command_path("ffmpeg"),
+                "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                "-ss", f"{timestamp:.3f}",
+                "-i", source,
+                "-frames:v", "1",
+                "-vf", "scale='min(960,iw)':-2",
+                "-q:v", "4",
+                frame,
+            ],
+            timeout=min(timeout, 60),
+        )
+        if frame.is_file() and frame.stat().st_size > 0:
+            frames.append((timestamp, frame))
+    return frames
+
+
+def ocr_frames(frames: list[tuple[float, Path]], timeout: int) -> list[dict[str, Any]]:
+    tesseract = command_path("tesseract")
+    results: list[dict[str, Any]] = []
+    for timestamp, frame in frames:
+        try:
+            result = run_checked(
+                [tesseract, frame, "stdout", "--psm", "6", "-l", "eng"],
+                timeout=min(timeout, 30),
+            )
+            text = result.stdout.decode("utf-8", errors="replace").strip()
+        except AgentToolError:
+            text = ""
+        results.append({"seconds": round(timestamp, 3), "text": text})
+    return results
+
+
+def transcribe(source: Path, temp_dir: Path, timeout: int) -> tuple[str, str]:
+    transcript_path = temp_dir / "transcript.txt"
+    try:
+        run_checked(
+            [
+                command_path("agent-speech-to-text"),
+                source,
+                "--output", transcript_path,
+                "--timeout", str(timeout),
+            ],
+            timeout=timeout + 30,
+        )
+        return transcript_path.read_text(encoding="utf-8", errors="replace").strip(), ""
+    except AgentToolError as error:
+        return "", str(error)
+
+
+def create_contact_sheet(
+    frames: list[tuple[float, Path]],
+    destination: Path,
+    timeout: int,
+) -> Path | None:
+    if not frames:
+        return None
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    columns = min(4, max(1, math.ceil(math.sqrt(len(frames)))))
+    partial = destination.with_name(f".{destination.name}.{os.getpid()}.partial.jpg")
+    try:
+        run_checked(
+            [
+                command_path("montage"),
+                *[frame for _, frame in frames],
+                "-tile", f"{columns}x",
+                "-geometry", "320x+6+6",
+                "-background", "#ffffff",
+                partial,
+            ],
+            timeout=min(timeout, 90),
+        )
+        if not partial.is_file() or partial.stat().st_size <= 0:
+            return None
+        partial.replace(destination)
+        return destination
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def ai_summary(
+    *,
+    frames: list[tuple[float, Path]],
+    transcript: str,
+    ocr: list[dict[str, Any]],
+    model: str,
+    required: bool,
+) -> tuple[str, str]:
+    key = os.environ.get("AGENT_VISION_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if not key:
+        if required:
+            raise AgentToolError(
+                "--ai required needs AGENT_VISION_API_KEY or OPENAI_API_KEY."
+            )
+        return "", "No vision API key was configured; local evidence report only."
+    try:
+        from openai import OpenAI
+    except ImportError as error:
+        if required:
+            raise AgentToolError("The OpenAI Python client is not installed.") from error
+        return "", "OpenAI client unavailable; local evidence report only."
+
+    base_url = os.environ.get("AGENT_VISION_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    client_options: dict[str, Any] = {"api_key": key, "timeout": 90.0}
+    if base_url:
+        client_options["base_url"] = base_url
+    client = OpenAI(**client_options)
+    prompt = (
+        "Analyze this video evidence. State the main events, visible text, spoken content, "
+        "important changes over time, and uncertainties. Do not infer facts that the sampled "
+        "frames or transcript do not support.\n\n"
+        f"Transcript:\n{transcript[:12_000] or '[none]'}\n\n"
+        f"Frame OCR:\n{json.dumps(ocr, ensure_ascii=False)[:6_000]}"
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for timestamp, frame in frames[:8]:
+        encoded = base64.b64encode(frame.read_bytes()).decode("ascii")
+        content.append({
+            "type": "text",
+            "text": f"Frame sampled at {timestamp:.2f} seconds:",
+        })
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{encoded}", "detail": "low"},
+        })
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=1_500,
+        )
+        text = response.choices[0].message.content or ""
+        return text.strip(), ""
+    except Exception as error:
+        if required:
+            raise AgentToolError(
+                "Vision analysis failed. Verify the configured endpoint, model, and credentials."
+            ) from error
+        return "", (
+            "Vision analysis failed; local evidence report only. "
+            "Verify the configured endpoint, model, and credentials."
+        )
+
+
+def markdown_report(
+    source: Path,
+    payload: dict[str, Any],
+    duration: float,
+    contact_sheet: Path | None,
+    ocr: list[dict[str, Any]],
+    transcript: str,
+    transcript_warning: str,
+    summary: str,
+    ai_warning: str,
+) -> str:
+    stream = video_stream(payload)
+    format_data = payload.get("format") if isinstance(payload.get("format"), dict) else {}
+    lines = [f"# Video analysis: {source.name}", ""]
+    if summary:
+        lines.extend(["## AI-assisted summary", "", summary, ""])
+    lines.extend([
+        "## Media metadata",
+        "",
+        f"- Duration: {duration:.3f} seconds",
+        f"- Container: {format_data.get('format_long_name') or format_data.get('format_name') or 'unknown'}",
+        f"- Video codec: {stream.get('codec_long_name') or stream.get('codec_name') or 'unknown'}",
+        f"- Dimensions: {stream.get('width', '?')} × {stream.get('height', '?')}",
+        f"- Contact sheet: {contact_sheet.name if contact_sheet else 'not produced'}",
+        "",
+        "## Sampled-frame OCR",
+        "",
+    ])
+    found_ocr = False
+    for item in ocr:
+        text = str(item.get("text") or "").strip()
+        if text:
+            found_ocr = True
+            lines.extend([f"### {float(item['seconds']):.3f}s", "", text, ""])
+    if not found_ocr:
+        lines.extend(["No legible text was detected in the sampled frames.", ""])
+    lines.extend(["## Speech transcript", "", transcript or "No transcript was produced.", ""])
+    warnings = [warning for warning in (transcript_warning, ai_warning) if warning]
+    if warnings:
+        lines.extend(["## Processing notes", ""])
+        lines.extend(f"- {warning}" for warning in warnings)
+        lines.append("")
+    lines.extend([
+        "## Scope",
+        "",
+        "This report samples frames rather than inspecting every frame. Treat absent events as "
+        "unobserved, not disproven.",
+        "",
+    ])
+    return "\n".join(lines)
+
+
+def main() -> None:
+    args = parser().parse_args()
+    if args.frames <= 0 or args.frames > 16:
+        raise AgentToolError("--frames must be between 1 and 16.")
+    if args.timeout <= 0 or args.max_seconds <= 0:
+        raise AgentToolError("--timeout and --max-seconds must be positive.")
+    source = existing_file(args.input)
+    output = (
+        Path(args.output).expanduser().resolve()
+        if args.output
+        else source.with_suffix(".analysis.md")
+    )
+    if output.suffix.lower() not in {".md", ".markdown"}:
+        raise AgentToolError("Output must end in .md or .markdown.")
+
+    metadata = probe(source, args.timeout)
+    duration = duration_from_probe(metadata)
+    if duration > args.max_seconds:
+        raise AgentToolError(
+            f"Video is {duration:.1f}s; the configured limit is {args.max_seconds}s."
+        )
+    with tempfile.TemporaryDirectory(prefix="agent-video-") as temp_name:
+        temp_dir = Path(temp_name)
+        frames = sample_frames(source, temp_dir, duration, args.frames, args.timeout)
+        if not frames:
+            raise AgentToolError("No video frames could be decoded.")
+        ocr = ocr_frames(frames, args.timeout)
+        transcript, transcript_warning = transcribe(source, temp_dir, args.timeout)
+        contact_sheet_path = output.with_name(f"{output.stem}.contact-sheet.jpg")
+        contact_sheet = create_contact_sheet(
+            frames, contact_sheet_path, args.timeout
+        )
+        if args.ai == "off":
+            summary, ai_warning = "", "AI-assisted summary was disabled."
+        else:
+            summary, ai_warning = ai_summary(
+                frames=frames,
+                transcript=transcript,
+                ocr=ocr,
+                model=args.model,
+                required=args.ai == "required",
+            )
+        report = markdown_report(
+            source,
+            metadata,
+            duration,
+            contact_sheet,
+            ocr,
+            transcript,
+            transcript_warning,
+            summary,
+            ai_warning,
+        )
+    write_text_atomic(output, report)
+
+    result = {
+        "ok": True,
+        "input": str(source),
+        "output": str(output),
+        "contactSheet": str(contact_sheet) if contact_sheet else None,
+        "durationSeconds": round(duration, 3),
+        "sampledFrames": len(ocr),
+        "transcriptCharacters": len(transcript),
+        "aiAssisted": bool(summary),
+        "notes": bounded_join([transcript_warning, ai_warning], 2_000),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print(output)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except BaseException as error:
+        fail_cleanly(error)
