@@ -2719,6 +2719,20 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   // fail the entire task. Deep/wide work retains the stricter recovery floor.
   const depth = researchDepthProfileForState(state)
 
+  // A first-party claims/ingredients extraction phase is complete once the
+  // supplied authoritative page has been opened and read. Task-wide depth must
+  // not force duplicate reads of that one page; independent evidence belongs
+  // in the later evaluation phases.
+  const activeStep = currentStepText(state)
+  const singleAuthoritativeClaimsPacket =
+    /\bextract\b/i.test(activeStep) &&
+    /\b(?:claims?|ingredients?|specifications?|features?|manufacturer|product)\b/i.test(activeStep) &&
+    state.stepResearchCallCount >= 2 &&
+    state.stepToolCallCount >= 2 &&
+    state.stepVisitedUrls.size >= 1 &&
+    stepOpenedSourceDomains(state).size >= 1
+  if (singleAuthoritativeClaimsPacket) return true
+
   // A later evidence angle can exhaust several distinct searches while its
   // review/catalog pages reject extraction. When earlier phases already opened
   // real sources, retain that verified task-level evidence and advance after a
@@ -2737,21 +2751,6 @@ function canAdvanceResearchAfterPaidNoProgress(state: AgentStateData): boolean {
   if (exhaustedLaterPhaseDiscoveryPacket) return true
 
   if (depth.label === 'deep' || depth.label === 'wide') return false
-
-  // A first-party claims/ingredients extraction phase is complete once the
-  // supplied authoritative page has been opened and read. Do not force the
-  // model to reread that same page merely to satisfy a cross-source threshold;
-  // independent evidence belongs in the later evaluation phases. This remains
-  // unavailable to deep/wide research and to the final synthesis step.
-  const activeStep = currentStepText(state)
-  const singleAuthoritativeClaimsPacket =
-    /\bextract\b/i.test(activeStep) &&
-    /\b(?:claims?|ingredients?|specifications?|features?|manufacturer|product)\b/i.test(activeStep) &&
-    state.stepResearchCallCount >= 2 &&
-    state.stepToolCallCount >= 2 &&
-    state.stepVisitedUrls.size >= 1 &&
-    stepOpenedSourceDomains(state).size >= 1
-  if (singleAuthoritativeClaimsPacket) return true
 
   const multiSourcePacket = state.stepResearchCallCount >= 3 &&
     state.stepVisitedUrls.size >= 2 &&

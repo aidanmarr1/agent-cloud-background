@@ -30,6 +30,10 @@ assert.match(
   /singleAuthoritativeClaimsPacket[\s\S]*\\bextract\\b[\s\S]*stepResearchCallCount >= 2[\s\S]*stepVisitedUrls\.size >= 1/,
   'a bounded first-party claims extraction phase must advance after one authoritative page is opened and read',
 )
+assert.ok(
+  loopSource.indexOf('singleAuthoritativeClaimsPacket') < loopSource.indexOf("if (depth.label === 'deep' || depth.label === 'wide') return false"),
+  'task-wide deep research must not block completion of a bounded first-party claims extraction phase',
+)
 assert.match(
   loopSource,
   /exhaustedLaterPhaseDiscoveryPacket[\s\S]*depth\.label !== 'wide'[\s\S]*stepResearchCallCount >= 4[\s\S]*stepToolCallCount >= 6[\s\S]*stepSearchQueries\.size >= 4[\s\S]*stepSourceDomainCounts\.size >= 3/,
