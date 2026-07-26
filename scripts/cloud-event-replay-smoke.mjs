@@ -63,8 +63,12 @@ function assert(condition, message) {
 }
 
 function assertContiguousSeq(events) {
+  const unsequenced = events.filter((event) => !Number.isFinite(Number(event.seq)))
+  assert(
+    unsequenced.every((event) => event.type === 'heartbeat' || event.type === 'browser_frame'),
+    'Only transport heartbeats and ephemeral browser frames may be unsequenced.',
+  )
   const seqs = events.map((event) => Number(event.seq)).filter(Number.isFinite)
-  assert(seqs.length === events.length, 'Every replayed event must have a sequence number.')
   for (let index = 0; index < seqs.length; index += 1) {
     assert(seqs[index] === index + 1, `Persisted event sequence has a gap at index ${index}: ${seqs.join(', ')}`)
   }
@@ -97,6 +101,7 @@ const { tursoExecute } = await jiti.import(fileURLToPath(new URL('../src/lib/db/
 const userId = `internal-background-smoke-${randomUUID()}`
 const conversationId = `internal-background-smoke-${randomUUID()}`
 const runId = `background-smoke-${randomUUID()}`
+const workerId = `event-smoke-worker-${queueName}`
 const hugeText = 'x'.repeat(620_000)
 let cleanedUp = false
 
@@ -105,6 +110,11 @@ console.log('This smoke writes diagnostic rows to Turso but does not call the LL
 
 async function forceCleanup() {
   await tursoExecute('delete from agent_task_events where run_id = ?', [runId]).catch(() => undefined)
+  await tursoExecute('delete from agent_task_live_frames where run_id = ?', [runId]).catch(() => undefined)
+  await tursoExecute(
+    'delete from agent_task_workers where worker_id = ? and queue_name = ?',
+    [workerId, queueName],
+  ).catch(() => undefined)
   await tursoExecute(
     'delete from agent_task_jobs where user_id = ? and run_id = ? and queue_name = ?',
     [userId, runId, queueName],
@@ -123,7 +133,6 @@ try {
     },
   })
 
-  const workerId = `event-smoke-worker-${queueName}`
   await recordTaskWorkerHeartbeat({
     workerId,
     startedAtMs: Date.now(),
@@ -163,7 +172,7 @@ try {
     [runId],
   )
   const persistedEvents = rows.rows.map((row) => JSON.parse(String(row.event_json)))
-  assert(persistedEvents.length === 6, `Expected 6 persisted events, got ${persistedEvents.length}.`)
+  assert(persistedEvents.length === 5, `Expected 5 durable events, got ${persistedEvents.length}.`)
   assertContiguousSeq(persistedEvents)
   assert(
     persistedEvents.every((event) => JSON.stringify(event).length <= 256 * 1024),
@@ -173,11 +182,21 @@ try {
   const toolResult = persistedEvents.find((event) => event.type === 'tool_result')
   const terminalOutput = persistedEvents.find((event) => event.type === 'terminal_output')
   const artifactCreated = persistedEvents.find((event) => event.type === 'artifact_created')
-  const browserFallback = persistedEvents.find((event) => event.seq === 3)
   assert(toolResult?.result?.content?.includes('[truncated'), 'Oversized tool result content must be compacted, not dropped.')
   assert(terminalOutput?.data?.includes('[truncated'), 'Oversized terminal output must be compacted, not dropped.')
   assert(artifactCreated?.artifact?.content?.includes('[truncated'), 'Oversized artifact content must be compacted, not dropped.')
-  assert(browserFallback?.type === 'heartbeat', 'Oversized live browser frames should persist as sequence-preserving heartbeats.')
+  assert(
+    !persistedEvents.some((event) => event.type === 'browser_frame'),
+    'Ephemeral browser frames must not consume the durable task-event sequence.',
+  )
+  const liveFrames = await tursoExecute(
+    'select count(*) as frame_count from agent_task_live_frames where run_id = ?',
+    [runId],
+  )
+  assert(
+    Number(liveFrames.rows[0]?.frame_count || 0) === 0,
+    'Terminal completion must clear independently persisted live browser frames.',
+  )
 
   const stream = createTaskJobEventStream({ userId, conversationId, runId, afterSeq: 0 })
   const replayedEvents = await readStreamEvents(stream, (event) => event.type === 'done')
@@ -191,6 +210,10 @@ try {
   if (!cleanedUp) {
     throw new Error('Event replay smoke completed but diagnostic rows were not cleaned up.')
   }
+  await tursoExecute(
+    'delete from agent_task_workers where worker_id = ? and queue_name = ?',
+    [workerId, queueName],
+  )
 
   console.log(JSON.stringify({
     ok: true,

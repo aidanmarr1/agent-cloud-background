@@ -169,7 +169,11 @@ assert.match(taskWorker, /AGENT_TASK_WORKER_STALE_MS must exceed heartbeat \+ ca
 assert.match(taskWorkerSupervisor, /spawn\(process\.execPath, \[workerEntry, \.\.\.workerArgs\]/, 'the supervisor must run the fenced worker in a replaceable child process')
 assert.match(taskWorkerSupervisor, /Worker exited unexpectedly; restarting/, 'the supervisor must replace a worker after a deliberate hard exit')
 assert.match(taskWorkerSupervisor, /process\.once\('SIGTERM'[\s\S]*stop\('SIGTERM'\)/, 'the supervisor must forward hosted-worker shutdown signals without restarting')
-assert.match(taskWorkerSupervisor, /AGENT_TASK_WORKER_CONCURRENCY[\s\S]*const concurrency = runOnce \? 1 : configuredConcurrency/, 'the supervisor must provide configurable persistent capacity while preserving one-shot semantics')
+assert.match(
+  taskWorkerSupervisor,
+  /AGENT_TASK_WORKER_CONCURRENCY[\s\S]*const concurrency = runOnce \|\| runDrain \? 1 : configuredConcurrency/,
+  'the supervisor must provide configurable persistent capacity while preserving one-shot and exact-run drain semantics',
+)
 assert.match(taskWorkerSupervisor, /slots\.map\(\(slot\) => runWorkerSlot\(slot\)\)/, 'the supervisor must run independent persistent worker slots')
 assert.match(taskWorkerSupervisor, /if \(runOnce\)[\s\S]*process\.exitCode = await runWorkerSlot\(slots\[0\]\)/, 'the supervisor must stop after an explicit one-shot worker')
 assert.doesNotMatch(taskWorkerSupervisor, /if \(exitCode === 0/, 'a clean long-running worker exit must still be treated as an outage and restarted')
@@ -234,7 +238,11 @@ assert.ok(workerGateIndex > guardCallIndex && workerGateIndex < enqueueIndex, 'w
 assert.ok(activeJobGuardIndex > guardCallIndex && activeJobGuardIndex < enqueueIndex, 'same-conversation durable work must gate enqueue')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'background task enqueue must not use the old worker-side startup-plan patch handoff')
 assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'background task enqueue must not use local canned startup plans')
-assert.match(chatRoute, /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[heartbeatEvent\]/, 'background task startup replay should start with heartbeat only before the worker-owned plan')
+assert.match(
+  chatRoute,
+  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Preparing a fresh computer for this task…',\s*\},\s*\]/,
+  'background task startup replay should immediately show truthful computer preparation before the worker-owned plan',
+)
 assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'background task acceptance must await the durable enqueue while worker planning owns visible steps')
 assert.match(chatRoute, /error instanceof TaskConversationConflictError[\s\S]*CONVERSATION_TASK_ALREADY_RUNNING[\s\S]*status: 409/, 'the durable conversation conflict must be returned as HTTP 409')
 assert.match(chatRoute, /access = conversationId[\s\S]*await timedRoutePromise\('taskAccessReadyMs'[\s\S]*if \(access && !access\.ok\) return access\.response/, 'task access must be resolved before idempotency and task acceptance')
@@ -348,8 +356,36 @@ assert.match(cloudFinishSetupScript, /--e2b-smoke/, 'cloud finish setup must mak
 assert.match(cloudFinishSetupScript, /--create-render-worker/, 'cloud finish setup must expose an explicit opt-in for creating a missing Render worker')
 assert.match(cloudFinishSetupScript, /--render-owner-id/, 'cloud finish setup must forward Render owner id for worker creation')
 assert.match(cloudFinishSetupScript, /--render-repo/, 'cloud finish setup must forward Render repo URL for worker creation')
-assert.match(cloudFinishSetupScript, /waitForWorkerReadiness/, 'cloud finish setup must wait for the deployed worker heartbeat before final proof')
-assert.match(cloudFinishSetupScript, /\/api\/internal\/background-worker-ready/, 'cloud finish setup worker wait must use the signed deployed readiness endpoint')
+assert.match(cloudFinishSetupScript, /--wait-for-deploy/, 'cloud finish setup must wait for the Render worker image to become live')
+assert.match(cloudFinishSetupScript, /--safe-suspended-deploy/, 'cloud finish setup must use the guarded suspended-base deploy path')
+assert.match(cloudFinishSetupScript, /--keep-intake-held/, 'cloud finish setup must retain task intake hold through the web rollout')
+assert.ok(
+  cloudFinishSetupScript.indexOf("runStep('Apply and deploy Render worker env") <
+    cloudFinishSetupScript.indexOf("runStep('Apply Vercel production env"),
+  'cloud finish setup must finish the Render worker rollout before activating Vercel on-demand dispatch',
+)
+assert.match(cloudFinishSetupScript, /waitForWorkerReadiness/, 'cloud finish setup must wait for deployed task executor readiness before final proof')
+assert.ok(
+  cloudFinishSetupScript.indexOf('await waitForWorkerReadiness()') <
+    cloudFinishSetupScript.indexOf("runStep('Prove deployed one-off worker execution before reopening intake'"),
+  'cloud finish setup must run the paid deployed worker proof only after signed readiness',
+)
+assert.ok(
+  cloudFinishSetupScript.indexOf("runStep('Prove deployed one-off worker execution before reopening intake'") <
+    cloudFinishSetupScript.indexOf("runStep('Release verified rollout intake hold'"),
+  'cloud finish setup must not reopen intake until the new web deployment passes the one-off worker smoke',
+)
+assert.match(
+  cloudFinishSetupScript,
+  /prod-background-worker-smoke\.mjs'[\s\S]*--url'[\s\S]*deployedUrl[\s\S]*--timeout-ms'[\s\S]*timeoutMs[\s\S]*Release verified rollout intake hold/,
+  'cloud finish setup must run the bounded deployed worker smoke while intake remains held',
+)
+assert.match(
+  cloudFinishSetupScript,
+  /deployedWorkerSmokeProven = true[\s\S]*cloud-preflight\.mjs'[\s\S]*deployedWorkerSmokeProven \? \['--skip-worker-smoke'\] : \[\]/,
+  'cloud finish setup post-release preflight must skip the paid worker smoke only after that proof passed',
+)
+assert.match(cloudFinishSetupScript, /\/api\/internal\/background-worker-ready/, 'cloud finish setup task executor wait must use the signed deployed readiness endpoint')
 assert.match(cloudFinishSetupScript, /--worker-ready-wait-ms/, 'cloud finish setup must let operators tune worker readiness wait time')
 assert.match(cloudFinishSetupScript, /--skip-worker-ready-wait/, 'cloud finish setup must let operators explicitly skip worker readiness waiting')
 assert.match(cloudPreflightScript, /cloud:smoke/, 'cloud preflight must run the source contract smoke')
@@ -367,6 +403,7 @@ assert.match(cloudPreflightScript, /cloud:worker-ready/, 'cloud preflight must r
 assert.match(cloudPreflightScript, /cloud:worker-smoke/, 'cloud preflight must run deployed worker smoke when a deployed URL is provided')
 assert.match(cloudPreflightScript, /--source-only/, 'cloud preflight must offer source-only mode for no-credential checks')
 assert.match(cloudPreflightScript, /--deployed-only/, 'cloud preflight must offer deployed-only mode for live app verification')
+assert.match(cloudPreflightScript, /--skip-worker-smoke/, 'cloud preflight must let a guarded rollout avoid paying for the same worker smoke twice')
 assert.match(cloudPreflightScript, /Pass --url https:\/\/your-deployed-app\.example with --deployed-only/, 'deployed-only preflight must require a deployed URL')
 assert.match(renderBlueprintSmokeScript, /parseRenderBlueprint/, 'Render blueprint smoke must parse the blueprint into service records')
 assert.match(renderBlueprintSmokeScript, /AGENT_TASK_QUEUE_NAME/, 'Render blueprint smoke must verify the queue namespace')
@@ -381,6 +418,17 @@ assert.match(renderWorkerEnvSmokeScript, /E2B_TEMPLATE_ID/, 'Render worker env s
 assert.match(renderWorkerEnvScript, /RENDER_API_KEY/, 'Render worker env helper must authenticate with a Render API key')
 assert.match(renderWorkerEnvScript, /\/services\/\$\{encodeURIComponent\(serviceId\)\}\/env-vars\/\$\{encodeURIComponent\(entry\.key\)\}/, 'Render worker env helper must update expected env vars individually')
 assert.match(renderWorkerEnvScript, /\/services\/\$\{encodeURIComponent\(serviceId\)\}\/deploys/, 'Render worker env helper must be able to trigger a worker deploy')
+assert.match(renderWorkerEnvScript, /--wait-for-deploy/, 'Render worker env helper must support waiting for a triggered deploy')
+assert.doesNotMatch(
+  renderWorkerEnvScript,
+  /JSON\.stringify\(\{\s*clearCache\s*,\s*deployMode/,
+  'Render deploy requests must not combine clearCache with deployMode because the Render API rejects that payload',
+)
+assert.match(
+  renderWorkerEnvScript,
+  /waitForDeploy[\s\S]*\/deploys\/\$\{encodeURIComponent\(deployId\)\}[\s\S]*SUCCESSFUL_DEPLOY_STATUSES[\s\S]*FAILED_DEPLOY_STATUSES/,
+  'Render worker env helper must prove a deploy is live and fail closed on terminal deploy errors',
+)
 assert.match(renderWorkerEnvScript, /Secret values are never printed/, 'Render worker env helper must not print secret values')
 assert.match(
   renderWorkerEnvScript,
@@ -426,10 +474,18 @@ assert.match(backgroundWorkerReadyScript, /loadLocalEnvFiles/, 'deployed backgro
 
 assert.match(backgroundWorkerSmokeRoute, /enqueueTaskJob/, 'deployed background worker smoke route must enqueue a real durable job')
 assert.match(backgroundWorkerSmokeRoute, /AGENT_TASK_WORKER_MODE\?\.trim\(\) !== 'external'/, 'deployed background worker smoke route must tolerate whitespace-padded cloud env values')
+assert.match(backgroundWorkerSmokeRoute, /usesOnDemandTaskDispatch/, 'deployed background worker smoke must detect suspended on-demand execution')
+assert.match(backgroundWorkerSmokeRoute, /intakeAdmission:\s*'signed_internal_probe'/, 'only the signed deployed diagnostic may bypass a rollout intake hold')
+assert.match(backgroundWorkerSmokeRoute, /getTaskExecutionCoordinatorStatus/, 'deployed background worker smoke must validate the on-demand coordinator before accepting a probe')
+assert.match(
+  backgroundWorkerSmokeRoute,
+  /await startTaskExecutionCoordinator\(runId\)[\s\S]*dispatchId:\s*`coordinator:\$\{runId\}`[\s\S]*backend:\s*'vercel-workflow'[\s\S]*providerJobId:\s*coordinator\.workflowRunId[\s\S]*await enqueueTaskJob\(\{[\s\S]*coordinatorDispatch,/,
+  'deployed background worker smoke must start and atomically record the same durable coordinator as real tasks',
+)
 assert.match(backgroundWorkerSmokeRoute, /findActiveTaskJobForConversation/, 'deployed background worker smoke route must prove active-run discovery after enqueue')
 assert.match(backgroundWorkerSmokeRoute, /Durable active-run discovery could not find the queued probe/, 'deployed background worker smoke route must fail if early-close run discovery is broken')
 assert.match(backgroundWorkerSmokeRoute, /createTaskJobEventStream/, 'deployed background worker smoke route must exercise event replay streams')
-assert.match(backgroundWorkerSmokeRoute, /getRecentTaskWorkerHeartbeats/, 'deployed background worker smoke route must fail fast without a live worker heartbeat')
+assert.match(backgroundWorkerSmokeRoute, /if \(!onDemandDispatch\)[\s\S]*getRecentTaskWorkerHeartbeats/, 'persistent fallback smoke must still fail fast without a live worker heartbeat')
 assert.match(backgroundWorkerSmokeRoute, /No hosted E2B task worker heartbeat found/, 'deployed background worker smoke must fail fast unless the live worker can run E2B-backed tasks')
 assert.match(backgroundWorkerSmokeRoute, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'deployed background worker smoke must support deployment-version matching')
 assert.match(backgroundWorkerSmokeRoute, /matched AGENT_DEPLOYMENT_VERSION/, 'deployed background worker smoke must explain deployment-version mismatch')
@@ -484,16 +540,18 @@ assert.match(eventReplaySmokeScript, /hugeText = 'x'\.repeat/, 'event replay smo
 assert.match(eventReplaySmokeScript, /runClaimedTaskJob/, 'event replay smoke must run through the worker job path')
 assert.match(eventReplaySmokeScript, /agent_task_events/, 'event replay smoke must inspect persisted Turso task events directly')
 assert.match(eventReplaySmokeScript, /assertContiguousSeq/, 'event replay smoke must prove persisted replay has no sequence gaps')
-assert.match(eventReplaySmokeScript, /Oversized live browser frames should persist as sequence-preserving heartbeats/, 'event replay smoke must prove oversized live browser frames do not overwrite the UI with empty screenshots')
+assert.match(eventReplaySmokeScript, /Ephemeral browser frames must not consume the durable task-event sequence/, 'event replay smoke must prove live browser frames cannot create durable replay gaps')
 assert.match(eventReplaySmokeScript, /does not call the LLM or start E2B/, 'event replay smoke must document the no-credit probe contract')
 
 assert.match(cloudReadiness, /getRecentTaskWorkerHeartbeats/, 'cloud readiness live check must inspect worker heartbeats')
+assert.match(cloudReadiness, /usesOnDemandDispatch\(\)[\s\S]*on-demand execution intentionally requires no idle worker heartbeat/, 'cloud readiness must not require an idle heartbeat for suspended on-demand execution')
+assert.match(cloudReadiness, /RENDER_API_KEY[\s\S]*RENDER_WORKER_SERVICE_ID[\s\S]*RENDER_ON_DEMAND_JOB_PLAN_ID/, 'cloud readiness must require Render one-off dispatch configuration')
 assert.match(cloudReadiness, /workerMatchesConfiguredRuntime/, 'cloud readiness live check must reject incompatible worker heartbeats')
 assert.match(cloudReadiness, /AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION/, 'cloud readiness must support deployment-version enforcement')
 assert.match(cloudReadiness, /AGENT_DEPLOYMENT_VERSION/, 'cloud readiness must validate deployment version when stale-worker rejection is enabled')
 assert.match(cloudReadiness, /live compatible task worker heartbeat found/, 'cloud readiness must report compatible live worker heartbeats')
 assert.match(cloudReadiness, /no live E2B worker heartbeat found/, 'cloud readiness must fail when no worker is present')
-assert.match(cloudReadiness, /task requests require a recent worker heartbeat/, 'cloud readiness must report the runtime worker guard')
+assert.match(cloudReadiness, /persistent task requests require a recent worker heartbeat/, 'cloud readiness must report the persistent runtime worker guard')
 assert.match(cloudReadiness, /AGENT_INTERNAL_HEALTH_SECRET/, 'cloud readiness must report dedicated internal health signing secret coverage')
 assert.match(cloudReadiness, /cloud-secrets\.mjs/, 'cloud readiness must require the deployment secret generator')
 assert.match(cloudReadiness, /cloud-env-smoke\.mjs/, 'cloud readiness must require the strict env smoke command')
@@ -627,10 +685,23 @@ assert.match(envExample, /AGENT_E2B_WARM_POOL_ENABLED=false/, '.env.example must
 assert.match(envExample, /AGENT_E2B_VERIFY_ON_WORKER_STARTUP=false/, '.env.example must document the optional E2B startup verification flag')
 assert.match(envExample, /AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP=false/, '.env.example must document the optional E2B browser startup verification flag')
 
-assert.match(cloudDocs, /npm run worker:cloud/, 'cloud docs must tell operators to run the guarded worker process')
+assert.match(cloudDocs, /primary production architecture is an on-demand executor/i, 'cloud docs must identify on-demand execution as the primary production topology')
+assert.match(cloudDocs, /Vercel Workflow/, 'cloud docs must document the durable Vercel Workflow coordinator')
+assert.match(cloudDocs, /suspended Render background-worker base/, 'cloud docs must document the suspended Render worker base')
+assert.match(cloudDocs, /npm run worker:drain -- --run-id <run-id>/, 'cloud docs must document the exact-run finite worker command')
+assert.match(cloudDocs, /AGENT_TASK_DISPATCH_MODE=render_job/, 'cloud docs must document Render one-off dispatch mode')
+assert.match(cloudDocs, /AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false/, 'cloud docs must document that on-demand task acceptance does not require an idle heartbeat')
+assert.match(cloudDocs, /## Render-First Deployment Order/, 'cloud docs must require the worker image to deploy before Vercel activates on-demand dispatch')
+assert.match(cloudDocs, /liveWorkerHeartbeat=false/, 'cloud docs must explain the healthy scale-to-zero readiness response')
+assert.match(cloudDocs, /background_probe[\s\S]*does not call the LLM or start E2B/, 'cloud docs must explain the real one-off smoke and its no-LLM/no-E2B boundary')
+assert.match(cloudDocs, /## Persistent Worker Rollback \(Legacy Fallback\)/, 'cloud docs must label the always-on worker as a legacy rollback')
+assert.match(cloudDocs, /fixed idle compute cost/, 'cloud docs must distinguish persistent-worker idle cost from finite one-off usage')
+assert.doesNotMatch(cloudDocs, /readiness response should show `liveWorkerHeartbeat=true`/, 'cloud docs must not require an idle heartbeat in the primary on-demand path')
+assert.doesNotMatch(cloudDocs, /still run `npm run worker:cloud` on a separate long-running worker host/, 'cloud docs must not describe an always-on worker as required by the primary Vercel path')
+assert.match(cloudDocs, /npm run worker:cloud/, 'cloud docs must document the guarded persistent-worker rollback command')
 assert.match(cloudDocs, /\/api\/health/, 'cloud docs must document the public deployment health endpoint')
-assert.match(cloudDocs, /BACKGROUND_WORKER_UNAVAILABLE/, 'cloud docs must explain fail-fast worker unavailability')
-assert.match(cloudDocs, /npm run cloud:check -- --live/, 'cloud docs must document the live worker heartbeat check')
+assert.match(cloudDocs, /BACKGROUND_WORKER_UNAVAILABLE/, 'cloud docs must explain fail-fast worker unavailability in the persistent fallback')
+assert.match(cloudDocs, /npm run cloud:check -- --live/, 'cloud docs must document the legacy persistent-worker heartbeat check')
 assert.match(cloudDocs, /npm run cloud:env-smoke/, 'cloud docs must document the strict environment smoke check')
 assert.match(cloudDocs, /npm run cloud:worker-env/, 'cloud docs must document the strict worker host env smoke check')
 assert.match(cloudDocs, /npm run cloud:vercel-env/, 'cloud docs must document the Vercel production env drift checker')

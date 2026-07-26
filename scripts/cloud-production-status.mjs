@@ -181,6 +181,7 @@ const local = {
   e2bApiKey: envPresent('E2B_API_KEY'),
   turso: envPresent('TURSO_DATABASE_URL') && envPresent('TURSO_AUTH_TOKEN'),
   openRouter: envPresent('OPENROUTER_API_KEY'),
+  renderApiKey: envPresent('RENDER_API_KEY'),
   deploymentVersion: envPresent('AGENT_DEPLOYMENT_VERSION'),
   deploymentVersionRequired: envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION'),
 }
@@ -210,6 +211,9 @@ if (vercel.checked && vercel.missingRequired?.length === 0 && !liveReady && erro
 if (!liveReady && errors.some((error) => /worker heartbeat/i.test(error))) {
   nextActions.push('Start a long-running worker host with npm run worker:cloud using render.worker.env.example and AGENT_TASK_QUEUE_NAME=production.')
 }
+if (!liveReady && errors.some((error) => /Render task executor|On-demand task execution|Render base worker/i.test(error))) {
+  nextActions.push('Verify the Render API key and suspended base worker settings, then reapply Vercel production env.')
+}
 if (!liveReady && errors.some((error) => /AGENT_DEPLOYMENT_VERSION/i.test(error))) {
   nextActions.push('Set the same AGENT_DEPLOYMENT_VERSION on Vercel and the worker host, then redeploy both services.')
 }
@@ -225,6 +229,7 @@ printLine(local.signedReadinessSecret, 'signed readiness secret is available loc
 printLine(local.turso, 'Turso queue credentials are available locally')
 printLine(local.openRouter, 'OpenRouter API key is available locally')
 printLine(local.e2bApiKey, 'E2B_API_KEY is available locally')
+printLine(local.renderApiKey, 'Render API key for on-demand jobs is available locally')
 if (local.deploymentVersionRequired) {
   printLine(local.deploymentVersion, 'AGENT_DEPLOYMENT_VERSION is set because worker version matching is required locally')
 } else {
@@ -242,7 +247,7 @@ if (vercel.skipped) {
   if (vercelValueMismatches.length > 0) console.log(`FAIL Vercel env value drift: ${vercelValueMismatches.join(', ')}`)
 }
 
-console.log('\nLive worker readiness')
+console.log('\nTask executor readiness')
 if (!readiness.checked) {
   printLine(false, readiness.error || 'readiness check failed')
 } else {
@@ -268,7 +273,7 @@ if (nextActions.length > 0) {
 }
 
 if (liveReady) {
-  console.log('\nProduction background worker readiness is live. Run the deployed preflight smoke to prove disconnect/reconnect completion.')
+  console.log('\nProduction task executor readiness is live. Run the deployed smoke to prove on-demand completion and reconnect.')
 } else {
   process.exitCode = 1
 }

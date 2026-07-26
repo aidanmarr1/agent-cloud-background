@@ -100,6 +100,29 @@ export interface BackgroundProbeTaskPayload {
 
 export type TaskJobPayload = ChatTaskPayload | BackgroundProbeTaskPayload
 
+export type TaskInfrastructureInitializationStage =
+  | 'agent_runtime_preload'
+  | 'task_bootstrap'
+  | 'sandbox_startup'
+
+export class RetryableTaskInfrastructureInitializationError extends Error {
+  readonly code = 'RETRYABLE_TASK_INFRASTRUCTURE_INITIALIZATION'
+
+  constructor(
+    readonly stage: TaskInfrastructureInitializationStage,
+    readonly originalError: unknown,
+  ) {
+    super(`Task infrastructure initialization failed during ${stage}.`)
+    this.name = 'RetryableTaskInfrastructureInitializationError'
+  }
+}
+
+export function isRetryableTaskInfrastructureInitializationError(
+  error: unknown,
+): error is RetryableTaskInfrastructureInitializationError {
+  return error instanceof RetryableTaskInfrastructureInitializationError
+}
+
 export interface ChatTaskRunInput extends ChatTaskPayload {
   emitter: AgentEventEmitter
   signal: AbortSignal
@@ -182,6 +205,60 @@ function isTransientUsageAccountingError(error: unknown): boolean {
   if (isOutOfCreditsError(error)) return false
   const message = error instanceof Error ? error.message : String(error || '')
   return /(?:fetch|network|socket|timeout|timed out|temporar|transaction|concurrent|busy|locked|closed|turso|libsql|database|429|502|503|504|econn|etimedout|connection)/i.test(message)
+}
+
+export function isRetryableTaskInfrastructureStartupFailure(error: unknown): boolean {
+  if (isOutOfCreditsError(error)) return false
+  const errorRecord = error && typeof error === 'object'
+    ? error as {
+        status?: unknown
+        statusCode?: unknown
+        code?: unknown
+        name?: unknown
+      }
+    : null
+  const status = Number(
+    errorRecord
+      ? errorRecord.status ?? errorRecord.statusCode
+      : Number.NaN,
+  )
+  // Authentication, authorization, billing-account, malformed-request, and
+  // missing-resource failures require configuration or user action. Retrying
+  // them in fresh paid workers would only consume the bounded launch budget.
+  if (
+    status === 400 ||
+    status === 401 ||
+    status === 402 ||
+    status === 403 ||
+    status === 404 ||
+    status === 405 ||
+    status === 410 ||
+    status === 422
+  ) {
+    return false
+  }
+  const code = [
+    typeof errorRecord?.code === 'string' ? errorRecord.code : '',
+    typeof errorRecord?.name === 'string' ? errorRecord.name : '',
+  ].join(' ')
+  const message = error instanceof Error ? error.message : String(error || '')
+  if (
+    /(?:auth(?:entication|orization)?|unauthori[sz]ed|forbidden|permission.?denied|invalid.?credential|invalid.?api.?key|missing.?api.?key|not.?configured|configuration.?missing|configuration.?invalid|account.?(?:disabled|suspended|closed))/i.test(
+      `${code} ${message}`,
+    )
+  ) {
+    return false
+  }
+  if (
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    (Number.isFinite(status) && status >= 500 && status <= 599)
+  ) {
+    return true
+  }
+  return /(?:fetch|network|socket|timeout|timed out|temporar|transaction|concurrent|busy|locked|closed|turso|libsql|database|rate.?limit|too many requests|(?:http\s*)?5\d\d|econn|etimedout|connection|service unavailable|gateway|lifecycle changed)/i.test(message)
 }
 
 async function destroyCloudSandboxAfterTask(
@@ -436,6 +513,24 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
   let releaseStartupBrowserFence: (() => void) | null = null
   let agentMessages = messages
 
+  const runClaimedPreChargeBootstrap = async <T>(
+    stage: Extract<TaskInfrastructureInitializationStage, 'task_bootstrap' | 'sandbox_startup'>,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await operation()
+    } catch (error) {
+      if (
+        claimedWorkerAttempt !== null &&
+        !directChat &&
+        isRetryableTaskInfrastructureStartupFailure(error)
+      ) {
+        throw new RetryableTaskInfrastructureInitializationError(stage, error)
+      }
+      throw error
+    }
+  }
+
   const restorePersistedTaskFiles = async () => {
     const restored = await restoreTaskFilesToActiveSandbox({ userId, conversationId }).catch((error) => {
       console.warn('[AgentDiagnostics] Persisted task file restore failed', {
@@ -616,13 +711,30 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         // A worker retry reopens a run that may have been sealed by the prior
         // attempt immediately before it lost its lease. In-process runs use
         // attempt 1 so durable directive claims work when Turso is enabled.
-        await openLiveDirectiveRun(conversationId, userId, creditRunId, directiveWorkerAttempt)
+        await runClaimedPreChargeBootstrap(
+          'task_bootstrap',
+          () => openLiveDirectiveRun(
+            conversationId,
+            userId,
+            creditRunId,
+            directiveWorkerAttempt,
+          ),
+        )
       }
       const startupTasks: Array<Promise<unknown>> = []
       if (!directChat) {
         if (startIsolatedTaskSandbox || staleLeaseRecovery) {
-          releaseStartupBrowserFence = await acquireBrowserSessionFence(conversationId)
-          await clearLiveDirectives(conversationId, { userId, exceptRunId: creditRunId })
+          releaseStartupBrowserFence = await runClaimedPreChargeBootstrap(
+            'task_bootstrap',
+            () => acquireBrowserSessionFence(conversationId),
+          )
+          await runClaimedPreChargeBootstrap(
+            'task_bootstrap',
+            () => clearLiveDirectives(
+              conversationId,
+              { userId, exceptRunId: creditRunId },
+            ),
+          )
           if (startIsolatedTaskSandbox) {
             const staleResearchCutoff = Date.now()
             void clearResearchActivityForTask(userId, conversationId, staleResearchCutoff).catch((error) => {
@@ -640,19 +752,6 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           restorePersistedFiles = true
         }
       }
-      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
-        .then((record) => {
-          emitCreditRecord(record)
-          meteredTaskStarted = true
-        })
-        .catch((error) => {
-          console.error('[AgentDiagnostics] Task-start credit charge failed', {
-            conversationId,
-            error: error instanceof Error ? error.message : String(error),
-          })
-          throw error
-        })
-      void taskStartCreditPromise.catch(() => undefined)
       startupReadyPromise = (async () => {
         await Promise.all(startupTasks)
         if (restorePersistedFiles) {
@@ -666,9 +765,11 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         throw error
       })
       void startupReadyPromise.catch(() => undefined)
-      await taskStartCreditPromise
       if (!directChat) {
-        agentMessages = await hydrateMessageAttachmentsForUser(agentMessages, userId)
+        agentMessages = await runClaimedPreChargeBootstrap(
+          'task_bootstrap',
+          () => hydrateMessageAttachmentsForUser(agentMessages, userId),
+        )
       }
       if (!directChat && shouldUseE2BSandbox()) {
         const explicitToolConstraint = explicitTaskToolConstraintFromText(
@@ -741,12 +842,6 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           })
         })
       }
-      if (ACTIVE_CREDITS_PER_MINUTE > 0) {
-        activeCreditTimer = setInterval(() => {
-          void chargeActiveCredit().catch(() => undefined)
-        }, 5000)
-      }
-
       if (!directChat) {
         agentMessages = withMessageAttachmentSandboxPaths(agentMessages)
         const hasSandboxAttachments = agentMessages.some(message =>
@@ -781,6 +876,38 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           releaseStartupBrowserFence = null
         })
         void startupReadyPromise.catch(() => undefined)
+      }
+
+      if (claimedWorkerAttempt !== null && !directChat && startupReadyPromise) {
+        const pendingStartupReady = startupReadyPromise
+        // A claimed one-off worker must prove its task computer is ready before
+        // any user task-start charge or agent action. Transient provider/DB
+        // failures are infrastructure recovery, not task output.
+        await runClaimedPreChargeBootstrap(
+          'sandbox_startup',
+          () => pendingStartupReady,
+        )
+      }
+
+      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
+        .then((record) => {
+          emitCreditRecord(record)
+          meteredTaskStarted = true
+        })
+        .catch((error) => {
+          console.error('[AgentDiagnostics] Task-start credit charge failed', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw error
+        })
+      void taskStartCreditPromise.catch(() => undefined)
+      await taskStartCreditPromise
+
+      if (ACTIVE_CREDITS_PER_MINUTE > 0) {
+        activeCreditTimer = setInterval(() => {
+          void chargeActiveCredit().catch(() => undefined)
+        }, 5000)
       }
     }
 
@@ -869,7 +996,13 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       terminalStatus: emitter.terminalStatus,
       error: error instanceof Error ? error.message : String(error),
     })
-    if (isJobAbort()) {
+    if (
+      isRetryableTaskInfrastructureInitializationError(error) &&
+      !isJobAbort() &&
+      !emitter.terminalStatus
+    ) {
+      throw error
+    } else if (isJobAbort()) {
       if (!isHandoffAbort() && !emitter.terminalStatus) {
         emitter.error(runtimeDeadlineAbortController.signal.aborted
           ? 'Task stopped at its runtime limit. Results completed before the cutoff are shown above.'

@@ -1270,7 +1270,12 @@ export async function syncUserConversations(userId: string, input: ConversationS
             serverRevision: currentRevision,
           }
           conversation = mergeConversationWithDurableLiveDirectives(stored, incomingConversation)
-          if (!baseRevisionMatches) {
+          // The server-created task-start row is deliberately provisional. A
+          // client snapshot may be older by timestamp/revision yet still be
+          // the first complete UI body, so it replaces that placeholder after
+          // durable live-directive state is merged. Ordinary stale snapshots
+          // continue through the conservative revision-conflict merge below.
+          if (!baseRevisionMatches && !currentIsPlaceholder) {
             conversation = mergeConversationForRevisionConflict(stored, conversation)
           }
         } catch {

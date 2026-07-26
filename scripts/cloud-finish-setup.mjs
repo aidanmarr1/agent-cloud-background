@@ -1,18 +1,49 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process'
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { chmod, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { loadLocalEnvFiles } from './load-local-env.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
 const root = fileURLToPath(rootUrl)
 const args = process.argv.slice(2)
-const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const nodeBin = process.execPath
 const READY_PATH = '/api/internal/background-worker-ready'
 
 loadLocalEnvFiles(rootUrl)
+
+function resolveVercelCommand() {
+  const configuredVercel = env('VERCEL_CLI')
+  if (configuredVercel) {
+    return { bin: configuredVercel, baseArgs: [], label: configuredVercel }
+  }
+
+  const localVercel = resolve(root, 'node_modules/.bin/vercel')
+  if (existsSync(localVercel)) {
+    return { bin: localVercel, baseArgs: [], label: localVercel }
+  }
+
+  const configuredPnpm = env('PNPM_BIN')
+  const pathPnpm = (process.env.PATH || '')
+    .split(delimiter)
+    .map((directory) => join(directory, process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'))
+    .find((candidate) => existsSync(candidate)) || ''
+  const bundledPnpm = resolve(
+    dirname(process.execPath),
+    process.platform === 'win32' ? '../../bin/fallback/pnpm.cmd' : '../../bin/fallback/pnpm',
+  )
+  const pnpm = configuredPnpm || pathPnpm || (existsSync(bundledPnpm) ? bundledPnpm : '')
+  if (pnpm) {
+    return { bin: pnpm, baseArgs: ['dlx', 'vercel'], label: `${pnpm} dlx vercel` }
+  }
+
+  const npx = env('NPX_BIN') || (process.platform === 'win32' ? 'npx.cmd' : 'npx')
+  return { bin: npx, baseArgs: ['--yes', 'vercel'], label: `${npx} --yes vercel` }
+}
 
 function readArg(name) {
   const equalPrefix = `${name}=`
@@ -150,13 +181,13 @@ async function waitForWorkerReadiness() {
   let attempt = 0
   let last = null
 
-  console.log(`\n==> Wait for deployed worker readiness (${waitMs}ms max)`)
+  console.log(`\n==> Wait for deployed task executor readiness (${waitMs}ms max)`)
   while (Date.now() - startedAt < waitMs) {
     attempt += 1
     const remainingMs = Math.max(1_000, waitMs - (Date.now() - startedAt))
     last = await signedWorkerReadyCheck(Math.min(30_000, remainingMs))
     if (last.ok) {
-      console.log(`Worker readiness passed after ${Date.now() - startedAt}ms.`)
+      console.log(`Task executor readiness passed after ${Date.now() - startedAt}ms.`)
       return
     }
     const errorText = readinessErrorText(last.body)
@@ -164,7 +195,7 @@ async function waitForWorkerReadiness() {
     await sleep(Math.min(pollMs, Math.max(0, waitMs - (Date.now() - startedAt))))
   }
 
-  throw new Error(`Timed out after ${waitMs}ms waiting for a live compatible worker heartbeat at ${deployedUrl}. Last status: ${last?.status || 0}${last ? `; ${readinessErrorText(last.body)}` : ''}`)
+  throw new Error(`Timed out after ${waitMs}ms waiting for the deployed task executor at ${deployedUrl}. Last status: ${last?.status || 0}${last ? `; ${readinessErrorText(last.body)}` : ''}`)
 }
 
 const deployedUrl = (
@@ -186,6 +217,10 @@ const skipRenderEnv = hasFlag('--skip-render-env')
 const waitForWorkerReady = hasFlag('--wait-for-worker-ready')
 const skipWorkerReadyWait = hasFlag('--skip-worker-ready-wait')
 const skipDeployedPreflight = hasFlag('--skip-deployed-preflight')
+// cloud:vercel-env defaults production to render_job. Treat an unset local
+// dispatch mode the same way so this rollout helper cannot activate the web
+// coordinator before the exact-run worker image is live on Render.
+const onDemandDispatch = (env('AGENT_TASK_DISPATCH_MODE') || 'render_job') === 'render_job'
 
 const requiredLocalEnv = [
   'AUTH_SECRET',
@@ -226,36 +261,60 @@ async function writeWorkerEnvFile(path) {
   console.log('Secret values were written to that file but were not printed.')
 }
 
+let renderRolloutAttempted = false
+const intakeHoldId = randomUUID()
+
 try {
   let renderWorkerDeployTriggered = false
+  let renderIntakeHoldActive = false
+  let deployedWorkerSmokeProven = false
   if (workerEnvPath) await writeWorkerEnvFile(workerEnvPath)
 
-  await runStep('Production cloud env smoke', npmBin, ['run', 'cloud:env-smoke'])
+  await runStep('Production cloud env smoke (cloud:env-smoke)', nodeBin, ['scripts/cloud-env-smoke.mjs'])
   if (buildE2BTemplate) {
     if (!env('E2B_ACCESS_TOKEN') && !allowExistingE2BCLIAuth) {
       throw new Error('E2B_ACCESS_TOKEN is required for non-interactive E2B template builds. Set it locally, or pass --allow-existing-e2b-cli-auth if the E2B CLI is already authenticated on this machine.')
     }
-    await runStep('Build E2B browser template', npmBin, ['run', 'e2b:template:build'])
+    await runStep('Build E2B browser template (e2b:template:build)', nodeBin, [
+      'scripts/e2b-template-build-v2.mjs',
+      '--dockerfile',
+      'e2b.Dockerfile',
+      '--name',
+      env('E2B_TEMPLATE_ID') || 'agent-cloud-browser',
+    ])
   } else {
     console.log('\nSKIP E2B template build. Pass --build-e2b-template after setting E2B_ACCESS_TOKEN to build agent-cloud-browser.')
   }
   if (runE2BSmoke) {
-    await runStep('Live E2B template smoke', npmBin, ['run', 'cloud:e2b-smoke'])
+    await runStep('Live E2B template smoke (cloud:e2b-smoke)', nodeBin, ['scripts/e2b-template-smoke.mjs'])
   } else {
     console.log('\nSKIP Live E2B template smoke. Pass --e2b-smoke to run the paid sandbox probe.')
   }
-  if (!skipVercelEnv) {
-    await runStep('Apply Vercel production env', npmBin, ['run', 'cloud:vercel-env', '--', '--apply', '--verify-values', '--replace-drift'])
-  }
-  if (!skipDeploy) {
-    await runStep('Deploy Vercel production', 'vercel', ['deploy', '--prod', '--yes'])
-  }
+
+  // Render must finish first. Once Vercel activates render_job, every accepted
+  // task can immediately launch `worker:drain`; activating the web deployment
+  // against an older worker image would create paid jobs that cannot claim.
   if (!skipRenderEnv && env('RENDER_API_KEY')) {
-    const renderArgs = ['run', 'cloud:render-worker-env', '--', '--apply', '--trigger-deploy']
+    const renderArgs = [
+      'scripts/render-worker-env.mjs',
+      '--apply',
+      '--trigger-deploy',
+      '--wait-for-deploy',
+      '--safe-suspended-deploy',
+      '--keep-intake-held',
+      '--intake-hold-id',
+      intakeHoldId,
+      '--intake-hold-url',
+      deployedUrl,
+    ]
     const renderServiceId = readArg('--render-service-id')
     const renderServiceName = readArg('--render-service-name')
+    const renderDeployWaitMs = readArg('--render-deploy-wait-ms')
+    const renderDeployPollMs = readArg('--render-deploy-poll-ms')
     if (renderServiceId) renderArgs.push('--service-id', renderServiceId)
     if (renderServiceName) renderArgs.push('--service-name', renderServiceName)
+    if (renderDeployWaitMs) renderArgs.push('--deploy-wait-ms', renderDeployWaitMs)
+    if (renderDeployPollMs) renderArgs.push('--deploy-poll-ms', renderDeployPollMs)
     if (hasFlag('--create-render-worker')) renderArgs.push('--create-if-missing')
     for (const [finishArg, renderArg] of [
       ['--render-owner-id', '--owner-id'],
@@ -270,31 +329,98 @@ try {
       if (value) renderArgs.push(renderArg, value)
     }
     if (hasFlag('--render-clear-cache')) renderArgs.push('--clear-cache')
-    await runStep('Apply and deploy Render worker env', npmBin, renderArgs)
+    const renderCommitId = readArg('--render-commit-id')
+    if (renderCommitId) renderArgs.push('--commit-id', renderCommitId)
+    renderRolloutAttempted = true
+    await runStep('Apply and deploy Render worker env (cloud:render-worker-env)', nodeBin, renderArgs)
     renderWorkerDeployTriggered = true
+    renderIntakeHoldActive = true
   } else if (!skipRenderEnv) {
+    if (onDemandDispatch) {
+      throw new Error(
+        'RENDER_API_KEY is required to deploy and verify the on-demand worker image before Vercel. ' +
+        'Set it locally, or pass --skip-render-env only after verifying the Render deployment manually.',
+      )
+    }
     console.log('\nSKIP Render worker env apply. Set RENDER_API_KEY locally to let this command configure and deploy agent-worker through the Render API.')
+  } else if (onDemandDispatch) {
+    console.log('\nSKIP Render worker deploy by explicit request. Verify the exact-run worker image is already live before Vercel is activated.')
+  }
+
+  if (!skipVercelEnv) {
+    await runStep('Apply Vercel production env (cloud:vercel-env)', nodeBin, [
+      'scripts/vercel-cloud-env.mjs',
+      '--apply',
+      '--verify-values',
+      '--replace-drift',
+    ])
+  }
+  if (!skipDeploy) {
+    const vercel = resolveVercelCommand()
+    await runStep('Deploy Vercel production', vercel.bin, [
+      ...vercel.baseArgs,
+      'deploy',
+      '--prod',
+      '--yes',
+    ])
+  }
+  if (renderIntakeHoldActive && skipWorkerReadyWait) {
+    throw new Error(
+      'Cannot release the rollout intake hold while --skip-worker-ready-wait is set. ' +
+      'Prove the new web deployment is ready before reopening task intake.',
+    )
   }
   if (!skipWorkerReadyWait && (renderWorkerDeployTriggered || waitForWorkerReady)) {
     await waitForWorkerReadiness()
   } else if (!skipWorkerReadyWait) {
-    console.log('\nSKIP worker readiness wait. Pass --wait-for-worker-ready to wait for an already-running manual worker before final status/preflight.')
+    console.log('\nSKIP task executor readiness wait. Pass --wait-for-worker-ready to verify an already-prepared manual executor before final status/preflight.')
   }
-  await runStep('Production status', npmBin, ['run', 'cloud:status', '--', '--url', deployedUrl, '--timeout-ms', timeoutMs])
-  if (!skipDeployedPreflight) {
-    await runStep('Deployed background worker preflight', npmBin, [
-      'run',
-      'cloud:preflight',
-      '--',
-      '--deployed-only',
+  if (renderIntakeHoldActive) {
+    await runStep('Prove deployed one-off worker execution before reopening intake', nodeBin, [
+      'scripts/prod-background-worker-smoke.mjs',
       '--url',
       deployedUrl,
       '--timeout-ms',
       timeoutMs,
     ])
+    deployedWorkerSmokeProven = true
+    await runStep('Release verified rollout intake hold', nodeBin, [
+      'scripts/render-worker-env.mjs',
+      '--release-intake-hold',
+      '--intake-hold-id',
+      intakeHoldId,
+      '--intake-hold-url',
+      deployedUrl,
+    ])
+    renderIntakeHoldActive = false
+  }
+  await runStep('Production status (cloud:status)', nodeBin, [
+    'scripts/cloud-production-status.mjs',
+    '--url',
+    deployedUrl,
+    '--timeout-ms',
+    timeoutMs,
+  ])
+  if (!skipDeployedPreflight) {
+    await runStep('Deployed background worker preflight (cloud:preflight)', nodeBin, [
+      'scripts/cloud-preflight.mjs',
+      '--deployed-only',
+      '--url',
+      deployedUrl,
+      '--timeout-ms',
+      timeoutMs,
+      ...(deployedWorkerSmokeProven ? ['--skip-worker-smoke'] : []),
+    ])
   }
 } catch (error) {
   console.error(`\nCloud finish setup stopped: ${error instanceof Error ? error.message : String(error)}`)
+  if (renderRolloutAttempted) {
+    console.error(
+      'The queue-scoped intake hold may still be active. First verify the Render base is suspended, then ' +
+      `release only this rollout hold with: ${nodeBin} scripts/render-worker-env.mjs ` +
+      `--release-intake-hold --intake-hold-id ${intakeHoldId} --intake-hold-url ${deployedUrl}`,
+    )
+  }
   console.error('Fix the failing step above, then rerun this command.')
   process.exit(1)
 }

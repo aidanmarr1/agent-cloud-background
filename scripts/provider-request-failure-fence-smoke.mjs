@@ -23,8 +23,8 @@ assert.doesNotMatch(
 )
 assert.match(
   loopSource,
-  /maxModelStartAttempts\s*=\s*STREAM_MAX_RETRIES\s*\+\s*MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS\s*\+\s*1/,
-  'the provider-start call must have one explicit local request-repair allowance',
+  /maxModelStartAttempts\s*=\s*state\.finalDeliverableHandoffPending\s*\?\s*1\s*:\s*STREAM_MAX_RETRIES\s*\+\s*MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS\s*\+\s*1/,
+  'handoff turns must have one provider-start attempt while ordinary turns retain one local request-repair allowance',
 )
 
 const nullStreamBranch = loopSource.slice(

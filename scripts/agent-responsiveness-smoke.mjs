@@ -96,7 +96,11 @@ assert.match(chatRoute, /Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPr
 assert.ok(chatRoute.indexOf("await timedRoutePromise('taskAccessReadyMs'") < chatRoute.indexOf('const creditsPromise'), 'task access must be approved before the remaining acceptance gates begin')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker chat route must not wait for startup planning before enqueueing the durable job')
 assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker chat route must not fabricate deterministic visible plans')
-assert.match(chatRoute, /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[heartbeatEvent\]/, 'external-worker chat route should persist only heartbeat before the worker-owned plan')
+assert.match(
+  chatRoute,
+  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Preparing a fresh computer for this task…',\s*\},\s*\]/,
+  'external-worker chat route should immediately persist truthful computer-preparation progress before the worker-owned plan',
+)
 assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must durably enqueue before returning an accepted stream')
 assert.match(chatRoute, /catch \(error\) \{[\s\S]*error instanceof TaskConversationConflictError[\s\S]*status: 409/, 'atomic enqueue conflicts must remain truthful HTTP 409 responses')
 assert.ok(chatRoute.indexOf('if (access && !access.ok)') < chatRoute.indexOf('enqueueTaskJob({'), 'task access must be approved before enqueue')

@@ -1,8 +1,16 @@
 import { randomUUID } from 'crypto'
 import { hostname } from 'os'
-import { runChatTaskJob, type BackgroundProbeTaskPayload, type TaskJobPayload } from '@/lib/agent/chatTaskRunner'
+import {
+  isRetryableTaskInfrastructureStartupFailure,
+  isRetryableTaskInfrastructureInitializationError,
+  RetryableTaskInfrastructureInitializationError,
+  runChatTaskJob,
+  type BackgroundProbeTaskPayload,
+  type TaskJobPayload,
+} from '@/lib/agent/chatTaskRunner'
 import {
   claimNextTaskJob,
+  inspectTaskExecutionDispatchState,
   runClaimedTaskJob,
   TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS,
   TASK_WORKER_CANCEL_PROOF_JITTER_MS,
@@ -23,6 +31,8 @@ import { AGENT_WORKER_RUN_MAX_DURATION_MS } from '@/lib/agent/config'
 
 interface TaskWorkerOptions {
   once?: boolean
+  drain?: boolean
+  runId?: string
 }
 
 const DEFAULT_WORKER_POLL_MS = 100
@@ -31,6 +41,9 @@ const DEFAULT_WORKER_MAX_IDLE_POLL_MS = 500
 const DEFAULT_WORKER_HARD_EXIT_GRACE_MS = 30_000
 const DEFAULT_WORKER_CANCEL_HARD_EXIT_MS = 5_000
 const DEFAULT_WORKER_STALE_MS = 60_000
+const DEFAULT_WORKER_DRAIN_RECLAIM_WAIT_MS = 120_000
+const DEFAULT_WORKER_DRAIN_MISSING_GRACE_MS = 5_000
+const TASK_RUN_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/
 
 function finitePositiveInt(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value || '', 10)
@@ -166,6 +179,21 @@ async function runBackgroundProbeTaskJob(
 }
 
 export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<void> {
+  const drainMode = options.drain === true
+  const targetRunId = options.runId?.trim() || ''
+  if (drainMode && options.once === true) {
+    throw new Error('Task worker --drain mode cannot be combined with --once.')
+  }
+  if (drainMode && !targetRunId) {
+    throw new Error('Task worker --drain mode requires --run-id.')
+  }
+  if (!drainMode && targetRunId) {
+    throw new Error('Task worker --run-id requires --drain mode.')
+  }
+  if (targetRunId && !TASK_RUN_ID_PATTERN.test(targetRunId)) {
+    throw new Error('Invalid target task run id.')
+  }
+
   validateWorkerRuntimeConfig()
 
   const turso = getTursoSetupStatus()
@@ -196,6 +224,20 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     process.env.AGENT_TASK_WORKER_STALE_MS,
     DEFAULT_WORKER_STALE_MS,
   )
+  const drainReclaimWaitMs = Math.max(
+    workerStaleMs + heartbeatMs + cancelHardExitMs + TASK_WORKER_CANCEL_PROOF_JITTER_MS,
+    finitePositiveInt(
+      process.env.AGENT_TASK_WORKER_DRAIN_RECLAIM_WAIT_MS,
+      DEFAULT_WORKER_DRAIN_RECLAIM_WAIT_MS,
+    ),
+  )
+  const drainMissingGraceMs = Math.min(
+    drainReclaimWaitMs,
+    finitePositiveInt(
+      process.env.AGENT_TASK_WORKER_DRAIN_MISSING_GRACE_MS,
+      DEFAULT_WORKER_DRAIN_MISSING_GRACE_MS,
+    ),
+  )
   if (cancelHardExitMs > TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS) {
     throw new Error(`AGENT_WORKER_CANCEL_HARD_EXIT_MS must be at most ${TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS}ms.`)
   }
@@ -214,12 +256,15 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     e2bPauseOnTaskEnd: envBool('AGENT_E2B_PAUSE_ON_TASK_END'),
   }
   const startedAtMs = Date.now()
+  const drainClaimDeadlineMs = startedAtMs + drainReclaimWaitMs
+  const drainMissingDeadlineMs = startedAtMs + drainMissingGraceMs
   let currentRunId: string | null = null
   let completedTasks = 0
   let stopping = false
   let runtimePreloadStarted = false
   let runtimePreloadFailure: unknown = null
   let runtimePreloadPromise: Promise<void> | null = null
+  let drainStaleRetryUsed = false
   const shutdownController = new AbortController()
 
   const ensureAgentRuntimePreloaded = async () => {
@@ -280,14 +325,29 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
 
   try {
     await sendHeartbeat('starting', true)
-    console.log('[TaskWorker] Starting', { workerId, queueName, pollMs, heartbeatMs, once: options.once === true })
+    console.log('[TaskWorker] Starting', {
+      workerId,
+      queueName,
+      pollMs,
+      heartbeatMs,
+      once: options.once === true,
+      drain: drainMode,
+      targetRunId: targetRunId || null,
+    })
 
-    const warmPoolEnabled = e2bWarmPoolEnabled()
-    const startupWarmupPromise = warmPoolEnabled
-      ? startE2BWorkerWarmup()
-      : verifyE2BWorkerStartup()
+    const warmPoolEnabled = !drainMode && e2bWarmPoolEnabled()
+    const startupWarmupPromise = drainMode
+      ? Promise.resolve()
+      : warmPoolEnabled
+        ? startE2BWorkerWarmup()
+        : verifyE2BWorkerStartup()
     try {
-      await Promise.all([startupWarmupPromise, ensureAgentRuntimePreloaded()])
+      // A finite drain may only need to observe an already-terminal task or
+      // wait for an old lease to expire. Avoid creating a throwaway sandbox or
+      // loading the full agent runtime until this process actually owns work.
+      if (!drainMode) {
+        await Promise.all([startupWarmupPromise, ensureAgentRuntimePreloaded()])
+      }
     } catch (error) {
       console.error('[TaskWorker] Startup readiness check failed', {
         error: workerErrorMessage(error),
@@ -305,7 +365,9 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
     while (!stopping) {
       let claim: Awaited<ReturnType<typeof claimNextTaskJob>>
       try {
-        claim = await claimNextTaskJob(workerId)
+        claim = drainMode
+          ? await claimNextTaskJob(workerId, undefined, targetRunId)
+          : await claimNextTaskJob(workerId)
         consecutiveClaimFailures = 0
       } catch (error) {
         consecutiveClaimFailures += 1
@@ -320,6 +382,54 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
       }
       if (!claim) {
         if (options.once) break
+        if (drainMode) {
+          const dispatchState = await inspectTaskExecutionDispatchState(targetRunId)
+          if (dispatchState.state === 'terminal') {
+            console.log('[TaskWorker] Target task is already terminal; drain complete', {
+              runId: targetRunId,
+              status: dispatchState.status,
+              terminalStatus: dispatchState.terminalStatus,
+            })
+            break
+          }
+
+          const now = Date.now()
+          if (dispatchState.state === 'missing' && now >= drainMissingDeadlineMs) {
+            throw new Error(`Target task "${targetRunId}" was not found before the drain grace period expired.`)
+          }
+          if (dispatchState.state === 'running' && now >= drainClaimDeadlineMs) {
+            console.log('[TaskWorker] Target task remains owned by a live worker; drain duplicate is exiting', {
+              runId: targetRunId,
+              workerId: dispatchState.workerId,
+              workerStatus: dispatchState.workerStatus,
+              leaseExpiresAtMs: dispatchState.leaseExpiresAtMs,
+            })
+            break
+          }
+          if (
+            now >= drainClaimDeadlineMs &&
+            dispatchState.state === 'stale' &&
+            !drainStaleRetryUsed
+          ) {
+            // The state can become reclaimable immediately after the claim
+            // attempt that preceded this inspection. Permit exactly one more
+            // targeted transaction, then fail rather than spin indefinitely.
+            drainStaleRetryUsed = true
+          } else if (
+            now >= drainClaimDeadlineMs &&
+            dispatchState.state !== 'missing'
+          ) {
+            throw new Error(
+              `Target task "${targetRunId}" could not be claimed within ${drainReclaimWaitMs}ms ` +
+              `(state: ${dispatchState.state}).`,
+            )
+          }
+
+          await sendHeartbeat('idle').catch(() => undefined)
+          await sleepUntilAbort(idlePollMs, shutdownController.signal)
+          idlePollMs = Math.min(maxIdlePollMs, idlePollMs * 2)
+          continue
+        }
         await sleepUntilAbort(idlePollMs, shutdownController.signal)
         idlePollMs = Math.min(maxIdlePollMs, idlePollMs * 2)
         continue
@@ -373,21 +483,45 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
           }
 
           const chatPayload = claim.payload
-          return ensureAgentRuntimePreloaded().then(() =>
-            runChatTaskJob({
-              ...chatPayload,
-              emitter,
-              signal,
-              conversationId: claim.conversationId,
-              userId: claim.userId,
-              creditRunId: claim.runId,
-              workerAttempt: claim.attempts,
-              preserveSandboxOnAbort: runContext.shouldPreserveSandboxOnAbort,
-              registerPreTerminalCleanup: runContext.registerPreTerminalCleanup,
-              registerInflightToolDrain: runContext.registerInflightToolDrain,
-              markHandoffUnsafe: runContext.markHandoffUnsafe,
-            }),
-          )
+          return (async () => {
+            try {
+              await ensureAgentRuntimePreloaded()
+            } catch (error) {
+              if (!isRetryableTaskInfrastructureStartupFailure(error)) {
+                // Build/configuration/authentication defects cannot heal in a
+                // replacement paid job. Let the claimed-task finalizer publish
+                // a terminal error instead of spending the restart budget.
+                throw error
+              }
+              const initializationError = new RetryableTaskInfrastructureInitializationError(
+                'agent_runtime_preload',
+                error,
+              )
+              runContext.requestInfrastructureRetry(initializationError.stage)
+              throw initializationError
+            }
+
+            try {
+              await runChatTaskJob({
+                ...chatPayload,
+                emitter,
+                signal,
+                conversationId: claim.conversationId,
+                userId: claim.userId,
+                creditRunId: claim.runId,
+                workerAttempt: claim.attempts,
+                preserveSandboxOnAbort: runContext.shouldPreserveSandboxOnAbort,
+                registerPreTerminalCleanup: runContext.registerPreTerminalCleanup,
+                registerInflightToolDrain: runContext.registerInflightToolDrain,
+                markHandoffUnsafe: runContext.markHandoffUnsafe,
+              })
+            } catch (error) {
+              if (isRetryableTaskInfrastructureInitializationError(error)) {
+                runContext.requestInfrastructureRetry(error.stage)
+              }
+              throw error
+            }
+          })()
         }, {
           shutdownSignal: shutdownController.signal,
           onCancellationObserved: armCancellationHardExit,
@@ -407,6 +541,14 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
         break
       }
 
+      if (taskResult === 'retryable_failure') {
+        currentRunId = null
+        await sendHeartbeat('stopping')
+        throw new Error(
+          `Target task "${claim.runId}" was safely requeued after a transient infrastructure initialization failure.`,
+        )
+      }
+
       if (taskResult === 'lease_lost') {
         currentRunId = null
         await sendHeartbeat(stopping ? 'stopping' : 'idle')
@@ -416,6 +558,7 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
           attempts: claim.attempts,
         })
         if (options.once) break
+        if (drainMode) continue
         continue
       }
 
@@ -428,6 +571,9 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
           conversationId: claim.conversationId,
           attempts: claim.attempts,
         })
+        if (drainMode) {
+          throw new Error(`Target task "${claim.runId}" requires isolated recovery after an unsafe handoff.`)
+        }
         break
       }
 
@@ -440,17 +586,19 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
         conversationId: claim.conversationId,
       })
 
-      if (options.once) break
+      if (options.once || drainMode) break
     }
   } finally {
     clearInterval(heartbeatTimer)
     currentRunId = null
     await heartbeatWriteChain
-    await destroyWarmE2BSandbox().catch((error) => {
-      console.warn('[TaskWorker] Warm sandbox cleanup failed', {
-        error: error instanceof Error ? error.message : String(error),
+    if (!drainMode) {
+      await destroyWarmE2BSandbox().catch((error) => {
+        console.warn('[TaskWorker] Warm sandbox cleanup failed', {
+          error: error instanceof Error ? error.message : String(error),
+        })
       })
-    })
+    }
     await markTaskWorkerStopped(workerId, startedAtMs).catch((error) => {
       console.error('[TaskWorker] Failed to mark worker stopped', {
         workerId,

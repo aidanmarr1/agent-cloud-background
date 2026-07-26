@@ -20,25 +20,40 @@ const completion = sectionBetween(
   '// Final directive acceptance and the empty-queue seal happen in one',
   '// ── Finalization',
 )
+const injectionWrapper = sectionBetween(
+  'const injectRunLiveDirectives = async (',
+  '/**\n     * Cadence narration',
+)
 
 assert.equal(
-  (streaming.match(/this\.injectLiveDirectives\(contextManager\)/g) || []).length,
+  (injectionWrapper.match(/this\.injectLiveDirectives\(contextManager, options\)/g) || []).length,
+  1,
+  'the run-scoped wrapper must delegate to the durable directive drain exactly once',
+)
+assert.match(
+  injectionWrapper,
+  /narrationIntentEpoch \+= 1[\s\S]*narrationSidecarAbortController\?\.abort/,
+  'a newly injected directive must invalidate and cancel stale narration intent',
+)
+
+assert.equal(
+  (streaming.match(/await injectRunLiveDirectives\(\)/g) || []).length,
   1,
   'STREAMING must drain live directives exactly once before the next model call',
 )
 assert.ok(
-  streaming.indexOf('this.injectLiveDirectives(contextManager)') < streaming.indexOf('this.callLLMWithRetry('),
+  streaming.indexOf('await injectRunLiveDirectives()') < streaming.indexOf('this.callLLMWithRetry('),
   'a newly accepted directive must be injected before the next model call',
 )
 
-const beforeExecution = executing.indexOf('this.injectLiveDirectives(contextManager)')
+const beforeExecution = executing.indexOf('await injectRunLiveDirectives()')
 const executeAll = executing.indexOf('toolPipeline.executeAll(')
 assert.ok(beforeExecution >= 0 && beforeExecution < executeAll, 'pending tools must retain their pre-execution directive supersession fence')
 
 const resultBoundary = executing.slice(executeAll)
 assert.doesNotMatch(
   resultBoundary,
-  /this\.injectLiveDirectives\(contextManager\)/,
+  /injectRunLiveDirectives\(\)/,
   'the result-to-next-model transition must not perform a duplicate post-result drain before STREAMING drains again',
 )
 assert.match(
@@ -54,7 +69,7 @@ assert.match(
 
 assert.match(
   completion,
-  /this\.injectLiveDirectives\(contextManager, \{ sealWhenEmpty: true \}\)/,
+  /injectRunLiveDirectives\(\{ sealWhenEmpty: true \}\)/,
   'completion must retain the atomic directive drain-and-seal boundary',
 )
 assert.match(
@@ -63,7 +78,7 @@ assert.match(
   'non-reopenable terminal reasons must retain explicit run sealing',
 )
 
-const callSites = source.match(/this\.injectLiveDirectives\(contextManager(?:, \{ sealWhenEmpty: true \})?\)/g) || []
+const callSites = source.match(/await injectRunLiveDirectives\((?:\{ sealWhenEmpty: true \})?\)/g) || []
 assert.equal(
   callSites.length,
   3,

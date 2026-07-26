@@ -14,6 +14,11 @@ import {
   workerHeartbeatIsHosted,
   workerHeartbeatMatchesCurrentProtocol,
 } from '@/lib/agent/taskWorkerHeartbeat'
+import {
+  getTaskExecutionCoordinatorStatus,
+  startTaskExecutionCoordinator,
+} from '@/lib/agent/taskExecutionCoordinator'
+import { usesOnDemandTaskDispatch } from '@/lib/agent/taskDispatch'
 import { parseSSE } from '@/lib/stream'
 import type { SSEEvent } from '@/types'
 
@@ -209,35 +214,77 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ ok: false, error: 'AGENT_TASK_WORKER_MODE must be external.' }, { status: 409 })
   }
 
-  const staleMs = envPositiveInt('AGENT_TASK_WORKER_STALE_MS', 60_000)
-  const workers = await getRecentTaskWorkerHeartbeats(staleMs)
-  if (workers.length === 0) {
-    return NextResponse.json({ ok: false, error: 'No live background worker heartbeat found.' }, { status: 503 })
+  const onDemandDispatch = usesOnDemandTaskDispatch()
+  if (onDemandDispatch) {
+    const coordinatorStatus = getTaskExecutionCoordinatorStatus()
+    if (!coordinatorStatus.configured || !coordinatorStatus.workflowConfigured) {
+      return NextResponse.json({
+        ok: false,
+        error: 'On-demand task execution is not configured.',
+        missing: coordinatorStatus.missing,
+        invalid: coordinatorStatus.invalid,
+      }, { status: 503 })
+    }
   }
+
+  let workers: Awaited<ReturnType<typeof getRecentTaskWorkerHeartbeats>> = []
+  let cloudCapableWorkers: typeof workers = []
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')
   const requireHostedWorker = envBoolEnabled('AGENT_REQUIRE_HOSTED_TASK_WORKER', false)
-  const cloudCapableWorkers = workers.filter((worker) =>
-    isCloudCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
-  const e2bCapableWorkers = workers.filter((worker) =>
-    isE2BCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
-  const acceptedWorkers = requireHostedWorker ? cloudCapableWorkers : e2bCapableWorkers
-  if (acceptedWorkers.length === 0) {
-    const localOnlyWorkerHosts = e2bCapableWorkers
-      .filter((worker) => isLikelyLocalWorkerHostname(worker.hostname))
-      .map((worker) => worker.hostname)
-    const error = requireHostedWorker && localOnlyWorkerHosts.length > 0
-      ? `Only local E2B background worker heartbeats were found (${localOnlyWorkerHosts.join(', ')}). Start a hosted worker before running this smoke.`
-      : requireDeploymentVersion
-      ? `No task worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}".`
-      : 'No hosted E2B task worker heartbeat found.'
-    return NextResponse.json({ ok: false, error }, { status: 503 })
+  if (!onDemandDispatch) {
+    const staleMs = envPositiveInt('AGENT_TASK_WORKER_STALE_MS', 60_000)
+    workers = await getRecentTaskWorkerHeartbeats(staleMs)
+    if (workers.length === 0) {
+      return NextResponse.json({ ok: false, error: 'No live background worker heartbeat found.' }, { status: 503 })
+    }
+    cloudCapableWorkers = workers.filter((worker) =>
+      isCloudCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
+    const e2bCapableWorkers = workers.filter((worker) =>
+      isE2BCapableWorker(worker, expectedDeploymentVersion, requireDeploymentVersion))
+    const acceptedWorkers = requireHostedWorker ? cloudCapableWorkers : e2bCapableWorkers
+    if (acceptedWorkers.length === 0) {
+      const localOnlyWorkerHosts = e2bCapableWorkers
+        .filter((worker) => isLikelyLocalWorkerHostname(worker.hostname))
+        .map((worker) => worker.hostname)
+      const error = requireHostedWorker && localOnlyWorkerHosts.length > 0
+        ? `Only local E2B background worker heartbeats were found (${localOnlyWorkerHosts.join(', ')}). Start a hosted worker before running this smoke.`
+        : requireDeploymentVersion
+        ? `No task worker heartbeat matched AGENT_DEPLOYMENT_VERSION="${expectedDeploymentVersion}".`
+        : 'No hosted E2B task worker heartbeat found.'
+      return NextResponse.json({ ok: false, error }, { status: 503 })
+    }
   }
 
   const runId = `background-smoke-${randomUUID()}`
   const userId = `internal-background-smoke-${randomUUID()}`
   const conversationId = `internal-background-smoke-${randomUUID()}`
   const startedAt = Date.now()
+
+  let coordinatorDispatch: {
+    dispatchId: string
+    backend: string
+    providerJobId: string
+  } | null = null
+  if (onDemandDispatch) {
+    try {
+      const coordinator = await startTaskExecutionCoordinator(runId)
+      coordinatorDispatch = {
+        dispatchId: `coordinator:${runId}`,
+        backend: 'vercel-workflow',
+        providerJobId: coordinator.workflowRunId,
+      }
+    } catch (error) {
+      console.error('[BackgroundWorkerSmoke] On-demand task coordinator failed to start', {
+        runId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return NextResponse.json({
+        ok: false,
+        error: 'The on-demand task coordinator could not start.',
+      }, { status: 503 })
+    }
+  }
 
   await enqueueTaskJob({
     runId,
@@ -248,6 +295,8 @@ export async function GET(request: NextRequest) {
       delayMs: PROBE_DELAY_MS,
       message: `queue=${taskQueueName()}`,
     },
+    coordinatorDispatch,
+    intakeAdmission: 'signed_internal_probe',
   })
 
   const discoveredJob = await findActiveTaskJobForConversation(userId, conversationId)
@@ -281,6 +330,7 @@ export async function GET(request: NextRequest) {
       queueName: taskQueueName(),
       workerCount: workers.length,
       hostedWorkerCount: cloudCapableWorkers.length,
+      executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
       activeDiscovery: true,
       cleanedUp,
       firstViewerEvents: first.events.map(eventSummary),
@@ -311,6 +361,7 @@ export async function GET(request: NextRequest) {
       activeDiscovery: true,
       workerCount: workers.length,
       hostedWorkerCount: cloudCapableWorkers.length,
+      executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
       cleanedUp,
       firstViewerLastSeq: first.lastSeq,
       firstViewerEvents: first.events.map(eventSummary),
@@ -327,6 +378,7 @@ export async function GET(request: NextRequest) {
     queueName: taskQueueName(),
     workerCount: workers.length,
     hostedWorkerCount: cloudCapableWorkers.length,
+    executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
     activeDiscovery: true,
     cleanedUp,
     workers: workers.map((worker) => ({

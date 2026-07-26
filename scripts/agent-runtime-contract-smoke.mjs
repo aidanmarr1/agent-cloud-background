@@ -325,7 +325,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const assertPlannerCreditRunway = async \(\) => this\.assertServerCreditRunwayCached\(\)/, 'planner control calls must share the cached credit runway instead of rechecking credits before acknowledgement')
   assert.match(agentLoop, /new PlanManager\([\s\S]{0,500}this\.options\.skipStartupAcknowledgement === true,[\s\S]{0,80}\bsignal\b/, 'AgentLoop must wire effective custom instructions, credit usage, credit preflight, startup acknowledgement control, and cancellation into PlanManager')
   assert.match(agentLoop, /shouldHydrateResearchActivity[\s\S]*this\.options\.startFreshSandbox !== true[\s\S]*loadResearchActivityEntries/, 'fresh tasks must not block startup acknowledgement on an already-cleared research activity read')
-  assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*void clearResearchActivityForTask\(userId,\s*conversationId,\s*staleResearchCutoff\)[\s\S]*resetLocalSandboxDir[\s\S]*taskStartCreditPromise = chargeServerTaskStart[\s\S]*await Promise\.all\(startupTasks\)/, 'background task startup must keep sandbox reset parallel and move stale research cleanup plus task-start billing off the acknowledgement critical path')
+  assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*void clearResearchActivityForTask\(userId,\s*conversationId,\s*staleResearchCutoff\)[\s\S]*resetLocalSandboxDir[\s\S]*startupReadyPromise = \(async \(\) => \{[\s\S]*await Promise\.all\(startupTasks\)[\s\S]*claimedWorkerAttempt !== null && !directChat && startupReadyPromise[\s\S]*const pendingStartupReady = startupReadyPromise[\s\S]*await runClaimedPreChargeBootstrap\(\s*'sandbox_startup',\s*\(\) => pendingStartupReady,\s*\)[\s\S]*taskStartCreditPromise = chargeServerTaskStart/, 'background startup must remain parallel while a claimed worker proves its computer is ready through the retryable infrastructure fence before task-start billing')
   assert.doesNotMatch(chatTaskRunner, /startupTasks\.push\(\s*chargeServerTaskStart/, 'task-start credit charging must not block first acknowledgement startup')
   assert.match(researchActivityLog, /created_at < \?/, 'async stale research cleanup must be timestamp-bounded so it cannot delete new task activity written after startup')
   assert.match(agentLoop, /latestUserMessage = \[\.\.\.messages\]\.reverse\(\)\.find\(m => m\.role === 'user'\)/, 'prompt-injection checks must only inspect the latest user turn')
@@ -1026,7 +1026,11 @@ async function assertSourceContracts() {
   assert.ok(chatRoute.indexOf('if (unavailableWorker)') < chatRoute.indexOf('enqueueTaskJob({'), 'worker unavailability must return before durable enqueue')
   assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker route must not use the old post-queue startup-plan patch race')
   assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker route must not create deterministic local plans')
-  assert.match(chatRoute, /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[heartbeatEvent\]/, 'external-worker route must persist only heartbeat before the worker-owned plan')
+  assert.match(
+    chatRoute,
+    /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Preparing a fresh computer for this task…',\s*\},\s*\]/,
+    'external-worker route must immediately persist truthful computer-preparation progress before the worker-owned plan',
+  )
   assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload/, 'external-worker route must durably enqueue before returning while the worker owns visible planning')
   assert.doesNotMatch(chatRoute, /startupPlanExpected:\s*!directChat && useExternalWorker/, 'worker must not wait behind route-owned startup planning after claiming a queued job')
   assert.ok(chatRoute.indexOf('findActiveTaskJobForConversation(userId, conversationId)') < chatRoute.indexOf('enqueueTaskJob({'), 'same-conversation queued or running work must be detected before enqueue')

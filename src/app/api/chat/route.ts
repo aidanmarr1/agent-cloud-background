@@ -34,6 +34,7 @@ import {
   startTaskJob,
   TaskConversationConflictError,
   TaskConversationPersistenceConflictError,
+  TaskIntakePausedError,
   TaskJobPayloadTooLargeError,
   TaskPreStartCancelledError,
 } from '@/lib/agent/taskJobs'
@@ -44,6 +45,12 @@ import {
   type TaskWorkerHeartbeat,
 } from '@/lib/agent/taskWorkerHeartbeat'
 import { runChatTaskJob as runSharedChatTaskJob, type ChatTaskPayload } from '@/lib/agent/chatTaskRunner'
+import {
+  getTaskExecutionCoordinatorStatus,
+  startTaskExecutionCoordinator,
+} from '@/lib/agent/taskExecutionCoordinator'
+import { usesOnDemandTaskDispatch } from '@/lib/agent/taskDispatch'
+import { getTaskIntakeHold } from '@/lib/agent/taskIntakeHold'
 import type { SSEEvent } from '@/types'
 import { userErrorMessage } from '@/lib/errorMessages'
 
@@ -143,6 +150,17 @@ async function taskWorkerUnavailableResponse(): Promise<Response | null> {
     }, { status: 503 })
   }
 
+  if (usesOnDemandTaskDispatch()) {
+    const status = getTaskExecutionCoordinatorStatus()
+    if (status.configured && status.workflowConfigured) return null
+    return Response.json({
+      error: 'On-demand task execution is not configured right now. Please try again shortly.',
+      code: 'ON_DEMAND_TASK_EXECUTOR_NOT_CONFIGURED',
+      missing: status.missing,
+      invalid: status.invalid,
+    }, { status: 503 })
+  }
+
   if (!requiresTaskWorkerHeartbeat()) return null
 
   const cached = (globalThis as unknown as Record<typeof workerAvailabilityCacheKey, WorkerAvailabilityCache | undefined>)[workerAvailabilityCacheKey]
@@ -187,6 +205,33 @@ async function taskWorkerUnavailableResponse(): Promise<Response | null> {
     code: 'BACKGROUND_WORKER_UNAVAILABLE',
   }
   return Response.json(body, { status: 503 })
+}
+
+async function taskIntakeHoldResponse(): Promise<Response | null> {
+  if (!externalTaskWorkerModeRequested() || !shouldUseExternalTaskWorker()) return null
+
+  try {
+    const hold = await getTaskIntakeHold()
+    if (!hold) return null
+    return Response.json({
+      error: 'New tasks are briefly paused while the task runtime is being updated. Please try again shortly.',
+      code: 'TASK_INTAKE_PAUSED',
+    }, {
+      status: 503,
+      headers: { 'Retry-After': '30' },
+    })
+  } catch (error) {
+    console.error('[AgentDiagnostics] Task intake hold check failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return Response.json({
+      error: 'The task runtime could not safely verify whether new work is paused. Please try again shortly.',
+      code: 'TASK_INTAKE_HOLD_CHECK_FAILED',
+    }, {
+      status: 503,
+      headers: { 'Retry-After': '30' },
+    })
+  }
 }
 
 function hasUnhydratedAttachments(messages: AgentLoopOptions['messages']): boolean {
@@ -459,6 +504,19 @@ export async function POST(request: Request) {
     return Response.json({ error: message, code: 'TASK_START_STATUS_FAILED' }, { status: 500 })
   }
 
+  const intakeHold = await taskIntakeHoldResponse()
+  markRouteTiming('intakeHoldReadyMs')
+  if (intakeHold) {
+    const headers = new Headers(intakeHold.headers)
+    headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
+    headers.set('X-Agent-Route-Timings', routeTimingsHeaderValue(routeTimings))
+    return new Response(intakeHold.body, {
+      status: intakeHold.status,
+      statusText: intakeHold.statusText,
+      headers,
+    })
+  }
+
   const messagesPromise = useExternalWorker || directChat || !hasUnhydratedAttachments(scopedTaskMessages)
     ? Promise.resolve(scopedTaskMessages)
     : hydrateMessageAttachmentsForUser(scopedTaskMessages, userId)
@@ -577,7 +635,13 @@ export async function POST(request: Request) {
 
   if (useExternalWorker) {
     const heartbeatEvent: SSEEvent = { type: 'heartbeat', timestamp: postStartedAt }
-    const initialEvents: SSEEvent[] = [heartbeatEvent]
+    const initialEvents: SSEEvent[] = [
+      heartbeatEvent,
+      {
+        type: 'progress_update',
+        content: 'Preparing a fresh computer for this task…',
+      },
+    ]
     try {
       const queuedTaskPayload: ChatTaskPayload = {
         ...taskPayload,
@@ -587,6 +651,31 @@ export async function POST(request: Request) {
       if (request.signal.aborted) {
         return Response.json({ error: 'Request cancelled.', code: 'REQUEST_ABORTED' }, { status: 499 })
       }
+      let coordinatorDispatch: {
+        dispatchId: string
+        backend: string
+        providerJobId: string
+      } | null = null
+      if (usesOnDemandTaskDispatch()) {
+        try {
+          const coordinator = await startTaskExecutionCoordinator(creditRunId)
+          coordinatorDispatch = {
+            dispatchId: `coordinator:${creditRunId}`,
+            backend: 'vercel-workflow',
+            providerJobId: coordinator.workflowRunId,
+          }
+          markRouteTiming('executorStartedMs')
+        } catch (error) {
+          console.error('[AgentDiagnostics] On-demand task coordinator failed to start', {
+            runId: creditRunId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return Response.json({
+            error: 'The task runtime could not start right now. Please try again shortly.',
+            code: 'TASK_EXECUTOR_START_FAILED',
+          }, { status: 503 })
+        }
+      }
       await enqueueTaskJob({
         runId: creditRunId,
         userId,
@@ -594,6 +683,7 @@ export async function POST(request: Request) {
         payload: queuedTaskPayload,
         initialEvents,
         conversationInsert,
+        coordinatorDispatch,
       })
     } catch (error) {
       if (error instanceof TaskPreStartCancelledError) {
@@ -617,6 +707,15 @@ export async function POST(request: Request) {
       }
       if (error instanceof TaskConversationPersistenceConflictError) {
         return Response.json({ error: error.message, code: error.code }, { status: 409 })
+      }
+      if (error instanceof TaskIntakePausedError) {
+        return Response.json({
+          error: error.message,
+          code: error.code,
+        }, {
+          status: 503,
+          headers: { 'Retry-After': '30' },
+        })
       }
       if (error instanceof TaskJobPayloadTooLargeError) {
         return Response.json({

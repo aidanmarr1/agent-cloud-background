@@ -37,5 +37,7 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  // Workflow's internal callbacks must reach the generated handler directly.
+  // Running them through application proxy logic can break durable step replay.
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|\\.well-known/workflow).*)'],
 }

@@ -67,6 +67,8 @@ export function workerHeartbeatMatchesCurrentProtocol(worker: {
 }
 
 let schemaReady: Promise<void> | null = null
+const STOPPED_WORKER_RETENTION_MS = 24 * 60 * 60 * 1000
+const ABANDONED_WORKER_RETENTION_MS = 7 * STOPPED_WORKER_RETENTION_MS
 
 async function addTaskWorkerHeartbeatColumn(sql: string): Promise<void> {
   try {
@@ -155,6 +157,23 @@ export async function recordTaskWorkerHeartbeat(input: TaskWorkerHeartbeatInput)
   await ensureTaskWorkerHeartbeatSchema()
   const now = Date.now()
   const queueName = input.queueName || taskQueueName()
+  if (input.status === 'starting') {
+    await tursoExecute(
+      `
+        delete from agent_task_workers
+        where queue_name = ?
+          and (
+            (status = 'stopped' and last_seen_at_ms < ?)
+            or last_seen_at_ms < ?
+          )
+      `,
+      [
+        queueName,
+        now - STOPPED_WORKER_RETENTION_MS,
+        now - ABANDONED_WORKER_RETENTION_MS,
+      ],
+    )
+  }
   const result = await tursoExecute(
     `
       insert into agent_task_workers (

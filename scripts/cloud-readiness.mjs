@@ -36,6 +36,10 @@ function envBoolExact(name, fallback = false) {
   return value === 'true' || value === '1'
 }
 
+function usesOnDemandDispatch() {
+  return env('AGENT_TASK_DISPATCH_MODE') === 'render_job'
+}
+
 function workerMatchesConfiguredRuntime(worker) {
   const expectedDeploymentVersion = env('AGENT_DEPLOYMENT_VERSION') || null
   const requireDeploymentVersion = envBoolEnabled('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION')
@@ -100,7 +104,7 @@ function checkPackageScripts(pkg) {
 
 function checkDependencies(pkg) {
   const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) }
-  for (const name of ['@tursodatabase/serverless', 'e2b', 'jiti', 'next']) {
+  for (const name of ['@tursodatabase/serverless', 'e2b', 'jiti', 'next', 'workflow']) {
     if (deps[name]) pass(`dependency "${name}" exists`)
     else fail(`dependency "${name}" is missing`)
   }
@@ -126,7 +130,11 @@ async function checkToolExposure() {
 
 async function checkLiveDatabase() {
   if (!live) {
-    warn('live Turso connectivity and worker heartbeat were not checked; run npm run cloud:check -- --live to test them')
+    warn(
+      usesOnDemandDispatch()
+        ? 'live Turso connectivity was not checked; run npm run cloud:check -- --live to test it'
+        : 'live Turso connectivity and worker heartbeat were not checked; run npm run cloud:check -- --live to test them',
+    )
     return
   }
 
@@ -146,6 +154,11 @@ async function checkLiveDatabase() {
     else fail('live Turso connectivity returned no rows')
   } catch (error) {
     fail(`live Turso connectivity failed: ${error instanceof Error ? error.message : String(error)}`)
+    return
+  }
+
+  if (usesOnDemandDispatch()) {
+    pass('on-demand execution intentionally requires no idle worker heartbeat')
     return
   }
 
@@ -183,6 +196,15 @@ function checkEnvironment() {
     pass('AGENT_TASK_WORKER_MODE=external')
   } else {
     fail('AGENT_TASK_WORKER_MODE must be set to external for tab-close-safe cloud execution')
+  }
+
+  if (usesOnDemandDispatch()) {
+    pass('AGENT_TASK_DISPATCH_MODE=render_job')
+    requireEnv('RENDER_API_KEY', 'launching Render one-off task workers')
+    requireEnv('RENDER_WORKER_SERVICE_ID', 'selecting the suspended Render worker image')
+    requireEnv('RENDER_ON_DEMAND_JOB_PLAN_ID', 'selecting one-off worker compute')
+  } else if (env('AGENT_TASK_DISPATCH_MODE')) {
+    fail('AGENT_TASK_DISPATCH_MODE must be render_job or blank for the persistent-worker fallback')
   }
 
   const queueName = env('AGENT_TASK_QUEUE_NAME') || 'default'
@@ -230,10 +252,16 @@ function checkEnvironment() {
   }
 
   const requireHeartbeat = env('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT').toLowerCase()
-  if (!requireHeartbeat || requireHeartbeat === 'true' || requireHeartbeat === '1') {
-    pass('task requests require a recent worker heartbeat')
+  if (usesOnDemandDispatch()) {
+    if (requireHeartbeat === 'false' || requireHeartbeat === '0') {
+      pass('on-demand task requests do not require an idle worker heartbeat')
+    } else {
+      fail('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT must be false for suspended on-demand execution')
+    }
+  } else if (!requireHeartbeat || requireHeartbeat === 'true' || requireHeartbeat === '1') {
+    pass('persistent task requests require a recent worker heartbeat')
   } else {
-    warn('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT is disabled; tasks may queue even when no worker is running')
+    warn('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT is disabled; persistent tasks may queue even when no worker is running')
   }
 
   if (env('AGENT_INTERNAL_HEALTH_SECRET')) {
@@ -286,6 +314,9 @@ function checkFiles() {
   requireFile('scripts/prod-background-worker-smoke.mjs', 'deployed worker reconnect smoke command')
   requireFile('src/worker/taskWorker.ts', 'worker loop')
   requireFile('src/lib/agent/taskJobs.ts', 'durable task queue')
+  requireFile('src/lib/agent/taskDispatch.ts', 'Render one-off task dispatcher')
+  requireFile('src/lib/agent/taskExecutionCoordinator.ts', 'durable task execution coordinator')
+  requireFile('src/workflows/taskExecution.ts', 'Vercel task execution workflow')
   requireFile('src/lib/e2bSandbox.ts', 'E2B cloud sandbox provider')
   requireFile('src/lib/browser.ts', 'browser tool runtime')
   requireFile('src/app/api/health/route.ts', 'public deployment health check endpoint')

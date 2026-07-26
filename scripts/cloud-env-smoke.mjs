@@ -107,6 +107,31 @@ requireRealEnv('AGENT_INTERNAL_HEALTH_SECRET', 'internal health signing secret',
 requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)
 
 requireExact('AGENT_TASK_WORKER_MODE', 'external', 'web requests must enqueue durable background tasks')
+const taskDispatchMode = env('AGENT_TASK_DISPATCH_MODE')
+if (taskDispatchMode === 'render_job') {
+  requireRealEnv('RENDER_API_KEY', 'server-only Render API key', validateNonShortToken)
+  requireRealEnv(
+    'RENDER_WORKER_SERVICE_ID',
+    'Render base worker service id',
+    (value) => /^srv-[a-zA-Z0-9]+$/.test(value),
+  )
+  requireRealEnv(
+    'RENDER_ON_DEMAND_JOB_PLAN_ID',
+    'Render one-off job plan id',
+    (value) => /^plan-[a-zA-Z0-9-]+$/.test(value),
+  )
+  requireExactBool(
+    'AGENT_REQUIRE_TASK_WORKER_HEARTBEAT',
+    false,
+    'the suspended on-demand executor must accept tasks without an idle worker heartbeat',
+  )
+  pass('AGENT_TASK_DISPATCH_MODE=render_job uses scale-to-zero execution')
+} else {
+  requireRecommendedTrue('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', 'failing fast when no persistent worker is alive')
+  if (taskDispatchMode) {
+    fail('AGENT_TASK_DISPATCH_MODE must be render_job or left unset for the persistent-worker fallback')
+  }
+}
 requireRealEnv('AGENT_TASK_QUEUE_NAME', 'deployment queue namespace', validateQueueName)
 if (env('AGENT_TASK_QUEUE_NAME') === 'default') {
   fail('AGENT_TASK_QUEUE_NAME must not be default for cloud deployment; use production, staging, or another explicit namespace')
@@ -127,7 +152,6 @@ const storageDriver = env('AGENT_STORAGE_DRIVER') || 'turso'
 if (storageDriver === 'turso') pass('AGENT_STORAGE_DRIVER=turso')
 else fail('AGENT_STORAGE_DRIVER must be turso so task files survive web/worker restarts')
 
-requireRecommendedTrue('AGENT_REQUIRE_TASK_WORKER_HEARTBEAT', 'failing fast when no worker is alive')
 if (['true', '1'].includes(env('AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION').toLowerCase())) {
   requireRealEnv('AGENT_DEPLOYMENT_VERSION', 'web/worker deployment version match')
 } else if (env('AGENT_DEPLOYMENT_VERSION')) {
@@ -140,6 +164,7 @@ for (const name of [
   'AGENT_TASK_WORKER_HEARTBEAT_MS',
   'AGENT_TASK_WORKER_STALE_MS',
   'AGENT_TASK_WORKER_MAX_ATTEMPTS',
+  'AGENT_TASK_DISPATCH_MAX_ATTEMPTS',
   'AGENT_E2B_SANDBOX_TIMEOUT_MS',
   'AGENT_E2B_COMMAND_TIMEOUT_MS',
   'AGENT_E2B_BROWSER_PORT',

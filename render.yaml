@@ -95,6 +95,7 @@ services:
     runtime: node
     plan: starter
     region: singapore
+    autoDeployTrigger: off
     buildCommand: npm ci && npm run build
     startCommand: npm run worker:cloud
     maxShutdownDelaySeconds: 300
@@ -151,6 +152,14 @@ services:
         value: "930000"
       - key: AGENT_WORKER_CANCEL_HARD_EXIT_MS
         value: "5000"
+      - key: AGENT_TASK_WORKER_DRAIN_RECLAIM_WAIT_MS
+        value: "120000"
+      - key: AGENT_TASK_WORKER_DRAIN_MISSING_GRACE_MS
+        value: "5000"
+      - key: AGENT_TASK_WORKER_DRAIN_MAX_RESTARTS
+        value: "8"
+      - key: AGENT_TASK_WORKER_DRAIN_MAX_RUNTIME_MS
+        value: "3600000"
       - key: AGENT_DEPLOYMENT_VERSION
         value: ""
       - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION

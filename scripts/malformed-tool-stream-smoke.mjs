@@ -273,8 +273,13 @@ assert.equal(pipelineResult?.internalRecovery, undefined, 'a conservatively repa
 assert.deepEqual(JSON.parse(pipelineResult!.tc.arguments), JSON.parse(repaired!))
 assert.match(
   JSON.stringify(pipelineResult?.result || {}),
-  /no opened or extracted source pages yet/i,
-  'the repaired call must continue through ordinary research preflight rather than malformed recovery',
+  /already ran in the active phase/i,
+  'the repaired call must continue through ordinary duplicate-query preflight rather than malformed recovery',
+)
+assert.equal(
+  pipelineState.lastLoopSignal?.type,
+  'search_duplicate',
+  'the ordinary duplicate-query preflight must retain its deterministic loop signal',
 )
 
 const readPipelineEmitter = makeEmitter()

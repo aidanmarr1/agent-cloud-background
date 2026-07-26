@@ -19,7 +19,11 @@ import { clearLiveDirectivesForRun } from '@/lib/liveDirectives'
 import { destroySandbox } from '@/lib/sandbox'
 import type { TaskStartConversationInsert } from '@/lib/conversations'
 import { ensureTaskWorkerHeartbeatSchema } from './taskWorkerHeartbeat'
-import { TASK_ORCHESTRATION_PROTOCOL_VERSION, taskQueueName } from './taskQueue'
+import {
+  TASK_ORCHESTRATION_PROTOCOL_VERSION,
+  taskQueueBaseName,
+  taskQueueName,
+} from './taskQueue'
 import type { AgentEventEmitter } from './SSEEmitter'
 import type { InflightToolDrain } from './toolSafety'
 import type { BackgroundProbeTaskPayload, ChatTaskPayload, TaskJobPayload } from './chatTaskRunner'
@@ -90,7 +94,7 @@ interface TaskJob {
   pendingBrowserFramePersistenceTimer: ReturnType<typeof setTimeout> | null
   terminalCleanupTimer: ReturnType<typeof setTimeout> | null
   requeueRequested: boolean
-  requeueReason: 'shutdown' | 'lease_lost' | null
+  requeueReason: 'shutdown' | 'lease_lost' | 'infrastructure_failure' | null
   claimWorkerId: string | null
   claimAttempts: number | null
   inflightToolDrain: InflightToolDrain | null
@@ -119,6 +123,8 @@ interface StaleTaskTerminalFence {
   terminalStatus: 'done' | 'error'
   terminalError: string | null
   terminalEventPersisted: boolean
+  requireNoLiveTaskDispatches?: boolean
+  ignoredDispatchId?: string | null
 }
 
 export interface ActiveTaskJobSummary {
@@ -134,6 +140,47 @@ export interface ActiveTaskJobSummary {
   terminalError?: string | null
   acceptsLiveDirectives: boolean
   cancelRequested: boolean
+}
+
+export interface TaskExecutionDispatchState {
+  runId: string
+  state: 'missing' | 'queued' | 'running' | 'stale' | 'terminal'
+  status: TaskJobStatus | null
+  startedAtMs: number | null
+  attempts: number
+  cancelRequested: boolean
+  workerId: string | null
+  leaseExpiresAtMs: number | null
+  workerLastSeenAtMs: number | null
+  workerStatus: string | null
+  terminalStatus: 'done' | 'error' | null
+  renderDispatches: TaskExecutionRenderDispatch[]
+}
+
+export type TaskExecutionRenderDispatchStatus =
+  | 'creating'
+  | 'unknown'
+  | 'created'
+  | 'failed_known'
+  | 'terminal'
+
+export interface TaskExecutionRenderDispatch {
+  dispatchId: string
+  status: TaskExecutionRenderDispatchStatus
+  providerJobId: string | null
+  createdAtMs: number
+  updatedAtMs: number
+}
+
+export interface TaskDispatchAttemptReservation {
+  created: boolean
+  providerJobId: string | null
+  reservationToken: string | null
+  status:
+    | TaskExecutionRenderDispatchStatus
+    | 'budget_exhausted'
+    | 'task_cancelled'
+    | 'task_terminal'
 }
 
 export class TaskConversationConflictError extends Error {
@@ -166,6 +213,20 @@ export class TaskPreStartCancelledError extends Error {
   ) {
     super('This task was stopped before it started.')
     this.name = 'TaskPreStartCancelledError'
+  }
+}
+
+export class TaskIntakePausedError extends Error {
+  readonly code = 'TASK_INTAKE_PAUSED'
+
+  constructor(
+    readonly queueName: string,
+    readonly holdId: string,
+    readonly reason: string | null,
+    readonly heldAtMs: number,
+  ) {
+    super('New tasks are briefly paused while the task runtime is being updated. Please try again shortly.')
+    this.name = 'TaskIntakePausedError'
   }
 }
 
@@ -279,6 +340,8 @@ export const TASK_WORKER_CANCEL_HARD_EXIT_MAX_MS = 30_000
 export const TASK_WORKER_CANCEL_PROOF_JITTER_MS = 5_000
 const TASK_JOB_INFLIGHT_DRAIN_TIMEOUT_MS = 5_000
 const TASK_JOB_WORKER_MAX_ATTEMPTS = 3
+const TASK_DISPATCH_MAX_ATTEMPTS = 8
+const TASK_DISPATCH_MAX_ATTEMPTS_LIMIT = 32
 const TASK_JOB_TEXT_PERSIST_DEBOUNCE_MS = 200
 // The E2B worker receives push-based CDP screencast frames. Coalesce only the
 // cross-process database relay to roughly 4fps so the production Computer
@@ -436,6 +499,12 @@ function taskWorkerMaxAttempts(): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : TASK_JOB_WORKER_MAX_ATTEMPTS
 }
 
+export function taskDispatchMaxAttempts(): number {
+  const parsed = Number.parseInt(process.env.AGENT_TASK_DISPATCH_MAX_ATTEMPTS?.trim() || '', 10)
+  if (!Number.isSafeInteger(parsed) || parsed < 1) return TASK_DISPATCH_MAX_ATTEMPTS
+  return Math.min(parsed, TASK_DISPATCH_MAX_ATTEMPTS_LIMIT)
+}
+
 export function shouldUseExternalTaskWorker(): boolean {
   return process.env.AGENT_TASK_WORKER_MODE?.trim() === 'external' && shouldUseDatabaseTaskJobs()
 }
@@ -448,6 +517,24 @@ function normalizeStatus(value: unknown): TaskJobStatus {
 
 function normalizeTerminalStatus(value: unknown): 'done' | 'error' | null {
   return value === 'done' || value === 'error' ? value : null
+}
+
+function normalizeTaskExecutionRenderDispatchStatus(
+  value: unknown,
+): TaskExecutionRenderDispatchStatus {
+  if (
+    value === 'creating' ||
+    value === 'unknown' ||
+    value === 'created' ||
+    value === 'failed_known' ||
+    value === 'terminal'
+  ) {
+    return value
+  }
+  // Protocol 4 briefly used "failed" before dispatch generations became
+  // immutable. Treat those rows as a known non-live failure during rollout.
+  if (value === 'failed') return 'failed_known'
+  return 'unknown'
 }
 
 function rowToActiveTaskJobSummary(row: TaskJobRow | undefined | null): ActiveTaskJobSummary | null {
@@ -542,6 +629,22 @@ async function ensureTaskJobSchema(): Promise<void> {
         )
       `)
       await tursoExecute(`
+        create table if not exists agent_task_dispatches (
+          dispatch_id text primary key,
+          run_id text not null,
+          queue_name text not null,
+          backend text not null,
+          status text not null,
+          reservation_token text,
+          provider_job_id text,
+          error text,
+          created_at_ms integer not null,
+          updated_at_ms integer not null
+        )
+      `)
+      await addTaskJobColumn('alter table agent_task_dispatches add column reservation_token text')
+      await tursoExecute('create index if not exists agent_task_dispatches_run_idx on agent_task_dispatches(run_id, updated_at_ms desc)')
+      await tursoExecute(`
         create table if not exists agent_task_prestart_cancellations (
           queue_name text not null,
           user_id text not null,
@@ -553,6 +656,15 @@ async function ensureTaskJobSchema(): Promise<void> {
         )
       `)
       await tursoExecute('create index if not exists agent_task_prestart_cancellations_expiry_idx on agent_task_prestart_cancellations(expires_at_ms)')
+      await tursoExecute(`
+        create table if not exists agent_task_queue_controls (
+          queue_name text primary key,
+          intake_hold_id text,
+          intake_hold_reason text,
+          intake_held_at_ms integer,
+          updated_at_ms integer not null
+        )
+      `)
     })().catch((error) => {
       taskJobSchemaPromise = null
       throw error
@@ -605,6 +717,10 @@ async function maybePruneTerminalTaskJobs(now = nowMs()): Promise<void> {
     })
     await transaction.execute({
       sql: `delete from agent_task_live_frames where run_id in (${placeholders})`,
+      args: runIds,
+    })
+    await transaction.execute({
+      sql: `delete from agent_task_dispatches where run_id in (${placeholders})`,
       args: runIds,
     })
     await transaction.execute({
@@ -2619,6 +2735,17 @@ export async function enqueueTaskJob(input: {
   payload: TaskJobPayload
   initialEvents?: SSEEvent[]
   conversationInsert?: TaskStartConversationInsert | null
+  coordinatorDispatch?: {
+    dispatchId: string
+    backend: string
+    providerJobId: string
+  } | null
+  /**
+   * A capability passed only by the HMAC-authenticated internal smoke route.
+   * It is intentionally valid only for that route's isolated probe identity
+   * and background-probe payload, never for user task admission.
+   */
+  intakeAdmission?: 'signed_internal_probe'
 }): Promise<{ runId: string; status: TaskJobStatus }> {
   if (!shouldUseDatabaseTaskJobs()) {
     throw new Error('External task worker mode requires Turso to be configured.')
@@ -2627,10 +2754,78 @@ export async function enqueueTaskJob(input: {
   const serializedPayload = serializeTaskJobPayload(input.payload)
   const createdAt = nowMs()
   const queueName = taskQueueName()
+  const queueBaseName = taskQueueBaseName()
+  const signedInternalProbe = input.intakeAdmission === 'signed_internal_probe' &&
+    input.payload.kind === 'background_probe' &&
+    input.runId.startsWith('background-smoke-') &&
+    input.userId.startsWith('internal-background-smoke-') &&
+    input.conversationId.startsWith('internal-background-smoke-')
+  if (input.coordinatorDispatch && (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(input.coordinatorDispatch.dispatchId) ||
+    !/^[a-zA-Z0-9_.:-]{1,64}$/.test(input.coordinatorDispatch.backend) ||
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(input.coordinatorDispatch.providerJobId)
+  )) {
+    throw new Error('Invalid task coordinator dispatch identity.')
+  }
   if (hasMemoryPreStartCancellation(queueName, input.userId, input.conversationId, input.runId, createdAt)) {
     throw new TaskPreStartCancelledError(input.runId, input.conversationId)
   }
   const status = await withTaskJobSchemaRepair(() => tursoTransaction('write', async (transaction): Promise<TaskJobStatus> => {
+    // Idempotent retries for a run already durably owned by this exact task
+    // remain safe while rollout intake is held. This check must precede the
+    // hold fence so a response retry can discover the accepted run instead of
+    // turning a successful acceptance into a synthetic 503.
+    const existingRun = await transaction.execute({
+      sql: `
+        select user_id, conversation_id, queue_name, status
+        from agent_task_jobs
+        where run_id = ?
+        limit 1
+      `,
+      args: [input.runId],
+    })
+    const existingRunRow = existingRun.rows[0]
+    if (existingRunRow) {
+      if (
+        existingRunRow.user_id !== input.userId ||
+        existingRunRow.conversation_id !== input.conversationId ||
+        existingRunRow.queue_name !== queueName
+      ) {
+        throw new Error('Task run id is already owned by a different task.')
+      }
+      return normalizeStatus(existingRunRow.status)
+    }
+
+    // The stable base-name hold survives orchestration protocol migrations;
+    // the exact queue hold supports queue-specific incident response. Reading
+    // both inside this write transaction makes hold observation and job insert
+    // one atomic admission decision.
+    const intakeHold = await transaction.execute({
+      sql: `
+        select queue_name, intake_hold_id, intake_hold_reason, intake_held_at_ms
+        from agent_task_queue_controls
+        where queue_name in (?, ?)
+          and length(trim(coalesce(intake_hold_id, ''))) > 0
+        order by case when queue_name = ? then 0 else 1 end
+        limit 1
+      `,
+      args: [queueName, queueBaseName, queueName],
+    })
+    const intakeHoldRow = intakeHold.rows[0]
+    const intakeHoldId = typeof intakeHoldRow?.intake_hold_id === 'string'
+      ? intakeHoldRow.intake_hold_id.trim()
+      : ''
+    if (intakeHoldId && !signedInternalProbe) {
+      throw new TaskIntakePausedError(
+        typeof intakeHoldRow.queue_name === 'string' ? intakeHoldRow.queue_name : queueName,
+        intakeHoldId,
+        typeof intakeHoldRow.intake_hold_reason === 'string' && intakeHoldRow.intake_hold_reason
+          ? intakeHoldRow.intake_hold_reason
+          : null,
+        Math.max(0, Number(intakeHoldRow.intake_held_at_ms || 0)),
+      )
+    }
+
     const stoppedBeforeStart = await transaction.execute({
       sql: `
         select 1 as cancelled
@@ -2690,6 +2885,26 @@ export async function enqueueTaskJob(input: {
     })
 
     if (inserted.rowsAffected === 1) {
+      if (input.coordinatorDispatch) {
+        await transaction.execute({
+          sql: `
+            insert into agent_task_dispatches (
+              dispatch_id, run_id, queue_name, backend, status,
+              reservation_token, provider_job_id, error, created_at_ms, updated_at_ms
+            )
+            values (?, ?, ?, ?, 'created', null, ?, null, ?, ?)
+          `,
+          args: [
+            input.coordinatorDispatch.dispatchId,
+            input.runId,
+            queueName,
+            input.coordinatorDispatch.backend,
+            input.coordinatorDispatch.providerJobId,
+            createdAt,
+            createdAt,
+          ],
+        })
+      }
       if (input.conversationInsert) {
         const conversationResult = await transaction.execute(input.conversationInsert)
         if (conversationResult.rowsAffected !== 1) {
@@ -2711,7 +2926,10 @@ export async function enqueueTaskJob(input: {
       return 'queued'
     }
 
-    const existing = await transaction.execute({
+    // A concurrent idempotent transaction can win the insert after the first
+    // lookup. Re-read within this transaction and prove exact ownership before
+    // reporting its durable status.
+    const concurrentlyInserted = await transaction.execute({
       sql: `
         select user_id, conversation_id, queue_name, status
         from agent_task_jobs
@@ -2720,16 +2938,16 @@ export async function enqueueTaskJob(input: {
       `,
       args: [input.runId],
     })
-    const row = existing.rows[0]
+    const concurrentlyInsertedRow = concurrentlyInserted.rows[0]
     if (
-      !row ||
-      row.user_id !== input.userId ||
-      row.conversation_id !== input.conversationId ||
-      row.queue_name !== queueName
+      !concurrentlyInsertedRow ||
+      concurrentlyInsertedRow.user_id !== input.userId ||
+      concurrentlyInsertedRow.conversation_id !== input.conversationId ||
+      concurrentlyInsertedRow.queue_name !== queueName
     ) {
       throw new Error('Task run id is already owned by a different task.')
     }
-    return normalizeStatus(row.status)
+    return normalizeStatus(concurrentlyInsertedRow.status)
   }))
   // Retention removes only expired cancellation markers and already-terminal
   // jobs. It is maintenance, not part of accepting this run, so it must not
@@ -2975,6 +3193,531 @@ export async function findTaskJobForRun(
   return rowToActiveTaskJobSummary(result.rows[0] as TaskJobRow | undefined)
 }
 
+export async function inspectTaskExecutionDispatchState(
+  runId: string,
+): Promise<TaskExecutionDispatchState> {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(runId)) throw new Error('Invalid task run id')
+  if (!shouldUseDatabaseTaskJobs()) {
+    return {
+      runId,
+      state: 'missing',
+      status: null,
+      startedAtMs: null,
+      attempts: 0,
+      cancelRequested: false,
+      workerId: null,
+      leaseExpiresAtMs: null,
+      workerLastSeenAtMs: null,
+      workerStatus: null,
+      terminalStatus: null,
+      renderDispatches: [],
+    }
+  }
+
+  await ensureTaskWorkerHeartbeatSchema()
+  const queueName = taskQueueName()
+  const result = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      select jobs.status, jobs.terminal_status, jobs.started_at_ms,
+             jobs.attempts, jobs.cancel_requested,
+             jobs.worker_id, jobs.lease_expires_at_ms,
+             workers.status as worker_status,
+             workers.current_run_id as worker_current_run_id,
+             workers.last_seen_at_ms as worker_last_seen_at_ms
+      from agent_task_jobs as jobs
+      left join agent_task_workers as workers
+        on workers.worker_id = jobs.worker_id
+       and workers.queue_name = jobs.queue_name
+      where jobs.run_id = ?
+        and jobs.queue_name = ?
+      limit 1
+    `,
+    [runId, queueName],
+  ))
+  const row = result.rows[0]
+  if (!row) {
+    return {
+      runId,
+      state: 'missing',
+      status: null,
+      startedAtMs: null,
+      attempts: 0,
+      cancelRequested: false,
+      workerId: null,
+      leaseExpiresAtMs: null,
+      workerLastSeenAtMs: null,
+      workerStatus: null,
+      terminalStatus: null,
+      renderDispatches: [],
+    }
+  }
+
+  const dispatchResult = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      select dispatch_id, status, provider_job_id, created_at_ms, updated_at_ms
+      from agent_task_dispatches
+      where run_id = ?
+        and queue_name = ?
+        and backend = 'render-one-off'
+      order by created_at_ms asc, dispatch_id asc
+    `,
+    [runId, queueName],
+  ))
+  const renderDispatches = dispatchResult.rows.flatMap((dispatchRow) => {
+    if (typeof dispatchRow.dispatch_id !== 'string') return []
+    const rawCreatedAtMs = Number(dispatchRow.created_at_ms)
+    const rawUpdatedAtMs = Number(dispatchRow.updated_at_ms)
+    return [{
+      dispatchId: dispatchRow.dispatch_id,
+      status: normalizeTaskExecutionRenderDispatchStatus(dispatchRow.status),
+      providerJobId: typeof dispatchRow.provider_job_id === 'string' &&
+          dispatchRow.provider_job_id.length > 0
+        ? dispatchRow.provider_job_id
+        : null,
+      createdAtMs: Number.isFinite(rawCreatedAtMs) ? rawCreatedAtMs : 0,
+      updatedAtMs: Number.isFinite(rawUpdatedAtMs) ? rawUpdatedAtMs : 0,
+    } satisfies TaskExecutionRenderDispatch]
+  })
+
+  const status = normalizeStatus(row.status)
+  const terminalStatus = normalizeTerminalStatus(row.terminal_status)
+  const rawStartedAtMs = row.started_at_ms === null || row.started_at_ms === undefined
+    ? null
+    : Number(row.started_at_ms)
+  const startedAtMs = rawStartedAtMs !== null && Number.isFinite(rawStartedAtMs)
+    ? rawStartedAtMs
+    : null
+  const attempts = Math.max(0, Number(row.attempts || 0))
+  const cancelRequested = row.cancel_requested === 1 || row.cancel_requested === true
+  const workerId = typeof row.worker_id === 'string' ? row.worker_id : null
+  const rawLeaseExpiresAtMs = row.lease_expires_at_ms === null || row.lease_expires_at_ms === undefined
+    ? null
+    : Number(row.lease_expires_at_ms)
+  const leaseExpiresAtMs = rawLeaseExpiresAtMs !== null && Number.isFinite(rawLeaseExpiresAtMs)
+    ? rawLeaseExpiresAtMs
+    : null
+  const rawWorkerLastSeenAtMs = row.worker_last_seen_at_ms === null || row.worker_last_seen_at_ms === undefined
+    ? null
+    : Number(row.worker_last_seen_at_ms)
+  const workerLastSeenAtMs = rawWorkerLastSeenAtMs !== null && Number.isFinite(rawWorkerLastSeenAtMs)
+    ? rawWorkerLastSeenAtMs
+    : null
+  const workerStatus = typeof row.worker_status === 'string' ? row.worker_status : null
+
+  if (terminalStatus || status === 'done' || status === 'error' || status === 'cancelled') {
+    return {
+      runId,
+      state: 'terminal',
+      status,
+      startedAtMs,
+      attempts,
+      cancelRequested,
+      workerId,
+      leaseExpiresAtMs,
+      workerLastSeenAtMs,
+      workerStatus,
+      terminalStatus,
+      renderDispatches,
+    }
+  }
+
+  if (status === 'queued') {
+    return {
+      runId,
+      state: 'queued',
+      status,
+      startedAtMs,
+      attempts,
+      cancelRequested,
+      workerId,
+      leaseExpiresAtMs,
+      workerLastSeenAtMs,
+      workerStatus,
+      terminalStatus,
+      renderDispatches,
+    }
+  }
+
+  const now = nowMs()
+  const exactWorkerIsFresh = (
+    !!workerId &&
+    row.worker_current_run_id === runId &&
+    workerStatus === 'running' &&
+    workerLastSeenAtMs !== null &&
+    workerLastSeenAtMs >= now - taskWorkerStaleMs()
+  )
+  const leaseIsFresh = leaseExpiresAtMs !== null && leaseExpiresAtMs > now
+  return {
+    runId,
+    state: leaseIsFresh || exactWorkerIsFresh ? 'running' : 'stale',
+    status,
+    startedAtMs,
+    attempts,
+    cancelRequested,
+    workerId,
+    leaseExpiresAtMs,
+    workerLastSeenAtMs,
+    workerStatus,
+    terminalStatus,
+    renderDispatches,
+  }
+}
+
+export async function reserveTaskDispatchAttempt(input: {
+  runId: string
+  dispatchId: string
+  backend: string
+}): Promise<TaskDispatchAttemptReservation> {
+  if (!shouldUseDatabaseTaskJobs()) {
+    throw new Error('On-demand task dispatch requires Turso to be configured.')
+  }
+  if (
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(input.runId) ||
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(input.dispatchId) ||
+    !/^[a-zA-Z0-9_.:-]{1,64}$/.test(input.backend)
+  ) {
+    throw new Error('Task dispatch reservation requires runId, dispatchId, and backend.')
+  }
+  const now = nowMs()
+  const queueName = taskQueueName()
+  const reservationToken = randomUUID()
+  return withTaskJobSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+    const task = await transaction.execute({
+      sql: `
+        select status, terminal_status, worker_id, cancel_requested
+        from agent_task_jobs
+        where run_id = ? and queue_name = ?
+        limit 1
+      `,
+      args: [input.runId, queueName],
+    })
+    const taskRow = task.rows[0]
+    if (
+      !taskRow ||
+      taskRow.terminal_status ||
+      taskRow.status === 'done' ||
+      taskRow.status === 'error' ||
+      taskRow.status === 'cancelled' ||
+      (
+        typeof taskRow.worker_id === 'string' &&
+        (
+          taskRow.worker_id.startsWith('terminal-fence:') ||
+          taskRow.worker_id.startsWith('cancel-fence:')
+        )
+      )
+    ) {
+      return {
+        created: false,
+        providerJobId: null,
+        reservationToken: null,
+        status: 'task_terminal' as const,
+      }
+    }
+    if (
+      taskRow.cancel_requested === 1 ||
+      taskRow.cancel_requested === true
+    ) {
+      return {
+        created: false,
+        providerJobId: null,
+        reservationToken: null,
+        status: 'task_cancelled' as const,
+      }
+    }
+
+    // Dispatch IDs are immutable provider POST attempts. Replaying a Workflow
+    // step may observe the same row, but it must never reopen that ID and send
+    // the POST again after a timeout or process loss.
+    const existing = await transaction.execute({
+      sql: `
+        select run_id, queue_name, backend, status, provider_job_id
+        from agent_task_dispatches
+        where dispatch_id = ?
+        limit 1
+      `,
+      args: [input.dispatchId],
+    })
+    const existingRow = existing.rows[0]
+    if (existingRow) {
+      if (
+        existingRow.run_id !== input.runId ||
+        existingRow.queue_name !== queueName ||
+        existingRow.backend !== input.backend
+      ) {
+        throw new Error('Task dispatch id is already owned by a different task.')
+      }
+      return {
+        created: false,
+        providerJobId: typeof existingRow.provider_job_id === 'string' &&
+            existingRow.provider_job_id.length > 0
+          ? existingRow.provider_job_id
+          : null,
+        reservationToken: null,
+        status: normalizeTaskExecutionRenderDispatchStatus(existingRow.status),
+      }
+    }
+
+    // The budget is counted and reserved inside the same write transaction, so
+    // duplicate Workflow coordinators share one cap instead of each owning an
+    // independent in-memory retry counter.
+    const attempts = await transaction.execute({
+      sql: `
+        select count(*) as attempt_count
+        from agent_task_dispatches
+        where run_id = ?
+          and queue_name = ?
+          and backend = ?
+      `,
+      args: [input.runId, queueName, input.backend],
+    })
+    const attemptCount = Math.max(0, Number(attempts.rows[0]?.attempt_count || 0))
+    if (attemptCount >= taskDispatchMaxAttempts()) {
+      return {
+        created: false,
+        providerJobId: null,
+        reservationToken: null,
+        status: 'budget_exhausted' as const,
+      }
+    }
+
+    const inserted = await transaction.execute({
+      sql: `
+        insert into agent_task_dispatches (
+          dispatch_id, run_id, queue_name, backend, status, reservation_token,
+          provider_job_id, error, created_at_ms, updated_at_ms
+        )
+        values (?, ?, ?, ?, 'creating', ?, null, null, ?, ?)
+        on conflict(dispatch_id) do nothing
+      `,
+      args: [
+        input.dispatchId,
+        input.runId,
+        queueName,
+        input.backend,
+        reservationToken,
+        now,
+        now,
+      ],
+    })
+    if (inserted.rowsAffected !== 1) {
+      throw new Error('Task dispatch reservation changed concurrently.')
+    }
+    return {
+      created: true,
+      providerJobId: null,
+      reservationToken,
+      status: 'creating' as const,
+    }
+  }))
+}
+
+export async function completeTaskDispatchAttempt(
+  dispatchId: string,
+  reservationToken: string,
+  providerJobId: string,
+): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(dispatchId) ||
+    !/^[a-f0-9-]{36}$/i.test(reservationToken) ||
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(providerJobId)
+  ) {
+    throw new Error('Missing task dispatch completion identity.')
+  }
+  const result = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      update agent_task_dispatches
+      set status = 'created',
+          provider_job_id = ?,
+          reservation_token = null,
+          error = null,
+          updated_at_ms = ?
+      where dispatch_id = ?
+        and status = 'creating'
+        and reservation_token = ?
+    `,
+    [providerJobId, nowMs(), dispatchId, reservationToken],
+  ))
+  return result.rowsAffected === 1
+}
+
+export async function failTaskDispatchAttempt(
+  dispatchId: string,
+  reservationToken: string,
+  error: unknown,
+): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(dispatchId) ||
+    !/^[a-f0-9-]{36}$/i.test(reservationToken)
+  ) return false
+  const message = error instanceof Error ? error.message : String(error || 'Task dispatch failed')
+  const result = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      update agent_task_dispatches
+      set status = 'failed_known',
+          reservation_token = null,
+          error = ?,
+          updated_at_ms = ?
+      where dispatch_id = ?
+        and status = 'creating'
+        and reservation_token = ?
+    `,
+    [message.slice(0, 1_000), nowMs(), dispatchId, reservationToken],
+  ))
+  return result.rowsAffected === 1
+}
+
+export async function markTaskDispatchAttemptUnknown(
+  dispatchId: string,
+  reservationToken: string,
+  error: unknown,
+): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(dispatchId) ||
+    !/^[a-f0-9-]{36}$/i.test(reservationToken)
+  ) return false
+  const message = error instanceof Error
+    ? error.message
+    : String(error || 'Task dispatch outcome is unknown')
+  const result = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      update agent_task_dispatches
+      set status = 'unknown',
+          reservation_token = null,
+          error = ?,
+          updated_at_ms = ?
+      where dispatch_id = ?
+        and status = 'creating'
+        and reservation_token = ?
+    `,
+    [message.slice(0, 1_000), nowMs(), dispatchId, reservationToken],
+  ))
+  return result.rowsAffected === 1
+}
+
+export async function reconcileTaskDispatchAttempt(
+  dispatchId: string,
+  runId: string,
+  backend: string,
+  providerJobId: string,
+): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(dispatchId) ||
+    !/^[a-zA-Z0-9_-]{1,128}$/.test(runId) ||
+    !/^[a-zA-Z0-9_.:-]{1,64}$/.test(backend) ||
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(providerJobId)
+  ) {
+    throw new Error('Invalid task dispatch reconciliation identity.')
+  }
+  const queueName = taskQueueName()
+  return withTaskJobSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+    const providerOwner = await transaction.execute({
+      sql: `
+        select dispatch_id
+        from agent_task_dispatches
+        where run_id = ?
+          and queue_name = ?
+          and backend = ?
+          and provider_job_id = ?
+          and dispatch_id != ?
+        limit 1
+      `,
+      args: [runId, queueName, backend, providerJobId, dispatchId],
+    })
+    if (providerOwner.rows[0]) return false
+
+    const updated = await transaction.execute({
+      sql: `
+        update agent_task_dispatches
+        set status = 'created',
+            reservation_token = null,
+            provider_job_id = ?,
+            error = null,
+            updated_at_ms = ?
+        where dispatch_id = ?
+          and run_id = ?
+          and queue_name = ?
+          and backend = ?
+          and status in ('creating', 'unknown')
+      `,
+      args: [providerJobId, nowMs(), dispatchId, runId, queueName, backend],
+    })
+    if (updated.rowsAffected === 1) return true
+    const current = await transaction.execute({
+      sql: `
+        select status, provider_job_id
+        from agent_task_dispatches
+        where dispatch_id = ?
+          and run_id = ?
+          and queue_name = ?
+          and backend = ?
+        limit 1
+      `,
+      args: [dispatchId, runId, queueName, backend],
+    })
+    const row = current.rows[0]
+    return row?.status === 'created' && row.provider_job_id === providerJobId
+  }))
+}
+
+export async function recordTaskDispatchProviderStatus(
+  dispatchId: string,
+  providerJobId: string | null,
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'canceled' | 'not_found',
+  notFoundBeforeMs?: number,
+): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (
+    !/^[a-zA-Z0-9_.:-]{1,200}$/.test(dispatchId) ||
+    (providerJobId !== null && !/^[a-zA-Z0-9_.:-]{1,200}$/.test(providerJobId))
+  ) {
+    throw new Error('Invalid task dispatch provider status identity.')
+  }
+  if (status === 'pending' || status === 'running') {
+    if (!providerJobId) return false
+    const result = await withTaskJobSchemaRepair(() => tursoExecute(
+      `
+        update agent_task_dispatches
+        set status = 'created',
+            updated_at_ms = ?
+        where dispatch_id = ?
+          and provider_job_id = ?
+          and status = 'created'
+      `,
+      [nowMs(), dispatchId, providerJobId],
+    ))
+    return result.rowsAffected === 1
+  }
+
+  const cutoff = Number.isFinite(notFoundBeforeMs)
+    ? Number(notFoundBeforeMs)
+    : Number.MAX_SAFE_INTEGER
+  const result = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      update agent_task_dispatches
+      set status = 'terminal',
+          reservation_token = null,
+          error = case when ? = 'not_found'
+            then 'Render did not report an exact matching one-off job after the observation grace.'
+            else error
+          end,
+          updated_at_ms = ?
+      where dispatch_id = ?
+        and status in ('creating', 'unknown', 'created')
+        and updated_at_ms <= ?
+        and (
+          (? is null and provider_job_id is null)
+          or provider_job_id = ?
+        )
+    `,
+    [status, nowMs(), dispatchId, cutoff, providerJobId, providerJobId],
+  ))
+  return result.rowsAffected === 1
+}
+
 export async function findActiveTaskJobForUser(
   userId: string,
 ): Promise<ActiveTaskJobSummary | null> {
@@ -3032,8 +3775,18 @@ export async function findActiveTaskJobForUser(
   return rowToActiveTaskJobSummary(result.rows[0] as TaskJobRow | undefined)
 }
 
-export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORKER_LEASE_MS): Promise<ClaimedTaskJob | null> {
+export async function claimNextTaskJob(
+  workerId: string,
+  leaseMs = TASK_JOB_WORKER_LEASE_MS,
+  targetRunId?: string,
+): Promise<ClaimedTaskJob | null> {
   if (!workerId) throw new Error('Missing worker id')
+  if (
+    targetRunId !== undefined &&
+    (typeof targetRunId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(targetRunId))
+  ) {
+    throw new Error('Invalid target task run id')
+  }
   if (!shouldUseDatabaseTaskJobs()) {
     throw new Error('Task worker requires Turso to be configured.')
   }
@@ -3091,6 +3844,7 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
         from agent_task_jobs
         where status = 'running'
           and queue_name = ?
+          and (? is null or run_id = ?)
           and terminal_status is null
           and cancel_requested = 0
           and (lease_expires_at_ms is null or lease_expires_at_ms <= ?)
@@ -3120,7 +3874,7 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
         order by updated_at_ms asc
         limit 1
       `,
-      args: [queueName, now, workerFreshAfterMs],
+      args: [queueName, targetRunId ?? null, targetRunId ?? null, now, workerFreshAfterMs],
     })
     for (const candidate of staleTerminalCandidates.rows) {
       if (
@@ -3157,6 +3911,7 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
           from agent_task_jobs
           where status = 'running'
             and queue_name = ?
+            and (? is null or run_id = ?)
             and terminal_status is null
             and cancel_requested = 1
             and payload_json is not null
@@ -3184,6 +3939,8 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
         `,
         args: [
           queueName,
+          targetRunId ?? null,
+          targetRunId ?? null,
           now,
           now,
           taskWorkerStaleMs(),
@@ -3216,6 +3973,7 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
               updated_at_ms = ?
           where status = 'running'
             and queue_name = ?
+            and (? is null or run_id = ?)
             and terminal_status is null
             and cancel_requested = 0
             and (lease_expires_at_ms is null or lease_expires_at_ms <= ?)
@@ -3243,7 +4001,7 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
               limit 1
             ), '') not in ('done', 'error')
         `,
-        args: [now, queueName, now, workerFreshAfterMs],
+        args: [now, queueName, targetRunId ?? null, targetRunId ?? null, now, workerFreshAfterMs],
       })
     }
 
@@ -3255,12 +4013,13 @@ export async function claimNextTaskJob(workerId: string, leaseMs = TASK_JOB_WORK
         from agent_task_jobs
         where status = 'queued'
           and queue_name = ?
+          and (? is null or run_id = ?)
           and terminal_status is null
           and cancel_requested = 0
         order by updated_at_ms asc
         limit 1
       `,
-      args: [queueName],
+      args: [queueName, targetRunId ?? null, targetRunId ?? null],
     })
 
     const row = selected.rows[0]
@@ -3649,6 +4408,28 @@ async function fenceAndFinalizeStaleTask(fence: StaleTaskTerminalFence): Promise
       return null
     }
 
+    if (fence.requireNoLiveTaskDispatches) {
+      const liveDispatch = await transaction.execute({
+        sql: `
+          select 1 as live
+          from agent_task_dispatches
+          where run_id = ?
+            and queue_name = ?
+            and backend = 'render-one-off'
+            and status in ('creating', 'unknown', 'created')
+            and (? is null or dispatch_id != ?)
+          limit 1
+        `,
+        args: [
+          fence.runId,
+          queueName,
+          fence.ignoredDispatchId ?? null,
+          fence.ignoredDispatchId ?? null,
+        ],
+      })
+      if (liveDispatch.rows[0]) return null
+    }
+
     const previousWorkerId = typeof row.worker_id === 'string' ? row.worker_id : null
     const rawLeaseExpiresAt = Number(row.lease_expires_at_ms)
     const previousLeaseExpiresAt = Number.isFinite(rawLeaseExpiresAt) ? rawLeaseExpiresAt : null
@@ -3817,6 +4598,149 @@ async function fenceAndFinalizeStaleTask(fence: StaleTaskTerminalFence): Promise
     })
     return true
   }))
+}
+
+export async function failTaskExecutionDispatch(
+  runId: string,
+  rejectedDispatchIdOrMessage?: string,
+  message?: string,
+): Promise<boolean> {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(runId)) throw new Error('Invalid task run id')
+  if (!shouldUseDatabaseTaskJobs()) return false
+  const queueName = taskQueueName()
+  const rejectedDispatchId = typeof rejectedDispatchIdOrMessage === 'string' &&
+      rejectedDispatchIdOrMessage.startsWith(`render:${runId}:`) &&
+      /^render:[a-zA-Z0-9_-]{1,128}:[1-9][0-9]*$/.test(rejectedDispatchIdOrMessage)
+    ? rejectedDispatchIdOrMessage
+    : null
+  const requestedMessage = rejectedDispatchId
+    ? message
+    : rejectedDispatchIdOrMessage
+  const terminalError = requestedMessage?.trim().slice(0, 1_000) ||
+    'The task computer could not start after repeated recovery attempts. Please try the task again.'
+
+  const state = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      select user_id, conversation_id, status, terminal_status, attempts
+      from agent_task_jobs
+      where run_id = ? and queue_name = ?
+      limit 1
+    `,
+    [runId, queueName],
+  ))
+  const row = state.rows[0]
+  if (
+    !row ||
+    typeof row.user_id !== 'string' ||
+    typeof row.conversation_id !== 'string'
+  ) return false
+  if (
+    row.terminal_status ||
+    row.status === 'done' ||
+    row.status === 'error' ||
+    row.status === 'cancelled'
+  ) return true
+
+  let finalized = false
+  if (row.status === 'running') {
+    finalized = await fenceAndFinalizeStaleTask({
+      staleTerminalFence: true,
+      runId,
+      userId: row.user_id,
+      conversationId: row.conversation_id,
+      expectedStatus: 'running',
+      expectedAttempts: Math.max(0, Number(row.attempts || 0)),
+      terminalStatus: 'error',
+      terminalError,
+      terminalEventPersisted: false,
+      requireNoLiveTaskDispatches: true,
+      ignoredDispatchId: rejectedDispatchId,
+    })
+  } else if (row.status === 'queued' && Math.max(0, Number(row.attempts || 0)) > 0) {
+    // A queued row is not necessarily pristine: shutdown/stale recovery puts
+    // an attempted run back in the queue after its sandbox may have executed
+    // actions. Reserve exact ownership and destroy that sandbox before making
+    // a provider-rejection terminal or releasing the user's active-task lease.
+    finalized = await fenceAndFinalizeStaleTask({
+      staleTerminalFence: true,
+      runId,
+      userId: row.user_id,
+      conversationId: row.conversation_id,
+      expectedStatus: 'queued',
+      expectedAttempts: Math.max(0, Number(row.attempts || 0)),
+      terminalStatus: 'error',
+      terminalError,
+      terminalEventPersisted: false,
+      requireNoLiveTaskDispatches: true,
+      ignoredDispatchId: rejectedDispatchId,
+    })
+  } else if (row.status === 'queued') {
+    const finalizedAt = nowMs()
+    finalized = await withTaskJobSchemaRepair(() => tursoTransaction('write', async (transaction) => {
+      const updated = await transaction.execute({
+        sql: `
+          update agent_task_jobs
+          set status = 'error',
+              terminal_status = 'error',
+              terminal_error = ?,
+              worker_id = null,
+              lease_expires_at_ms = null,
+              updated_at_ms = ?,
+              completed_at_ms = ?
+          where run_id = ?
+            and queue_name = ?
+            and status = 'queued'
+            and terminal_status is null
+            and cancel_requested = 0
+            and attempts = 0
+            and not exists (
+              select 1
+              from agent_task_dispatches
+              where agent_task_dispatches.run_id = agent_task_jobs.run_id
+                and agent_task_dispatches.queue_name = agent_task_jobs.queue_name
+                and agent_task_dispatches.backend = 'render-one-off'
+                and agent_task_dispatches.status in ('creating', 'unknown', 'created')
+                and (? is null or agent_task_dispatches.dispatch_id != ?)
+            )
+        `,
+        args: [
+          terminalError,
+          finalizedAt,
+          finalizedAt,
+          runId,
+          queueName,
+          rejectedDispatchId,
+          rejectedDispatchId,
+        ],
+      })
+      if (updated.rowsAffected !== 1) return false
+      const seqRows = await transaction.execute({
+        sql: 'select max(seq) as max_seq from agent_task_events where run_id = ?',
+        args: [runId],
+      })
+      const maxSeq = Number(seqRows.rows[0]?.max_seq)
+      const seq = Number.isFinite(maxSeq) ? Math.max(1, maxSeq + 1) : 1
+      const event = { type: 'error', message: terminalError, seq, runId } satisfies SSEEvent
+      await transaction.execute({
+        sql: `
+          insert or ignore into agent_task_events (run_id, seq, event_json, created_at_ms)
+          values (?, ?, ?, ?)
+        `,
+        args: [runId, seq, JSON.stringify(event), finalizedAt],
+      })
+      await transaction.execute({
+        sql: 'delete from agent_task_live_frames where run_id = ?',
+        args: [runId],
+      })
+      return true
+    }))
+  }
+
+  if (finalized) {
+    await clearLiveDirectivesForRun(row.user_id, runId).catch(() => undefined)
+    await releaseActiveTaskLease(row.user_id, runId).catch(() => undefined)
+  }
+  return finalized
 }
 
 interface CancellationFenceReservation {
@@ -4019,6 +4943,41 @@ async function fenceAndFinalizeTaskCancellation(userId: string, runId: string): 
   }))
 }
 
+export async function finalizeRequestedTaskCancellation(runId: string): Promise<boolean> {
+  if (!shouldUseDatabaseTaskJobs()) return false
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(runId)) {
+    throw new Error('Invalid task cancellation run id.')
+  }
+  const queueName = taskQueueName()
+  const rows = await withTaskJobSchemaRepair(() => tursoExecute(
+    `
+      select user_id, status, terminal_status, cancel_requested
+      from agent_task_jobs
+      where run_id = ? and queue_name = ?
+      limit 1
+    `,
+    [runId, queueName],
+  ))
+  const row = rows.rows[0]
+  if (!row || typeof row.user_id !== 'string') return false
+  if (
+    row.terminal_status ||
+    row.status === 'done' ||
+    row.status === 'error' ||
+    row.status === 'cancelled'
+  ) {
+    return true
+  }
+  if (row.cancel_requested !== 1 && row.cancel_requested !== true) return false
+
+  const finalized = await fenceAndFinalizeTaskCancellation(row.user_id, runId)
+  if (finalized) {
+    await clearLiveDirectivesForRun(row.user_id, runId).catch(() => undefined)
+    await releaseActiveTaskLease(row.user_id, runId).catch(() => undefined)
+  }
+  return finalized
+}
+
 async function reconcileExpiredDurableTaskJob(input: {
   userId: string
   runId?: string
@@ -4180,10 +5139,11 @@ export async function runClaimedTaskJob(
       registerPreTerminalCleanup: (cleanup: () => Promise<void>) => void
       registerInflightToolDrain: (drain: InflightToolDrain) => void
       markHandoffUnsafe: (reason: string) => void
+      requestInfrastructureRetry: (reason: string) => boolean
     },
   ) => Promise<void>,
   options: { shutdownSignal?: AbortSignal; onCancellationObserved?: () => void } = {},
-): Promise<'completed' | 'requeued' | 'lease_lost' | 'unsafe_handoff'> {
+): Promise<'completed' | 'requeued' | 'retryable_failure' | 'lease_lost' | 'unsafe_handoff'> {
   const startedAt = claim.startedAt || nowMs()
   const job: TaskJob = {
     runId: claim.runId,
@@ -4236,6 +5196,8 @@ export async function runClaimedTaskJob(
   let releaseRequeueClaim = true
   let unsafeHandoff = false
   let handoffUnsafeReason: string | null = null
+  let infrastructureFailureReason: string | null = null
+  let requeueClaimReleased: boolean | null = null
 
   const drainInflightTools = async (timeoutMs: number) => {
     if (!job.inflightToolDrain) {
@@ -4255,10 +5217,14 @@ export async function runClaimedTaskJob(
 
     const initialDrain = await drainInflightTools(TASK_JOB_INFLIGHT_DRAIN_TIMEOUT_MS)
     const runCleanups = async () => {
-      if (job.cancelRequested && preTerminalCleanups.length === 0) {
-        // Cancellation can arrive before the runner has initialized its sandbox
-        // cleanup callback. Destroying by conversation id is safe here because
-        // this attempt still owns the durable job claim and no successor can run.
+      if (
+        (job.cancelRequested || job.requeueReason === 'infrastructure_failure') &&
+        preTerminalCleanups.length === 0
+      ) {
+        // Cancellation or module preload failure can arrive before the runner
+        // has initialized its sandbox cleanup callback. Destroying by
+        // conversation id is safe because this attempt still owns the durable
+        // claim and no successor can run.
         await destroySandbox(claim.conversationId)
       }
       for (const cleanup of preTerminalCleanups) await cleanup()
@@ -4301,7 +5267,7 @@ export async function runClaimedTaskJob(
       claim.attempts,
       handoffPayload,
     ).catch((error) => {
-      console.error('[TaskJobs] Failed to release worker lease during shutdown', {
+      console.error('[TaskJobs] Failed to release worker lease during requeue', {
         runId: claim.runId,
         error: error instanceof Error ? error.message : String(error),
       })
@@ -4310,13 +5276,14 @@ export async function runClaimedTaskJob(
     return releaseClaimPromise
   }
 
-  const stopForRequeue = (reason: 'shutdown' | 'lease_lost') => {
-    if (job.requeueRequested || job.terminalStatus) return
+  const stopForRequeue = (reason: 'shutdown' | 'lease_lost' | 'infrastructure_failure'): boolean => {
+    if (job.requeueRequested || job.terminalStatus) return false
     job.requeueRequested = true
     job.requeueReason = reason
     job.closed = true
     closeJobSubscribers(job)
     job.abortController.abort()
+    return true
   }
   const releaseClaimForShutdown = () => stopForRequeue('shutdown')
 
@@ -4403,6 +5370,13 @@ export async function runClaimedTaskJob(
       markHandoffUnsafe: (reason) => {
         handoffUnsafeReason = reason || 'runner_marked_unsafe'
       },
+      requestInfrastructureRetry: (reason) => {
+        const requested = stopForRequeue('infrastructure_failure')
+        if (requested) {
+          infrastructureFailureReason = reason || 'task_infrastructure_initialization_failed'
+        }
+        return requested
+      },
     }), {
       persistStart: false,
       beforeFinalCommit: async () => {
@@ -4432,16 +5406,41 @@ export async function runClaimedTaskJob(
         }
       }
     }
+    if (job.requeueReason === 'infrastructure_failure') {
+      try {
+        // Startup can allocate/reset a sandbox before it fails. Reuse the
+        // destructive terminal fence without committing a terminal row so the
+        // next isolated attempt cannot race any late startup side effect.
+        await establishTerminalExecutionFence()
+      } catch (error) {
+        releaseRequeueClaim = false
+        unsafeHandoff = true
+        job.requeueReason = 'lease_lost'
+        console.error('[TaskJobs] Infrastructure retry fence failed; claim will expire before recovery', {
+          runId: job.runId,
+          reason: infrastructureFailureReason,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
   } finally {
     clearInterval(refreshTimer)
     cancelPollingStopped = true
     if (cancelTimer) clearTimeout(cancelTimer)
     options.shutdownSignal?.removeEventListener('abort', releaseClaimForShutdown)
-    if (job.requeueRequested && releaseRequeueClaim) await releaseClaimOnce()
+    if (job.requeueRequested && releaseRequeueClaim) {
+      requeueClaimReleased = await releaseClaimOnce()
+      if (!requeueClaimReleased && job.requeueReason === 'infrastructure_failure') {
+        unsafeHandoff = true
+      }
+    }
     taskJobState.jobs.delete(job.runId)
   }
   if (unsafeHandoff) return 'unsafe_handoff'
   if (job.requeueReason === 'lease_lost') return 'lease_lost'
+  if (job.requeueReason === 'infrastructure_failure' && requeueClaimReleased) {
+    return 'retryable_failure'
+  }
   return job.requeueRequested ? 'requeued' : 'completed'
 }
 
@@ -4814,6 +5813,10 @@ export async function cleanupInternalTaskJob(userId: string, runId: string): Pro
     })
     await transaction.execute({
       sql: 'delete from agent_task_live_frames where run_id = ?',
+      args: [runId],
+    })
+    await transaction.execute({
+      sql: 'delete from agent_task_dispatches where run_id = ?',
       args: [runId],
     })
     const deleted = await transaction.execute({

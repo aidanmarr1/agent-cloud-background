@@ -39,13 +39,18 @@ const modelEmissionBlock = sourceBlock(
 )
 assert.match(
   modelEmissionBlock,
-  /rejectedHandoffEmission[\s\S]*shouldAcceptFinalDeliverableHandoff[\s\S]*lastStreamResult\.cadenceProgressViolation \|\| rejectedHandoffEmission[\s\S]*streamProcessor\.discardBufferedEmission\(\)/,
-  'an unaccepted handoff must be discarded before buffered text reaches the client',
+  /const rejectedModelEmission\s*=\s*rejectedHandoffEmission\s*\|\|\s*rejectedBuildTextOnlyEmission/,
+  'handoff and build-text drift rejection must share one model-emission fence',
 )
 assert.match(
   modelEmissionBlock,
-  /visibleText:[\s\S]*!rejectedHandoffEmission[\s\S]*internalRecoveryScheduled: 'display_contract'/,
-  'a withheld handoff must be recorded as an intentional display recovery',
+  /lastStreamResult\.cadenceProgressViolation \|\| rejectedModelEmission[\s\S]*streamProcessor\.discardBufferedEmission\(\)/,
+  'every rejected model emission must be discarded before buffered text reaches the client',
+)
+assert.match(
+  modelEmissionBlock,
+  /visibleText:[\s\S]*!rejectedModelEmission[\s\S]*lastStreamResult\.cadenceProgressViolation \|\| rejectedModelEmission[\s\S]*internalRecoveryScheduled: 'display_contract'/,
+  'every withheld model emission must be recorded as an intentional display recovery',
 )
 
 const autosaveCompletionBlock = sourceBlock(

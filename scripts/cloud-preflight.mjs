@@ -12,6 +12,7 @@ const scriptFiles = {
   'cloud:reconnect-smoke': 'scripts/cloud-background-reconnect-smoke.mjs',
   'cloud:render-smoke': 'scripts/render-blueprint-smoke.mjs',
   'cloud:worker-template-smoke': 'scripts/render-worker-env-smoke.mjs',
+  'cloud:render-rollout-smoke': 'scripts/render-suspended-rollout-smoke.mjs',
   'cloud:check': 'scripts/cloud-readiness.mjs',
   'cloud:event-smoke': 'scripts/cloud-event-replay-smoke.mjs',
   'cloud:task-start-smoke': 'scripts/cloud-task-start-persistence-smoke.mjs',
@@ -70,6 +71,7 @@ function runNpmScript(label, scriptName, scriptArgs = []) {
 
 const sourceOnly = args.includes('--source-only')
 const deployedOnly = args.includes('--deployed-only')
+const skipWorkerSmoke = args.includes('--skip-worker-smoke')
 const deployedUrl = readArg('--url') || readArg('--deployed-url')
 const timeoutMs = readArg('--timeout-ms')
 
@@ -82,8 +84,16 @@ try {
       throw new Error('Pass --url https://your-deployed-app.example with --deployed-only.')
     }
     await runNpmScript('Deployed worker readiness', 'cloud:worker-ready', deployedArgs)
-    await runNpmScript('Deployed closed-tab worker smoke', 'cloud:worker-smoke', deployedArgs)
-    console.log('\nDeployed-only cloud preflight passed. Closed-tab worker execution is live on the deployed app.')
+    if (skipWorkerSmoke) {
+      console.log('\nSKIP deployed closed-tab worker smoke by explicit request.')
+    } else {
+      await runNpmScript('Deployed closed-tab worker smoke', 'cloud:worker-smoke', deployedArgs)
+    }
+    console.log(
+      skipWorkerSmoke
+        ? '\nDeployed-only cloud preflight passed. Worker readiness is live; the paid worker smoke was skipped.'
+        : '\nDeployed-only cloud preflight passed. Closed-tab worker execution is live on the deployed app.',
+    )
     process.exit(0)
   }
 
@@ -91,6 +101,7 @@ try {
   await runNpmScript('Closed-tab reconnect smoke', 'cloud:reconnect-smoke')
   await runNpmScript('Render blueprint consistency smoke', 'cloud:render-smoke')
   await runNpmScript('Render worker env template consistency smoke', 'cloud:worker-template-smoke')
+  await runNpmScript('Guarded suspended Render rollout smoke', 'cloud:render-rollout-smoke')
 
   if (sourceOnly) {
     console.log('\nSource-only preflight passed. Runtime checks were skipped by --source-only.')
@@ -107,8 +118,13 @@ try {
 
   if (deployedUrl) {
     await runNpmScript('Deployed worker readiness', 'cloud:worker-ready', deployedArgs)
-    await runNpmScript('Deployed closed-tab worker smoke', 'cloud:worker-smoke', deployedArgs)
-    console.log('\nCloud preflight passed, including deployed closed-tab worker execution.')
+    if (skipWorkerSmoke) {
+      console.log('\nSKIP deployed closed-tab worker smoke by explicit request.')
+      console.log('\nCloud preflight passed, including deployed worker readiness. The paid worker smoke was skipped.')
+    } else {
+      await runNpmScript('Deployed closed-tab worker smoke', 'cloud:worker-smoke', deployedArgs)
+      console.log('\nCloud preflight passed, including deployed closed-tab worker execution.')
+    }
   } else {
     console.log('\nPre-deploy cloud preflight passed.')
     console.log('After deployment, rerun with: npm run cloud:preflight -- --deployed-only --url https://your-deployed-app.example')
