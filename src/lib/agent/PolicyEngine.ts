@@ -329,7 +329,6 @@ function pendingDeliverableRevisionGuidance(state: AgentStateData, path: string)
 
 function finalDeliverableRequired(state: AgentStateData): boolean {
   if (!state.currentPlanItems || state.currentStepIdx !== state.currentPlanItems.length - 1) return false
-  if (isBrowserActionTask(state)) return false
   if (currentStepWantsImageArtifact(state)) return false
   if (isFixedWebSearchInlineAnswerState(state)) return false
   return taskRequiresSavedFinalArtifact(state)
@@ -1718,7 +1717,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         ]
       }
 
-      const finalDeliverable = isLastStep && !isBrowserActionTask(state)
+      const finalDeliverable = isLastStep && finalDeliverableRequired(state)
         ? latestFinalDeliverableCandidate(state)
         : null
       if (finalDeliverable) {

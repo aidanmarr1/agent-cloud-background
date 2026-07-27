@@ -64,8 +64,29 @@ export class OutputVerifier {
   }
 
   private isExplicitlyConciseDeliverableRequest(originalRequest: string, filePath: string): boolean {
+    const artifactRequest = originalRequest.replace(
+      /\b(?:keep|make)\s+(?:the\s+)?final\s+(?:response|reply|answer|message|handoff)\s+(?:very\s+)?(?:brief|quick|short|concise|succinct)\b/gi,
+      ' ',
+    )
     return filePath.toLowerCase().endsWith('.md') &&
-      /\b(?:brief|quick|short|concise|succinct|one[-\s]?page|1[-\s]?page)\b/i.test(originalRequest)
+      /\b(?:brief|quick|short|concise|succinct|one[-\s]?page|1[-\s]?page)\b/i.test(artifactRequest)
+  }
+
+  private isCompactStructuredDataRequest(originalRequest: string, filePath: string): boolean {
+    if (!filePath.toLowerCase().endsWith('.md')) return false
+    if (!/\b[A-Za-z0-9][A-Za-z0-9._-]*\.md\b/i.test(originalRequest)) return false
+    if (/\b(?:report|research|analysis|assessment|essay|memo|briefing|white\s+paper)\b/i.test(originalRequest)) {
+      return false
+    }
+    const fieldSignals = [
+      /\btitle\b/i,
+      /\b(?:source\s+)?url\b/i,
+      /\blink\b/i,
+      /\bstatus\b/i,
+      /\bvalue\b/i,
+      /\bresult\b/i,
+    ].filter(pattern => pattern.test(originalRequest)).length
+    return fieldSignals >= 2
   }
 
   private isDeepResearchRequest(originalRequest: string): boolean {
@@ -76,6 +97,7 @@ export class OutputVerifier {
     const headingCount = (content.match(/^#{1,3}\s+\S/gm) || []).length
     const bulletItems = (content.match(/^\s*[-*]\s+(?!\[[ xX]\])\S.+$/gm) || []).length
     const checklistItems = (content.match(/^\s*[-*]\s+\[[ xX]\]\s+\S.+$/gm) || []).length
+    const labeledFacts = (content.match(/^\s*\*\*[^*\n]{2,48}:\*\*\s+\S.+$/gm) || []).length
     const wordCount = content.split(/\s+/).filter(Boolean).length
     const informativeBlocks = content.split(/\n\s*\n/).filter(block => {
       const withoutMarkdown = block
@@ -90,6 +112,11 @@ export class OutputVerifier {
       headingCount >= 1 &&
       wordCount >= 35 &&
       (bulletItems >= 3 || checklistItems >= 3)
+    ) || (
+      headingCount >= 1 &&
+      wordCount >= 8 &&
+      bulletItems + checklistItems + labeledFacts >= 2 &&
+      /\bhttps?:\/\/\S+/i.test(content)
     ) || (
       headingCount >= 4 &&
       (checklistItems >= 5 || informativeBlocks >= 6)
@@ -108,7 +135,11 @@ export class OutputVerifier {
     const suggestions: string[] = []
     let score = 1.0
     const conciseStructuredDeliverable =
-      this.isExplicitlyConciseDeliverableRequest(originalRequest, filePath) &&
+      !this.isDeepResearchRequest(originalRequest) &&
+      (
+        this.isExplicitlyConciseDeliverableRequest(originalRequest, filePath) ||
+        this.isCompactStructuredDataRequest(originalRequest, filePath)
+      ) &&
       this.compactDeliverableHasSubstance(fileContent)
 
     // --- Universal checks ---
@@ -226,7 +257,9 @@ export class OutputVerifier {
         this.checkCreative(fileContent, failures, suggestions)
         break
       case 'browse':
-        this.checkBrowseAction(fileContent, failures, suggestions)
+        if (!conciseStructuredDeliverable) {
+          this.checkBrowseAction(fileContent, failures, suggestions)
+        }
         break
       default:
         if (savedMarkdownReport && !conciseStructuredDeliverable) {

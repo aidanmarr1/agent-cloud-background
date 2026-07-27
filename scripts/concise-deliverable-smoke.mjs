@@ -30,4 +30,44 @@ const result = new OutputVerifier().verify(
 )
 
 assert.equal(result.passed, true, `a complete concise note must not trigger an unnecessary append: ${result.failures.join('; ')}`)
+
+const compactBrowserResult = new OutputVerifier().verify(
+  `# Live Check Report
+
+## Page Details
+
+**Source URL:** https://example.com
+**Page Title:** Example Domain`,
+  'live-check.md',
+  'Open https://example.com, read its current page title, then create live-check.md with the title and source URL. Keep the final response brief.',
+  'browse',
+  null,
+  1,
+)
+
+assert.equal(
+  compactBrowserResult.passed,
+  true,
+  `a concise structured browser result must not be expanded into an action report: ${compactBrowserResult.failures.join('; ')}`,
+)
+
+const handoffBriefBrowserReport = new OutputVerifier().verify(
+  `# Live Check Report
+
+## Page Details
+
+**Source URL:** https://example.com
+**Page Title:** Example Domain`,
+  'source-report.md',
+  'Open https://example.com and create a substantive report in source-report.md with the title and source URL. Keep the final response brief.',
+  'browse',
+  null,
+  3,
+)
+
+assert.equal(
+  handoffBriefBrowserReport.passed,
+  false,
+  'brief final handoff wording must not weaken verification for the saved report itself',
+)
 console.log('concise deliverable smoke checks passed')

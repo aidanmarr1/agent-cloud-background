@@ -1255,7 +1255,14 @@ function scheduleFinalSavedDeliverableRecovery(
 }
 
 function finalSavedDeliverableTurn(state: AgentStateData, messages: Array<{ role: string; content: string }>): boolean {
-  return isLeanFinalSynthesisStep(state) && taskNeedsSavedFinalArtifact(state, messages)
+  const compactSavedOutputStrategy =
+    !state.buildTask &&
+    state.taskStrategy !== 'build' &&
+    state.taskStrategy !== 'code' &&
+    state.taskStrategy !== 'creative'
+  return isFinalDeliveryStep(state) &&
+    compactSavedOutputStrategy &&
+    taskNeedsSavedFinalArtifact(state, messages)
 }
 
 function shouldUseTextSavedFinalDeliverable(
@@ -1264,10 +1271,12 @@ function shouldUseTextSavedFinalDeliverable(
 ): boolean {
   // Native file-tool streaming is the primary path even on OpenRouter. It
   // exposes the real target and exact generated body deltas while the model is
-  // writing. Retain text-then-save only as a last-resort recovery after the
-  // provider has produced two malformed native tool envelopes.
+  // writing. If a required native file turn nevertheless returns prose, switch
+  // the very next turn into the live text-then-save lane. This keeps native
+  // actions primary while bounding provider routes that silently ignore
+  // tool_choice instead of paying for the same hidden draft indefinitely.
   return ASSISTANT_PROVIDER === 'openrouter' &&
-    state.toolJsonRecoveryCount >= 2 &&
+    (state.toolJsonRecoveryCount >= 2 || state.consecutiveNoToolCalls >= 1) &&
     finalSavedDeliverableTurn(state, messages) &&
     !state.partialFileWriteRecoveryPending &&
     !hasSavedFinalDeliverableCandidate(state)
@@ -1309,15 +1318,29 @@ function savedFinalDeliverableMinimumChars(
 ): number {
   const taskText = `${state.originalUserRequest || ''} ${currentToolIntentText(state)} ${messages.map(m => m.content).join(' ')}`.toLowerCase()
   const originalRequest = state.originalUserRequest || ''
-  const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(originalRequest)
+  const artifactRequest = originalRequest.replace(
+    /\b(?:keep|make)\s+(?:the\s+)?final\s+(?:response|reply|answer|message|handoff)\s+(?:very\s+)?(?:brief|quick|short|concise|succinct)\b/gi,
+    ' ',
+  )
+  const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(artifactRequest)
+  const compactNamedDataArtifact = !!requestedMarkdownDeliverablePath(state, messages) &&
+    !/\b(?:report|research|analysis|assessment|essay|memo|briefing|white\s+paper)\b/i.test(originalRequest) &&
+    [
+      /\btitle\b/i,
+      /\b(?:source\s+)?url\b/i,
+      /\blink\b/i,
+      /\bstatus\b/i,
+      /\bvalue\b/i,
+      /\bresult\b/i,
+    ].filter(pattern => pattern.test(originalRequest)).length >= 2
   if (/\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|rigorous|extensive|full report|long report|serious analysis|technical)\b/.test(taskText)) {
     return 4_800
   }
-  if (requestLooksBrief) {
+  if (requestLooksBrief || compactNamedDataArtifact) {
     // A clean, explicitly concise artifact must not be expanded merely to hit
     // a generic report-length floor. Whole-file verification still checks its
     // requested structure, substance, placeholders, duplicates, and ending.
-    return 160
+    return 50
   }
   return 2_600
 }
@@ -1331,6 +1354,7 @@ function savedDeliverableChunkEndsCleanly(content: string): boolean {
   const lastLine = lines[lines.length - 1] || ''
   if (!lastLine) return false
   if (/^\|.+\|\s*$/.test(lastLine)) return true
+  if (/^(?:[-*+]|\d+\.)\s+\S/.test(lastLine)) return true
   const stripped = lastLine.replace(/[\])}"'`*_]+$/g, '').trim()
   return /[.!?:;]$/.test(stripped)
 }
@@ -1344,8 +1368,14 @@ function shouldContinueSavedFinalDeliverableChunk(
   if (!finalSavedDeliverableTurn(state, messages)) return false
   if (!path || !path.toLowerCase().endsWith('.md')) return false
   if (state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS) return false
-  if (!savedDeliverableChunkEndsCleanly(content)) return true
-  return content.trim().length < savedFinalDeliverableMinimumChars(state, messages)
+  const minimumChars = savedFinalDeliverableMinimumChars(state, messages)
+  if (content.trim().length < minimumChars) return true
+  // A deliberately tiny named Markdown artifact (for example a title + source
+  // URL check) should go straight to the real verifier once it reaches its
+  // truthful minimum. Requiring prose punctuation here caused nonsensical
+  // 350–650 word appends to already-complete bullet/value files.
+  if (minimumChars <= 50) return false
+  return !savedDeliverableChunkEndsCleanly(content)
 }
 
 function isPartialRecoveryClosingAppendTurn(state: AgentStateData): boolean {
@@ -3586,7 +3616,32 @@ export class AgentLoop {
       return null
     }
 
-    if (!shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) return null
+    // A required native file turn that returned prose has not opened a genuine
+    // live file lane. Keep that draft hidden and let the next bounded
+    // OpenRouter recovery turn stream its accepted text directly into the file
+    // preview from the first content chunk. The streamed recovery target below
+    // then saves that exact body once, without replaying it in chat.
+    if (
+      ASSISTANT_PROVIDER === 'openrouter' &&
+      finalSavedDeliverableTurn(state, this.options.messages) &&
+      !streamedTarget
+    ) {
+      return null
+    }
+
+    if (!shouldAutosaveTextOnlyDraft(state, assistantContent, this.options.messages)) {
+      if (streamedTarget?.started) {
+        this.emitter.toolResult(streamedTarget.id, 'create_file', {
+          superseded: true,
+          error: 'INTERNAL_RECOVERY: The streamed saved-output draft was too short to persist safely.',
+        } as never)
+      }
+      if (streamedTarget && state.consecutiveNoToolCalls >= 2) {
+        state.lastModelErrorForUser = 'The assistant could not produce enough valid content to save the requested file.'
+        return 'ERROR'
+      }
+      return null
+    }
 
     const content = cleanDraftContent(assistantContent)
     const target = streamedTarget || textSavedDeliverableTarget(state, this.options.messages)
@@ -5015,9 +5070,16 @@ export class AgentLoop {
               state,
               lastStreamResult,
             )
+            const rejectedUnsavedFinalDeliverableDraft =
+              !lastStreamToolCallPolicy.textSavedDeliverable &&
+              lastStreamResult.toolCalls.size === 0 &&
+              finalSavedDeliverableTurn(state, this.options.messages) &&
+              !hasSavedFinalDeliverableCandidate(state) &&
+              lastStreamResult.assistantContent.trim().length > 0
             const rejectedModelEmission =
               rejectedHandoffEmission ||
-              rejectedBuildTextOnlyEmission
+              rejectedBuildTextOnlyEmission ||
+              rejectedUnsavedFinalDeliverableDraft
             const usageDebitStartedAt = Date.now()
             try {
               if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
@@ -5058,7 +5120,9 @@ export class AgentLoop {
                     ? '[AgentDiagnostics] Held back an unaccepted personalized handoff'
                     : rejectedBuildTextOnlyEmission
                       ? '[AgentDiagnostics] Held back a text-only website build drift'
-                    : '[AgentDiagnostics] Released billed model-turn emissions',
+                      : rejectedUnsavedFinalDeliverableDraft
+                        ? '[AgentDiagnostics] Held back an unsaved final-deliverable draft'
+                        : '[AgentDiagnostics] Released billed model-turn emissions',
                 {
                   iteration: state.iterations,
                   usageDebitMs: Date.now() - usageDebitStartedAt,
@@ -5068,6 +5132,7 @@ export class AgentLoop {
                   cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
                   rejectedHandoffEmission,
                   rejectedBuildTextOnlyEmission,
+                  rejectedUnsavedFinalDeliverableDraft,
                 },
               )
               pendingPaidTurnProgress = {

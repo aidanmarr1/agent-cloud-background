@@ -107,7 +107,9 @@ async function assertSourceContracts() {
   assert.match(completionAudit, /taskRequiresSavedFinalArtifact\(state\)/, 'completion audit must use the shared saved-deliverable contract')
   assert.match(agentLoop, /taskRequiresSavedFinalArtifact\(state,\s*effectiveTaskRequest\(messages\)\)/, 'the live loop must use the same saved-deliverable contract as completion audit')
   assert.match(policyEngine, /return taskRequiresSavedFinalArtifact\(state\)/, 'policy completion must use the same saved-deliverable contract as the loop and final audit')
+  assert.doesNotMatch(policyEngine, /function finalDeliverableRequired[\s\S]{0,260}isBrowserActionTask\(state\)\) return false/, 'browse strategy must not erase an explicit final saved-artifact contract')
   assert.doesNotMatch(policyEngine, /taskIntent\.requiresSavedArtifact\s*$/, 'policy completion must not keep an independent final-output classifier')
+  assert.match(deliverableContract, /userIntent\.explicitSavedArtifact[\s\S]*state\.taskStrategy !== 'browse'[\s\S]*browseRequestCreatesSavedArtifact\(userRequest\)[\s\S]*return true[\s\S]*state\.taskStrategy === 'browse'\) return false/, 'an explicit output action must preserve a saved artifact after browser work without treating a browsed input file as a new deliverable')
   assert.match(deliverableContract, /userIntent\.wantsInlineAnswer \|\| userIntent\.wantsQuick[\s\S]*return false[\s\S]*userIntent\.requiresSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(taskText\)/, 'the shared contract must honor explicit inline/quick requests while preserving saved Markdown research defaults')
   assert.match(taskConstraints, /isFixedWebSearchInlineAnswerState/, 'task constraints must distinguish fixed-search inline answers from fixed-search markdown deliverables')
   assert.match(taskFiles, /create table if not exists task_files/, 'task file schema must create durable task-file records')
@@ -180,6 +182,7 @@ import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify
 import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
 import { PolicyEngine } from ${JSON.stringify(join(root, 'src/lib/agent/PolicyEngine.ts'))}
 import { taskRequiresSavedFinalArtifact } from ${JSON.stringify(join(root, 'src/lib/agent/DeliverableContract.ts'))}
+import { OutputVerifier } from ${JSON.stringify(join(root, 'src/lib/agent/OutputVerifier.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -217,6 +220,89 @@ export function runCompletionAuditSmoke() {
     taskRequiresSavedFinalArtifact(explicitInlineContract),
     false,
     'an explicit quick inline request must not become a file because of planner wording',
+  )
+
+  const browseWithExplicitFile = createInitialState(false, timeouts)
+  browseWithExplicitFile.currentPlanItems = ['Open the exact page', 'Generate output file']
+  browseWithExplicitFile.currentPlanScopes = [
+    'Read the current page title from the user-supplied URL',
+    'Create the requested Markdown file',
+  ]
+  browseWithExplicitFile.currentStepIdx = 1
+  browseWithExplicitFile.taskStrategy = 'browse'
+  browseWithExplicitFile.originalUserRequest =
+    'Open https://example.com, read its current page title, then create live-check.md with the title and source URL. Keep the final response brief.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(browseWithExplicitFile),
+    true,
+    'an explicit Markdown file must remain required when the task starts with browser work',
+  )
+  const compactBrowseFileVerification = new OutputVerifier().verify(
+    '# Live Check Report\\n\\n## Page Details\\n\\n**Source URL:** https://example.com\\n**Page Title:** Example Domain',
+    'live-check.md',
+    browseWithExplicitFile.originalUserRequest,
+    'browse',
+    null,
+    1,
+  )
+  assert.equal(
+    compactBrowseFileVerification.passed,
+    true,
+    'an explicitly concise structured browser result must not be expanded into a generic 100-word action report',
+  )
+  let browseFileAudit = auditAgentCompletion(browseWithExplicitFile, 'no_tool_progress_on_step')
+  assert.equal(browseFileAudit.complete, false)
+  assert.match(
+    browseFileAudit.message,
+    /no successful final deliverable/,
+    'browser-led tasks must not pass completion without their explicitly requested file',
+  )
+
+  browseWithExplicitFile.createdFiles.add('live-check.md')
+  recordWorkLedgerDeliverable(browseWithExplicitFile, {
+    path: 'live-check.md',
+    purpose: 'deliverable',
+  })
+  browseWithExplicitFile.deliverableVerificationDone = true
+  const browseFilePolicyActions = new PolicyEngine().evaluate(
+    browseWithExplicitFile,
+    new Map(),
+    'The requested Markdown file is ready.',
+    false,
+    40,
+  )
+  assert.equal(
+    browseFilePolicyActions.some(action =>
+      action.type === 'terminate' && action.reason === 'deliverable_created',
+    ),
+    true,
+    'browser-led tasks must close through the verified deliverable path after the requested file exists',
+  )
+
+  const ordinaryBrowseTask = createInitialState(false, timeouts)
+  ordinaryBrowseTask.currentPlanItems = ['Open the settings page', 'Confirm the updated setting']
+  ordinaryBrowseTask.currentPlanScopes = [null, null]
+  ordinaryBrowseTask.currentStepIdx = 1
+  ordinaryBrowseTask.taskStrategy = 'browse'
+  ordinaryBrowseTask.originalUserRequest =
+    'Open the settings page, turn on email notifications, and tell me when it is done.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(ordinaryBrowseTask),
+    false,
+    'an ordinary browser interaction must still finish inline when no file was requested',
+  )
+
+  const browseInputDocument = createInitialState(false, timeouts)
+  browseInputDocument.currentPlanItems = ['Open the supplied PDF', 'Answer with its title']
+  browseInputDocument.currentPlanScopes = [null, null]
+  browseInputDocument.currentStepIdx = 1
+  browseInputDocument.taskStrategy = 'browse'
+  browseInputDocument.originalUserRequest =
+    'Open https://example.com/report.pdf, read its current title, and tell me the title in chat.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(browseInputDocument),
+    false,
+    'mentioning a PDF as browser input must not imply that the task should create a new saved artifact',
   )
 
   const incompletePlan = createInitialState(false, timeouts)
