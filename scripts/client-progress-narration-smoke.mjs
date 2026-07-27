@@ -61,6 +61,100 @@ const progressText = 'The three verified benchmarks now agree that short action 
 
 {
   const narrations: CapturedNarration[] = []
+  const groups: any[] = []
+  const dispatcher = new EventDispatcher(
+    'durable-startup-progress',
+    makeActions(narrations, groups),
+    () => {},
+  )
+
+  dispatcher.dispatch({
+    type: 'progress_update',
+    content: 'Preparing a fresh computer for this task…',
+  })
+  dispatcher.flushPendingUpdates()
+
+  assert.equal(groups.length, 1, 'pre-plan durable progress must create an immediate visible task group')
+  assert.equal(groups[0].title, 'Preparing a fresh computer for this task…')
+  assert.equal(groups[0].status, 'running')
+  assert.deepEqual(groups[0].narrations, [], 'startup progress must not duplicate itself inside the group')
+  const acceptedAt = groups[0].startedAt
+
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'startup-race',
+    name: 'browser_navigate',
+    args: {
+      action_label: 'Open the supplied page',
+      plan_step_index: 0,
+      url: 'https://example.test',
+    },
+  })
+  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
+  dispatcher.flushPendingUpdates()
+
+  assert.deepEqual(
+    groups.map(group => group.title),
+    ['Open the supplied page', 'Save the requested result'],
+    'the real plan must replace the provisional startup shell',
+  )
+  assert.equal(
+    groups.some(group => group.title === 'Preparing a fresh computer for this task…'),
+    false,
+    'the provisional startup group must not remain as a fake plan step',
+  )
+  assert.equal(
+    groups[0].subtasks[0]?.id,
+    'startup-race',
+    'the real plan must preserve a concrete action that raced ahead of it',
+  )
+  assert.equal(
+    groups[0].startedAt,
+    acceptedAt,
+    'the real plan must preserve the task acceptance time for truthful elapsed duration',
+  )
+}
+
+{
+  const narrations: CapturedNarration[] = []
+  const groups: any[] = []
+  const acceptedAt = Date.now() - 5_000
+  const initialMessage: Message = {
+    id: 'assistant-startup-reconnect',
+    role: 'assistant',
+    content: '',
+    timestamp: acceptedAt,
+    taskGroups: [{
+      id: 'task-startup-reconnect',
+      index: -1,
+      title: 'Preparing a fresh computer for this task…',
+      status: 'running',
+      subtasks: [],
+      narrations: [],
+      synthesis: '',
+      startedAt: acceptedAt,
+    }],
+  }
+  const dispatcher = new EventDispatcher(
+    'startup-reconnect',
+    makeActions(narrations, groups),
+    () => {},
+    initialMessage,
+  )
+
+  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
+  dispatcher.flushPendingUpdates()
+
+  assert.deepEqual(
+    groups.map(group => group.title),
+    ['Open the supplied page', 'Save the requested result'],
+    'a reconnect during cold start must still accept and render the durable plan',
+  )
+  assert.equal(groups[0].startedAt, acceptedAt, 'reconnect must preserve the original acceptance time')
+}
+
+{
+  const narrations: CapturedNarration[] = []
   const groups: unknown[] = []
   const dispatcher = new EventDispatcher(
     'cross-step-progress-update',

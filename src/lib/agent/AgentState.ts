@@ -240,7 +240,8 @@ export interface AgentStateData {
   workingMemory: WorkingMemory | null
 
   // URL the user provided in the scoped task request (if any). When non-null,
-  // ToolPipeline silently reroutes premature web_search calls to direct navigation.
+  // ToolPipeline rejects and suppresses premature web_search calls until the
+  // model opens the supplied target directly.
   userProvidedUrl: string | null
   uploadedAttachmentContextAvailable: boolean
   uploadedAttachmentContentAvailable: boolean

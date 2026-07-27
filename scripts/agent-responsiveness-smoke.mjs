@@ -12,6 +12,9 @@ const [
   streamProcessor,
   llm,
   useAgentStream,
+  eventDispatcher,
+  typingIndicator,
+  computerPanelHeader,
   search,
   chatRoute,
 ] = await Promise.all([
@@ -22,6 +25,9 @@ const [
   readFile(join(root, 'src/lib/agent/StreamProcessor.ts'), 'utf8'),
   readFile(join(root, 'src/lib/llm.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
+  readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
+  readFile(join(root, 'src/components/chat/TypingIndicator.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/computer/PanelHeader.tsx'), 'utf8'),
   readFile(join(root, 'src/lib/search.ts'), 'utf8'),
   readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
 ])
@@ -92,6 +98,31 @@ assert.match(llm, /const delayMs = Math\.min\(rawDelay,\s*maxDelayMs\) \+ jitter
 assert.match(useAgentStream, /if \(existingController && isAutoSend\) \{[\s\S]*?return[\s\S]*?\}/, 'duplicate auto-send must not abort an already-running task stream')
 assert.doesNotMatch(useAgentStream, /Too many dispatch errors, aborting stream|controller\.abort\(\)[\s\S]*?Stream dispatcher failed repeatedly/, 'client-side stream dispatch errors must not abort the backend task')
 assert.match(useAgentStream, /Repeated dispatch errors; leaving the durable cursor at the last complete event/, 'dispatch failures should be visible but non-fatal')
+assert.doesNotMatch(
+  useAgentStream,
+  /streamingStatus === 'startup'[\s\S]{0,240}setStreamingStatus\('thinking'\)/,
+  'a fixed client timer must not relabel a still-queued remote computer as thinking',
+)
+assert.match(
+  eventDispatcher,
+  /if \(!this\.planTextParsed\)[\s\S]*queuedComputerPreparationTitle\(event\.content\)[\s\S]*title: startupTitle[\s\S]*status: 'running'[\s\S]*this\.actions\.setTaskGroups/,
+  'durable pre-plan preparation progress must create an immediate visible running group',
+)
+assert.match(
+  typingIndicator,
+  /startup:\s*'Preparing a fresh computer'/,
+  'the pre-plan task stream indicator must describe actual computer preparation',
+)
+assert.doesNotMatch(
+  typingIndicator,
+  /Creating plan|elapsedMs|setInterval/,
+  'elapsed wall time alone must not invent a planning phase before the worker emits one',
+)
+assert.match(
+  computerPanelHeader,
+  /startup:\s*'Preparing a fresh computer'/,
+  'the Computer header must agree with the task-stream cold-start state',
+)
 assert.match(chatRoute, /Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*workerAvailabilityPromise,[\s\S]*attachmentAccessPromise,/, 'task acceptance must await credit, message, worker, and attachment checks running in parallel')
 assert.ok(chatRoute.indexOf("await timedRoutePromise('taskAccessReadyMs'") < chatRoute.indexOf('const creditsPromise'), 'task access must be approved before the remaining acceptance gates begin')
 assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.then|workerStartupPlanPromise[\s\S]*enqueueTaskJob/, 'external-worker chat route must not wait for startup planning before enqueueing the durable job')

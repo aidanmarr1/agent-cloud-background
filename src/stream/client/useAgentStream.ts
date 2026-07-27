@@ -1018,16 +1018,6 @@ export async function startInitialAgentTask(conversationId: string): Promise<voi
   })
   activeControllers.set(conversationId, controller)
 
-  const startupTimer = window.setTimeout(() => {
-    if (
-      activeControllers.get(conversationId) === controller &&
-      useChatStore.getState().activeId === conversationId &&
-      useUIStore.getState().streamingStatus === 'startup'
-    ) {
-      useUIStore.getState().setStreamingStatus('thinking')
-    }
-  }, 1500)
-
   try {
     const latestUserMessage = [...conversation.messages].reverse().find((message) => message.role === 'user')
     if (latestUserMessage?.attachments?.length) {
@@ -1190,7 +1180,6 @@ export async function startInitialAgentTask(conversationId: string): Promise<voi
     startRequestsAwaitingHeaders.delete(conversationId)
     startReservations.delete(conversationId)
     cancelledStartReservations.delete(conversationId)
-    window.clearTimeout(startupTimer)
     if (activeControllers.get(conversationId) === controller && !pendingStopRequests.has(conversationId)) {
       useCreditStore.getState().finishTask(conversationId, dispatcher.getTerminalStatus() ?? 'stopped')
       setConversationStreaming(conversationId, false)
@@ -1617,16 +1606,6 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
       abortRef.current = controller
       activeControllers.set(conversationId, controller)
 
-      const startupTimer = window.setTimeout(() => {
-        if (
-          activeControllers.get(conversationId) === controller &&
-          useChatStore.getState().activeId === conversationId &&
-          useUIStore.getState().streamingStatus === 'startup'
-        ) {
-          useUIStore.getState().setStreamingStatus('thinking')
-        }
-      }, 1500)
-
       try {
         if (controller.signal.aborted) {
           throw Object.assign(new Error('Task stopped.'), { name: 'AbortError' })
@@ -1787,7 +1766,6 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
         startRequestsAwaitingHeaders.delete(conversationId)
         startReservations.delete(conversationId)
         cancelledStartReservations.delete(conversationId)
-        window.clearTimeout(startupTimer)
         if (activeControllers.get(conversationId) === controller && !pendingStopRequests.has(conversationId)) {
           useCreditStore.getState().finishTask(conversationId, dispatcher.getTerminalStatus() ?? 'stopped')
           setConversationStreaming(conversationId, false)

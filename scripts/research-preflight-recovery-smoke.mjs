@@ -4,10 +4,11 @@ import { join } from 'node:path'
 import { build } from 'esbuild'
 
 const root = process.cwd()
-const [loopSource, pipelineSource, progressSource] = await Promise.all([
+const [loopSource, pipelineSource, progressSource, clientDispatcherSource] = await Promise.all([
   readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
   readFile(join(root, 'src/lib/agent/PaidModelTurnProgress.ts'), 'utf8'),
+  readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
 ])
 
 assert.match(
@@ -17,8 +18,13 @@ assert.match(
 )
 assert.match(
   pipelineSource,
-  /schedulesRouteRecovery = rejectionCode === 'research_source_balance'/,
-  'unrelated preflight guards must retain their normal provider-history repair path',
+  /schedulesRouteRecovery =[\s\S]*rejectionCode === 'research_source_balance'[\s\S]*rejectionCode === 'direct_navigation_required'/,
+  'source-balance and direct-navigation rejections must both schedule bounded route recovery',
+)
+assert.match(
+  pipelineSource,
+  /directNavigationTarget[\s\S]*superseded:\s*true[\s\S]*preflightResult\(errorMessage,\s*true,\s*'direct_navigation_required'\)/,
+  'a rejected provisional search must be superseded and classified for direct-navigation recovery',
 )
 assert.doesNotMatch(
   pipelineSource,
@@ -39,6 +45,21 @@ assert.match(
   loopSource,
   /lastToolResults\.every\(isPreflightRejectionRecovery\)[\s\S]*internalRecoveryScheduled = 'preflight_rejection'[\s\S]*type: 'action_rejected'/,
   'the agent loop must schedule bounded route recovery and diagnostics for rejected actions',
+)
+assert.match(
+  loopSource,
+  /directNavigationRequired[\s\S]*web_search is temporarily unavailable\. Call browser_navigate with that exact URL now/,
+  'direct-navigation recovery must tell the model to open the exact user target',
+)
+assert.match(
+  loopSource,
+  /const directNavigationRecovery[\s\S]*if \(!directNavigationRecovery\)[\s\S]*state\.recentToolCalls = \[\][\s\S]*state\.recentToolSequence = \[\]/,
+  'direct-navigation recovery must preserve recent-call history so repeated rejected searches remain detectable',
+)
+assert.match(
+  clientDispatcherSource,
+  /isSupersededToolResult\(event\.result\)[\s\S]*removeHiddenTool\(event\.id\)/,
+  'the client must remove a superseded provisional search instead of displaying fake completed work',
 )
 assert.match(
   loopSource,
@@ -163,6 +184,34 @@ assert.equal(
   researchSourceBalanceBlockReason('web_search', state),
   null,
   'the single bounded fresh-search escape must be executable',
+)
+
+const directNavigationState = createInitialState(false, state.tierTimeouts)
+directNavigationState.userProvidedUrl = 'https://example.com/exact-target?ref=user'
+applyResearchPreflightRouteRecovery(
+  directNavigationState,
+  'web_search',
+  'direct_navigation_required',
+)
+assert.equal(
+  directNavigationState.suppressedResearchToolName,
+  'web_search',
+  'a rejected search must be unavailable on the immediate direct-navigation recovery turn',
+)
+assert.equal(
+  directNavigationState.stepLoopDetections,
+  1,
+  'the rejected search route must count toward bounded loop recovery',
+)
+releaseSearchAfterDistinctSourceFailures(
+  directNavigationState,
+  'browser_navigate',
+  'https://example.com/exact-target?ref=user#attempt',
+)
+assert.equal(
+  directNavigationState.suppressedResearchToolName,
+  null,
+  'one failed attempt at the exact supplied target must release a bounded fallback search',
 )
 
 state.stepFailedSourceTargets.clear()

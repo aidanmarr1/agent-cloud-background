@@ -3828,7 +3828,9 @@ export class ToolPipeline {
       rejectionCode = 'preflight',
     ): ToolExecutionResult => {
       closeVisibleProvisionalStart(result)
-      const schedulesRouteRecovery = rejectionCode === 'research_source_balance'
+      const schedulesRouteRecovery =
+        rejectionCode === 'research_source_balance' ||
+        rejectionCode === 'direct_navigation_required'
       if (schedulesRouteRecovery) {
         applyResearchPreflightRouteRecovery(state, tc.name, rejectionCode)
       }
@@ -4384,14 +4386,12 @@ export class ToolPipeline {
     // different tool behind it.
     const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
     if (directNavigationTarget) {
-      const provisionalSearchWasVisible = state.visibleNarrationToolStartIds.has(tc.id)
-      if (provisionalSearchWasVisible) {
-        closeVisibleProvisionalStart({
-          error: 'INTERNAL_RECOVERY: provisional search display was closed because the exact supplied target must be opened directly.',
-        })
-      }
       const errorMessage = {
         error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Call browser_navigate with that exact URL now and author a fresh action_label that describes the navigation purpose.`,
+        // The streamed tool_start was only provisional. Marking this result as
+        // superseded makes the client remove the rejected search pill/panel
+        // instead of presenting a preflight correction as completed work.
+        superseded: true,
       }
       recordWorkLedgerFailure(state, {
         tool: tc.name,
@@ -4403,7 +4403,7 @@ export class ToolPipeline {
       // the phase action budget or make the next model turn believe that work
       // has started. AgentLoop removes web_search from that repair turn so the
       // model must author the appropriate direct URL action itself.
-      return preflightResult(errorMessage)
+      return preflightResult(errorMessage, true, 'direct_navigation_required')
     }
 
     if (tc.name === 'web_search') {

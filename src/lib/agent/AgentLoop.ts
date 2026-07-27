@@ -158,7 +158,8 @@ function executedParallelSourceExtractionBatch(results: ToolExecutionResult[]): 
  * Phase 12 Fix NNN: scan the user's most recent message for a URL or bare
  * domain. Returns the first match (full URL preferred over bare domain), or
  * null if none. Used by AgentLoop to populate state.userProvidedUrl, which
- * ToolPipeline reads to reroute premature web_search calls into direct navigation.
+ * ToolPipeline reads to reject and suppress premature web_search calls so the
+ * next model turn authors the required direct navigation explicitly.
  *
  * Bare-domain regex requires `[a-z]{2,}` TLD AND a leading domain part so
  * filenames (`report.pdf`) and version strings (`1.2.3`) don't false-positive.
@@ -247,10 +248,15 @@ function preflightRejectionRecoveryMessage(
   const sourceBalanceRejected = results.some(
     result => result.preflightRejection?.code === 'research_source_balance',
   )
+  const directNavigationRequired = results.some(
+    result => result.preflightRejection?.code === 'direct_navigation_required',
+  )
   return [
     'ACTION ROUTE RECOVERY: the previous model-selected action was rejected before execution, so it produced no new evidence and must not be selected again on this turn.',
     rejectedTools ? `Rejected route: ${rejectedTools}.` : '',
-    sourceBalanceRejected
+    directNavigationRequired
+      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Call browser_navigate with that exact URL now and use a fresh action label describing the navigation.`
+      : sourceBalanceRejected
       ? 'A search result set already exists but still needs a usable opened source. The rejected web_search route is temporarily unavailable. Open a different unfailed URL from the Remaining candidate URLs with an available source reader or browser navigation tool. After two distinct source-opening failures, one fresh search route may reopen.'
       : 'Choose one materially different available action that satisfies the active phase and current runtime constraints.',
     `Continue active phase ${state.currentStepIdx + 1} now with exactly one executable native tool call.`,
@@ -3911,8 +3917,8 @@ export class AgentLoop {
     state.uploadedImageAttachmentAvailable = ASSISTANT_SUPPORTS_IMAGE_INPUT && visualImageUploadedAttachments(scopedMessages).length > 0
     state.uploadedAttachmentContentAvailable = readableUploadedAttachments(scopedMessages).length > 0 ||
       state.uploadedImageAttachmentAvailable
-    // Detect a URL/domain in the scoped task request so web_search attempts can
-    // be silently rerouted to direct navigation before another paid model turn.
+    // Detect a URL/domain in the scoped task request so premature web_search
+    // attempts can be rejected and suppressed until the model opens it directly.
     state.userProvidedUrl = extractUserProvidedUrl(scopedMessages)
     if (state.userProvidedUrl) log.info(`User provided URL detected: ${state.userProvidedUrl}`)
     const shouldHydrateResearchActivity = !!this.options.userId &&
@@ -5581,8 +5587,13 @@ export class AgentLoop {
               state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
               state.forceTextNextIteration = false
               state.phaseEndNarrationPending = false
-              state.recentToolCalls = []
-              state.recentToolSequence = []
+              const directNavigationRecovery = lastToolResults.some(
+                result => result.preflightRejection?.code === 'direct_navigation_required',
+              )
+              if (!directNavigationRecovery) {
+                state.recentToolCalls = []
+                state.recentToolSequence = []
+              }
 
               const rejectionDetails = lastToolResults.map(result => ({
                 tool: result.tc.name,

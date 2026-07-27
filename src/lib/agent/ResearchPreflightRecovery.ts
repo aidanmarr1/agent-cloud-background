@@ -98,7 +98,10 @@ export function applyResearchPreflightRouteRecovery(
   toolName: string,
   rejectionCode: string,
 ): void {
-  if (rejectionCode !== 'research_source_balance' || toolName !== 'web_search') return
+  if (
+    toolName !== 'web_search' ||
+    (rejectionCode !== 'research_source_balance' && rejectionCode !== 'direct_navigation_required')
+  ) return
   state.suppressedResearchToolName = 'web_search'
   state.stepLoopDetections = Math.max(1, state.stepLoopDetections + 1)
   state.lastLoopSignal = { type: 'search_duplicate', tool: 'web_search' }
@@ -119,6 +122,20 @@ export function releaseSearchAfterDistinctSourceFailures(
     return
   }
   state.stepFailedSourceTargets.add(normalizedTarget)
+  const normalizedUserTarget = state.userProvidedUrl
+    ? normalizeResearchUrl(state.userProvidedUrl)
+    : ''
+  if (
+    state.suppressedResearchToolName === 'web_search' &&
+    normalizedUserTarget &&
+    normalizedTarget === normalizedUserTarget
+  ) {
+    // A direct-navigation correction needs exactly one non-search attempt.
+    // If that exact target fails, the next turn may use search as a fallback;
+    // keeping it suppressed would leave the route with no bounded escape.
+    state.suppressedResearchToolName = null
+    return
+  }
   if (
     state.suppressedResearchToolName !== 'web_search' ||
     state.stepFailedSourceTargets.size < 2

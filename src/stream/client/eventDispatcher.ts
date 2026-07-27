@@ -54,6 +54,13 @@ function isDeferredBrowseToolStart(name: string): boolean {
   return false
 }
 
+function queuedComputerPreparationTitle(content: string): string | null {
+  const trimmed = content.trim()
+  return /^Preparing a fresh computer for this task(?:…|\.\.\.)?$/.test(trimmed)
+    ? trimmed
+    : null
+}
+
 function isStaleFutureWorkAck(text: string): boolean {
   const normalized = text.trim().toLowerCase()
   if (!normalized) return false
@@ -303,7 +310,10 @@ export class EventDispatcher {
           narrations: [...safeNarrations(group)],
         }))
       : []
-    this.planTextParsed = this.parsedGroups.length > 0
+    // A reconnect can hydrate the provisional cold-start group before the
+    // durable plan arrives. Its negative index is intentional: it keeps the
+    // stream visible without masquerading as a parsed plan.
+    this.planTextParsed = this.parsedGroups.some((group) => group.index >= 0)
     this.groupsActive = this.parsedGroups.length > 0
 
     if (this.parsedGroups.length > 0) {
@@ -602,6 +612,30 @@ export class EventDispatcher {
   }
 
   private handleProgressUpdate(event: ProgressUpdateEvent): void {
+    // The durable acceptance event arrives before the worker has emitted its
+    // plan. Render it as a provisional running group immediately instead of
+    // dropping it behind the generic Thinking indicator. The real plan
+    // replaces this shell while preserving any tool starts that raced ahead.
+    if (!this.planTextParsed) {
+      const startupTitle = queuedComputerPreparationTitle(event.content)
+      if (!startupTitle) return
+      const existing = this.parsedGroups[0]
+      this.parsedGroups = [{
+        id: existing?.id || `task-startup-${this.conversationId}`,
+        index: -1,
+        title: startupTitle,
+        status: 'running',
+        subtasks: [...safeSubtasks(existing)],
+        narrations: [],
+        synthesis: '',
+        startedAt: existing?.startedAt || Date.now(),
+      }]
+      this.currentGroupIdx = 0
+      this.groupsActive = true
+      this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+      return
+    }
+
     if (!this.groupsActive || this.currentGroupIdx < 0) return
 
     const narrationText = sanitizeNarrationText(event.content, {
@@ -686,6 +720,7 @@ export class EventDispatcher {
     this.captureStartupAcknowledgment()
 
     const existingSubtasks = this.parsedGroups.length > 0 ? [...safeSubtasks(this.parsedGroups[0])] : []
+    const existingStartedAt = this.parsedGroups[0]?.startedAt
     this.parsedGroups.length = 0
     this.parsedSteps.length = 0
 
@@ -699,7 +734,7 @@ export class EventDispatcher {
         subtasks: i === 0 ? existingSubtasks : [],
         narrations: [],
         synthesis: '',
-        startedAt: i === 0 ? Date.now() : undefined,
+        startedAt: i === 0 ? existingStartedAt || Date.now() : undefined,
       })
     })
 

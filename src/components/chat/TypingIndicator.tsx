@@ -1,11 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import { useUIStore } from '@/store/ui'
 import type { StreamingStatus } from '@/types'
 
 const statusLabels: Record<Exclude<StreamingStatus, null>, string> = {
-  startup: 'Initializing computer',
+  startup: 'Preparing a fresh computer',
   thinking: 'Thinking',
   searching: 'Searching',
   browsing: 'Browsing',
@@ -16,28 +15,10 @@ const statusLabels: Record<Exclude<StreamingStatus, null>, string> = {
   stopping: 'Stopping',
 }
 
-function statusLabel(status: Exclude<StreamingStatus, null>, elapsedMs: number): string {
-  if (status === 'startup') {
-    return elapsedMs < 750 ? 'Initializing computer' : 'Creating plan'
-  }
-  return statusLabels[status] || 'Thinking'
-}
-
 export function TypingIndicator() {
   const streamingStatus = useUIStore((s) => s.streamingStatus)
   const status = streamingStatus ?? 'thinking'
-  const [elapsedMs, setElapsedMs] = useState(0)
-
-  useEffect(() => {
-    setElapsedMs(0)
-    const startedAt = Date.now()
-    const id = window.setInterval(() => {
-      setElapsedMs(Date.now() - startedAt)
-    }, 250)
-    return () => window.clearInterval(id)
-  }, [status])
-
-  const label = statusLabel(status, elapsedMs)
+  const label = statusLabels[status] || 'Thinking'
 
   return (
     <div
