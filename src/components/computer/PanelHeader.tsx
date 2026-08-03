@@ -11,8 +11,8 @@ export function PanelHeader() {
   const streamingStatus = useUIStore((s) => s.streamingStatus)
 
   const statusLabels: Record<string, string> = {
-    startup: 'Initializing computer',
-    planning: 'Planning',
+    startup: 'Initializing new computer',
+    planning: 'Thinking',
     searching: 'Searching',
     browsing: 'Browsing',
     coding: 'Writing code',

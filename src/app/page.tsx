@@ -34,7 +34,7 @@ export default function HomePage() {
     const id = createConversation(message, attachments)
     const uiState = useUIStore.getState()
     uiState.setStreaming(true)
-    uiState.setStreamingStatus('startup')
+    uiState.setStreamingStatus('thinking')
     uiState.setRouteHandoffPending(false)
     void startInitialAgentTask(id).catch((error) => {
       console.error('[Home] Failed to start task immediately after submit:', error)

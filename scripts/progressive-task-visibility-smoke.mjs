@@ -30,7 +30,7 @@ assert.match(
 assert.match(
   agentMessage,
   /isStreaming && visibleTaskGroups\.length === 0 && visibleSteps\.length === 0/,
-  'a planning indicator must remain visible before the first planned group starts',
+  'a truthful startup indicator must remain visible before the first planned group starts',
 )
 assert.match(
   agentMessage,

@@ -599,7 +599,6 @@ export class PlanManager {
   }
 
   startPlanCall(): void {
-    if (!this.emitter.isClosed) this.emitter.progressUpdate('Planning…')
     console.log('[AgentDiagnostics] Planner scheduled', {
       complexity: this.taskComplexity,
       messages: this.messages.length,

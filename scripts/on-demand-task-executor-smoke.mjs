@@ -16,6 +16,7 @@ const sourceFiles = {
   taskDispatch: '../src/lib/agent/taskDispatch.ts',
   taskJobs: '../src/lib/agent/taskJobs.ts',
   chatTaskRunner: '../src/lib/agent/chatTaskRunner.ts',
+  agentLoop: '../src/lib/agent/AgentLoop.ts',
   taskWorker: '../src/worker/taskWorker.ts',
   taskWorkerHeartbeat: '../src/lib/agent/taskWorkerHeartbeat.ts',
   taskWorkflow: '../src/workflows/taskExecution.ts',
@@ -499,10 +500,25 @@ check('drain startup failures requeue behind an execution fence', () => {
     /runClaimedPreChargeBootstrap\(\s*'task_bootstrap',\s*\(\) => openLiveDirectiveRun[\s\S]*runClaimedPreChargeBootstrap\(\s*'task_bootstrap',\s*\(\) => acquireBrowserSessionFence[\s\S]*runClaimedPreChargeBootstrap\(\s*'task_bootstrap',\s*\(\) => clearLiveDirectives[\s\S]*runClaimedPreChargeBootstrap\(\s*'task_bootstrap',\s*\(\) => hydrateMessageAttachmentsForUser/,
     'every blocking pre-charge directive, browser-fence, and attachment bootstrap operation must use the typed retry boundary',
   )
-  assert.match(
+  assert.doesNotMatch(
     sources.chatTaskRunner.slice(bootstrapHelper, taskStartCharge),
-    /runClaimedPreChargeBootstrap\(\s*'sandbox_startup',\s*\(\) => pendingStartupReady/,
-    'a claimed worker must prove computer startup through the same retry boundary before charging task-start credit',
+    /await runClaimedPreChargeBootstrap\(\s*'sandbox_startup'/,
+    'computer readiness must not hold acknowledgement and planning behind the full sandbox cold start',
+  )
+  assert.match(
+    sources.chatTaskRunner,
+    /startupReadyPromise = runClaimedPreChargeBootstrap\(\s*'sandbox_startup',\s*\(\) => pendingStartupReady/,
+    'parallel computer startup failures must still be classified for a fresh worker recovery attempt',
+  )
+  assert.match(
+    sources.agentLoop,
+    /toolCallsNeedStartupReady\(lastStreamResult\.toolCalls\)[\s\S]*await this\.awaitWithTaskSignal\(this\.options\.startupReadyPromise\)/,
+    'actual native tool execution must still await the computer it needs',
+  )
+  assert.match(
+    sources.agentLoop,
+    /isRetryableTaskInfrastructureInitializationError\(error\)\) throw error[\s\S]*isRetryableTaskInfrastructureInitializationError\(err\)\) throw err/,
+    'a transient computer-start failure must escape the agent UI loop and reach durable worker recovery',
   )
   const startupClassifier = sources.chatTaskRunner.slice(
     sources.chatTaskRunner.indexOf('function isRetryableTaskInfrastructureStartupFailure'),

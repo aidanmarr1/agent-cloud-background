@@ -206,6 +206,11 @@ function publicErrorMessage(error: unknown): string {
   return message
 }
 
+function isAssistantRequestTimeout(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /Assistant request timed out|\btimed out\b|\btimeout\b|ETIMEDOUT/i.test(message)
+}
+
 function isTransientUsageAccountingError(error: unknown): boolean {
   if (isOutOfCreditsError(error)) return false
   const message = error instanceof Error ? error.message : String(error || '')
@@ -382,15 +387,40 @@ async function runDirectChat(
     if (userId) {
       await assertServerCreditsAvailable(userId)
     }
-    const response = await createCompletion({
-      model,
-      messages: nextMessages,
-      temperature: 0.3,
-      max_tokens: attempt === 0 ? DIRECT_CHAT_MAX_TOKENS : DIRECT_CHAT_CONTINUATION_MAX_TOKENS,
-      includeTemporalContext: directChatNeedsTemporalContext(messages),
-      requestTimeoutMs: 30_000,
-      abortSignal: signal,
-    })
+    let response
+    try {
+      response = await createCompletion({
+        model,
+        messages: nextMessages,
+        temperature: 0.3,
+        max_tokens: attempt === 0 ? DIRECT_CHAT_MAX_TOKENS : DIRECT_CHAT_CONTINUATION_MAX_TOKENS,
+        includeTemporalContext: directChatNeedsTemporalContext(messages),
+        requestTimeoutMs: 30_000,
+        retryMaxAttempts: 0,
+        abortSignal: signal,
+      })
+    } catch (error) {
+      if (!isAssistantRequestTimeout(error) || signal?.aborted) throw error
+      console.warn('[AgentDiagnostics] Direct answer model request timed out; retrying once through a fresh provider route', {
+        continuation: attempt,
+      })
+      response = await createCompletion({
+        model,
+        messages: [
+          ...nextMessages,
+          {
+            role: 'system',
+            content: 'REQUEST RECOVERY: the previous provider route timed out before returning an answer. Answer the same request now, directly and concisely. Do not mention the retry or apologize.',
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: attempt === 0 ? DIRECT_CHAT_MAX_TOKENS : DIRECT_CHAT_CONTINUATION_MAX_TOKENS,
+        includeTemporalContext: directChatNeedsTemporalContext(messages),
+        requestTimeoutMs: 60_000,
+        retryMaxAttempts: 0,
+        abortSignal: signal,
+      })
+    }
 
     const creditUsage = normalizeProviderUsage(response.usage)
     if (!creditUsage) {
@@ -728,7 +758,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       }
       const startupTasks: Array<Promise<unknown>> = []
       if (!directChat) {
-        emitter.progressUpdate('Initializing computer…')
+        emitter.progressUpdate('Initializing new computer…')
         if (startIsolatedTaskSandbox || staleLeaseRecovery) {
           releaseStartupBrowserFence = await runClaimedPreChargeBootstrap(
             'task_bootstrap',
@@ -777,6 +807,31 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           () => hydrateMessageAttachmentsForUser(agentMessages, userId),
         )
       }
+
+      // The accepted task-start debit is the spend fence for model and paid
+      // sandbox work. It is a quick database operation and must settle before
+      // E2B activation, while local preparation above remains parallel.
+      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
+        .then((record) => {
+          emitCreditRecord(record)
+          meteredTaskStarted = true
+        })
+        .catch((error) => {
+          console.error('[AgentDiagnostics] Task-start credit charge failed', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw error
+        })
+      void taskStartCreditPromise.catch(() => undefined)
+      await taskStartCreditPromise
+
+      if (ACTIVE_CREDITS_PER_MINUTE > 0) {
+        activeCreditTimer = setInterval(() => {
+          void chargeActiveCredit().catch(() => undefined)
+        }, 5000)
+      }
+
       if (!directChat && shouldUseE2BSandbox()) {
         const explicitToolConstraint = explicitTaskToolConstraintFromText(
           latestUserContent(agentMessages),
@@ -884,37 +939,19 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         void startupReadyPromise.catch(() => undefined)
       }
 
+      // Computer initialization continues in parallel. The agent loop starts
+      // acknowledgement and planning immediately, while its execution fence
+      // below awaits startup only when the selected native tool actually needs
+      // the sandbox/browser. Status labels therefore never delay real work.
       if (claimedWorkerAttempt !== null && !directChat && startupReadyPromise) {
         const pendingStartupReady = startupReadyPromise
-        // A claimed one-off worker must prove its task computer is ready before
-        // any user task-start charge or agent action. Transient provider/DB
-        // failures are infrastructure recovery, not task output.
-        await runClaimedPreChargeBootstrap(
+        startupReadyPromise = runClaimedPreChargeBootstrap(
           'sandbox_startup',
           () => pendingStartupReady,
         )
+        void startupReadyPromise.catch(() => undefined)
       }
 
-      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
-        .then((record) => {
-          emitCreditRecord(record)
-          meteredTaskStarted = true
-        })
-        .catch((error) => {
-          console.error('[AgentDiagnostics] Task-start credit charge failed', {
-            conversationId,
-            error: error instanceof Error ? error.message : String(error),
-          })
-          throw error
-        })
-      void taskStartCreditPromise.catch(() => undefined)
-      await taskStartCreditPromise
-
-      if (ACTIVE_CREDITS_PER_MINUTE > 0) {
-        activeCreditTimer = setInterval(() => {
-          void chargeActiveCredit().catch(() => undefined)
-        }, 5000)
-      }
     }
 
     let resolvedStartupPlan = startupPlan

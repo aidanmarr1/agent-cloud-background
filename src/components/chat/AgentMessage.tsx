@@ -172,7 +172,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
           </div>
         )}
 
-        {/* Live activity indicator — shows immediately while the first agent turn is booting/planning. */}
+        {/* Live activity indicator — shows immediately while the first agent turn starts. */}
         {isStreaming && visibleTaskGroups.length === 0 && visibleSteps.length === 0 && (
           <div className={finalContent ? 'mt-4' : ''}>
             <TypingIndicator />

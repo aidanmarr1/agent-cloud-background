@@ -252,7 +252,7 @@ export default function ChatPage() {
 
         const uiState = useUIStore.getState()
         uiState.setStreaming(true)
-        uiState.setStreamingStatus('startup')
+        uiState.setStreamingStatus('thinking')
         try {
           await sendMessage(conversation.messages[0].content, true)
         } catch (err) {

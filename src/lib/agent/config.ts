@@ -18,7 +18,10 @@ export const MIN_ITERATION_DELAY_MS = 0
 export const MODEL_MAX_PROMPT_TOKENS = 983_616
 export const MODEL_MAX_COMPLETION_TOKENS = 65_536
 export const MAX_CONTEXT_MESSAGES = 4_096
-export const MAX_TIMEOUT_NUDGES = 1
+// A single slow/stalled model turn is ordinary provider jitter, not a reason to
+// terminate an otherwise healthy task. Recovery changes the next request route
+// and may retry a few times; the run/iteration deadlines remain the hard fence.
+export const MAX_TIMEOUT_NUDGES = 3
 export const AGENT_RUN_MAX_DURATION_MS = 270_000
 export const AGENT_DEADLINE_FINALIZATION_BUFFER_MS = 150_000
 export const AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS = 20_000
@@ -68,14 +71,14 @@ export const WORK_SUMMARY_RECENT_ACTIONS = 6
 // --- Timeouts (ms) ---
 export const TIER_TIMEOUTS = {
   iterationTimeoutMs: IS_OLLAMA ? 600_000 : 60_000,    // X-high reasoning can take longer before the first streamed event
-  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 3_000,    // Allow ordinary provider jitter while the bounded iteration deadline still prevents frozen turns
+  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 8_000,    // Routed providers can pause between reasoning and a native tool envelope
   checkIntervalMs: 150,
   build: {
-    contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 1_200,
+    contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 4_000,
     contentOnlyMinChars: IS_OLLAMA ? 5000 : 1200,
   },
   research: {
-    contentOnlyTimeoutMs: IS_OLLAMA ? 90_000 : 900,
+    contentOnlyTimeoutMs: IS_OLLAMA ? 90_000 : 3_000,
     contentOnlyMinChars: IS_OLLAMA ? 5_000 : 700,
   },
 } as const

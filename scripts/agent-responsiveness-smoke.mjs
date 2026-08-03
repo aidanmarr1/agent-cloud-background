@@ -34,7 +34,8 @@ const [
   readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
 ])
 
-assert.match(config, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 3_000/, 'agent inactivity timeout must tolerate ordinary provider jitter while iteration deadlines bound frozen turns')
+assert.match(config, /inactivityTimeoutMs:\s*IS_OLLAMA \? 120_000 : 8_000/, 'agent inactivity timeout must tolerate routed-provider pauses while iteration deadlines bound frozen turns')
+assert.match(config, /export const MAX_TIMEOUT_NUDGES = 3/, 'ordinary provider stalls need several bounded recovery attempts before the runtime deadline')
 assert.match(config, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 60_000/, 'API stream iterations must tolerate medium reasoning while remaining bounded')
 assert.match(config, /checkIntervalMs:\s*150/, 'timeout watchdog must check often enough for responsive recovery')
 assert.match(config, /export const STREAM_REQUEST_TIMEOUT_MS = 60_000/, 'streaming model requests must tolerate Qwen 3.7 Flash startup while remaining bounded')
@@ -57,10 +58,13 @@ assert.match(agentLoop, /const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 
 assert.match(agentLoop, /const FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'non-source action turns must tolerate Qwen 3.7 Flash provider startup without stacked retries')
 assert.match(agentLoop, /const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 15_000/, 'source action turns must tolerate medium reasoning and provider jitter instead of buying a repair turn')
 assert.match(agentLoop, /const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 15_000/, 'non-source action turns must tolerate medium reasoning and provider jitter instead of buying a repair turn')
+assert.match(agentLoop, /const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000/, 'brief provider pauses after visible action-selection text must not instantly kill the stream')
 assert.match(agentLoop, /if \(!lastStreamResult\.timedOut\) state\.timeoutNudgeCount = 0[\s\S]*finishNarrationCadenceAttempt/, 'only a normally completed stream may reset the consecutive timeout budget')
 assert.match(agentLoop, /effectiveCadenceNarrationInMainTurn =[\s\S]*activeTools\.length > 0[\s\S]*cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn/, 'cadence narration must never require a native tool field on a text-only turn')
 assert.doesNotMatch(agentLoop, /FINAL_SAVED_DELIVERABLE_NONSTREAM_REQUEST_TIMEOUT_MS|Final saved deliverable stream start timed out; using compact final-write completion/, 'final saved writes must not wait on a second non-stream fallback request')
 assert.match(agentLoop, /const FAST_SOURCE_ACTION_MAX_TOKENS = 384/, 'source/action selection turns must keep a small but non-truncating output budget')
+assert.match(agentLoop, /const FAST_ACTION_MAX_TOKENS = 1_024[\s\S]*fastActionTurn[\s\S]*FAST_ACTION_MAX_TOKENS/, 'ordinary native-tool decisions must not reserve the full report output budget')
+assert.match(agentLoop, /state\.timeoutNudgeCount = 0[\s\S]*MODEL TIMEOUT ROUTE RECOVERY:[\s\S]*return 'STREAMING'/, 'repeated internal model stalls must change route and continue instead of surfacing a terminal task-timeout error')
 assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*parallel batch of up to 3 source extraction calls/, 'source/action turns should allow one model-selected batch of three independent source reads after search results are available')
 assert.match(agentLoop, /allowParallelSourceToolCalls[\s\S]*!sourceExtractionBatchConsumedForLatestSearch\(state\)[\s\S]*visibleNarrationActionHeadroom\(state\) >= 3[\s\S]*parallel_tool_calls:\s*allowParallelSourceToolCalls/, 'parallel model tool calls must be limited to one model-selected source batch with enough narration headroom')
 assert.match(agentLoop, /streamToolCallPolicy[\s\S]*processStream\([\s\S]*streamToolCallPolicy/, 'the exact request-time parallel source policy must be forwarded to stream processing')
@@ -113,7 +117,7 @@ assert.match(
 assert.doesNotMatch(eventDispatcher, /title:\s*startupTitle/, 'startup status must not appear as a fake plan item')
 assert.match(
   typingIndicator,
-  /startup:\s*'Initializing computer'/,
+  /startup:\s*'Initializing new computer'/,
   'the pre-plan task stream indicator must describe actual computer initialization',
 )
 assert.match(
@@ -128,7 +132,7 @@ assert.doesNotMatch(
 )
 assert.match(
   computerPanelHeader,
-  /startup:\s*'Initializing computer'/,
+  /startup:\s*'Initializing new computer'/,
   'the Computer header must agree with the task-stream cold-start state',
 )
 assert.match(chatRoute, /Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*workerAvailabilityPromise,[\s\S]*attachmentAccessPromise,/, 'task acceptance must await credit, message, worker, and attachment checks running in parallel')

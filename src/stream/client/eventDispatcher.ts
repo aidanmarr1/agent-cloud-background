@@ -57,8 +57,10 @@ function isDeferredBrowseToolStart(name: string): boolean {
 function queuedStartupStatus(content: string): Exclude<StreamingStatus, null> | null {
   const trimmed = content.trim()
   if (/^Thinking(?:…|\.\.\.)?$/.test(trimmed)) return 'thinking'
-  if (/^Planning(?:…|\.\.\.)?$/.test(trimmed)) return 'planning'
-  if (/^(?:Initializing computer|Preparing a fresh computer for this task)(?:…|\.\.\.)?$/.test(trimmed)) return 'startup'
+  // Legacy planning events should never introduce a third visible startup
+  // label. Planning remains internal while the user sees Thinking.
+  if (/^Planning(?:…|\.\.\.)?$/.test(trimmed)) return 'thinking'
+  if (/^(?:Initializing new computer|Initializing computer|Preparing a fresh computer for this task)(?:…|\.\.\.)?$/.test(trimmed)) return 'startup'
   return null
 }
 

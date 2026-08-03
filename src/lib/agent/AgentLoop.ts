@@ -348,14 +348,19 @@ const FAST_ACTION_ITERATION_TIMEOUT_MS = 60_000
 // buys another model turn and makes the task slower overall.
 const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 15_000
 const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 15_000
-const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 450
-const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 120
+const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000
+const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 320
 // Routed models may spend part of this allowance on hidden reasoning before
 // emitting a native tool call. A 260-token ceiling repeatedly cut otherwise
 // tiny search JSON at the stream boundary, making the runtime pay for a full
 // repair turn. Keep this far below synthesis budgets while leaving enough room
 // for one complete action envelope (or the bounded three-source read batch).
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
+// Ordinary action-selection turns only need enough output for a complete
+// native tool envelope. Reserving the model's full 65k report budget here made
+// Qwen provider scheduling slower without adding useful capability. Full output
+// capacity remains available for synthesis, reports, code, and deliverables.
+const FAST_ACTION_MAX_TOKENS = 1_024
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
 const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -372,6 +377,12 @@ function isTransientAssistantStreamError(error: unknown): boolean {
   if (error instanceof TypeError) return true
   const message = error instanceof Error ? error.message : String(error || '')
   return /\b(?:fetch failed|network|socket|terminated|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|temporarily unavailable)\b/i.test(message)
+}
+
+function isRetryableTaskInfrastructureInitializationError(error: unknown): boolean {
+  return !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'RETRYABLE_TASK_INFRASTRUCTURE_INITIALIZATION'
 }
 
 function supportsProviderRequiredToolChoice(model: string): boolean {
@@ -5472,6 +5483,7 @@ export class AgentLoop {
                   totalSteps: state.currentPlanItems?.length || 0,
                 })
               } catch (error) {
+                if (isRetryableTaskInfrastructureInitializationError(error)) throw error
                 console.error('[AgentDiagnostics] Tool startup prerequisites failed', {
                   elapsedMs: Date.now() - waitStartedAt,
                   error: error instanceof Error ? error.message : String(error),
@@ -6708,6 +6720,7 @@ export class AgentLoop {
         }
       }
     } catch (err) {
+      if (isRetryableTaskInfrastructureInitializationError(err)) throw err
       if (signal?.aborted) {
         return
       }
@@ -7628,6 +7641,8 @@ export class AgentLoop {
           ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_MAX_TOKENS)
           : fastSourceActionTurn
           ? Math.min(maxTokensForIteration(state), FAST_SOURCE_ACTION_MAX_TOKENS)
+          : fastActionTurn
+          ? Math.min(maxTokensForIteration(state), FAST_ACTION_MAX_TOKENS)
           : maxTokensForIteration(state)
         const requestTemperature = useCompactNarration
           ? 0.25
@@ -8200,8 +8215,27 @@ export class AgentLoop {
         return 'STREAMING'
       }
 
-      state.lastModelErrorForUser = 'The task took too long to respond. Please try again.'
-      return 'ERROR'
+      // Escalate the recovery route instead of converting provider jitter into
+      // a terminal task failure. Clear local loop suppression and demand one
+      // concrete action; the ordinary iteration/runtime deadline is still the
+      // bounded stop if the provider never recovers.
+      state.timeoutNudgeCount = 0
+      state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
+      state.suppressedResearchToolName = null
+      state.stepLoopDetections = 0
+      state.recentToolCalls = []
+      state.forceTextNextIteration = false
+      contextManager.push({
+        role: 'system',
+        content: isBuild
+          ? 'MODEL TIMEOUT ROUTE RECOVERY: the previous response route stalled repeatedly. Continue from current state with exactly one concrete native build or file tool call. Use a different viable action/path than the stalled attempt. Do not restart, plan, apologize, narrate, or stop the task.'
+          : state.taskStrategy === 'browse'
+            ? 'MODEL TIMEOUT ROUTE RECOVERY: the previous response route stalled repeatedly. Continue from the current page with exactly one concrete browser action. Change the action or route if the previous target was unresponsive. Do not restart, plan, apologize, narrate, or stop the task.'
+            : 'MODEL TIMEOUT ROUTE RECOVERY: the previous response route stalled repeatedly. Continue the active phase with exactly one concrete native tool call, using a different viable source or action path. Do not restart, plan, apologize, narrate, or stop the task.',
+      } as ChatMessageParam)
+      state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+      state.lastIterationEnd = Date.now()
+      return 'STREAMING'
     }
 
     if (isTransientAssistantStreamError(error)) {
