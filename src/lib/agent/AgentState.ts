@@ -260,6 +260,8 @@ export interface AgentStateData {
   // Output verification — prevents premature completion with low-quality deliverables
   deliverableVerificationDone: boolean
   deliverableRevisionCount: number
+  deliverableRevisionFailureCount: number
+  deliverableRevisionSnapshot: { path: string; content: string } | null
   pendingDeliverableRevision: { path: string; failures: string[]; suggestions: string[]; createdAt: number } | null
   finalDeliverableHandoffPending: { path: string; kind: 'file' | 'image' } | null
   finalDeliverableHandoffAttempts: number
@@ -545,6 +547,8 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     goalsMet: false,
     deliverableVerificationDone: false,
     deliverableRevisionCount: 0,
+    deliverableRevisionFailureCount: 0,
+    deliverableRevisionSnapshot: null,
     pendingDeliverableRevision: null,
     finalDeliverableHandoffPending: null,
     finalDeliverableHandoffAttempts: 0,
@@ -690,6 +694,8 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.autonomousRecoveryEscalations = 0
   state.partialFileWriteRecoveryNudged = false
   state.fileWriteRepairPending = null
+  state.deliverableRevisionFailureCount = 0
+  state.deliverableRevisionSnapshot = null
   // Phase 11: do NOT clear recentBrowserStateHashes on step advance — keeping
   // it across steps lets us detect "re-navigated to homepage to start step 2
   // when the test page from step 1 was the right place to be" failures. The

@@ -2646,6 +2646,30 @@ export class ToolPipeline {
     const cachedIsError = isToolExecutionErrorResult(tc.name, cached)
     const usableCachedBrowserEvidence = !cachedIsError && browserEvidenceLooksUsable(tc.name, cached)
 
+    if (!cachedIsError && tc.name === 'read_file') {
+      const path = typeof args.path === 'string'
+        ? normalizeSandboxFilePath(args.path)
+        : typeof args.source === 'string'
+          ? normalizeSandboxFilePath(args.source)
+          : ''
+      const content = cached && typeof cached === 'object'
+        ? (cached as { content?: unknown }).content
+        : undefined
+      if (path && state.fileWriteRepairPending?.path === path) {
+        // A cached read is still a successful inspection. Previously this
+        // early return skipped the normal read_file state transition, leaving
+        // the final report lane permanently locked to read_file.
+        state.fileWriteRepairPending.inspected = true
+      }
+      if (
+        path &&
+        state.pendingDeliverableRevision?.path === path &&
+        typeof content === 'string'
+      ) {
+        state.deliverableRevisionSnapshot = { path, content }
+      }
+    }
+
     trackToolCall(state, tc.name, JSON.stringify(args))
     if (!cachedIsError) trackSuccessfulToolExecution(state, tc.name)
     state.stepToolCallCount++
@@ -4917,18 +4941,35 @@ export class ToolPipeline {
     if (isError && (tc.name === 'create_file' || tc.name === 'edit_file' || tc.name === 'append_file')) {
       const path = typeof args.path === 'string' ? normalizeSandboxFilePath(args.path) : ''
       const errorText = String((result as Record<string, unknown> | null)?.error || '')
+      if (
+        path &&
+        state.pendingDeliverableRevision?.path === path &&
+        (tc.name === 'edit_file' || tc.name === 'append_file')
+      ) {
+        state.deliverableRevisionFailureCount++
+      }
       if (path && tc.name === 'create_file' && /already exists|similar name/i.test(errorText)) {
         state.fileWriteRepairPending = { path, reason: 'already_exists', inspected: false }
       } else if (path && tc.name === 'edit_file' && /old_string|not found|no match|does not match/i.test(errorText)) {
-        state.fileWriteRepairPending = { path, reason: 'stale_edit', inspected: false }
+        state.fileWriteRepairPending = {
+          path,
+          reason: 'stale_edit',
+          inspected: state.deliverableRevisionSnapshot?.path === path,
+        }
       } else if (
         path &&
         tc.name === 'append_file' &&
         /would corrupt the Markdown report structure|use edit_file to merge, replace, or reorder/i.test(errorText)
       ) {
         // A guarded structural append is not a reason to keep appending. Read
-        // the current report once, then let the model repair it in place.
-        state.fileWriteRepairPending = { path, reason: 'ambiguous_write', inspected: false }
+        // the current report once, then let the model repair it in place. If
+        // the exact snapshot is already retained, the failed append did not
+        // mutate it and another read would be redundant.
+        state.fileWriteRepairPending = {
+          path,
+          reason: 'ambiguous_write',
+          inspected: state.deliverableRevisionSnapshot?.path === path,
+        }
       }
     }
     const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)
@@ -5100,6 +5141,10 @@ export class ToolPipeline {
       const path = (args.path as string) || ''
       if (path) state.createdFiles.add(path)
       if (path && state.fileWriteRepairPending?.path === normalizeSandboxFilePath(path)) state.fileWriteRepairPending = null
+      if (path && state.pendingDeliverableRevision?.path === normalizeSandboxFilePath(path)) {
+        state.deliverableRevisionFailureCount = 0
+        state.deliverableRevisionSnapshot = null
+      }
       maybeSatisfyWebsiteStructureRequirement(state)
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
@@ -5163,6 +5208,19 @@ export class ToolPipeline {
         // exact-path lock until a targeted edit/append actually succeeds.
         state.fileWriteRepairPending.inspected = true
       }
+      const readContent = result && typeof result === 'object'
+        ? (result as { content?: unknown }).content
+        : undefined
+      if (
+        normalizedPath &&
+        state.pendingDeliverableRevision?.path === normalizedPath &&
+        typeof readContent === 'string'
+      ) {
+        state.deliverableRevisionSnapshot = {
+          path: normalizedPath,
+          content: readContent,
+        }
+      }
       logWork(state, `Read file: ${path}`)
       satisfyWorkLedgerRequirement(state, 'Input file/document read', [
         'read and load selected skill/file',
@@ -5196,6 +5254,10 @@ export class ToolPipeline {
     } else if (!isError && tc.name === 'edit_file') {
       const path = (args.path as string) || ''
       if (path && state.fileWriteRepairPending?.path === normalizeSandboxFilePath(path)) state.fileWriteRepairPending = null
+      if (path && state.pendingDeliverableRevision?.path === normalizeSandboxFilePath(path)) {
+        state.deliverableRevisionFailureCount = 0
+        state.deliverableRevisionSnapshot = null
+      }
       if (path && state.partialFileWriteRecoveryPending?.path === path) {
         state.partialFileWriteRecoveryPending = null
         state.partialFileWriteRecoveryNudged = false

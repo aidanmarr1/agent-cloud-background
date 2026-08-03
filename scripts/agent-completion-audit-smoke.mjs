@@ -30,6 +30,7 @@ async function assertSourceContracts() {
     chatPage,
     serverSync,
     agentConfig,
+    toolLimits,
     taskConstraints,
     deliverableContract,
     agentMessage,
@@ -56,6 +57,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/app/chat/[id]/page.tsx'), 'utf8'),
     readFile(join(root, 'src/store/chat/serverSync.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/ToolLimits.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskConstraints.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/DeliverableContract.ts'), 'utf8'),
     readFile(join(root, 'src/components/chat/AgentMessage.tsx'), 'utf8'),
@@ -85,9 +87,15 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /requireDeliverableInspectionBeforeRevision/, 'failed report verification must refresh the exact saved file before a structural edit')
   assert.match(agentLoop, /deliverableRevisionLimit[\s\S]*taskStrategy === 'code'[\s\S]*MAX_DELIVERABLE_REVISIONS[\s\S]*: 2/, 'ordinary reports must stop after two targeted verification revisions while code/build work retains its larger repair budget')
   assert.match(agentLoop, /deliverableVerificationAccepted[\s\S]*deliverableRevisionCount >= deliverableRevisionLimit[\s\S]*!hasBlockingDeliverableIntegrityFailure/, 'soft report-format heuristics must not fail an intact artifact after its bounded revisions')
+  assert.doesNotMatch(agentLoop, /hasBlockingDeliverableIntegrityFailure[\s\S]{0,300}appears to be an outline/, 'an outline-style heuristic must not become a terminal integrity failure after bounded revisions')
+  assert.match(agentLoop, /Exact current saved-file contents \(copy old_string verbatim from this text\)/, 'compact report revision context must retain the exact file contents needed for a reliable edit_file match')
+  assert.match(agentLoop, /deliverableRevisionFailureCount >= 2[\s\S]*readFileInSandbox[\s\S]*Accepted intact saved deliverable after bounded revision-tool failures/, 'repeated failed report repair tools must re-verify the saved artifact directly instead of entering a read loop')
   assert.match(policyEngine, /LAST_STEP_TERMINATE_MULTIPLIER[\s\S]*finalDeliverableRequired\(state\) && !state\.deliverableVerificationDone[\s\S]*deliverable_verification_failed/, 'the final-step budget fence must not mark an unverified deliverable step complete')
   assert.match(agentLoop, /fileWriteRepairPending && !state\.fileWriteRepairPending\.inspected \? \['read_file'\]/, 'stale final-report edits must keep read_file available instead of producing a zero-tool loop')
   assert.match(toolPipeline, /tc\.name === 'append_file'[\s\S]*would corrupt the Markdown report structure[\s\S]*fileWriteRepairPending/, 'a blocked report append must redirect into exact-file repair')
+  assert.match(toolPipeline, /A cached read is still a successful inspection[\s\S]*fileWriteRepairPending\.inspected = true/, 'cached final-report reads must unlock the pending in-place revision instead of repeating forever')
+  assert.match(toolPipeline, /deliverableRevisionSnapshot = \{ path, content \}/, 'a successful cached report read must retain exact revision contents')
+  assert.match(toolLimits, /toolName === 'read_file'[\s\S]*state\.currentPhase === 'deliver'[\s\S]*return 4/, 'ordinary final report steps must have a hard inspection-read ceiling')
   assert.match(toolPipeline, /MAX_ORDINARY_REPORT_APPENDS = 2[\s\S]*ordinaryReportTask[\s\S]*successfulAppends >= MAX_ORDINARY_REPORT_APPENDS[\s\S]*Do not append again/, 'ordinary reports must have a runtime backstop against repetitive continuation loops')
   assert.match(agentLoop, /Do not deliberately stop after the introduction or first section/, 'normal reports must prefer one coherent initial write instead of a forced append workflow')
   assert.match(agentLoop, /recoverTextOnlyDraft[\s\S]*shouldContinueSavedFinalDeliverableChunk[\s\S]*const verification = outputVerifier\.verify\(\s*content,\s*path/, 'text-only saved reports must continue and verify before completing')
@@ -164,6 +172,7 @@ async function assertSourceContracts() {
   assert.ok(hardStopBuffer >= 18_000, 'agent must leave a hard-stop buffer before route termination')
   assert.match(policyEngine, /Progress guard: do not write another text-only status reply/, 'ordinary no-tool loops must recover without hard-stopping the task')
   assert.match(policyEngine, /FINAL DELIVERABLE REVISION REQUIRED/, 'final deliverable revision stalls must force append/edit guidance instead of generic no-tool blocking')
+  assert.match(policyEngine, /stepLoopDetections >= 3[\s\S]*latestFinalDeliverableCandidate[\s\S]*pendingDeliverableRevisionGuidance/, 'final-step loop recovery must preserve an existing report and request an in-place revision instead of another create/append cycle')
   assert.doesNotMatch(policyEngine, /deliverable_saved_after_revision_stall/, 'saved final deliverables must not be marked verified after repeated revision stalls')
   assert.match(policyEngine, /NO-TOOL BROWSER RECOVERY/, 'browser action no-tool loops must recover into a concrete browser action')
   assert.doesNotMatch(policyEngine, /browser step produced \$\{threshold\} repeated text-only replies/, 'browser action no-tool loops must not hard-block while the page remains actionable')

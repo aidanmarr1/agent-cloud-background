@@ -45,6 +45,19 @@ export function toolTypeRateLimitForState(state: AgentStateData, toolName: strin
   const fixedSearchLimit = toolName === 'web_search' ? currentStepWebSearchLimit(state) : null
   if (fixedSearchLimit !== null) return fixedSearchLimit
 
+  if (
+    toolName === 'read_file' &&
+    state.currentPhase === 'deliver' &&
+    !state.buildTask &&
+    state.taskStrategy !== 'build' &&
+    state.taskStrategy !== 'code'
+  ) {
+    // A normal saved report may be inspected once before each of two targeted
+    // revisions, plus a small recovery margin. More reads cannot improve the
+    // artifact and previously produced long paid final-step loops.
+    return 4
+  }
+
   const base = TOOL_TYPE_RATE_LIMITS[toolName]
   if (base === undefined) return undefined
 

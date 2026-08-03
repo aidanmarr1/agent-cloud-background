@@ -1282,6 +1282,8 @@ function requireDeliverableInspectionBeforeRevision(
 ): void {
   const target = path.trim()
   if (!target || target === 'the existing deliverable') return
+  state.deliverableRevisionFailureCount = 0
+  state.deliverableRevisionSnapshot = null
   state.fileWriteRepairPending = {
     path: target,
     reason: 'ambiguous_write',
@@ -1297,7 +1299,7 @@ function deliverableRevisionLimit(state: AgentStateData): number {
 
 function hasBlockingDeliverableIntegrityFailure(failures: string[]): boolean {
   return failures.some(failure =>
-    /empty or nearly empty|placeholder text|appears to be an outline|cut off or unfinished|duplicated substantive|duplicate numbered|structure restarts/i.test(failure),
+    /empty or nearly empty|placeholder text|cut off or unfinished|duplicated substantive|duplicate numbered|structure restarts/i.test(failure),
   )
 }
 
@@ -1503,6 +1505,9 @@ function scheduleFinalDeliverableHandoff(
   path: string,
   kind: 'file' | 'image',
 ): void {
+  state.fileWriteRepairPending = null
+  state.deliverableRevisionFailureCount = 0
+  state.deliverableRevisionSnapshot = null
   state.finalDeliverableHandoffPending = {
     path: path || (kind === 'image' ? 'the generated image' : 'the completed deliverable'),
     kind,
@@ -3254,6 +3259,9 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
   const boundedClosingAppend = isPartialRecoveryClosingAppendTurn(state)
   const existingPath = existingFinalDeliverablePath(state)
   const pendingRepairRead = state.fileWriteRepairPending && !state.fileWriteRepairPending.inspected
+  const revisionSnapshot = existingPath && state.deliverableRevisionSnapshot?.path === existingPath
+    ? state.deliverableRevisionSnapshot.content
+    : ''
   const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
   const findings = [...state.stepFindings.entries()]
     .sort(([a], [b]) => a - b)
@@ -3278,6 +3286,9 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
     !pendingPartial && existingPath ? `Existing saved deliverable: ${existingPath}.` : '',
     !pendingPartial && state.pendingDeliverableRevision?.failures?.length ? `Verification failures:\n- ${state.pendingDeliverableRevision.failures.join('\n- ')}` : '',
     !pendingPartial && state.pendingDeliverableRevision?.suggestions?.length ? `Revision suggestions:\n- ${state.pendingDeliverableRevision.suggestions.join('\n- ')}` : '',
+    !pendingPartial && revisionSnapshot
+      ? `Exact current saved-file contents (copy old_string verbatim from this text):\n\n${revisionSnapshot}`
+      : '',
     memoryText,
     findings.length ? `Completed findings:\n- ${findings.join('\n- ')}` : '',
     recentSources.length ? `Recent sources/results:\n- ${recentSources.join('\n- ')}` : '',
@@ -3311,7 +3322,10 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
               'FINAL SAVED DELIVERABLE REVISION TOOL CALL ONLY.',
               `Make exactly one native append_file or edit_file call to "${existingPath}" now; do not write visible prose before it.`,
               'Do not call create_file, read-only research tools, browser tools, or emit <next_step/>.',
-              'Prefer edit_file for structural changes, substantive paragraph revisions, duplicate removal, and inline citation placement. Use append_file only when genuinely missing material belongs after the current last section.',
+              revisionSnapshot
+                ? 'The exact current file is included below. For edit_file, copy a short unique old_string verbatim from it—never paraphrase, abbreviate, or invent the match text.'
+                : 'Use the retained current file state to make the smallest reliable in-place revision.',
+              'Prefer edit_file for structural changes, substantive paragraph revisions, duplicate removal, and inline citation placement. Use append_file only when genuinely missing material belongs after the current last section and no equivalent terminal section already exists.',
               'For professional research/report Markdown, preserve one coherent title, an opening synthesis, substantive topic-specific sections, a conclusion, and references where evidence requires them. Adapt headings and numbering to the request instead of forcing a template.',
               'Start the file tool call immediately and end the new content cleanly at a sentence or section boundary.',
             ].join(' ')
@@ -5749,6 +5763,69 @@ export class AgentLoop {
             const imageDeliverableRequested = /\b(image|images|photo|photos|picture|pictures|asset|assets)\b/i.test(
               `${currentRequestText} ${state.currentPlanItems?.[state.currentStepIdx] || ''}`,
             )
+
+            if (
+              isLastStep &&
+              conversationId &&
+              state.pendingDeliverableRevision &&
+              state.deliverableRevisionFailureCount >= 2
+            ) {
+              const revisionPath = state.pendingDeliverableRevision.path
+              try {
+                const currentFile = await readFileInSandbox(conversationId, revisionPath)
+                const verification = outputVerifier.verify(
+                  currentFile.content || '',
+                  revisionPath,
+                  messages[messages.length - 1]?.content || state.originalUserRequest || '',
+                  state.taskStrategy,
+                  workingMemory,
+                  state.taskComplexity,
+                )
+                // Two concrete in-place repair attempts are enough. Do not let
+                // provider-specific old_string/append mistakes turn a readable
+                // saved report into dozens of read-only retries. At this
+                // boundary, soft report-shape heuristics yield to the intact
+                // artifact; genuine truncation/corruption still fails.
+                state.deliverableRevisionCount = deliverableRevisionLimit(state)
+                if (deliverableVerificationAccepted(state, verification)) {
+                  state.deliverableVerificationDone = true
+                  state.pendingDeliverableRevision = null
+                  state.fileWriteRepairPending = null
+                  state.deliverableRevisionFailureCount = 0
+                  state.deliverableRevisionSnapshot = null
+                  scheduleFinalDeliverableHandoff(state, revisionPath, 'file')
+                  state.lastIterationEnd = Date.now()
+                  log.info('Accepted intact saved deliverable after bounded revision-tool failures', {
+                    path: revisionPath,
+                    failures: verification.failures,
+                  })
+                  phase = 'STREAMING'
+                  break
+                }
+
+                state.deliverableVerificationDone = false
+                state.fileWriteRepairPending = null
+                state.deliverableRevisionSnapshot = null
+                terminalReason = 'deliverable_verification_failed'
+                log.warn('Saved deliverable retained a blocking integrity failure after bounded repair attempts', {
+                  path: revisionPath,
+                  failures: verification.failures,
+                })
+                phase = 'COMPLETE'
+                break
+              } catch (error) {
+                state.deliverableVerificationDone = false
+                state.fileWriteRepairPending = null
+                state.deliverableRevisionSnapshot = null
+                terminalReason = 'deliverable_verification_failed'
+                log.warn('Could not re-read saved deliverable after bounded repair attempts', {
+                  path: revisionPath,
+                  error: error instanceof Error ? error.message : String(error),
+                })
+                phase = 'COMPLETE'
+                break
+              }
+            }
 
             if (isLastStep && imageDeliverableCreated && imageDeliverableRequested) {
               const imageResult = lastToolResults.find(result => {

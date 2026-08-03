@@ -2460,11 +2460,14 @@ Then make your first tool call. Your plan will be remembered across iterations o
       state.recentToolCalls = []
       state.recentToolSequence = []
       if (state.currentPlanItems && isLastStep) {
+        const savedDeliverable = latestFinalDeliverableCandidate(state)
         return [{
           type: 'inject_message',
           message: {
             role: 'system',
-            content: 'LOOP RECOVERY: Stop repeating the previous action. If a final artifact is requested, use create_file or append_file now with the available findings. If no file is requested, write the final answer directly from the gathered evidence. Do not browse, search, or retry the same tool again on this step.',
+            content: savedDeliverable && !state.deliverableVerificationDone
+              ? pendingDeliverableRevisionGuidance(state, savedDeliverable.path)
+              : 'LOOP RECOVERY: Stop repeating the previous action. If a final artifact is requested and none exists, create it now from the available findings. If no file is requested, write the final answer directly from the gathered evidence. Do not browse, search, or retry the same tool again on this step.',
           },
           continueLoop: true,
         }]
@@ -2483,11 +2486,14 @@ Then make your first tool call. Your plan will be remembered across iterations o
     if (state.stepLoopDetections >= 2 && isLastStep) {
       state.recentToolCalls = []
       state.recentToolSequence = []
+      const savedDeliverable = latestFinalDeliverableCandidate(state)
       return [{
         type: 'inject_message',
         message: {
           role: 'system',
-          content: 'FINAL STEP LOOP RECOVERY: Stop repeating the previous tool. Use the gathered context to finish now. For saved deliverables, create_file starts the artifact and append_file continues it in chunks. For direct answers, respond with the final answer now. Do not spend extra turns browsing or retrying the same action.',
+          content: savedDeliverable && !state.deliverableVerificationDone
+            ? pendingDeliverableRevisionGuidance(state, savedDeliverable.path)
+            : 'FINAL STEP LOOP RECOVERY: Stop repeating the previous tool. Use the gathered context to finish now. If no saved deliverable exists, create it once; for direct answers, respond with the final answer now. Do not spend extra turns browsing or retrying the same action.',
         },
         continueLoop: true,
       }]
