@@ -36,7 +36,7 @@ services:
       - key: OPENROUTER_MODEL
         value: qwen/qwen3.7-flash
       - key: OPENROUTER_REASONING_EFFORT
-        value: minimal
+        value: none
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER
@@ -129,7 +129,7 @@ services:
       - key: OPENROUTER_MODEL
         value: qwen/qwen3.7-flash
       - key: OPENROUTER_REASONING_EFFORT
-        value: minimal
+        value: none
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER

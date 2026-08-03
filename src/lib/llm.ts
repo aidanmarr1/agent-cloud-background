@@ -27,13 +27,12 @@ export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 
-type ReasoningEffort = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
 function normalizeReasoningEffort(value: string | undefined, fallback: ReasoningEffort): ReasoningEffort {
   const normalized = (value || fallback).toLowerCase().trim().replace(/[\s-]+/g, '_')
-  if (normalized === 'none') return 'minimal'
   if (['x_high', 'extra_high'].includes(normalized)) return 'xhigh'
-  if (['minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)) {
+  if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)) {
     return normalized as ReasoningEffort
   }
   return fallback
@@ -41,7 +40,7 @@ function normalizeReasoningEffort(value: string | undefined, fallback: Reasoning
 
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
   trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT),
-  'minimal',
+  'none',
 )
 const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
 

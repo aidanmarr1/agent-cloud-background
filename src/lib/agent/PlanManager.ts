@@ -82,10 +82,11 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-// Keep acknowledgement, planning, and task turns on the configured minimal
-// reasoning route so the balanced provider mode stays responsive.
-const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_CONTROL_REASONING = { effort: 'none' as const, exclude: true }
+// Startup control turns should not spend thousands of hidden thinking tokens
+// before a short acknowledgement or plan becomes visible. OpenRouter defines
+// `none` as its lowest reasoning mode and Qwen supports it directly.
+const PLANNER_ACK_REASONING = { effort: 'none' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60

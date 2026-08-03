@@ -8,9 +8,7 @@
 import {
   ASSISTANT_SUPPORTS_IMAGE_INPUT,
   ASSISTANT_PROVIDER,
-  createCompletion,
   createStreamingCompletion,
-  type ChatCompletionResponse,
   type ChatContentPart,
   type ChatCompletionTool,
   type ChatMessageParam,
@@ -302,41 +300,6 @@ function approximateStreamUsageForCompletedTurn(
   })
 }
 
-function completionUsageForNarration(
-  model: string,
-  requestMessages: ChatMessageParam[],
-  response: ChatCompletionResponse,
-  content: string,
-): StreamUsage {
-  const raw = response.usage
-  if (
-    raw &&
-    Number.isFinite(raw.prompt_tokens) &&
-    Number.isFinite(raw.completion_tokens) &&
-    Number.isFinite(raw.cost)
-  ) {
-    const promptTokens = Math.max(0, Math.round(raw.prompt_tokens || 0))
-    const completionTokens = Math.max(0, Math.round(raw.completion_tokens || 0))
-    return {
-      promptTokens,
-      completionTokens,
-      totalTokens: Number.isFinite(raw.total_tokens)
-        ? Math.max(0, Math.round(raw.total_tokens || 0))
-        : promptTokens + completionTokens,
-      cost: Math.max(0, Number(raw.cost || 0)),
-    }
-  }
-
-  return estimateConservativeMissingStreamUsage({
-    model,
-    requestMessages,
-    requestTools: [],
-    assistantContent: content,
-    reasoningContent: response.choices[0]?.message?.reasoning_content || '',
-    toolCalls: [],
-  })
-}
-
 const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'create_website', 'append_file', 'edit_file', 'export_pdf', 'package_files'])
 const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000
 const FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000
@@ -362,8 +325,8 @@ const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 // capacity remains available for synthesis, reports, code, and deliverables.
 const FAST_ACTION_MAX_TOKENS = 1_024
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const MINIMAL_THINKING_REASONING = { effort: 'none' as const, exclude: true }
+const TASK_REASONING = { effort: 'none' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -3560,8 +3523,6 @@ const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
 const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
 const FORCED_NARRATION_MAX_TOKENS = 48
-const NARRATION_SIDECAR_REQUEST_TIMEOUT_MS = 4_000
-const NARRATION_SIDECAR_MAX_TOKENS = 64
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
 export class AgentLoop {
@@ -4202,171 +4163,14 @@ export class AgentLoop {
     let cumulativeInputTokens = 0
     let cumulativeOutputTokens = 0
     let cumulativeCost = 0
-    let narrationSidecarPromise: Promise<void> | null = null
-    let narrationSidecarAbortController: AbortController | null = null
-    let narrationSidecarSequence = 0
-    let narrationIntentEpoch = 0
     let terminalReason = 'unknown'
-
-    const settleNarrationSidecar = async (): Promise<void> => {
-      const pending = narrationSidecarPromise
-      if (pending) await pending
-    }
 
     const injectRunLiveDirectives = async (
       options: { sealWhenEmpty?: boolean } = {},
     ): Promise<false | 'injected'> => {
       const result = await this.injectLiveDirectives(contextManager, options)
       if (!result) return false
-
-      narrationIntentEpoch += 1
-      narrationSidecarAbortController?.abort(
-        new DOMException('Narration superseded by a newer live instruction.', 'AbortError'),
-      )
       return result
-    }
-
-    /**
-     * Cadence narration has its own tiny LLM request so action selection never
-     * waits for prose and a provider cannot accidentally omit narration from a
-     * native tool argument. Only one request may run at a time; later actions
-     * remain fully concurrent and are retained as cadence remainder.
-     */
-    const launchNarrationSidecarIfDue = (): void => {
-      if (narrationSidecarPromise) return
-      if (!shouldUseNaturalCadenceNarration(state, this.options.messages)) return
-      if (!beginNarrationCadenceAttempt(state)) return
-
-      const sequence = ++narrationSidecarSequence
-      const visibleActionFrontier = state.visibleToolActionsSinceLastNarration
-      const workLogFrontier = state.workLog.at(-1)
-      const recordStepIdx = state.currentStepIdx
-      const recordIteration = state.iterations
-      const afterToolId = Array.from(state.visibleNarrationToolStartIds).at(-1)
-      const intentEpoch = narrationIntentEpoch
-      const sidecarAbortController = new AbortController()
-      const narrationAbortSignal = signal
-        ? AbortSignal.any([signal, sidecarAbortController.signal])
-        : sidecarAbortController.signal
-      narrationSidecarAbortController = sidecarAbortController
-      const requestMessages = compactForcedNarrationMessages(
-        state,
-        contextManager.getMessages(),
-      )
-
-      const sidecarTask = (async () => {
-        try {
-          await this.assertServerCreditRunwayCached()
-          const response = await createCompletion({
-            model,
-            messages: requestMessages,
-            // A small amount of lexical and syntactic freedom prevents the
-            // short sidecar from collapsing into one repeated status template;
-            // the evidence-only prompt and post-generation guards still keep
-            // the update factual.
-            temperature: 0.55,
-            max_tokens: NARRATION_SIDECAR_MAX_TOKENS,
-            // Keep the tiny narration sidecar on minimal reasoning while
-            // substantive Gemini task turns use the configured minimal effort.
-            reasoning: MINIMAL_THINKING_REASONING,
-            includeTemporalContext: false,
-            requestTimeoutMs: NARRATION_SIDECAR_REQUEST_TIMEOUT_MS,
-            retryMaxAttempts: 0,
-            abortSignal: narrationAbortSignal,
-          })
-          const content = response.choices[0]?.message?.content?.trim() || ''
-          const usage = completionUsageForNarration(
-            model,
-            requestMessages,
-            response,
-            content,
-          )
-
-          if (intentEpoch !== narrationIntentEpoch) {
-            retryNarrationCadenceAttemptWithoutNewAction(state)
-            return
-          }
-
-          if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
-            const recorded = await chargeServerTokenUsage(
-              this.options.userId,
-              this.options.conversationId,
-              this.options.creditRunId,
-              usage,
-              `attempt:${creditAttempt}:narration:${sequence}`,
-            )
-            if (recorded?.created) this.emitter.creditEvent(recorded.entry)
-          }
-          cumulativeInputTokens += usage.promptTokens
-          cumulativeOutputTokens += usage.completionTokens
-          cumulativeCost += usage.cost
-
-          if (intentEpoch !== narrationIntentEpoch) {
-            retryNarrationCadenceAttemptWithoutNewAction(state)
-            return
-          }
-
-          const remainingVisibleActions = Math.max(
-            0,
-            state.visibleToolActionsSinceLastNarration - visibleActionFrontier,
-          )
-          const review = acceptProgressNarration(state, content, {
-            requireSignal: false,
-            remainingVisibleActions,
-            resetCadence: true,
-            workLogFrontier,
-            recordStepIdx,
-            recordIteration,
-          })
-          if (review.status !== 'accepted') {
-            retryNarrationCadenceAttemptWithoutNewAction(state)
-            console.warn('[AgentDiagnostics] LLM narration sidecar returned unusable progress', {
-              sequence,
-              status: review.status,
-              step: recordStepIdx,
-              visibleActionFrontier,
-            })
-            return
-          }
-
-          if (intentEpoch !== narrationIntentEpoch) {
-            retryNarrationCadenceAttemptWithoutNewAction(state)
-            return
-          }
-
-          this.emitter.progressUpdate(review.text, {
-            stepIndex: recordStepIdx,
-            afterToolId,
-            remainingVisibleActions,
-          })
-          console.log('[AgentDiagnostics] Emitted asynchronous LLM progress narration', {
-            sequence,
-            step: recordStepIdx,
-            visibleActionFrontier,
-            remainingVisibleActions,
-            chars: review.text.length,
-          })
-        } catch (error) {
-          retryNarrationCadenceAttemptWithoutNewAction(state)
-          if (isOutOfCreditsError(error) && error.record?.created) {
-            this.emitter.creditEvent(error.record.entry)
-          }
-          if (intentEpoch === narrationIntentEpoch && !sidecarAbortController.signal.aborted) {
-            console.warn('[AgentDiagnostics] LLM narration sidecar failed without blocking task actions', {
-              sequence,
-              step: recordStepIdx,
-              visibleActionFrontier,
-              error: error instanceof Error ? error.message : String(error),
-            })
-          }
-        } finally {
-          if (narrationSidecarSequence === sequence) {
-            narrationSidecarPromise = null
-            narrationSidecarAbortController = null
-          }
-        }
-      })()
-      narrationSidecarPromise = sidecarTask
     }
 
     // ── Main Loop ─────────────────────────────────────────────────────
@@ -4728,10 +4532,13 @@ export class AgentLoop {
             contextManager.trimIfNeeded(state)
 
             const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
-            // Progress prose is generated by the independent sidecar after
-            // completed actions. Keep the action request schema minimal and
-            // never make tool selection wait for narration.
-            const cadenceNarrationInMainTurn = false
+            // Once three visible actions have completed, carry the LLM-authored
+            // update in the next native tool call. This keeps narration on the
+            // same provider request as real work instead of competing for a
+            // second rate-limited provider slot.
+            const cadenceNarrationInMainTurn =
+              shouldUseNaturalCadenceNarration(state, this.options.messages) &&
+              beginNarrationCadenceAttempt(state)
             let modelRequestMessagesForUsage = [...contextManager.getMessages()]
             let modelRequestToolsForUsage: unknown[] = []
             let streamToolCallPolicy: StreamToolCallPolicy = {
@@ -5218,6 +5025,9 @@ export class AgentLoop {
               throw error
             }
 
+            // A cadence violation is only possible when the turn supplied no
+            // executable tool call. Missing or unusable display narration on
+            // a valid native action fails open inside StreamProcessor.
             if (lastStreamResult.cadenceProgressViolation) {
               contextManager.push({
                 role: 'system',
@@ -5503,7 +5313,6 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
-            launchNarrationSidecarIfDue()
             const currentPaidTurnProgress = paidTurnProgressForIteration(
               pendingPaidTurnProgress,
               state.iterations,
@@ -6666,11 +6475,6 @@ export class AgentLoop {
 
         // ── Finalization ────────────────────────────────────────────────
 
-        // A narration request never delays tool execution. At the terminal
-        // boundary only, let the already-running bounded request finish so its
-        // event and token debit cannot race the durable done event.
-        await settleNarrationSidecar()
-
         const totalUsage = {
           promptTokens: cumulativeInputTokens,
           completionTokens: cumulativeOutputTokens,
@@ -6711,7 +6515,6 @@ export class AgentLoop {
       }
 
       if (phase === 'ERROR') {
-        await settleNarrationSidecar()
         if (!signal?.aborted && !this.emitter.isClosed && !this.emitter.terminalStatus) {
           this.emitter.error(
             state.lastModelErrorForUser ||
@@ -6729,7 +6532,6 @@ export class AgentLoop {
         iterations: state.iterations,
         phase: state.currentPhase,
       })
-      await settleNarrationSidecar()
       if (!this.emitter.isClosed) {
         if (isOutOfCreditsError(err) && err.record?.created) {
           this.emitter.creditEvent(err.record.entry)
@@ -6737,7 +6539,6 @@ export class AgentLoop {
         this.emitter.error(publicAgentErrorMessage(err))
       }
     } finally {
-      await settleNarrationSidecar()
       planManager.dispose()
       releaseBrowserFrameStream()
     }
