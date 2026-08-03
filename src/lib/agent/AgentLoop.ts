@@ -4532,10 +4532,10 @@ export class AgentLoop {
             contextManager.trimIfNeeded(state)
 
             const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
-            // Once three visible actions have completed, carry the LLM-authored
-            // update in the next native tool call. This keeps narration on the
-            // same provider request as real work instead of competing for a
-            // second rate-limited provider slot.
+            // Arm after two completed visible actions so the third native tool
+            // call carries the LLM-authored update. The runtime holds it until
+            // that action succeeds; a missed update retries on action four.
+            // Keeping it in the work request avoids a competing provider call.
             const cadenceNarrationInMainTurn =
               shouldUseNaturalCadenceNarration(state, this.options.messages) &&
               beginNarrationCadenceAttempt(state)

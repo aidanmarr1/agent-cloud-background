@@ -93,6 +93,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(toolPipeline, /visibleToolActionsSinceLastNarration\+\+[\s\S]{0,160}state\.forceTextNextIteration = true/, 'visible actions must schedule cadence without disabling tools')
   assert.match(config, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(config, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
+  assert.match(config, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*2/, 'the model request must arm after action 2 so narration lands on successful action 3')
   assert.match(streamProcessor, /recordVisibleToolStartForNarration/, 'provisional file/code tool starts must count toward the same visible narration cadence as executed tools')
   assert.match(streamProcessor, /fail open for the concrete action[\s\S]*return true/, 'missing display narration must fail open for valid work')
   assert.match(streamProcessor, /Suppress invalid\/duplicate display text[\s\S]*return allowMissing/, 'invalid or repeated narration must stay invisible without suppressing the action')
@@ -119,7 +120,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(prompts, /minority case|uncommon/, 'agent prompt must not impose a frequency quota on natural Next transitions')
   assert.match(prompts, /same response immediately begins the exact concrete action it names/, 'agent prompt must give Next its immediate-in-the-moment meaning')
   assert.match(prompts, /Never use it for a broader phase, a general shift in analysis, planned later work/, 'agent prompt must reject broad phase-transition Next narration')
-  assert.match(prompts, /At exactly 3 visible actions, start the next response/, 'agent prompt must make narration happen before the next action')
+  assert.match(prompts, /When 2 new visible actions are already complete, the next native action is action 3/, 'agent prompt must attach narration to action 3 instead of waiting until action 4')
   assert.match(prompts, /standing cadence for every phase/, 'agent prompt must frame narration as a per-phase cadence, not only research narration')
   assert.match(prompts, /narration is the default first visible text/, 'agent prompt must make narration the preferred first visible text at the 3-action window')
   assert.match(prompts, /before <next_step\/> if the current phase is complete/, 'agent prompt must allow narration at the end of a phase before next_step')
@@ -194,6 +195,7 @@ export function runNarrationSmoke() {
   })
   state.currentPlanItems = ['Research', 'Deliver']
   state.workLog.push('[1] Confirmed DevRev funding')
+  assert.equal(state.narrationNextAttemptAt, 2, 'fresh cadence must arm before action 3 is selected')
   state.visibleToolActionsSinceLastNarration = 3
   assert.equal(visibleNarrationActionHeadroom(state), 1)
   assert.equal(beginNarrationCadenceAttempt(state), true)

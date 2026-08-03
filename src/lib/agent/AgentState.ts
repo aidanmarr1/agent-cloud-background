@@ -21,7 +21,7 @@ import {
   WORK_SUMMARY_RECENT_SEARCHES,
   WORK_SUMMARY_RECENT_URLS,
   WORK_SUMMARY_RECENT_ACTIONS,
-  NARRATION_THRESHOLD_DEFAULT,
+  NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
 } from './config'
 import type { AcceptedNarrationRecord } from './NarrationMemory'
 
@@ -421,7 +421,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     visibleNarrationToolStartIds: new Set(),
     recentNarrations: [],
     narrationWorkLogFrontier: null,
-    narrationNextAttemptAt: NARRATION_THRESHOLD_DEFAULT,
+    narrationNextAttemptAt: NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
     narrationCadenceInFlight: false,
     phaseNarrationEmittedThisStep: false,
     forceTextNextIteration: false,

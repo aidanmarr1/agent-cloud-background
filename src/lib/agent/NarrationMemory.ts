@@ -1,6 +1,9 @@
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import type { AgentStateData } from './AgentState'
-import { NARRATION_MAX_VISIBLE_ACTION_GAP, NARRATION_THRESHOLD_DEFAULT } from './config'
+import {
+  NARRATION_MAX_VISIBLE_ACTION_GAP,
+  NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
+} from './config'
 
 export interface AcceptedNarrationRecord {
   text: string
@@ -339,7 +342,7 @@ export function acceptProgressNarration(
   state.iterationsSinceLastContent = 0
   if (options.resetCadence) {
     state.narrationCadenceInFlight = false
-    state.narrationNextAttemptAt = NARRATION_THRESHOLD_DEFAULT
+    state.narrationNextAttemptAt = NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS
     state.visibleToolActionsSinceLastNarration = options.remainingVisibleActions ?? Math.max(
       0,
       state.visibleToolActionsSinceLastNarration - NARRATION_MAX_VISIBLE_ACTION_GAP,
