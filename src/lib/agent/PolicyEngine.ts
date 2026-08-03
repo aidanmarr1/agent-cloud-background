@@ -322,9 +322,9 @@ function pendingDeliverableRevisionGuidance(state: AgentStateData, path: string)
     ? ` Suggested fix: ${pending.suggestions.join('; ')}.`
     : ''
   const sourceFix = pending?.failures.some(failure => /citation|source|url/i.test(failure))
-    ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.'
+    ? ' If citations/sources are missing, use edit_file to place inline [n] markers beside supported claims; append a References/Sources section only when none exists and it belongs at the true end.'
     : ''
-  return `FINAL DELIVERABLE REVISION REQUIRED: ${path} is already saved.${failures}${suggestions}${sourceFix} Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do not write another status sentence, do not create a new file, and do not repeat that the report was created.`
+  return `FINAL DELIVERABLE REVISION REQUIRED: ${path} is already saved.${failures}${suggestions}${sourceFix} Inspect the exact current file before a structural rewrite, then use one targeted edit_file revision. Use append_file only when genuinely missing material belongs at the current end. Do not write another status sentence, create a new file, or repeat that the report was created.`
 }
 
 function finalDeliverableRequired(state: AgentStateData): boolean {
@@ -365,7 +365,7 @@ function finalStepStartGuidance(state: AgentStateData): string {
   if (!finalDeliverableRequired(state)) {
     return 'This is the final answer step. Answer directly in chat from the evidence and work already gathered. Do not create files, call more tools, write a status update, or ask to continue.'
   }
-  return 'This is the DELIVERABLE step. Create the actual final output file using create_file, then append_file for large/chunked output. If the user requested PDF, save the source first and then call export_pdf. Do NOT write a summary or outline — produce the real deliverable.'
+  return 'This is the DELIVERABLE step. Create the actual final output as one coherent create_file write whenever it fits. Use append_file only if the first write is genuinely clipped or necessary material is still missing at the current end. If the user requested PDF, save the source first and then call export_pdf. Do NOT write a summary or outline — produce the real deliverable.'
 }
 
 function finalInlineAnswerRecoveryGuidance(state: AgentStateData): string {
@@ -3444,7 +3444,7 @@ When you do write the report, be short and factual. Never pretend success, but a
         type: 'inject_message',
         message: {
           role: 'system',
-          content: 'QUALITY CHECK: You are on the deliverable step but haven\'t created any files yet. Use create_file to save the first complete section of your deliverable, then append_file for additional chunks if needed. If the user requested PDF, export the completed source with export_pdf. The user expects a tangible result.',
+          content: 'QUALITY CHECK: You are on the deliverable step but haven\'t created any files yet. Use create_file to save one coherent complete deliverable whenever it fits. Use append_file only if the first write is genuinely clipped or necessary material remains missing at the current end. If the user requested PDF, export the completed source with export_pdf. The user expects a tangible result.',
         },
       }
     }

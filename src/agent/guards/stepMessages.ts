@@ -110,7 +110,7 @@ export function buildStepMessage(
 - Start synthesis now; first substantive action must produce, inspect, or export the deliverable and must not continue prior research.
 - Use prior findings in context. Search/browse only if this final step explicitly names a critical missing source.
 - Match requested depth/complexity. No outlines, bullet-only sections, or placeholders. Back claims with researched evidence.
-- For report-style research deliverables, use a clean Markdown report shape: # specific title, optional compact metadata, ## Executive Summary, numbered thematic sections, ## Conclusion, then ## References with numbered source entries and inline [n] citations.
+- For report-style research deliverables, use one coherent professional Markdown structure suited to the request. A common shape is a specific title, optional compact metadata, an Executive Summary or overview, substantive topic-specific sections, a conclusion, and References/Sources with inline [n] citations. Choose natural headings and numbering instead of forcing a template.
 - Create exactly ONE deliverable file.`
     }
   } else {

@@ -222,8 +222,8 @@ export class OutputVerifier {
     if (savedMarkdownReport && !conciseStructuredDeliverable) {
       const headingCount = (fileContent.match(/^#{1,3}\s+\S/gm) || []).length
       if (headingCount < 4) {
-        failures.push('Saved Markdown report needs a title, executive summary, multiple substantive sections, conclusion, and references')
-        suggestions.push('Expand the report structure before delivering')
+        failures.push('Saved Markdown report needs a title, opening synthesis, substantive sections, conclusion, and references')
+        suggestions.push('Expand the report with a coherent professional structure suited to the request')
         score -= 0.2
       }
       if (!/^#\s+\S/m.test(fileContent)) {
@@ -231,9 +231,9 @@ export class OutputVerifier {
         suggestions.push('Add a specific # title')
         score -= 0.1
       }
-      if (!/^##\s+Executive Summary\b/im.test(fileContent)) {
-        failures.push('Saved Markdown report needs an Executive Summary section')
-        suggestions.push('Add ## Executive Summary with synthesized findings')
+      if (!/^##\s+(?:Executive Summary|Summary|Overview|Key Findings)\b/im.test(fileContent)) {
+        failures.push('Saved Markdown report needs an opening synthesis section')
+        suggestions.push('Add an Executive Summary, Summary, Overview, or Key Findings section with synthesized findings')
         score -= 0.1
       }
       if (!/^##\s+(?:References|Sources)\b/im.test(fileContent)) {

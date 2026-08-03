@@ -501,7 +501,7 @@ function fileWritePreflightBlockReason(
       const failures = pending.failures.length > 0
         ? ` Verification issue: ${pending.failures.join('; ')}.`
         : ''
-      return `INTERNAL_RECOVERY: "${pending.path}" already exists and needs a targeted final-deliverable revision.${failures} Do not call ${toolName}${requestedPath && requestedPath !== pending.path ? ` on "${requestedPath}"` : ''}. Make exactly one append_file or edit_file call against "${pending.path}". If citations are missing, append a compact Sources section with the URLs/domains from gathered evidence. Do not recreate or restart the report.`
+      return `INTERNAL_RECOVERY: "${pending.path}" already exists and needs a targeted final-deliverable revision.${failures} Do not call ${toolName}${requestedPath && requestedPath !== pending.path ? ` on "${requestedPath}"` : ''}. Use edit_file for structural/content repairs and inline citation placement. Use append_file only when genuinely missing material belongs at the current end, including a References/Sources section only when none exists. Do not recreate or restart the report.`
     }
   }
 
@@ -4885,13 +4885,21 @@ export class ToolPipeline {
         })
       }
     }
-    if (isError && (tc.name === 'create_file' || tc.name === 'edit_file')) {
+    if (isError && (tc.name === 'create_file' || tc.name === 'edit_file' || tc.name === 'append_file')) {
       const path = typeof args.path === 'string' ? normalizeSandboxFilePath(args.path) : ''
       const errorText = String((result as Record<string, unknown> | null)?.error || '')
       if (path && tc.name === 'create_file' && /already exists|similar name/i.test(errorText)) {
         state.fileWriteRepairPending = { path, reason: 'already_exists', inspected: false }
       } else if (path && tc.name === 'edit_file' && /old_string|not found|no match|does not match/i.test(errorText)) {
         state.fileWriteRepairPending = { path, reason: 'stale_edit', inspected: false }
+      } else if (
+        path &&
+        tc.name === 'append_file' &&
+        /would corrupt the Markdown report structure|use edit_file to merge, replace, or reorder/i.test(errorText)
+      ) {
+        // A guarded structural append is not a reason to keep appending. Read
+        // the current report once, then let the model repair it in place.
+        state.fileWriteRepairPending = { path, reason: 'ambiguous_write', inspected: false }
       }
     }
     const usableBrowserEvidence = !isError && browserEvidenceLooksUsable(tc.name, result)

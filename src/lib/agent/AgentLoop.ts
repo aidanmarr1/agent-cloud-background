@@ -1306,10 +1306,24 @@ function finalDeliverableRevisionToolNames(
   messages: Array<{ role: string; content: string }>,
 ): Set<string> {
   return new Set([
+    ...(state.fileWriteRepairPending && !state.fileWriteRepairPending.inspected ? ['read_file'] : []),
     'append_file',
     'edit_file',
     ...(taskWantsPdfArtifact(state, messages) ? ['export_pdf'] : []),
   ])
+}
+
+function requireDeliverableInspectionBeforeRevision(
+  state: AgentStateData,
+  path: string,
+): void {
+  const target = path.trim()
+  if (!target || target === 'the existing deliverable') return
+  state.fileWriteRepairPending = {
+    path: target,
+    reason: 'ambiguous_write',
+    inspected: false,
+  }
 }
 
 function savedFinalDeliverableMinimumChars(
@@ -1397,7 +1411,7 @@ function finalSavedDeliverableToolCallInstruction(
       ? `Use append_file or edit_file against "${existingPath}".`
       : 'Use create_file for the final saved output under deliverables/ unless the user named a different path.'
   const chunkGuidance = !pending && !existingPath
-    ? 'For the first create_file call, save a concise complete Markdown deliverable when the scope is small; for longer reports, save the title, intro, and first complete section, ending at a clean sentence boundary.'
+    ? 'For the first create_file call, write one coherent complete Markdown deliverable whenever it fits. Do not deliberately stop after the introduction or first section; append_file is only for a genuinely clipped or still-incomplete saved file.'
     : 'Append the next complete, substantive section only—normally 350–650 words when that much content remains, or all remaining content when less remains. Do not repeat existing headings, claims, citations, or paragraphs, and never dribble out a tiny fragment.'
 
   return [
@@ -1552,6 +1566,16 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
   }
   const existingPath = existingFinalDeliverablePath(state)
   if (existingPath) {
+    if (state.fileWriteRepairPending && !state.fileWriteRepairPending.inspected) {
+      return [
+        `FINAL SAVED DELIVERABLE INSPECTION NOW: make exactly one native read_file call for "${state.fileWriteRepairPending.path}" immediately.`,
+        request ? `User request: ${request}.` : '',
+        `Current final task: ${step}.`,
+        'A structural revision is required, but the exact current file contents must be refreshed before editing.',
+        'Do not append, edit, recreate, search, narrate, or emit <next_step/> on this turn.',
+        'After this one read, revise the same file in place and re-run whole-file verification.',
+      ].filter(Boolean).join(' ')
+    }
     const revision = state.pendingDeliverableRevision
     if (!revision) {
       return [
@@ -1566,6 +1590,9 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     const duplicatedPassageFailure = revision.failures.some(failure =>
       /\bduplicat(?:e|ed|ion)\b/i.test(failure),
     )
+    const structuralRevision = revision.failures.some(failure =>
+      /\b(?:outline|heading|paragraph|citation|structure|restart|order|cut off|unfinished)\b/i.test(failure),
+    )
     return [
       `FINAL SAVED DELIVERABLE REVISION NOW: make exactly one native append_file or edit_file call to "${existingPath}" immediately.`,
       request ? `User request: ${request}.` : '',
@@ -1575,8 +1602,13 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
       'Do not call create_file, do not create a second report, do not write visible prose, and do not emit <next_step/>.',
       duplicatedPassageFailure
         ? 'This is a duplication repair: use edit_file to remove the repeated copy while preserving the single complete passage. Do not append anything.'
-        : 'Prefer append_file for missing sections, citations, source URLs, or extra analysis; use edit_file only for a targeted replacement.',
-      'For research/report Markdown, make the saved file clearly structured and expansive by default: # title, ## Executive Summary, numbered thematic sections with inline [n] citations, ## Conclusion, and ## References with URLs.',
+        : structuralRevision
+          ? 'This is a structural/content repair: use edit_file to revise the existing report in place. Use append_file only when genuinely missing material belongs after the current last section and will not restart the report structure.'
+          : 'Use edit_file for targeted corrections. Use append_file only when genuinely missing material belongs at the current end of the file.',
+      revision.failures.some(failure => /citation|source|url/i.test(failure))
+        ? 'Add inline [n] markers beside supported claims with edit_file. Append a References or Sources section only when the file does not already have one and it belongs at the true end.'
+        : '',
+      'For professional research/report Markdown, use a clear title, an opening synthesis, substantive topic-specific sections, a conclusion, and references where evidence requires them. Adapt headings and numbering to the request instead of forcing a template.',
       'End cleanly at a sentence or section boundary.',
     ].filter(Boolean).join(' ')
   }
@@ -1589,7 +1621,8 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     'Use create_file for the first saved output; use append_file only after that file exists and only when additional content is genuinely needed; use edit_file only for a targeted fix.',
     'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
     'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
-    'For the first create_file call, write a concise complete Markdown deliverable when the scope is small. For longer reports, write the title, short intro, and first useful complete section. Always end cleanly at a sentence or section boundary; the worker will continue with append_file chunks until the saved output is complete.',
+    'For the first create_file call, write one coherent complete Markdown deliverable whenever it fits. For a professional report, synthesize substantive prose under topic-specific headings, include an opening summary and conclusion when useful, and cite researched claims with a references section. Adapt the structure to the request rather than mechanically filling a template.',
+    'Do not deliberately stop after the introduction or first section. Use append_file only if the provider genuinely clips the write or the saved file is still missing necessary material, and always end each write at a clean sentence or section boundary.',
   ].filter(Boolean).join(' ')
 }
 
@@ -3204,6 +3237,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
   const pendingPartial = state.partialFileWriteRecoveryPending
   const boundedClosingAppend = isPartialRecoveryClosingAppendTurn(state)
   const existingPath = existingFinalDeliverablePath(state)
+  const pendingRepairRead = state.fileWriteRepairPending && !state.fileWriteRepairPending.inspected
   const memoryText = state.workingMemory?.render({ maxFacts: 12, maxChars: 1800 }) || ''
   const findings = [...state.stepFindings.entries()]
     .sort(([a], [b]) => a - b)
@@ -3250,12 +3284,19 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             'Do not emit <next_step/> until after a successful append clears the partial-file state.',
           ].join(' ')
         : existingPath
-          ? [
+          ? pendingRepairRead
+            ? [
+                'FINAL SAVED DELIVERABLE INSPECTION TOOL CALL ONLY.',
+                `Make exactly one native read_file call for "${state.fileWriteRepairPending!.path}" now; do not write visible prose before it.`,
+                'Do not call create_file, append_file, edit_file, research tools, browser tools, or emit <next_step/> on this turn.',
+                'The current contents must be refreshed once before the targeted in-place revision.',
+              ].join(' ')
+            : [
               'FINAL SAVED DELIVERABLE REVISION TOOL CALL ONLY.',
               `Make exactly one native append_file or edit_file call to "${existingPath}" now; do not write visible prose before it.`,
               'Do not call create_file, read-only research tools, browser tools, or emit <next_step/>.',
-              'Prefer append_file for missing citations/source URLs, missing sections, or more analysis; use edit_file only for targeted replacement.',
-              'For research/report Markdown, complete the default structure: # title, ## Executive Summary, numbered thematic sections with inline [n] citations, ## Conclusion, and ## References with URLs.',
+              'Prefer edit_file for structural changes, substantive paragraph revisions, duplicate removal, and inline citation placement. Use append_file only when genuinely missing material belongs after the current last section.',
+              'For professional research/report Markdown, preserve one coherent title, an opening synthesis, substantive topic-specific sections, a conclusion, and references where evidence requires them. Adapt headings and numbering to the request instead of forcing a template.',
               'Start the file tool call immediately and end the new content cleanly at a sentence or section boundary.',
             ].join(' ')
         : [
@@ -3267,7 +3308,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             state.stepToolCallCount > 0 && !hasSavedFinalDeliverableCandidate(state)
               ? 'A previous final-write turn did not save a deliverable; make a shorter complete create_file call now instead of continuing to reason.'
               : '',
-            'Write the complete deliverable when it fits. If it does not fit, write a clean opening chunk that ends at a sentence or section boundary, then continue the same file with append_file on the next turn.',
+            'Write one coherent complete deliverable in the first create_file call whenever it fits. Do not deliberately split a normal report into create-plus-append stages. Use append_file only if the provider genuinely clips the write or necessary material is still missing, and end every write at a clean sentence or section boundary.',
           ].filter(Boolean).join(' '),
     },
     {
@@ -3490,8 +3531,8 @@ const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 15_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
-const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 1_600
-const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 1_600
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 2_400
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 2_400
 const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
 const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
@@ -3598,10 +3639,11 @@ export class AgentLoop {
             suggestions: verification.suggestions,
             createdAt: Date.now(),
           }
+          requireDeliverableInspectionBeforeRevision(state, existingDeliverablePath)
           state.deliverableVerificationDone = false
           contextManager.push({
             role: 'system',
-            content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${existingDeliverablePath}". Do not write another confirmation, create a second file, search again, or expose this verification step.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+            content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Inspect "${existingDeliverablePath}" once with read_file, then make one targeted edit_file revision against that same file. Use append_file only if genuinely missing material belongs at the current end. Do not write another confirmation, create a second file, search again, or expose this verification step.${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
           } as ChatMessageParam)
           return 'STREAMING'
         }
@@ -3775,10 +3817,11 @@ export class AgentLoop {
           suggestions: verification.suggestions,
           createdAt: Date.now(),
         }
+        requireDeliverableInspectionBeforeRevision(state, path)
         state.deliverableVerificationDone = false
         contextManager.push({
           role: 'system',
-          content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Your next response must be exactly one native append_file or edit_file tool call against "${path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+          content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${verification.failures.join('; ')}. Inspect "${path}" once with read_file, then make one targeted edit_file revision against that same file. Use append_file only if genuinely missing material belongs at the current end. Do NOT write status text, create a new file, or repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' Add inline [n] citations beside supported claims; append a References or Sources section only when none exists and it belongs at the true end.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
         } as ChatMessageParam)
         return 'STREAMING'
       }
@@ -6028,11 +6071,12 @@ export class AgentLoop {
                         suggestions: verification.suggestions,
                         createdAt: Date.now(),
                       }
+                      requireDeliverableInspectionBeforeRevision(state, state.pendingDeliverableRevision.path)
                       const failureList = verification.failures.join('; ')
                       log.info(`Output verification failed (${verification.score.toFixed(2)}): ${failureList}`)
                       contextManager.push({
                         role: 'system',
-                        content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${failureList}. Your next response must be exactly one native append_file or edit_file tool call against "${state.pendingDeliverableRevision.path}". Do NOT write status text, do NOT create a new file, and do NOT repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' If citations/sources are missing, append a compact Sources section with URLs/domains from gathered evidence before adding any more analysis.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
+                        content: `OUTPUT QUALITY CHECK FAILED (${(verification.score * 100).toFixed(0)}%): ${failureList}. Inspect "${state.pendingDeliverableRevision.path}" once with read_file, then make one targeted edit_file revision against that same file. Use append_file only if genuinely missing material belongs at the current end. Do NOT write status text, create a new file, or repeat that the report was created.${verification.failures.some(failure => /citation|source|url/i.test(failure)) ? ' Add inline [n] citations beside supported claims; append a References or Sources section only when none exists and it belongs at the true end.' : ''}${verification.suggestions.length > 0 ? '\nSuggestions: ' + verification.suggestions.join('; ') : ''}`,
                       } as ChatMessageParam)
                       // Stay on deliverable step for revision
                       phase = 'EVALUATING'
