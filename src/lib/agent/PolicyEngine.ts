@@ -344,9 +344,14 @@ function isFinalInlineAnswerStep(state: AgentStateData): boolean {
 function shouldAcceptFinalInlineText(state: AgentStateData, content: string): boolean {
   if (!isFinalInlineAnswerStep(state)) return false
   const text = content.trim()
-  if (text.length < 60) return false
+  const request = state.originalUserRequest || ''
+  const explicitlyRequestsShortLiteralAnswer =
+    /\b(?:reply|respond|answer|output|return|say|write)\s+(?:(?:with|using)\s+)?(?:exactly|only)\b/i.test(request) ||
+    /\b(?:reply|respond|answer|output|return|say|write)\s+(?:only\s+)?(?:the\s+)?(?:word|string|text|phrase)\b/i.test(request)
+  if (text.length < 60 && !explicitlyRequestsShortLiteralAnswer) return false
   if (looksLikeFinalStatusUpdate(text) || looksLikeProgressOrRecoveryOnly(text)) return false
-  return /[.!?)]\s*$/.test(text) ||
+  return explicitlyRequestsShortLiteralAnswer ||
+    /[.!?)]\s*$/.test(text) ||
     text.split(/\n+/).some(line => /^\s*(?:[-*]|\d+\.)\s+\S/.test(line))
 }
 

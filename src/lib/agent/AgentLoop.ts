@@ -1185,14 +1185,20 @@ function shouldCompleteFinalInlineAnswerTurn(
 ): boolean {
   if (!finalInlineAnswerTurn(state, messages)) return false
   const text = content.trim()
-  if (text.length < 80) return false
+  const request = state.originalUserRequest || effectiveTaskRequest(messages)
+  const explicitlyRequestsShortLiteralAnswer =
+    /\b(?:reply|respond|answer|output|return|say|write)\s+(?:(?:with|using)\s+)?(?:exactly|only)\b/i.test(request) ||
+    /\b(?:reply|respond|answer|output|return|say|write)\s+(?:only\s+)?(?:the\s+)?(?:word|string|text|phrase)\b/i.test(request)
+  if (text.length < 80 && !explicitlyRequestsShortLiteralAnswer) return false
   const startsLikeStatus =
     /^(?:i(?:'|’)?ll|i will|i am going to|we(?:'|’)?ll|let me|next,?\s+i|now,?\s+i)\b/i.test(text) ||
     /\blet me\b/i.test(text.slice(0, 240)) ||
     /\b(?:i|we)\s+(?:found|checked|searched|gathered|looked|reviewed)\b.{0,180}\b(?:but|so|next|instead)\b/i.test(text.slice(0, 260)) ||
     /\b(?:will|going to)\s+(?:research|gather|compare|summari[sz]e|investigate|check|look up|write|produce)\b/i.test(text.slice(0, 220))
   if (startsLikeStatus) return false
-  return /[.!?)]\s*$/.test(text) || text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS
+  return explicitlyRequestsShortLiteralAnswer ||
+    /[.!?)]\s*$/.test(text) ||
+    text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS
 }
 
 const MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS = 2
