@@ -84,14 +84,14 @@ register('create_file', {
     // Normalize path: strip leading /, ./, and collapse ..
     const path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
     if (!path) return { action: 'created', path: '', error: 'A model-authored filename is required.' }
-    return createFileInSandbox(ctx.conversationId!, path, args.content as string)
+    return createFileInSandbox(ctx.conversationId!, path, args.content as string, ctx.signal)
   },
 })
 
 register('read_file', {
   required: ['path'],
   needsConversation: true,
-  execute: async (args, ctx) => readFileInSandbox(ctx.conversationId!, args.path as string),
+  execute: async (args, ctx) => readFileInSandbox(ctx.conversationId!, args.path as string, ctx.signal),
 })
 
 register('delete_file', {
@@ -112,7 +112,7 @@ register('edit_file', {
     if (typeof args.old_string !== 'string' || typeof args.new_string !== 'string') {
       return { error: 'Missing required arguments: old_string and new_string' }
     }
-    return editFileInSandbox(ctx.conversationId!, args.path as string, args.old_string, args.new_string)
+    return editFileInSandbox(ctx.conversationId!, args.path as string, args.old_string, args.new_string, ctx.signal)
   },
 })
 
@@ -122,7 +122,7 @@ register('append_file', {
   execute: async (args, ctx) => {
     const path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
     if (!path) return { action: 'appended', path: '', error: 'The existing target filename is required.' }
-    return appendFileInSandbox(ctx.conversationId!, path, args.content as string)
+    return appendFileInSandbox(ctx.conversationId!, path, args.content as string, ctx.signal)
   },
 })
 

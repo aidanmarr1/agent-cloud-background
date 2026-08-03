@@ -15,6 +15,7 @@ type E2BSandboxInstance = Awaited<ReturnType<typeof Sandbox.create>>
 const SAFE_TASK_ID = /^[a-zA-Z0-9_-]{1,128}$/
 const DEFAULT_E2B_TIMEOUT_MS = 60 * 60 * 1000
 const DEFAULT_E2B_COMMAND_TIMEOUT_MS = 2 * 60 * 1000
+const DEFAULT_E2B_FILE_REQUEST_TIMEOUT_MS = 7_000
 const DEFAULT_E2B_BROWSER_PORT = 9222
 const DEFAULT_E2B_PREVIEW_PORT = 4173
 const DEFAULT_E2B_WARM_POOL_MAX_AGE_MS = 15 * 60 * 1000
@@ -113,6 +114,19 @@ function envPositiveInt(name: string, fallback: number): number {
 
 function e2bPreviewPort(): number {
   return envPositiveInt('AGENT_E2B_PREVIEW_PORT', DEFAULT_E2B_PREVIEW_PORT)
+}
+
+function e2bFileRequestOptions(signal?: AbortSignal): { requestTimeoutMs: number; signal?: AbortSignal } {
+  return {
+    requestTimeoutMs: envPositiveInt('AGENT_E2B_FILE_REQUEST_TIMEOUT_MS', DEFAULT_E2B_FILE_REQUEST_TIMEOUT_MS),
+    ...(signal ? { signal } : {}),
+  }
+}
+
+function throwIfSignalAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  if (signal.reason instanceof Error) throw signal.reason
+  throw new DOMException('The operation was aborted.', 'AbortError')
 }
 
 function envBool(name: string, fallback: boolean): boolean {
@@ -1543,18 +1557,18 @@ export async function executeCommandInE2B(
   }
 }
 
-export async function createFileInE2B(conversationId: string, filePath: string, content: string, localMirrorRoot?: string): Promise<FileResult> {
+export async function createFileInE2B(conversationId: string, filePath: string, content: string, localMirrorRoot?: string, signal?: AbortSignal): Promise<FileResult> {
   const target = remotePath(conversationId, filePath)
   if (!target) return { action: 'created', path: filePath, content: 'Error: path traversal not allowed' }
 
   const sandbox = await getOrCreateE2BSandbox(conversationId)
-  await sandbox.files.write(target.absolutePath, content)
+  await sandbox.files.write(target.absolutePath, content, e2bFileRequestOptions(signal))
   if (localMirrorRoot) await writeLocalMirror(localMirrorRoot, target.relativePath, content).catch(() => undefined)
   return { action: 'created', path: target.relativePath, size: Buffer.byteLength(content, 'utf8') }
 }
 
-export async function readFileInE2B(conversationId: string, filePath: string, maxFileBytes: number): Promise<FileResult> {
-  const read = await readE2BFileBytes(conversationId, filePath, maxFileBytes)
+export async function readFileInE2B(conversationId: string, filePath: string, maxFileBytes: number, signal?: AbortSignal): Promise<FileResult> {
+  const read = await readE2BFileBytes(conversationId, filePath, maxFileBytes, signal)
   if (!read.ok) return { action: 'read', path: filePath, content: `Error: ${read.error.toLowerCase()}` }
   return {
     action: 'read',
@@ -1670,13 +1684,14 @@ export async function editFileInE2B(
   oldString: string,
   newString: string,
   localMirrorRoot?: string,
+  signal?: AbortSignal,
 ): Promise<FileResult> {
   const target = remotePath(conversationId, filePath)
   if (!target) return { action: 'edited', path: filePath, error: 'File edit blocked: path traversal not allowed' }
 
   try {
     const sandbox = await getOrCreateE2BSandbox(conversationId)
-    const content = await sandbox.files.read(target.absolutePath)
+    const content = await sandbox.files.read(target.absolutePath, e2bFileRequestOptions(signal))
     const idx = content.indexOf(oldString)
     if (idx === -1) {
       return {
@@ -1686,10 +1701,11 @@ export async function editFileInE2B(
       }
     }
     const updated = content.slice(0, idx) + newString + content.slice(idx + oldString.length)
-    await sandbox.files.write(target.absolutePath, updated)
+    await sandbox.files.write(target.absolutePath, updated, e2bFileRequestOptions(signal))
     if (localMirrorRoot) await writeLocalMirror(localMirrorRoot, target.relativePath, updated).catch(() => undefined)
     return { action: 'edited', path: target.relativePath, content: updated, size: Buffer.byteLength(updated, 'utf8') }
   } catch {
+    throwIfSignalAborted(signal)
     return {
       action: 'edited',
       path: target.relativePath,
@@ -1698,7 +1714,7 @@ export async function editFileInE2B(
   }
 }
 
-export async function appendFileInE2B(conversationId: string, filePath: string, content: string, localMirrorRoot?: string): Promise<FileResult> {
+export async function appendFileInE2B(conversationId: string, filePath: string, content: string, localMirrorRoot?: string, signal?: AbortSignal): Promise<FileResult> {
   const target = remotePath(conversationId, filePath)
   if (!target) return { action: 'appended', path: filePath, content: 'Error: path traversal not allowed' }
 
@@ -1707,15 +1723,16 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
   // create_file checkpoint makes the task stream and durable recovery state
   // truthful; append is reserved for a file that already exists.
   try {
-    await sandbox.files.getInfo(target.absolutePath)
+    await sandbox.files.getInfo(target.absolutePath, e2bFileRequestOptions(signal))
   } catch {
+    throwIfSignalAborted(signal)
     return {
       action: 'appended',
       path: target.relativePath,
       error: 'INTERNAL_RECOVERY: append_file requires an existing file. Start a new report with create_file, then append only continuation sections.',
     }
   }
-  const existing = await sandbox.files.read(target.absolutePath)
+  const existing = await sandbox.files.read(target.absolutePath, e2bFileRequestOptions(signal))
   const appendContent = trimReplayedAppendOverlap(existing, content)
   if (!appendContent) {
     return {
@@ -1737,8 +1754,9 @@ export async function appendFileInE2B(conversationId: string, filePath: string, 
   const root = workspaceRoot(conversationId)
   const tempDir = `${root}/.agent/tmp`
   const tempPath = `${tempDir}/append-${randomUUID()}.txt`
-  await sandbox.files.makeDir(tempDir).catch(() => undefined)
-  await sandbox.files.write(tempPath, appendContent)
+  await sandbox.files.makeDir(tempDir, e2bFileRequestOptions(signal)).catch(() => undefined)
+  throwIfSignalAborted(signal)
+  await sandbox.files.write(tempPath, appendContent, e2bFileRequestOptions(signal))
 
   const script = `
 set -e
@@ -1749,6 +1767,8 @@ wc -c < ${shellQuote(target.absolutePath)}
 `
   const result = await sandbox.commands.run(script, {
     timeoutMs: envPositiveInt('AGENT_E2B_COMMAND_TIMEOUT_MS', DEFAULT_E2B_COMMAND_TIMEOUT_MS),
+    requestTimeoutMs: envPositiveInt('AGENT_E2B_FILE_REQUEST_TIMEOUT_MS', DEFAULT_E2B_FILE_REQUEST_TIMEOUT_MS),
+    signal,
   })
   if (localMirrorRoot) await appendLocalMirror(localMirrorRoot, target.relativePath, appendContent).catch(() => undefined)
   const parsedSize = Number.parseInt((result.stdout || '').trim().split(/\s+/)[0] || '', 10)
@@ -1758,18 +1778,19 @@ wc -c < ${shellQuote(target.absolutePath)}
   return { action: 'appended', path: target.relativePath, size }
 }
 
-export async function readE2BFileBytes(conversationId: string, filePath: string, maxFileBytes: number): Promise<SandboxFileReadResult> {
+export async function readE2BFileBytes(conversationId: string, filePath: string, maxFileBytes: number, signal?: AbortSignal): Promise<SandboxFileReadResult> {
   const target = remotePath(conversationId, filePath)
   if (!target) return { ok: false, status: 403, error: 'Invalid path' }
 
   try {
     const sandbox = await getOrCreateE2BSandbox(conversationId)
-    const info = await sandbox.files.getInfo(target.absolutePath)
+    const info = await sandbox.files.getInfo(target.absolutePath, e2bFileRequestOptions(signal))
     if (String(info.type || '') === 'dir') return { ok: false, status: 404, error: 'File not found' }
     if (info.size > maxFileBytes) return { ok: false, status: 413, error: 'File too large' }
-    const body = await sandbox.files.read(target.absolutePath, { format: 'bytes' })
+    const body = await sandbox.files.read(target.absolutePath, { format: 'bytes', ...e2bFileRequestOptions(signal) })
     return { ok: true, body, size: body.byteLength }
   } catch {
+    throwIfSignalAborted(signal)
     return { ok: false, status: 404, error: 'File not found' }
   }
 }

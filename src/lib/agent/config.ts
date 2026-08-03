@@ -94,6 +94,9 @@ export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
 export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 1_800
 export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 4_000
 export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
+// Give an aborted handler a brief chance to settle, but never turn a tool
+// timeout into an unbounded wait for the same hung provider request.
+export const TOOL_TIMEOUT_SETTLE_GRACE_MS = 1_000
 
 // --- File & content limits ---
 export const MAX_TOOL_RESULT_CHARS = 1800

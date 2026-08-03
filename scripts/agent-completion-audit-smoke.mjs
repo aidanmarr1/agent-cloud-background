@@ -34,6 +34,8 @@ async function assertSourceContracts() {
     taskConstraints,
     deliverableContract,
     agentMessage,
+    toolRegistry,
+    e2bSandbox,
   ] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
@@ -61,6 +63,8 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/taskConstraints.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/DeliverableContract.ts'), 'utf8'),
     readFile(join(root, 'src/components/chat/AgentMessage.tsx'), 'utf8'),
+    readFile(join(root, 'src/lib/toolRegistry.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/e2bSandbox.ts'), 'utf8'),
   ])
 
   const readNumberConst = (source, name) => {
@@ -95,6 +99,10 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /tc\.name === 'append_file'[\s\S]*would corrupt the Markdown report structure[\s\S]*fileWriteRepairPending/, 'a blocked report append must redirect into exact-file repair')
   assert.match(toolPipeline, /A cached read is still a successful inspection[\s\S]*fileWriteRepairPending\.inspected = true/, 'cached final-report reads must unlock the pending in-place revision instead of repeating forever')
   assert.match(toolPipeline, /deliverableRevisionSnapshot = \{ path, content \}/, 'a successful cached report read must retain exact revision contents')
+  assert.match(toolPipeline, /toolAbortController\.abort[\s\S]*TOOL_TIMEOUT_SETTLE_GRACE_MS/, 'tool timeouts must abort the active handler and use only a bounded settle grace')
+  assert.doesNotMatch(toolPipeline, /if \(!timeoutTriggered\) throw error[\s\S]{0,900}return await Promise\.race\(\[\s*toolPromise,\s*\.\.\.\(abortPromise \? \[abortPromise\.promise\] : \[\]\),\s*\]\)/, 'a timed-out tool must never wait forever for the same provider promise')
+  assert.match(toolRegistry, /createFileInSandbox\(ctx\.conversationId!, path, args\.content as string, ctx\.signal\)/, 'create_file must propagate its cancellation signal into the sandbox provider')
+  assert.match(e2bSandbox, /sandbox\.files\.write\(target\.absolutePath, content, e2bFileRequestOptions\(signal\)\)/, 'E2B file writes must have a provider request timeout and cancellation signal')
   assert.match(toolLimits, /toolName === 'read_file'[\s\S]*state\.currentPhase === 'deliver'[\s\S]*return 4/, 'ordinary final report steps must have a hard inspection-read ceiling')
   assert.match(toolPipeline, /MAX_ORDINARY_REPORT_APPENDS = 2[\s\S]*ordinaryReportTask[\s\S]*successfulAppends >= MAX_ORDINARY_REPORT_APPENDS[\s\S]*Do not append again/, 'ordinary reports must have a runtime backstop against repetitive continuation loops')
   assert.match(agentLoop, /Do not deliberately stop after the introduction or first section/, 'normal reports must prefer one coherent initial write instead of a forced append workflow')

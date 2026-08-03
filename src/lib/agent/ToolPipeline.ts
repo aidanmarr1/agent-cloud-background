@@ -133,6 +133,7 @@ export interface ToolExecutionResult {
 import {
   TOOL_TIMEOUT_MS, FILE_WRITE_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS, MAX_BROWSE_RESULT_CHARS,
   WEB_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
+  TOOL_TIMEOUT_SETTLE_GRACE_MS,
   URL_NORMALIZE_STRIP_PARAMS,
   SEARCH_STOPWORDS,
   CROSS_TOOL_PATTERN_WINDOW, CROSS_TOOL_CYCLE_LENGTH, CROSS_TOOL_CYCLE_REPEATS,
@@ -4705,9 +4706,15 @@ export class ToolPipeline {
     const executeFn = async () => {
       this.throwIfAborted()
       let timeoutId: ReturnType<typeof setTimeout> | undefined
+      let settleGraceId: ReturnType<typeof setTimeout> | undefined
       const timeoutMs = timeoutMsForTool(tc.name)
       let abortPromise: ReturnType<ToolPipeline['createAbortPromise']> = null
       let timeoutTriggered = false
+      const toolAbortController = new AbortController()
+      const forwardTaskAbort = () => toolAbortController.abort(this.signal?.reason)
+
+      if (this.signal?.aborted) forwardTaskAbort()
+      else this.signal?.addEventListener('abort', forwardTaskAbort, { once: true })
 
       if (this.conversationId && BROWSER_TOOLS.includes(tc.name)) {
         this.ensureBrowserFrameStream?.()
@@ -4722,7 +4729,10 @@ export class ToolPipeline {
       const toolPromise = this.trackInflightOperation(
         Promise.resolve().then(() => {
           this.throwIfAborted()
-          return executeTool(tc.name, args, toolContext)
+          return executeTool(tc.name, args, {
+            ...toolContext,
+            signal: toolAbortController.signal,
+          })
         }),
         tc.name,
         args,
@@ -4733,6 +4743,7 @@ export class ToolPipeline {
           timeoutId = setTimeout(
             () => {
               timeoutTriggered = true
+              toolAbortController.abort(new Error(`Tool "${tc.name}" timed out after ${timeoutMs / 1000}s`))
               reject(new Error(`Tool "${tc.name}" timed out after ${timeoutMs / 1000}s`))
             },
             timeoutMs,
@@ -4746,16 +4757,16 @@ export class ToolPipeline {
       } catch (error) {
         if (!timeoutTriggered) throw error
 
-        // Tool handlers do not all expose cancellation. Never let a timed-out
-        // browser/file/process operation keep mutating state while a retry or
-        // the next model turn starts. If it finishes successfully, use that
-        // real result; if it fails, preserve the timeout for recovery policy.
-        // Cancellation is the one exception: a lease loss/user stop must be
-        // able to unwind even when the underlying handler is not cancellable.
+        // Let signal-aware handlers settle, but never wait forever for a
+        // provider request that ignored cancellation. The inflight registry
+        // still fences task completion for a bounded period.
         try {
           return await Promise.race([
             toolPromise,
             ...(abortPromise ? [abortPromise.promise] : []),
+            new Promise<never>((_, reject) => {
+              settleGraceId = setTimeout(() => reject(error), TOOL_TIMEOUT_SETTLE_GRACE_MS)
+            }),
           ])
         } catch {
           if (this.signal?.aborted) {
@@ -4765,6 +4776,8 @@ export class ToolPipeline {
         }
       } finally {
         if (timeoutId !== undefined) clearTimeout(timeoutId)
+        if (settleGraceId !== undefined) clearTimeout(settleGraceId)
+        this.signal?.removeEventListener('abort', forwardTaskAbort)
         abortPromise?.cleanup()
       }
     }

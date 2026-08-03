@@ -168,11 +168,12 @@ export async function executeInSandbox(
 export async function createFileInSandbox(
   conversationId: string,
   filePath: string,
-  content: string
+  content: string,
+  signal?: AbortSignal,
 ): Promise<FileResult> {
   if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return (await e2bSandbox()).createFileInE2B(conversationId, filePath, content, localRoot)
+    return (await e2bSandbox()).createFileInE2B(conversationId, filePath, content, localRoot, signal)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -236,10 +237,11 @@ export async function createFileInSandbox(
 
 export async function readFileInSandbox(
   conversationId: string,
-  filePath: string
+  filePath: string,
+  signal?: AbortSignal,
 ): Promise<FileResult> {
   if (shouldUseE2BProvider()) {
-    return (await e2bSandbox()).readFileInE2B(conversationId, filePath, MAX_SANDBOX_FILE_SIZE)
+    return (await e2bSandbox()).readFileInE2B(conversationId, filePath, MAX_SANDBOX_FILE_SIZE, signal)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -753,11 +755,12 @@ export async function editFileInSandbox(
   conversationId: string,
   filePath: string,
   oldString: string,
-  newString: string
+  newString: string,
+  signal?: AbortSignal,
 ): Promise<FileResult> {
   if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return (await e2bSandbox()).editFileInE2B(conversationId, filePath, oldString, newString, localRoot)
+    return (await e2bSandbox()).editFileInE2B(conversationId, filePath, oldString, newString, localRoot, signal)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
@@ -829,11 +832,12 @@ export async function editFileInSandbox(
 export async function appendFileInSandbox(
   conversationId: string,
   filePath: string,
-  content: string
+  content: string,
+  signal?: AbortSignal,
 ): Promise<FileResult> {
   if (shouldUseE2BProvider()) {
     const localRoot = await getOrCreateSandboxDir(conversationId)
-    return (await e2bSandbox()).appendFileInE2B(conversationId, filePath, content, localRoot)
+    return (await e2bSandbox()).appendFileInE2B(conversationId, filePath, content, localRoot, signal)
   }
 
   const sandboxDir = await getOrCreateSandboxDir(conversationId)
