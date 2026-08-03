@@ -1289,6 +1289,33 @@ function requireDeliverableInspectionBeforeRevision(
   }
 }
 
+function deliverableRevisionLimit(state: AgentStateData): number {
+  return state.buildTask || state.taskStrategy === 'build' || state.taskStrategy === 'code'
+    ? MAX_DELIVERABLE_REVISIONS
+    : 2
+}
+
+function hasBlockingDeliverableIntegrityFailure(failures: string[]): boolean {
+  return failures.some(failure =>
+    /empty or nearly empty|placeholder text|appears to be an outline|cut off or unfinished|duplicated substantive|duplicate numbered|structure restarts/i.test(failure),
+  )
+}
+
+/**
+ * Structural quality guidance is useful, but it must not turn an otherwise
+ * readable saved report into an endless read/edit/append loop. After two
+ * targeted report revisions, accept the artifact unless it is empty, clipped,
+ * placeholder/outline-only, duplicated, or structurally restarted.
+ */
+function deliverableVerificationAccepted(
+  state: AgentStateData,
+  verification: { passed: boolean; failures: string[] },
+): boolean {
+  if (verification.passed) return true
+  return state.deliverableRevisionCount >= deliverableRevisionLimit(state) &&
+    !hasBlockingDeliverableIntegrityFailure(verification.failures)
+}
+
 function savedFinalDeliverableMinimumChars(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -1344,7 +1371,7 @@ function shouldContinueSavedFinalDeliverableChunk(
 ): boolean {
   if (!finalSavedDeliverableTurn(state, messages)) return false
   if (!path || !path.toLowerCase().endsWith('.md')) return false
-  if (state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS) return false
+  if (state.deliverableRevisionCount >= deliverableRevisionLimit(state)) return false
   const minimumChars = savedFinalDeliverableMinimumChars(state, messages)
   if (content.trim().length < minimumChars) return true
   // A deliberately tiny named Markdown artifact (for example a title + source
@@ -1358,7 +1385,7 @@ function shouldContinueSavedFinalDeliverableChunk(
 function isPartialRecoveryClosingAppendTurn(state: AgentStateData): boolean {
   const pending = state.partialFileWriteRecoveryPending
   return !!pending &&
-    state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS &&
+    state.deliverableRevisionCount >= deliverableRevisionLimit(state) &&
     partialAppendRecoveryCountForPath(state, pending.path) >= PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH
 }
 
@@ -3505,7 +3532,7 @@ function displayContractRepairInstruction(state: AgentStateData, results: ToolEx
 const FINAL_INLINE_ANSWER_REQUEST_TIMEOUT_MS = 60_000
 const FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS = 60_000
 const FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS = 15_000
-const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
+const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS
 const FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS = 420
 const FINAL_INLINE_ANSWER_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_INLINE_REPORT_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
@@ -3600,7 +3627,7 @@ export class AgentLoop {
           state.taskComplexity,
         )
 
-        if (verification.passed) {
+        if (deliverableVerificationAccepted(state, verification)) {
           const stepIdxBefore = state.currentStepIdx
           state.pendingDeliverableRevision = null
           state.partialFileWriteRecoveryPending = null
@@ -3619,7 +3646,7 @@ export class AgentLoop {
           return 'COMPLETE'
         }
 
-        if (state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
+        if (state.deliverableRevisionCount < deliverableRevisionLimit(state)) {
           state.deliverableRevisionCount++
           state.pendingDeliverableRevision = {
             path: existingDeliverablePath,
@@ -3798,7 +3825,8 @@ export class AgentLoop {
         workingMemory,
         state.taskComplexity,
       )
-      if (!verification.passed && state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
+      const verificationAccepted = deliverableVerificationAccepted(state, verification)
+      if (!verificationAccepted && state.deliverableRevisionCount < deliverableRevisionLimit(state)) {
         state.deliverableRevisionCount++
         state.pendingDeliverableRevision = {
           path,
@@ -3815,7 +3843,7 @@ export class AgentLoop {
         return 'STREAMING'
       }
 
-      if (!verification.passed) {
+      if (!verificationAccepted) {
         state.pendingDeliverableRevision = {
           path,
           failures: verification.failures,
@@ -5765,7 +5793,7 @@ export class AgentLoop {
                       })
                     }
 
-                    if (verification.passed) {
+                    if (deliverableVerificationAccepted(state, verification)) {
                       state.partialFileWriteRecoveryPending = null
                       state.partialFileWriteRecoveryNudged = false
                       state.deliverableVerificationDone = true
@@ -5780,9 +5808,9 @@ export class AgentLoop {
                     const appendRecoveryCount = partialAppendRecoveryCountForPath(state, path)
                     const closingAppendAlreadyGranted =
                       appendRecoveryCount > PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH ||
-                      state.deliverableRevisionCount >= MAX_DELIVERABLE_REVISIONS
+                      state.deliverableRevisionCount >= deliverableRevisionLimit(state)
                     if (!closingAppendAlreadyGranted) {
-                      state.deliverableRevisionCount = MAX_DELIVERABLE_REVISIONS
+                      state.deliverableRevisionCount = deliverableRevisionLimit(state)
                       state.pendingDeliverableRevision = {
                         path,
                         failures: verification.failures,
@@ -5927,7 +5955,8 @@ export class AgentLoop {
                       state.taskComplexity,
                     )
 
-                    if (!verification.passed && state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
+                    const verificationAccepted = deliverableVerificationAccepted(state, verification)
+                    if (!verificationAccepted && state.deliverableRevisionCount < deliverableRevisionLimit(state)) {
                       state.deliverableRevisionCount++
                       state.pendingDeliverableRevision = {
                         path: verifiedContent.path || args.path || toolResultPath(deliverableResult) || 'the existing deliverable',
@@ -5947,7 +5976,7 @@ export class AgentLoop {
                       break
                     }
 
-                    if (!verification.passed) {
+                    if (!verificationAccepted) {
                       state.pendingDeliverableRevision = {
                         path: verifiedContent.path || args.path || toolResultPath(deliverableResult) || 'the existing deliverable',
                         failures: verification.failures,

@@ -80,7 +80,6 @@ export interface StreamToolCallPolicy {
 const FILE_PREVIEW_MIN_DELTA_CHARS = 1
 const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
 const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
-const INLINE_FINAL_TEXT_STREAM_CAP = 6000
 const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000
 const FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 3_000
 const STABLE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 8_000
@@ -1030,14 +1029,12 @@ export class StreamProcessor {
               // Keep draining the provider stream so it can still emit a later
               // tool call or final usage chunk; aborting here turns a clipped
               // progress paragraph into a terminal task error.
-              const TEXT_ONLY_CAP = progressNarrationTextCap !== null
+              const TEXT_ONLY_CAP: number | null = progressNarrationTextCap !== null
                 ? progressNarrationTextCap
-                : textSavedDeliverable
-                  ? INLINE_FINAL_TEXT_STREAM_CAP
-                : inlineFinalAnswerAllowsLongText(state)
-                ? INLINE_FINAL_TEXT_STREAM_CAP
+                : textSavedDeliverable || inlineFinalAnswerAllowsLongText(state)
+                ? null
                 : DEFAULT_TEXT_ONLY_STREAM_CAP
-                if (toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
+                if (TEXT_ONLY_CAP !== null && toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
                   suppressTextOnlyOverflow = true
                   contentBuffer = ''
                   break contentDelta

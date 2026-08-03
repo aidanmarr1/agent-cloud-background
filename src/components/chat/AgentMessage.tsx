@@ -76,7 +76,13 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
 
   const hasGroupError = hasGroups && taskGroups.some((g) => g.status === 'error' || g.status === 'incomplete')
   const allPlannedGroupsDone = hasGroups && taskGroups.every((g) => g.status === 'done')
-  const showCompletion = allPlannedGroupsDone && !hasGroupError && !isStreaming
+  const streamExplicitlyFailed = message.streamTerminalStatus === 'error'
+  const terminalCompletionConfirmed = message.streamTerminalStatus === 'done' || !message.streamRunId
+  const showCompletion = allPlannedGroupsDone &&
+    !hasGroupError &&
+    !streamExplicitlyFailed &&
+    terminalCompletionConfirmed &&
+    !isStreaming
   const completedGroupCount = taskGroups.filter((g) => g.status === 'done').length
   const placeReasoningAfterAnswer = Boolean(finalContent) && showFinalContent && !isStreaming
   // artifact_created is emitted as soon as a saved deliverable exists so the

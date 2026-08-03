@@ -32,6 +32,7 @@ async function assertSourceContracts() {
     agentConfig,
     taskConstraints,
     deliverableContract,
+    agentMessage,
   ] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
@@ -57,6 +58,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/taskConstraints.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/DeliverableContract.ts'), 'utf8'),
+    readFile(join(root, 'src/components/chat/AgentMessage.tsx'), 'utf8'),
   ])
 
   const readNumberConst = (source, name) => {
@@ -81,6 +83,9 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /deliverableContentForVerification/, 'deliverable verification must read the full current file, not only the latest append chunk')
   assert.match(agentLoop, /pendingDeliverableRevision/, 'failed deliverable verification must leave a concrete pending revision target')
   assert.match(agentLoop, /requireDeliverableInspectionBeforeRevision/, 'failed report verification must refresh the exact saved file before a structural edit')
+  assert.match(agentLoop, /deliverableRevisionLimit[\s\S]*taskStrategy === 'code'[\s\S]*MAX_DELIVERABLE_REVISIONS[\s\S]*: 2/, 'ordinary reports must stop after two targeted verification revisions while code/build work retains its larger repair budget')
+  assert.match(agentLoop, /deliverableVerificationAccepted[\s\S]*deliverableRevisionCount >= deliverableRevisionLimit[\s\S]*!hasBlockingDeliverableIntegrityFailure/, 'soft report-format heuristics must not fail an intact artifact after its bounded revisions')
+  assert.match(policyEngine, /LAST_STEP_TERMINATE_MULTIPLIER[\s\S]*finalDeliverableRequired\(state\) && !state\.deliverableVerificationDone[\s\S]*deliverable_verification_failed/, 'the final-step budget fence must not mark an unverified deliverable step complete')
   assert.match(agentLoop, /fileWriteRepairPending && !state\.fileWriteRepairPending\.inspected \? \['read_file'\]/, 'stale final-report edits must keep read_file available instead of producing a zero-tool loop')
   assert.match(toolPipeline, /tc\.name === 'append_file'[\s\S]*would corrupt the Markdown report structure[\s\S]*fileWriteRepairPending/, 'a blocked report append must redirect into exact-file repair')
   assert.match(toolPipeline, /MAX_ORDINARY_REPORT_APPENDS = 2[\s\S]*ordinaryReportTask[\s\S]*successfulAppends >= MAX_ORDINARY_REPORT_APPENDS[\s\S]*Do not append again/, 'ordinary reports must have a runtime backstop against repetitive continuation loops')
@@ -149,6 +154,7 @@ async function assertSourceContracts() {
   assert.match(homePage, /await flushChatServerSync\(\)/, 'home first-task creation must be saved immediately for cross-browser visibility')
   assert.match(homePage, /setStreamingStatus\('thinking'\)/, 'home first-task UI must begin with Thinking immediately')
   assert.match(chatPage, /setStreamingStatus\('thinking'\)/, 'chat auto-send UI must begin with Thinking immediately')
+  assert.match(agentMessage, /streamExplicitlyFailed = message\.streamTerminalStatus === 'error'[\s\S]*terminalCompletionConfirmed = message\.streamTerminalStatus === 'done' \|\| !message\.streamRunId[\s\S]*showCompletion = allPlannedGroupsDone/, 'a failed streamed task must never render the green completion banner even if every plan group was prematurely marked done')
   assert.match(serverSync, /waitForStoreHydration/, 'forced chat sync must wait for account history hydration')
   assert.match(serverSync, /await waitForStoreHydration\(\)/, 'flush sync must not no-op before hydration is ready')
   assert.ok(chatRouteMaxDuration === 300, 'chat route maxDuration must stay within the deployed Hobby plan cap')

@@ -3216,6 +3216,13 @@ Then make your first tool call. Your plan will be remembered across iterations o
       }
 
       if (state.stepIterationCount >= effectiveBudget * LAST_STEP_TERMINATE_MULTIPLIER) {
+        // A budget fence may stop work, but it must never mark an unverified
+        // deliverable step complete. Leaving the step active lets the terminal
+        // error path render it accurately instead of showing a green success
+        // banner beside a failed completion audit.
+        if (finalDeliverableRequired(state) && !state.deliverableVerificationDone) {
+          return [{ type: 'terminate', reason: 'deliverable_verification_failed' }]
+        }
         // Hard terminate at 2x budget
         actions.push({
           type: 'inject_message',
