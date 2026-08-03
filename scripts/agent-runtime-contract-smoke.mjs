@@ -1450,6 +1450,7 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /private openComputerPanel\(\)[\s\S]*setComputerPanelOpen\(true,\s*\{\s*source:\s*'auto'\s*\}\)[\s\S]*if \(!isBrowserPreflightBlock\)[\s\S]*this\.openComputerPanel\(\)/, 'browser preflight blocks must not force-open the computer panel')
   assert.match(prompts, /Progress narration is required every 3-4 completed visible action pills/, 'narration cadence must be based on visible user-facing action progress')
   assert.match(agentLoop, /shouldUseNaturalCadenceNarration[\s\S]*state\.visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt/, 'narration cadence must use the central visible-action frontier')
+  assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*!hardWindowOpen/, 'internal guard turns must not extend model narration beyond the fourth visible action')
   assert.match(agentConfig, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(agentConfig, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
   assert.match(agentConfig, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*2/, 'runtime must request model narration on action 3, with action 4 as the retry')

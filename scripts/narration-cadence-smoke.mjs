@@ -73,6 +73,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /advanceStalledResearchWithGap/, 'stalled research with real evidence must move on with a recorded gap')
   assert.doesNotMatch(agentState, /tool === 'browser_screenshot' \|\| tool === 'browser_get_content'/, 'browser_get_content must not be exempt from loop detection')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt[\s\S]*return true/, 'runtime must open the deterministic cadence window')
+  assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*state\.forceTextNextIteration \|\| state\.exactExtractionGuardPending[\s\S]*!hardWindowOpen/, 'internal text/extraction guards may defer action 3 but must never suppress action-4 narration')
   assert.match(agentLoop, /const cadenceNarrationInMainTurn =[\s\S]*shouldUseNaturalCadenceNarration\(state, this\.options\.messages\)[\s\S]*beginNarrationCadenceAttempt\(state\)/, 'cadence must be armed on the next ordinary action request once three visible actions complete')
   assert.match(agentLoop, /withCadenceProgressUpdateSchemas\([\s\S]*effectiveCadenceNarrationInMainTurn/, 'cadence narration must share the native tool request instead of opening a competing provider call')
   assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*progress_update is display-only[\s\S]*make the tool call/, 'main-turn narration must remain display-only and never replace real work')

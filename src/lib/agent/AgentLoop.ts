@@ -57,6 +57,7 @@ import {
   MAX_ITERATIONS,
   AGENT_RUN_MAX_DURATION_MS, AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS, AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
+  NARRATION_MAX_VISIBLE_ACTION_GAP,
 } from './config'
 import {
   StreamProcessor,
@@ -1712,7 +1713,16 @@ function shouldUseNaturalCadenceNarration(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
-  if (state.forceTextNextIteration || state.exactExtractionGuardPending) return false
+  // Exact-extraction and compact-text guards may defer the preferred action-3
+  // update, but they must not push a real visible action beyond the hard
+  // action-4 window. Tool availability is finalized later; if a guarded turn
+  // is genuinely text-only, the cadence attempt is released at this frontier.
+  const hardWindowOpen =
+    state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
+  if (
+    (state.forceTextNextIteration || state.exactExtractionGuardPending) &&
+    !hardWindowOpen
+  ) return false
   if (state.deadlineFinalizationStarted) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (state.narrationCadenceInFlight) return false
