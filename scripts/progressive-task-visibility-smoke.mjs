@@ -33,18 +33,23 @@ assert.match(
   'a planning indicator must remain visible before the first planned group starts',
 )
 assert.match(
+  agentMessage,
+  /const showFinalDeliverables = showFinalContent && Boolean\(finalContent\)[\s\S]*showFinalDeliverables && documentArtifacts\.length > 0[\s\S]*showFinalDeliverables && imageArtifacts\.length > 0/,
+  'saved deliverable cards must wait for the final handoff instead of appearing alone while the closing message is still being generated',
+)
+assert.match(
   actionFeed,
   /\.filter\(\(group\) => group\.status !== 'pending'\)/,
   'secondary inline activity feeds must hide future task groups until they start',
 )
 assert.match(
   stepTracker,
-  /\{taskGroups\.map\(\(group\) => \(/,
+  /const plannedTaskGroups = taskGroups\.filter\(\(group\) => group\.index >= 0\)[\s\S]*\{plannedTaskGroups\.map\(\(group\) => \(/,
   'the expanded task progress tracker must keep showing the full plan',
 )
 assert.match(
   stepTracker,
-  /taskGroups\.find\(\(group\) => group\.status === 'pending'\)/,
+  /plannedTaskGroups\.find\(\(group\) => group\.status === 'pending'\)/,
   'the collapsed task progress tracker may still identify the next future step',
 )
 assert.doesNotMatch(

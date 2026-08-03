@@ -79,6 +79,12 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
   const showCompletion = allPlannedGroupsDone && !hasGroupError && !isStreaming
   const completedGroupCount = taskGroups.filter((g) => g.status === 'done').length
   const placeReasoningAfterAnswer = Boolean(finalContent) && showFinalContent && !isStreaming
+  // artifact_created is emitted as soon as a saved deliverable exists so the
+  // Computer panel can keep showing the genuinely live file. The attachment
+  // card in the main response belongs to the final handoff, though: rendering
+  // it as soon as the last plan group advances leaves a card sitting alone
+  // while the personalized completion message is still being generated.
+  const showFinalDeliverables = showFinalContent && Boolean(finalContent)
 
   // Calculate total elapsed time for CompletionBanner
   const totalElapsed = (() => {
@@ -174,7 +180,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
         )}
 
         {/* Document previews */}
-        {showFinalContent && documentArtifacts.length > 0 && (
+        {showFinalDeliverables && documentArtifacts.length > 0 && (
           <div className="mt-5 max-w-[860px] space-y-3">
             {[...documentArtifacts].reverse().map((artifact) => (
               <DocumentPreview key={artifact.id} artifact={artifact} conversationId={conversationId} />
@@ -183,7 +189,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
         )}
 
         {/* Image previews */}
-        {showFinalContent && imageArtifacts.length > 0 && (
+        {showFinalDeliverables && imageArtifacts.length > 0 && (
           <div className={imageArtifacts.length > 1
             ? 'mt-5 grid max-w-[860px] grid-cols-1 gap-3 sm:grid-cols-2'
             : 'mt-5 max-w-[860px] space-y-3'
