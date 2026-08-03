@@ -400,6 +400,210 @@ export async function writeSandboxFileBytes(
   }
 }
 
+const ZIP_MAX_SOURCE_FILES = 100
+const ZIP_MAX_TOTAL_SOURCE_BYTES = 100 * 1024 * 1024
+
+function normalizeArchivePath(path: string): string | null {
+  const normalized = path.replace(/\\/g, '/').replace(/^\.?\/+/, '').replace(/\/+/g, '/')
+  if (!normalized || normalized === '.' || normalized.split('/').some(part => part === '..')) return null
+  return normalized
+}
+
+let crc32Table: Uint32Array | null = null
+
+function crc32(bytes: Uint8Array): number {
+  if (!crc32Table) {
+    crc32Table = new Uint32Array(256)
+    for (let n = 0; n < 256; n++) {
+      let value = n
+      for (let bit = 0; bit < 8; bit++) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1)
+      crc32Table[n] = value >>> 0
+    }
+  }
+  let value = 0xffffffff
+  for (const byte of bytes) value = crc32Table[(value ^ byte) & 0xff] ^ (value >>> 8)
+  return (value ^ 0xffffffff) >>> 0
+}
+
+function concatBytes(chunks: Uint8Array[]): Uint8Array {
+  const size = chunks.reduce((total, chunk) => total + chunk.byteLength, 0)
+  const output = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    output.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return output
+}
+
+function zipHeader(size: number, write: (view: DataView) => void): Uint8Array {
+  const bytes = new Uint8Array(size)
+  write(new DataView(bytes.buffer))
+  return bytes
+}
+
+/** Create a portable, uncompressed ZIP without relying on shell utilities. */
+export async function packageFilesInSandbox(
+  conversationId: string,
+  outputPath: string,
+  sourcePaths: string[],
+): Promise<FileResult> {
+  const normalizedOutput = normalizeArchivePath(outputPath)
+  if (!normalizedOutput || !normalizedOutput.toLowerCase().endsWith('.zip')) {
+    return { action: 'packaged', path: outputPath, error: 'The archive output path must be a safe .zip path.' }
+  }
+  const normalizedSources = [...new Set(sourcePaths.map(normalizeArchivePath).filter((path): path is string => !!path))]
+  if (normalizedSources.length === 0) {
+    return { action: 'packaged', path: normalizedOutput, error: 'At least one existing source file is required.' }
+  }
+  if (normalizedSources.length > ZIP_MAX_SOURCE_FILES) {
+    return { action: 'packaged', path: normalizedOutput, error: `Too many source files (maximum ${ZIP_MAX_SOURCE_FILES}).` }
+  }
+  if (normalizedSources.includes(normalizedOutput)) {
+    return { action: 'packaged', path: normalizedOutput, error: 'The output archive cannot include itself.' }
+  }
+
+  const entries: Array<{ path: string; name: Uint8Array; body: Uint8Array; crc: number; offset: number }> = []
+  let sourceBytes = 0
+  const encoder = new TextEncoder()
+  for (const path of normalizedSources) {
+    const read = await readSandboxFileBytes(conversationId, path)
+    if (!read.ok) return { action: 'packaged', path: normalizedOutput, error: `Source file not found: ${path}` }
+    sourceBytes += read.size
+    if (sourceBytes > ZIP_MAX_TOTAL_SOURCE_BYTES) {
+      return { action: 'packaged', path: normalizedOutput, error: 'Archive sources exceed the 100 MB limit.' }
+    }
+    const name = encoder.encode(path)
+    if (name.byteLength > 0xffff) return { action: 'packaged', path: normalizedOutput, error: `Source path is too long: ${path}` }
+    entries.push({ path, name, body: read.body, crc: crc32(read.body), offset: 0 })
+  }
+
+  const localChunks: Uint8Array[] = []
+  let localOffset = 0
+  for (const entry of entries) {
+    entry.offset = localOffset
+    const header = zipHeader(30, view => {
+      view.setUint32(0, 0x04034b50, true)
+      view.setUint16(4, 20, true)
+      view.setUint16(6, 0, true)
+      view.setUint16(8, 0, true)
+      view.setUint16(10, 0, true)
+      view.setUint16(12, 0, true)
+      view.setUint32(14, entry.crc, true)
+      view.setUint32(18, entry.body.byteLength, true)
+      view.setUint32(22, entry.body.byteLength, true)
+      view.setUint16(26, entry.name.byteLength, true)
+      view.setUint16(28, 0, true)
+    })
+    localChunks.push(header, entry.name, entry.body)
+    localOffset += header.byteLength + entry.name.byteLength + entry.body.byteLength
+  }
+
+  const centralChunks: Uint8Array[] = []
+  let centralSize = 0
+  for (const entry of entries) {
+    const header = zipHeader(46, view => {
+      view.setUint32(0, 0x02014b50, true)
+      view.setUint16(4, 20, true)
+      view.setUint16(6, 20, true)
+      view.setUint16(8, 0, true)
+      view.setUint16(10, 0, true)
+      view.setUint16(12, 0, true)
+      view.setUint16(14, 0, true)
+      view.setUint32(16, entry.crc, true)
+      view.setUint32(20, entry.body.byteLength, true)
+      view.setUint32(24, entry.body.byteLength, true)
+      view.setUint16(28, entry.name.byteLength, true)
+      view.setUint16(30, 0, true)
+      view.setUint16(32, 0, true)
+      view.setUint16(34, 0, true)
+      view.setUint16(36, 0, true)
+      view.setUint32(38, 0, true)
+      view.setUint32(42, entry.offset, true)
+    })
+    centralChunks.push(header, entry.name)
+    centralSize += header.byteLength + entry.name.byteLength
+  }
+
+  const end = zipHeader(22, view => {
+    view.setUint32(0, 0x06054b50, true)
+    view.setUint16(4, 0, true)
+    view.setUint16(6, 0, true)
+    view.setUint16(8, entries.length, true)
+    view.setUint16(10, entries.length, true)
+    view.setUint32(12, centralSize, true)
+    view.setUint32(16, localOffset, true)
+    view.setUint16(20, 0, true)
+  })
+  const archive = concatBytes([...localChunks, ...centralChunks, end])
+  await writeSandboxFileBytes(conversationId, normalizedOutput, archive)
+  return {
+    action: 'packaged',
+    path: normalizedOutput,
+    size: archive.byteLength,
+    files: normalizedSources,
+  }
+}
+
+/**
+ * Save an editable HTML/CSS/JS source set and a self-contained HTML bundle.
+ * The bundle is the previewable deliverable; source files remain available in
+ * Project Files and can also be packaged into a ZIP.
+ */
+export async function createWebsiteBundleInSandbox(
+  conversationId: string,
+  outputPath: string,
+  html: string,
+  css: string,
+  javascript: string,
+): Promise<FileResult> {
+  const normalizedOutput = normalizeArchivePath(outputPath || 'index.html')
+  if (!normalizedOutput || !normalizedOutput.toLowerCase().endsWith('.html')) {
+    return { action: 'created', path: outputPath, error: 'The bundled website output must use a safe .html path.' }
+  }
+  if (!/<html\b/i.test(html) || !/<body\b/i.test(html)) {
+    return { action: 'created', path: normalizedOutput, error: 'Website HTML must be a complete document containing html and body elements.' }
+  }
+  if (css.trim().length < 80) {
+    return { action: 'created', path: normalizedOutput, error: 'Website CSS is too short to be a substantive design.' }
+  }
+
+  const sourceHtmlPath = 'website-src/index.html'
+  const sourceCssPath = 'website-src/styles.css'
+  const sourceJsPath = 'website-src/script.js'
+  const sourceHtml = html
+    .replace(/<link\b[^>]*href=["'](?:\.\/)?styles\.css["'][^>]*>\s*/gi, '')
+    .replace(/<script\b[^>]*src=["'](?:\.\/)?script\.js["'][^>]*>\s*<\/script>\s*/gi, '')
+  const styleBlock = `\n<style>\n${css.trim()}\n</style>\n`
+  const scriptBlock = javascript.trim() ? `\n<script>\n${javascript.trim()}\n</script>\n` : ''
+  const editableSourceHtml = sourceHtml
+    .replace(/<\/head>/i, '  <link rel="stylesheet" href="styles.css">\n</head>')
+    .replace(/<\/body>/i, `${javascript.trim() ? '  <script src="script.js"></script>\n' : ''}</body>`)
+  let bundled = /<\/head>/i.test(sourceHtml)
+    ? sourceHtml.replace(/<\/head>/i, `${styleBlock}</head>`)
+    : sourceHtml.replace(/<body\b/i, `${styleBlock}<body`)
+  bundled = /<\/body>/i.test(bundled)
+    ? bundled.replace(/<\/body>/i, `${scriptBlock}</body>`)
+    : `${bundled}${scriptBlock}`
+
+  const writes = [
+    await createFileInSandbox(conversationId, sourceHtmlPath, `${editableSourceHtml.trim()}\n`),
+    await createFileInSandbox(conversationId, sourceCssPath, `${css.trim()}\n`),
+    await createFileInSandbox(conversationId, sourceJsPath, `${javascript.trim()}\n`),
+    await createFileInSandbox(conversationId, normalizedOutput, `${bundled.trim()}\n`),
+  ]
+  const failed = writes.find(result => result.size === undefined)
+  if (failed) {
+    return { action: 'created', path: normalizedOutput, error: failed.error || failed.content || 'Website files could not be saved.' }
+  }
+  return {
+    action: 'created',
+    path: normalizedOutput,
+    size: writes[writes.length - 1].size,
+    files: [sourceHtmlPath, sourceCssPath, sourceJsPath, normalizedOutput],
+  }
+}
+
 export async function syncCloudSandboxToLocal(conversationId: string): Promise<void> {
   if (!shouldUseE2BProvider()) return
   const localRoot = await getOrCreateSandboxDir(conversationId)

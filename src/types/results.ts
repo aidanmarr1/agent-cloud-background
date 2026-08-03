@@ -57,7 +57,7 @@ export interface ImageSearchPanelItem {
 }
 
 export interface FileResult {
-  action: 'created' | 'read' | 'deleted' | 'listed' | 'edited' | 'appended' | 'exported'
+  action: 'created' | 'read' | 'deleted' | 'listed' | 'edited' | 'appended' | 'exported' | 'packaged'
   path: string
   content?: string
   error?: string

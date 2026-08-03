@@ -141,6 +141,42 @@ const baseToolDefinitions: ChatCompletionTool[] = [
   {
     type: 'function',
     function: {
+      name: 'package_files',
+      description: 'Create a downloadable ZIP archive from existing workspace files. Use this when the user requests a ZIP or packaged source files.',
+      parameters: {
+        type: 'object',
+        properties: {
+          output_path: { type: 'string', description: 'Safe output path ending in .zip' },
+          source_paths: {
+            type: 'array',
+            description: 'Existing workspace file paths to include in the archive',
+            items: { type: 'string' },
+          },
+        },
+        required: ['output_path', 'source_paths'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'create_website',
+      description: 'Create a complete website in one reliable action. Saves editable website-src/index.html, styles.css, and script.js, then bundles them into one self-contained previewable index.html deliverable.',
+      parameters: {
+        type: 'object',
+        properties: {
+          output_path: { type: 'string', description: 'Bundled HTML deliverable path; use index.html by default' },
+          html: { type: 'string', description: 'Complete semantic HTML document without inline CSS or JavaScript' },
+          css: { type: 'string', description: 'Complete responsive stylesheet' },
+          javascript: { type: 'string', description: 'Complete client-side JavaScript, or an empty string when no interaction is needed' },
+        },
+        required: ['html', 'css', 'javascript'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'read_document',
       description: 'Extract PDF, DOCX, webpage, or text content from one concrete URL/workspace path. Pass the exact selected webpage or document address in the required url field.',
       parameters: {

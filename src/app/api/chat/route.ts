@@ -639,7 +639,7 @@ export async function POST(request: Request) {
       heartbeatEvent,
       {
         type: 'progress_update',
-        content: 'Preparing a fresh computer for this task…',
+        content: 'Thinking…',
       },
     ]
     try {

@@ -1010,7 +1010,7 @@ export async function startInitialAgentTask(conversationId: string): Promise<voi
   if (useChatStore.getState().activeId === conversationId) {
     useUIStore.getState().resetComputerPanelAutoOpenSuppression()
     setConversationStreaming(conversationId, true)
-    useUIStore.getState().setStreamingStatus('startup')
+    useUIStore.getState().setStreamingStatus('thinking')
   }
   useCreditStore.getState().startTask(conversationId, {
     chargeStart: false,
@@ -1591,7 +1591,7 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
       if (useChatStore.getState().activeId === conversationId) {
         useUIStore.getState().resetComputerPanelAutoOpenSuppression()
         setConversationStreaming(conversationId, true)
-        useUIStore.getState().setStreamingStatus(startFreshSandbox ? 'startup' : 'thinking')
+        useUIStore.getState().setStreamingStatus('thinking')
       }
       useCreditStore.getState().startTask(conversationId, {
         chargeStart: false,

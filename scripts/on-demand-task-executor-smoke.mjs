@@ -211,7 +211,7 @@ check('rollout holds intake and verifies Render before activating Vercel', () =>
 check('immediate progress is durable and truthful', () => {
   const initialEvents = sources.chatRoute.indexOf('const initialEvents: SSEEvent[]')
   const progress = sources.chatRoute.indexOf(
-    "content: 'Preparing a fresh computer for this task…'",
+    "content: 'Thinking…'",
     initialEvents,
   )
   const enqueue = sources.chatRoute.indexOf('await enqueueTaskJob({', progress)
@@ -220,8 +220,8 @@ check('immediate progress is durable and truthful', () => {
   assert(enqueue > progress, 'the preparation event must exist before enqueue begins')
   assert.match(
     sources.chatRoute.slice(initialEvents, enqueue + 300),
-    /type:\s*'progress_update'[\s\S]*Preparing a fresh computer for this task…[\s\S]*initialEvents,/,
-    'task acceptance must enqueue the preparation event instead of claiming work already happened',
+    /type:\s*'progress_update'[\s\S]*Thinking…[\s\S]*initialEvents,/,
+    'task acceptance must enqueue a truthful thinking event instead of claiming work already happened',
   )
   assert.match(
     exportedFunction(sources.taskJobs, 'enqueueTaskJob'),
@@ -926,7 +926,7 @@ if (withTurso) {
         { type: 'heartbeat', timestamp: Date.now() },
         {
           type: 'progress_update',
-          content: 'Preparing a fresh computer for this task…',
+          content: 'Thinking…',
         },
       ],
       coordinatorDispatch: {
@@ -1090,7 +1090,7 @@ if (withTurso) {
     assert.equal(atomic?.provider_job_id, `workflow-${suffix}`)
     assert.equal(
       JSON.parse(String(atomic?.progress_event || '{}')).content,
-      'Preparing a fresh computer for this task…',
+      'Thinking…',
     )
 
     await tursoExecute(

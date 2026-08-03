@@ -146,7 +146,7 @@ const RESEARCH_TOOLS = new Set([
 ])
 
 const DELIVERABLE_STEP_TOOLS = new Set([
-  'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'list_files',
+  'create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files', 'read_file', 'list_files',
   'image_search', 'browser_screenshot', 'browser_scroll',
 ])
 
@@ -190,7 +190,8 @@ const PARALLEL_SOURCE_EXTRACTION_TOOLS = new Set([
 
 const MAX_PARALLEL_SOURCE_EXTRACTIONS = 3
 
-const FILE_WRITE_TOOLS = new Set(['create_file', 'edit_file', 'append_file', 'export_pdf'])
+const FILE_WRITE_TOOLS = new Set(['create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files'])
+const MAX_ORDINARY_REPORT_APPENDS = 2
 
 const RESEARCH_FILE_DETOUR_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'read_file', 'list_files'])
 
@@ -538,6 +539,21 @@ function fileWritePreflightBlockReason(
     if (isFinalStep && requestedPath && !knownInRun && !explicitContinuation) {
       state.lastLoopSignal = { type: 'file_rewrite', tool: 'append_file' }
       return `INTERNAL_RECOVERY: "${requestedPath}" has not been created in this task. Start the saved report with exactly one create_file call first; use append_file only for later continuation chunks. Do not expose this correction to the user.`
+    }
+
+    const ordinaryReportTask =
+      /\b(?:report|research|analysis|brief|whitepaper|paper|study|findings|evidence|citations?)\b/i.test(requestText) &&
+      !/\b(?:book|novel|manuscript|chapters?|screenplay|thesis|dissertation)\b/i.test(requestText)
+    const successfulAppends = state.taskSuccessfulToolTypeCounts.get('append_file') || 0
+    if (
+      ordinaryReportTask &&
+      successfulAppends >= MAX_ORDINARY_REPORT_APPENDS &&
+      !isRecoveredPartialContinuation &&
+      !state.pendingDeliverableRevision &&
+      !explicitContinuation
+    ) {
+      state.lastLoopSignal = { type: 'file_rewrite', tool: 'append_file' }
+      return `INTERNAL_RECOVERY: The ordinary report already has ${successfulAppends} successful continuation writes. Do not append again. If material is actually missing, read the exact file once and use one targeted edit_file replacement; otherwise finish the report. Do not expose this correction to the user.`
     }
   }
 
@@ -1385,8 +1401,7 @@ function maybeSatisfyWebsiteStructureRequirement(state: AgentStateData): void {
     files.some(path => /(?:^|\/)(?:app\/)?page\.(?:tsx|jsx)$/.test(path)) &&
     files.some(path => /(?:^|\/)(?:app\/)?globals\.css$/.test(path) || path.endsWith('.css'))
   const hasStandaloneStructure =
-    files.some(path => /(?:^|\/)index\.html$/.test(path)) &&
-    files.some(path => path.endsWith('.css') || path.endsWith('.js') || path.endsWith('.ts'))
+    files.some(path => /(?:^|\/)index\.html$/.test(path))
 
   if (hasNextStructure || hasStandaloneStructure) {
     satisfyWorkLedgerRequirement(state, 'Complete runnable website files created', [
@@ -1878,7 +1893,7 @@ function compactCommandResultForModel(resultObj: Record<string, unknown> | null,
 
 function normalizeSandboxFilePath(path: string): string {
   const normalized = path.replace(/^\.?\/+/, '').replace(/\/+/g, '/')
-  return normalized || 'output.md'
+  return normalized
 }
 
 function decodeJsonStringFragment(fragment: string): string {
@@ -2558,7 +2573,7 @@ export class ToolPipeline {
       return
     }
 
-    if (!['create_file', 'append_file', 'edit_file', 'export_pdf'].includes(toolName)) return
+    if (!['create_file', 'create_website', 'append_file', 'edit_file', 'export_pdf', 'package_files'].includes(toolName)) return
     const path = typeof fileResult.path === 'string' && fileResult.path
       ? fileResult.path
       : typeof args.path === 'string' && args.path
@@ -2567,6 +2582,20 @@ export class ToolPipeline {
           ? args.output_path
           : ''
     if (!path || typeof fileResult.size !== 'number') return
+
+    if (toolName === 'create_website' && Array.isArray((result as { files?: unknown[] }).files)) {
+      for (const rawPath of (result as { files: unknown[] }).files) {
+        const generatedPath = typeof rawPath === 'string' ? rawPath : ''
+        if (!generatedPath) continue
+        const persisted = await persistSandboxTaskFile({
+          userId: this.userId,
+          conversationId: this.conversationId,
+          path: generatedPath,
+        })
+        if (!persisted) throw new Error(`Generated website file "${generatedPath}" could not be copied to durable task storage.`)
+      }
+      return
+    }
 
     const persisted = await persistSandboxTaskFile({
       userId: this.userId,
@@ -5095,6 +5124,23 @@ export class ToolPipeline {
       if (this.memory && path) {
         this.memory.recordFileCreated(path, state.currentStepIdx)
       }
+    } else if (!isError && tc.name === 'package_files') {
+      const archiveResult = result as { path?: string } | undefined
+      const path = archiveResult?.path || (args.output_path as string) || ''
+      if (path) state.createdFiles.add(path)
+      logWork(state, `Packaged files: ${path}`)
+      if (this.memory && path) this.memory.recordFileCreated(path, state.currentStepIdx)
+    } else if (!isError && tc.name === 'create_website') {
+      const websiteResult = result as { path?: string; files?: string[] } | undefined
+      const path = websiteResult?.path || (args.output_path as string) || 'index.html'
+      for (const generatedPath of websiteResult?.files || [path]) state.createdFiles.add(generatedPath)
+      maybeSatisfyWebsiteStructureRequirement(state)
+      logWork(state, `Created bundled website: ${path}`)
+      if (this.memory) {
+        for (const generatedPath of websiteResult?.files || [path]) {
+          this.memory.recordFileCreated(generatedPath, state.currentStepIdx)
+        }
+      }
     } else if (tc.name === 'read_document') {
       const resultActivityUrl = researchUrlFromToolCall(tc.name, args, result)
       if (!isError) {
@@ -5161,7 +5207,7 @@ export class ToolPipeline {
       logWork(state, `Edited file: ${(args.path as string) || ''}`)
     }
 
-    if (!isError && (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'delete_file' || tc.name === 'image_search')) {
+    if (!isError && (tc.name === 'create_file' || tc.name === 'create_website' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'package_files' || tc.name === 'delete_file' || tc.name === 'image_search')) {
       try {
         await this.persistGeneratedTaskFile(tc.name, args, result)
       } catch (error) {
@@ -5181,7 +5227,7 @@ export class ToolPipeline {
     // that turns an earlier draft into the requested report, but its arguments
     // contain replacements rather than a full `content` field.
     if (
-      (tc.name === 'create_file' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf') &&
+      (tc.name === 'create_file' || tc.name === 'create_website' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'package_files') &&
       (result as { size?: number } | undefined)?.size !== undefined
     ) {
       const savedPath = tc.name === 'export_pdf'
@@ -5211,6 +5257,17 @@ export class ToolPipeline {
       const pdfResult = result as { path?: string; size?: number } | undefined
       if (pdfResult?.path && pdfResult.size !== undefined) {
         await this.emitFileArtifact(tc.id, { path: pdfResult.path, content: '' }, result, state)
+      }
+    } else if (!isError && tc.name === 'package_files') {
+      const archiveResult = result as { path?: string; size?: number } | undefined
+      if (archiveResult?.path && archiveResult.size !== undefined) {
+        await this.emitFileArtifact(tc.id, { path: archiveResult.path, content: '' }, result, state)
+      }
+    } else if (!isError && tc.name === 'create_website') {
+      const websiteResult = result as { path?: string; size?: number } | undefined
+      if (websiteResult?.path && websiteResult.size !== undefined) {
+        await this.emitFileArtifact(tc.id, { path: websiteResult.path, content: '' }, result, state)
+        result = await this.maybeLaunchWebsiteAfterWrite(tc.id, websiteResult.path, result, state)
       }
     }
 
@@ -5248,6 +5305,18 @@ export class ToolPipeline {
       if (pdfResult?.path) {
         state.createdFiles.add(pdfResult.path)
         trackFileCreate(state, pdfResult.path)
+      }
+    } else if (!isError && tc.name === 'package_files') {
+      const archiveResult = result as { path?: string } | undefined
+      if (archiveResult?.path) {
+        state.createdFiles.add(archiveResult.path)
+        trackFileCreate(state, archiveResult.path)
+      }
+    } else if (!isError && tc.name === 'create_website') {
+      const websiteResult = result as { path?: string; files?: string[] } | undefined
+      for (const generatedPath of websiteResult?.files || []) {
+        state.createdFiles.add(generatedPath)
+        trackFileCreate(state, generatedPath)
       }
     }
 
@@ -5493,7 +5562,10 @@ export class ToolPipeline {
     if (fileResult.size !== undefined) {
       if (hasPlan && !isDeliverableStep && purpose !== 'deliverable') return
       let contentStr = String(args.content ?? '')
-      if ((fileResult.action === 'appended' || fileResult.action === 'edited') && this.conversationId && pathStr) {
+      const shouldReadSavedText =
+        (fileResult.action === 'appended' || fileResult.action === 'edited' || !contentStr) &&
+        !/\.(?:pdf|zip|png|jpe?g|gif|webp)$/i.test(pathStr)
+      if (shouldReadSavedText && this.conversationId && pathStr) {
         try {
           const diskFile = await readFileInSandbox(this.conversationId, pathStr)
           if (diskFile.content && !diskFile.content.startsWith('Error:')) {
@@ -5521,6 +5593,7 @@ export class ToolPipeline {
         fileName: pathStr.split('/').pop() || pathStr || 'file',
         filePath: pathStr,
         content: artifactContent,
+        size: fileResult.size,
         type: artifactType,
         ...(isImage && this.conversationId ? { imageUrl: this.durableImageUrl(pathStr) } : {}),
         ...(imageDataUrl ? { imageDataUrl } : {}),

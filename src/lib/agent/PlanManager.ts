@@ -474,7 +474,7 @@ function nonDeliverableStepGuidance(
   }
 
   if (isConcreteBuildStep(state.taskStrategy, stepTitle)) {
-    return `RULES:\n- Build now with create_file, edit_file, export_pdf, or read_file. Use append_file for prose or a runtime-confirmed partial streamed write only—never append a second TSX/JS/CSS module to an existing code file.\n- Website/app builds: commit to one coherent brand, visual system, navigation model, and section map; create each initial layout, page, stylesheet, and genuinely useful component once before advancing. app/layout.tsx must import './globals.css'. A cohesive page.tsx is valid—do not invent duplicate Header/Navbar/Navigation variants or speculative features. When a preview reports a compile error, read the named file and make one targeted edit; do not recreate or append alternate implementations. Verification is for running/preview/fixes, not first-time file creation.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT paste code or claim completion in chat; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact.'}`
+    return `RULES:\n- Build now with create_file, create_website, edit_file, export_pdf, package_files, or read_file. Use append_file for prose or a runtime-confirmed partial streamed write only—never append a second code module to an existing file.\n- Website/page builds default to one create_website call with complete HTML, CSS, and JavaScript inputs. The runtime saves the editable source set and bundles it into one self-contained previewable index.html; never read, verify, list, or append website files before that succeeds. Use React/Next/TSX only when the user explicitly requested that framework or the existing project already uses it. Commit to one coherent brand, visual system, navigation model, and section map. After the preview opens, inspect it and make only targeted edits; do not recreate alternate implementations.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT paste code or claim completion in chat; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact in the requested format, including HTML, PDF, ZIP, code, or data when requested.'}`
   }
 
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
@@ -482,7 +482,7 @@ function nonDeliverableStepGuidance(
   }
 
   if (state.taskStrategy === 'creative') {
-    return `RULES:\n- This is a long-form writing step. Save concrete prose to files now.\n- For novels/books, write chapter or section files in chunks (for example chapters/01-title.md), then later collate them into the final manuscript.\n- Use create_file for a new chapter/outline file and append_file for continuation chunks. Do NOT keep long prose only in the reply.`
+    return `RULES:\n- This is a writing step. Save concrete prose to files now.\n- For an ordinary report or research write-up, prefer one complete, coherent create_file call using the available full output budget; append only after a genuine provider clip or when verified missing material belongs at the end.\n- For novels, books, theses, and manuscripts, write chapter or section files in intentional chunks (for example chapters/01-title.md), then later collate them into the final manuscript.\n- Use edit_file for targeted corrections. Do NOT keep requested deliverable prose only in the reply.`
   }
 
   if (state.taskStrategy === 'browse') {
@@ -599,6 +599,7 @@ export class PlanManager {
   }
 
   startPlanCall(): void {
+    if (!this.emitter.isClosed) this.emitter.progressUpdate('Planning…')
     console.log('[AgentDiagnostics] Planner scheduled', {
       complexity: this.taskComplexity,
       messages: this.messages.length,
@@ -1028,7 +1029,7 @@ Requirements:
       const stepGuidance = imageOnlyStep
         ? `RULES:\n- This is a direct image retrieval step. Call image_search once with the user's requested subject.\n- When image_search downloads or returns images, you are DONE. Do NOT add separate browser, selection, file, or compile steps.`
         : isFirstStepDeliverable
-        ? `RULES:\n- This is the deliverable step. ${strategyGuidance?.deliverable || 'Create the actual final output file using create_file. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'}\n- For long manuscripts, assemble/collate chapter files into deliverables/final-manuscript.md instead of trying one giant write.\n- When the file is created and complete, you are DONE.`
+        ? `RULES:\n- This is the deliverable step. ${strategyGuidance?.deliverable || 'Create the actual final output file using create_file. Choose a concise topic-specific filename yourself unless the user supplied an exact name; never use the plan-step title or a generic fallback filename. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'}\n- For long manuscripts, assemble/collate chapter files into a model-named final manuscript instead of trying one giant write.\n- When the file is created and complete, you are DONE.`
         : nonDeliverableStepGuidance(state, resolvedPlan[0], this.taskComplexity)
       const msg = {
         role: 'system',
@@ -1181,7 +1182,7 @@ Requirements:
     )
     const stepHint = isLastStep
       ? lastStepNeedsSavedArtifact
-        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
+        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file. Choose a concise topic-specific filename yourself unless the user supplied an exact name; never use the plan-step title or a generic fallback filename. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
         : 'This is the final answer step. Deliver the requested answer directly in chat from completed work. Do not create a file unless the user explicitly requested one.'
       : nonDeliverableStepGuidance(state, state.currentPlanItems[state.currentStepIdx], this.taskComplexity)
     return {

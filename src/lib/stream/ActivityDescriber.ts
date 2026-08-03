@@ -32,7 +32,7 @@ export function strictActionLabelFromArgs(args: Record<string, unknown>): string
   const cleaned = raw
     .replace(/["'“”‘’]/g, '')
     .replace(/[{}()[\]]/g, ' ')
-    .replace(/\b(?:browser_|web_search|image_search|create_file|edit_file|append_file|read_file|read_document|http_request|execute_command|run_code)\b/gi, ' ')
+    .replace(/\b(?:browser_|web_search|image_search|create_file|create_website|package_files|edit_file|append_file|read_file|read_document|http_request|execute_command|run_code)\b/gi, ' ')
     .replace(/\s+/g, ' ')
     .trim()
 

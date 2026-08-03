@@ -53,7 +53,7 @@ import {
   MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES,
   STREAM_MAX_RETRIES, STREAM_RETRY_BASE_MS, STREAM_RETRY_EXPONENT,
   STREAM_REQUEST_TIMEOUT_MS, STREAM_RETRY_MAX_DELAY_MS,
-  MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, URGENCY_FINAL_FRACTION,
+  MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, MODEL_MAX_COMPLETION_TOKENS, URGENCY_FINAL_FRACTION,
   TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL_MS, TOOL_CACHE_MAX_SIZE_CHARS,
   MIN_TOOL_CALLS_BY_COMPLEXITY,
   MAX_ITERATIONS,
@@ -114,7 +114,10 @@ import { ReflectionEngine } from './ReflectionEngine'
 import { GoalTracker } from './GoalTracker'
 import { OutputVerifier } from './OutputVerifier'
 import { auditAgentCompletion, MISSING_FINAL_INLINE_ANSWER } from './CompletionAudit'
-import { shouldDefaultFrontendToNextTsx } from './frontendDefaults'
+import {
+  shouldDefaultFrontendToNextTsx,
+  shouldDefaultFrontendToStandaloneHtml,
+} from './frontendDefaults'
 import { analyzeTaskIntent } from './TaskIntent'
 import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
 import { isWebsiteEntryPath } from '@/lib/localWebsiteServer'
@@ -334,7 +337,7 @@ function completionUsageForNarration(
   })
 }
 
-const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'export_pdf'])
+const FINAL_DELIVERABLE_WRITE_TOOLS = new Set(['create_file', 'create_website', 'append_file', 'edit_file', 'export_pdf', 'package_files'])
 const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000
 const FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000
 const FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 60_000
@@ -389,7 +392,7 @@ function toolResultPath(result: ToolExecutionResult): string {
     if (result.tc.name === 'export_pdf') {
       return String((result.result as { path?: string } | undefined)?.path || args.output_path || '')
     }
-    return String(args.path || args.output_path || args.source_path || '')
+    return String((result.result as { path?: string } | undefined)?.path || args.path || args.output_path || args.source_path || '')
   } catch {
     return String((result.result as { path?: string } | undefined)?.path || '')
   }
@@ -527,7 +530,7 @@ async function deliverableContentForVerification(
 
   const path = toolResultPath(result)
   let content = String(args.content || '')
-  if (path && result.tc.name !== 'export_pdf') {
+  if (path && result.tc.name !== 'export_pdf' && result.tc.name !== 'package_files') {
     try {
       const diskFile = await readFileInSandbox(conversationId, path)
       if (typeof diskFile.content === 'string' && !diskFile.content.startsWith('Error:')) {
@@ -919,15 +922,6 @@ function cleanDraftContent(content: string): string {
     .trim()
 }
 
-function slugifyDraftName(input: string): string {
-  const slug = input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 64)
-  return slug || 'draft'
-}
-
 function shouldAutosaveTextOnlyDraft(
   state: AgentStateData,
   content: string,
@@ -975,15 +969,6 @@ function repairPrematureFinalStepJump(state: AgentStateData): boolean {
   return true
 }
 
-function autosaveDraftPath(state: AgentStateData): string {
-  const title = state.currentPlanItems?.[state.currentStepIdx] || 'draft'
-  const slug = slugifyDraftName(title)
-  const isLastStep = !!state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
-  return isLastStep
-    ? `deliverables/${slug}.md`
-    : `drafts/step-${state.currentStepIdx + 1}-${slug}.md`
-}
-
 function requestedMarkdownDeliverablePath(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
@@ -1010,16 +995,6 @@ function requestedMarkdownDeliverablePath(
     }
   }
   return null
-}
-
-function textSavedDeliverableTarget(
-  state: AgentStateData,
-  messages: Array<{ role: string; content: string }>,
-): NonNullable<StreamToolCallPolicy['textSavedDeliverable']> {
-  return {
-    id: `autosave_${state.iterations}_${state.currentStepIdx}`,
-    path: requestedMarkdownDeliverablePath(state, messages) || autosaveDraftPath(state),
-  }
 }
 
 function shouldKeepAssistantInjection(content: string): boolean {
@@ -1064,6 +1039,17 @@ function taskWantsPdfArtifact(
     .map(m => m.content)
     .join(' ')
   return /\b(?:pdf|export)\b/i.test(`${currentToolIntentText(state)} ${userText}`)
+}
+
+function taskWantsZipArtifact(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+): boolean {
+  const userText = messages
+    .filter(m => m.role === 'user')
+    .map(m => m.content)
+    .join(' ')
+  return /\b(?:zip|archive|package(?:d)?\s+(?:files?|source|project))\b/i.test(`${currentToolIntentText(state)} ${userText}`)
 }
 
 function taskNeedsSavedFinalArtifact(
@@ -1275,17 +1261,12 @@ function shouldUseTextSavedFinalDeliverable(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
 ): boolean {
-  // Native file-tool streaming is the primary path even on OpenRouter. It
-  // exposes the real target and exact generated body deltas while the model is
-  // writing. If a required native file turn nevertheless returns prose, switch
-  // the very next turn into the live text-then-save lane. This keeps native
-  // actions primary while bounding provider routes that silently ignore
-  // tool_choice instead of paying for the same hidden draft indefinitely.
-  return ASSISTANT_PROVIDER === 'openrouter' &&
-    (state.toolJsonRecoveryCount >= 2 || state.consecutiveNoToolCalls >= 1) &&
-    finalSavedDeliverableTurn(state, messages) &&
-    !state.partialFileWriteRecoveryPending &&
-    !hasSavedFinalDeliverableCandidate(state)
+  void state
+  void messages
+  // Never manufacture a filename from a plan title or local fallback. Saved
+  // deliverables must arrive through the model's native file call, where the
+  // model explicitly authors the topic-specific path.
+  return false
 }
 
 function hasSavedFinalDeliverableCandidate(state: AgentStateData): boolean {
@@ -1316,6 +1297,7 @@ function finalDeliverableRevisionToolNames(
     'append_file',
     'edit_file',
     ...(taskWantsPdfArtifact(state, messages) ? ['export_pdf'] : []),
+    ...(taskWantsZipArtifact(state, messages) ? ['package_files'] : []),
   ])
 }
 
@@ -1415,7 +1397,7 @@ function finalSavedDeliverableToolCallInstruction(
     ? `Use append_file to continue "${pending.path}".`
     : existingPath
       ? `Use append_file or edit_file against "${existingPath}".`
-      : 'Use create_file for the final saved output under deliverables/ unless the user named a different path.'
+      : 'Use create_file for the final saved output. Choose a concise topic-specific filename yourself unless the user supplied an exact path; never copy the plan-step title or use a generic fallback filename.'
   const chunkGuidance = !pending && !existingPath
     ? 'For the first create_file call, write one coherent complete Markdown deliverable whenever it fits. Do not deliberately stop after the introduction or first section; append_file is only for a genuinely clipped or still-incomplete saved file.'
     : 'Append the next complete, substantive section only—normally 350–650 words when that much content remains, or all remaining content when less remains. Do not repeat existing headings, claims, citations, or paragraphs, and never dribble out a tiny fragment.'
@@ -1626,6 +1608,7 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
     'Do not write a status update, plan, source summary, or permission question.',
     'Use create_file for the first saved output; use append_file only after that file exists and only when additional content is genuinely needed; use edit_file only for a targeted fix.',
     'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
+    'Choose a concise topic-specific report filename in the create_file path. Never copy the plan-step title and never use output.md, report.md, draft.md, or another runtime fallback.',
     'For create_file and append_file, put action_label, plan_step_index, and path before content so the visible file action starts immediately.',
     'For the first create_file call, write one coherent complete Markdown deliverable whenever it fits. For a professional report, synthesize substantive prose under topic-specific headings, include an opening summary and conclusion when useful, and cite researched claims with a references section. Adapt the structure to the request rather than mechanically filling a template.',
     'Do not deliberately stop after the introduction or first section. Use append_file only if the provider genuinely clips the write or the saved file is still missing necessary material, and always end each write at a clean sentence or section boundary.',
@@ -2641,7 +2624,23 @@ async function getNextWebsiteCompletionBlocker(
   state: AgentStateData,
   originalRequest: string,
 ): Promise<string | null> {
-  if (!shouldDefaultFrontendToNextTsx(originalRequest)) return null
+  const expectsNext = shouldDefaultFrontendToNextTsx(originalRequest)
+  const expectsStandalone = shouldDefaultFrontendToStandaloneHtml(originalRequest)
+  if (!expectsNext && !expectsStandalone) return null
+
+  if (expectsStandalone) {
+    const created = normalizedCreatedFileSet(state.createdFiles)
+    if (!created.has('index.html')) {
+      return 'WEBSITE COMPLETION BLOCKED: The requested website has not been created. Make exactly one create_website call with complete HTML, CSS, and JavaScript. The runtime will save the editable source set and bundle it into a self-contained index.html. Do not read, list, verify, or append website files before creating them.'
+    }
+    if (!state.websiteBrowserCheckDone) {
+      return 'WEBSITE COMPLETION BLOCKED: index.html exists, but its managed local preview has not opened successfully in the Computer panel. Make one targeted edit only if the preview reported a concrete problem; otherwise allow the automatic preview to open before finishing.'
+    }
+    if (!state.websiteResponsiveCheckDone) {
+      return 'WEBSITE COMPLETION BLOCKED: The local index.html preview is open but has not been visually inspected. Use browser_screenshot or browser_scroll once at the existing browser size, then make only a targeted edit if a real defect is visible.'
+    }
+    return null
+  }
 
   const websiteProblems = await getNextWebsiteCompletionProblems(conversationId, state.createdFiles)
   if (websiteProblems.missingFiles.length > 0 || websiteProblems.structureIssues.length > 0) {
@@ -2675,9 +2674,9 @@ async function getNextWebsiteCompletionBlocker(
 }
 
 function maxTokensForIteration(state: AgentStateData): number {
-  const maxNormalOutputTokens = 8192
-  const maxBuildOutputTokens = 24_576
-  const maxDeliverableOutputTokens = 24_576
+  const maxNormalOutputTokens = MODEL_MAX_COMPLETION_TOKENS
+  const maxBuildOutputTokens = MODEL_MAX_COMPLETION_TOKENS
+  const maxDeliverableOutputTokens = MODEL_MAX_COMPLETION_TOKENS
   if (state.deadlineFinalizationStarted) return maxDeliverableOutputTokens
   if (state.currentPhase === 'deliver') {
     return maxDeliverableOutputTokens
@@ -3311,6 +3310,7 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             'Start the file tool call immediately; do not spend a hidden pass outlining the deliverable first.',
             'For the first saved output, use create_file with action_label, plan_step_index, and path before content. Do not choose append_file unless the same file was already created and more content is actually required.',
             'For reports, research findings, and substantial write-ups, create a .md file under deliverables/ unless the user named a different path.',
+            'Choose a concise topic-specific filename yourself in the create_file path. Never derive it from the plan-step title and never use a generic fallback filename.',
             state.stepToolCallCount > 0 && !hasSavedFinalDeliverableCandidate(state)
               ? 'A previous final-write turn did not save a deliverable; make a shorter complete create_file call now instead of continuing to reason.'
               : '',
@@ -3523,8 +3523,8 @@ const FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS = 60_000
 const FINAL_INLINE_ANSWER_INACTIVITY_TIMEOUT_MS = 15_000
 const FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = 1_200
 const FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS = 420
-const FINAL_INLINE_ANSWER_MAX_TOKENS = 1_200
-const FINAL_INLINE_REPORT_MAX_TOKENS = 3_000
+const FINAL_INLINE_ANSWER_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
+const FINAL_INLINE_REPORT_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 60_000
 const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 60_000
 const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 60_000
@@ -3536,14 +3536,14 @@ const FINAL_SAVED_DELIVERABLE_TEXT_ITERATION_TIMEOUT_MS = 60_000
 const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 15_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
-const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = 1_800
-const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 2_400
-const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 2_400
+const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
 const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
 const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 420
-const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = 700
+const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
@@ -3692,7 +3692,8 @@ export class AgentLoop {
     }
 
     const content = cleanDraftContent(assistantContent)
-    const target = streamedTarget || textSavedDeliverableTarget(state, this.options.messages)
+    const target = streamedTarget
+    if (!target) return null
     const { path, id } = target
 
     if (!target.started) {
@@ -5978,7 +5979,7 @@ export class AgentLoop {
                 break
               }
               if (deliverableResult && !state.deliverableVerificationDone) {
-                if (deliverableResult.tc.name !== 'export_pdf') {
+                if (deliverableResult.tc.name !== 'export_pdf' && deliverableResult.tc.name !== 'package_files') {
                   try {
                     const args = JSON.parse(deliverableResult.tc.arguments) as { content?: string; path?: string }
                     const verifiedContent = conversationId
@@ -6136,7 +6137,7 @@ export class AgentLoop {
                     phase = 'COMPLETE'
                     break
                   }
-                } else {
+                } else if (deliverableResult.tc.name === 'export_pdf') {
                   const originalRequest = messages[messages.length - 1]?.content || ''
                   const wantsPdf = /\bpdf\b/i.test(originalRequest)
                   const pdfPath = (deliverableResult.result as { path?: string })?.path || ''
@@ -6167,7 +6168,7 @@ export class AgentLoop {
             // runnable file set is complete. Integration edits are just as
             // meaningful as first-time creates.
             const nonNoteFileCreated = lastToolResults.some(r => {
-              if (!['create_file', 'append_file', 'edit_file'].includes(r.tc.name) || r.isError) return false
+              if (!['create_file', 'create_website', 'append_file', 'edit_file'].includes(r.tc.name) || r.isError) return false
               try {
                 const parsed = JSON.parse(r.tc.arguments) as { path?: string }
                 const p = String(parsed?.path || '')
@@ -7076,6 +7077,8 @@ export class AgentLoop {
             activeTools = []
           } else {
             const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
+            const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
+            const finalWantsWebsite = shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '')
             const deadlineFinalTools = new Set([
               'create_file',
               'append_file',
@@ -7083,6 +7086,8 @@ export class AgentLoop {
               'read_file',
               'list_files',
               ...(finalWantsPdf ? ['export_pdf'] : []),
+              ...(finalWantsZip ? ['package_files'] : []),
+              ...(finalWantsWebsite ? ['create_website'] : []),
             ])
             activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
               .filter(t => deadlineFinalTools.has(t.function?.name || ''))
@@ -7112,6 +7117,8 @@ export class AgentLoop {
           } else {
             const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
             const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
+            const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
+            const finalWantsWebsite = shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '')
             const existingFinalPath = existingFinalDeliverablePath(state)
             const allowedFinalTools = existingFinalPath
               ? finalDeliverableRevisionToolNames(state, this.options.messages)
@@ -7122,6 +7129,8 @@ export class AgentLoop {
                   'read_file',
                   'list_files',
                   ...(finalWantsPdf ? ['export_pdf'] : []),
+                  ...(finalWantsZip ? ['package_files'] : []),
+                  ...(finalWantsWebsite ? ['create_website'] : []),
                   ...(finalWantsImage ? ['image_search'] : []),
                 ])
             activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
@@ -7132,6 +7141,7 @@ export class AgentLoop {
           }
         } else if (budgetFraction >= URGENCY_FINAL_FRACTION) {
           const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
+          const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
           const allActiveTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
           if (state.taskStrategy === 'browse') {
             activeTools = allActiveTools.filter(t => {
@@ -7149,9 +7159,11 @@ export class AgentLoop {
               .filter(t => {
                 const name = t.function?.name
                 return name === 'create_file' ||
+                  name === 'create_website' ||
                   name === 'edit_file' ||
                   name === 'append_file' ||
                   name === 'export_pdf' ||
+                  (finalWantsZip && name === 'package_files') ||
                   name === 'read_file' ||
                   name === 'browser_screenshot' ||
                   name === 'browser_scroll' ||
@@ -7186,6 +7198,26 @@ export class AgentLoop {
           }
         }
         activeTools = pruneToolsForCurrentStep(compactResearchToolState, activeTools)
+        const standaloneWebsiteNeedsInitialCreate =
+          (state.currentPhase === 'build' || state.currentPhase === 'deliver') &&
+          shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
+          !normalizedCreatedFileSet(state.createdFiles).has('index.html')
+        if (standaloneWebsiteNeedsInitialCreate) {
+          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
+          activeTools = activeTools.filter(tool => tool.function?.name === 'create_website')
+          requestMessages = [
+            ...requestMessages,
+            {
+              role: 'system',
+              content: 'INITIAL WEBSITE BUILD REQUIRED: Make exactly one native create_website call now. Supply a complete semantic HTML document, a complete responsive CSS stylesheet, and any needed JavaScript. The runtime will save the three editable source files and bundle them into one previewable index.html. Do not call read_file, list_files, append_file, browser tools, or verification before this succeeds. Do not emit visible status prose.',
+            } as ChatMessageParam,
+          ]
+          console.log('[AgentDiagnostics] Narrowed initial website action to create_website', {
+            step: state.currentStepIdx,
+            beforeTools,
+            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
+          })
+        }
         if (compactResearchNeedsTool && compactResearchNeedsOpenedSource(state)) {
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
           activeTools = compactResearchOpenedSourceToolsForState(state, activeTools)
@@ -7309,6 +7341,7 @@ export class AgentLoop {
         if (
           finalSavedDeliverableNeedsTool &&
           !partialFileContinuationNeedsTool &&
+          !standaloneWebsiteNeedsInitialCreate &&
           !hasSavedFinalDeliverableCandidate(state)
         ) {
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
@@ -7673,9 +7706,6 @@ export class AgentLoop {
           allowParallelSourceExtractionCalls: allowParallelSourceToolCalls,
           maxParallelSourceExtractionCalls,
           cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn,
-          ...(useTextFinalDeliverable
-            ? { textSavedDeliverable: textSavedDeliverableTarget(state, this.options.messages) }
-            : {}),
         }
         // Capture the exact request policy before awaiting provider response
         // headers. If the request itself times out, the outer loop can still

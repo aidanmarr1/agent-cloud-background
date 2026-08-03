@@ -49,4 +49,4 @@ export type SSEEvent = SSEEventPayload & {
   runId?: string
 }
 
-export type StreamingStatus = 'startup' | 'thinking' | 'searching' | 'browsing' | 'coding' | 'writing' | 'analyzing' | 'running' | 'stopping' | null
+export type StreamingStatus = 'startup' | 'planning' | 'thinking' | 'searching' | 'browsing' | 'coding' | 'writing' | 'analyzing' | 'running' | 'stopping' | null

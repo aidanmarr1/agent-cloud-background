@@ -10,7 +10,14 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-export const MAX_CONTEXT_MESSAGES = 8
+// Qwen 3.7 Flash exposes a 1M-token context window (983,616 prompt tokens).
+// Keep the complete bounded agent run in model context instead of discarding
+// all but eight messages. ContextManager still removes redundant file bodies
+// and stale screenshots, which preserves usable evidence without repeatedly
+// paying for content that already exists in the sandbox.
+export const MODEL_MAX_PROMPT_TOKENS = 983_616
+export const MODEL_MAX_COMPLETION_TOKENS = 65_536
+export const MAX_CONTEXT_MESSAGES = 4_096
 export const MAX_TIMEOUT_NUDGES = 1
 export const AGENT_RUN_MAX_DURATION_MS = 270_000
 export const AGENT_DEADLINE_FINALIZATION_BUFFER_MS = 150_000
@@ -140,7 +147,7 @@ export const TOOL_TYPE_RATE_LIMITS: Record<string, number> = {
   browser_find_text: 24,      // Allow targeted in-page evidence checks
   browser_scroll: 40,         // Long pages and mobile flows need repeated reveals
   create_file: 24,            // Enough for multi-part manuscripts/apps
-  append_file: 100,           // Long writing tasks can still append chunks
+  append_file: 100,           // Book/manuscript tasks can still use intentional chunks
   export_pdf: 16,             // Allow re-export after revisions
   edit_file: 60,              // Revisions across large manuscripts are expected
 }
@@ -281,13 +288,13 @@ export const PHASE_TOOL_FILTER: Record<string, string[]> = {
     'create_file', 'edit_file', 'append_file',  // ToolPipeline permits only explicitly requested phase-scoped notes
   ],
   build: [
-    'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'delete_file', 'list_files',
+    'create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files', 'read_file', 'delete_file', 'list_files',
     'execute_command', 'run_code',
     'browser_screenshot', 'browser_scroll',
     'image_search',
   ],
   deliver: [
-    'create_file', 'edit_file', 'append_file', 'export_pdf', 'read_file', 'list_files',
+    'create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files', 'read_file', 'list_files',
     'execute_command', 'run_code',
     'browser_screenshot', 'browser_scroll',
     'image_search',

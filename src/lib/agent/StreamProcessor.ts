@@ -90,7 +90,7 @@ const PARALLEL_STREAM_SOURCE_EXTRACTION_TOOLS = new Set([
   'read_document',
   'http_request',
 ])
-const STREAMED_FILE_WRITE_TOOLS = new Set(['create_file', 'append_file', 'edit_file'])
+const STREAMED_FILE_WRITE_TOOLS = new Set(['create_file', 'create_website', 'append_file', 'edit_file'])
 const MAX_PARALLEL_STREAM_SOURCE_EXTRACTIONS = 3
 const DISPLAY_FUTURE_ACTION_SENTENCE_RE =
   /(?:^|(?<=[.!?]\s))\s*(?:let\s+me|i(?:'|’)?ll|i\s+(?:will|need\s+to|have\s+to)|i(?:'|’)?m\s+going\s+to)\b[^.!?\n]*(?:research|search|look|gather|read|open|try|check|verify|move|continue|get|fetch|use|do|ground)\b[^.!?\n]*(?:[.!?]|$)/gi
@@ -286,6 +286,11 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
         addStringMetrics(args, rawArgs, 'new_string')
       }
       break
+    case 'create_website':
+      addString('output_path')
+      args.path = typeof args.output_path === 'string' && args.output_path ? args.output_path : 'index.html'
+      addStringMetrics(args, rawArgs, 'html')
+      break
     case 'list_files':
       addString('directory')
       addString('path')
@@ -371,7 +376,7 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
   // it on a recovery turn). The path is enough to open a truthful live action
   // and preview immediately; execution applies the same fallback contract.
   if (
-    (toolName === 'create_file' || toolName === 'append_file' || toolName === 'edit_file') &&
+    (toolName === 'create_file' || toolName === 'create_website' || toolName === 'append_file' || toolName === 'edit_file') &&
     typeof args.path === 'string' &&
     args.path.length > 0 &&
     !strictActionLabelFromArgs(args)
@@ -394,7 +399,7 @@ function searchWouldBePreflightBlocked(toolName: string, args: Record<string, un
 }
 
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
-  const isFileWrite = toolName === 'create_file' || toolName === 'append_file' || toolName === 'edit_file'
+  const isFileWrite = toolName === 'create_file' || toolName === 'create_website' || toolName === 'append_file' || toolName === 'edit_file'
   if (!strictActionLabelFromArgs(args) && !isFileWrite) return false
 
   if (toolName === 'web_search' || toolName === 'image_search') {
@@ -403,6 +408,10 @@ function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, u
   }
 
   if (toolName === 'create_file' || toolName === 'append_file') {
+    return typeof args.path === 'string' && args.path.length > 0
+  }
+
+  if (toolName === 'create_website') {
     return typeof args.path === 'string' && args.path.length > 0
   }
 
@@ -432,7 +441,7 @@ function pendingDeliverableRevisionAllowsPreview(
 ): boolean {
   const pending = state.pendingDeliverableRevision
   if (!pending) return true
-  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return true
+  if (toolName !== 'create_file' && toolName !== 'create_website' && toolName !== 'append_file' && toolName !== 'edit_file') return true
   if (toolName !== 'append_file' && toolName !== 'edit_file') return false
 
   const rawPath = typeof args.path === 'string' ? args.path : ''
@@ -1114,7 +1123,11 @@ export class StreamProcessor {
 
               if (STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)) {
                 const path = typeof earlyArgs.path === 'string' ? earlyArgs.path : ''
-                const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
+                const contentKey = toolCall.name === 'edit_file'
+                  ? 'new_string'
+                  : toolCall.name === 'create_website'
+                    ? 'html'
+                    : 'content'
                 const content = extractPartialStringArg(toolCall.arguments, contentKey)
                 const hasDisplayLabel = typeof earlyArgs.action_label === 'string' && earlyArgs.action_label.length > 0
                 if (toolCall.provisionalStartEmitted && currentStepPreview && revisionPreviewAllowed && path && hasDisplayLabel) {

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import {
   isFrontendArtifactRequest,
   requestExplicitlyWantsStandaloneHtml,
+  requestExplicitlyWantsFrameworkFrontend,
+  shouldDefaultFrontendToStandaloneHtml,
   shouldDefaultFrontendToNextTsx,
 } from '../src/lib/agent/frontendDefaults.ts'
 
@@ -22,13 +24,17 @@ assert.equal(isFrontendArtifactRequest('The sidebar layout needs to be fixed on 
 assert.equal(isFrontendArtifactRequest('Research ceramic styles, then build a portfolio website'), true)
 assert.equal(isFrontendArtifactRequest('Analyze the competitors and then design a dashboard'), true)
 
-assert.equal(shouldDefaultFrontendToNextTsx('Build a portfolio website for a ceramic studio'), true)
-assert.equal(shouldDefaultFrontendToNextTsx('Build a dashboard for kiln bookings'), true)
+assert.equal(shouldDefaultFrontendToNextTsx('Build a portfolio website for a ceramic studio'), false)
+assert.equal(shouldDefaultFrontendToNextTsx('Build a dashboard for kiln bookings'), false)
+assert.equal(shouldDefaultFrontendToStandaloneHtml('Build a portfolio website for a ceramic studio'), true)
+assert.equal(shouldDefaultFrontendToStandaloneHtml('Build a Next.js dashboard for kiln bookings'), false)
+assert.equal(shouldDefaultFrontendToNextTsx('Build a Next.js dashboard for kiln bookings'), true)
 assert.equal(shouldDefaultFrontendToNextTsx('Build a standalone HTML website for a ceramic studio'), false)
 assert.equal(shouldDefaultFrontendToNextTsx('Make index.html for a ceramic studio'), false)
 assert.equal(shouldDefaultFrontendToNextTsx('Research how Manus AI uses UI and UX design in its consumer product'), false)
 
 assert.equal(requestExplicitlyWantsStandaloneHtml('Build a single HTML file'), true)
 assert.equal(requestExplicitlyWantsStandaloneHtml('Build a Next.js website'), false)
+assert.equal(requestExplicitlyWantsFrameworkFrontend('Build a React website'), true)
 
 console.log('frontend default smoke checks passed')

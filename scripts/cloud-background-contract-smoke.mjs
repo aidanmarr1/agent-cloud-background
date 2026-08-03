@@ -242,8 +242,8 @@ assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.the
 assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'background task enqueue must not use local canned startup plans')
 assert.match(
   chatRoute,
-  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Preparing a fresh computer for this task…',\s*\},\s*\]/,
-  'background task startup replay should immediately show truthful computer preparation before the worker-owned plan',
+  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Thinking…',\s*\},\s*\]/,
+  'background task startup replay should immediately show truthful thinking before worker-owned startup stages',
 )
 assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'background task acceptance must await the durable enqueue while worker planning owns visible steps')
 assert.match(chatRoute, /error instanceof TaskConversationConflictError[\s\S]*CONVERSATION_TASK_ALREADY_RUNNING[\s\S]*status: 409/, 'the durable conversation conflict must be returned as HTTP 409')

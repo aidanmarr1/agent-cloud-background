@@ -1,7 +1,7 @@
 'use client'
 
 import { v4 as uuidv4 } from 'uuid'
-import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult, BrowseResult, BrowserResult, FileResult, ImageSearchPanelItem, TerminalResult, Artifact, ComputerPanelItem, Message } from '@/types'
+import type { SSEEvent, TaskStep, TaskGroup, Subtask, SubtaskType, SearchResult, BrowseResult, BrowserResult, FileResult, ImageSearchPanelItem, TerminalResult, Artifact, ComputerPanelItem, Message, StreamingStatus } from '@/types'
 import { useUIStore } from '@/store/ui'
 import { useChatStore } from '@/store/chat'
 import { useSettingsStore } from '@/store/settings'
@@ -54,11 +54,12 @@ function isDeferredBrowseToolStart(name: string): boolean {
   return false
 }
 
-function queuedComputerPreparationTitle(content: string): string | null {
+function queuedStartupStatus(content: string): Exclude<StreamingStatus, null> | null {
   const trimmed = content.trim()
-  return /^Preparing a fresh computer for this task(?:…|\.\.\.)?$/.test(trimmed)
-    ? trimmed
-    : null
+  if (/^Thinking(?:…|\.\.\.)?$/.test(trimmed)) return 'thinking'
+  if (/^Planning(?:…|\.\.\.)?$/.test(trimmed)) return 'planning'
+  if (/^(?:Initializing computer|Preparing a fresh computer for this task)(?:…|\.\.\.)?$/.test(trimmed)) return 'startup'
+  return null
 }
 
 function isStaleFutureWorkAck(text: string): boolean {
@@ -612,27 +613,14 @@ export class EventDispatcher {
   }
 
   private handleProgressUpdate(event: ProgressUpdateEvent): void {
-    // The durable acceptance event arrives before the worker has emitted its
-    // plan. Render it as a provisional running group immediately instead of
-    // dropping it behind the generic Thinking indicator. The real plan
-    // replaces this shell while preserving any tool starts that raced ahead.
+    // Startup status belongs in the typing/header indicator, not in a fake
+    // one-step plan. The first task group appears only when the complete plan
+    // event arrives from the worker.
     if (!this.planTextParsed) {
-      const startupTitle = queuedComputerPreparationTitle(event.content)
-      if (!startupTitle) return
-      const existing = this.parsedGroups[0]
-      this.parsedGroups = [{
-        id: existing?.id || `task-startup-${this.conversationId}`,
-        index: -1,
-        title: startupTitle,
-        status: 'running',
-        subtasks: [...safeSubtasks(existing)],
-        narrations: [],
-        synthesis: '',
-        startedAt: existing?.startedAt || Date.now(),
-      }]
-      this.currentGroupIdx = 0
-      this.groupsActive = true
-      this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+      const startupStatus = queuedStartupStatus(event.content)
+      if (startupStatus && this.isActiveConversation()) {
+        useUIStore.getState().setStreamingStatus(startupStatus)
+      }
       return
     }
 

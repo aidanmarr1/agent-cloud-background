@@ -61,8 +61,8 @@ assert.match(
 assert.match(streamProcessor, /beginBufferedEmission\(\)/, 'model-turn buffering must remain enabled')
 assert.match(
   agentLoop,
-  /function shouldUseTextSavedFinalDeliverable[\s\S]*state\.toolJsonRecoveryCount >= 2 \|\| state\.consecutiveNoToolCalls >= 1[\s\S]*finalSavedDeliverableTurn\(state, messages\)/,
-  'OpenRouter saved deliverables must attempt a native live file tool once, then enter bounded text-then-save recovery',
+  /function shouldUseTextSavedFinalDeliverable[\s\S]*Never manufacture a filename from a plan title or local fallback[\s\S]*return false/,
+  'OpenRouter saved deliverables must stay on the native file-tool path so the model authors the filename',
 )
 assert.match(taskJobs, /function shouldPublishFileEventLive[\s\S]*file_content_start[\s\S]*create_file[\s\S]*append_file/, 'file starts and live content must have an explicit low-latency event lane')
 assert.match(taskJobs, /publishFileEventLive\(job, record\)/, 'file events must be published to connected task streams before the durable batch completes')

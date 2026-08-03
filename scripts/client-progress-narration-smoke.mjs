@@ -70,48 +70,39 @@ const progressText = 'The three verified benchmarks now agree that short action 
 
   dispatcher.dispatch({
     type: 'progress_update',
-    content: 'Preparing a fresh computer for this task…',
+    content: 'Thinking…',
   })
   dispatcher.flushPendingUpdates()
 
-  assert.equal(groups.length, 1, 'pre-plan durable progress must create an immediate visible task group')
-  assert.equal(groups[0].title, 'Preparing a fresh computer for this task…')
-  assert.equal(groups[0].status, 'running')
-  assert.deepEqual(groups[0].narrations, [], 'startup progress must not duplicate itself inside the group')
-  const acceptedAt = groups[0].startedAt
+  assert.equal(groups.length, 0, 'pre-plan status must not fabricate a visible plan group')
 
+  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
   dispatcher.dispatch({
     type: 'tool_start',
     id: 'startup-race',
     name: 'browser_navigate',
     args: {
       action_label: 'Open the supplied page',
-      plan_step_index: 0,
+      plan_step_index: 1,
       url: 'https://example.test',
     },
   })
-  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
   dispatcher.flushPendingUpdates()
 
   assert.deepEqual(
     groups.map(group => group.title),
     ['Open the supplied page', 'Save the requested result'],
-    'the real plan must replace the provisional startup shell',
+    'the complete plan must appear only after the plan event',
   )
   assert.equal(
-    groups.some(group => group.title === 'Preparing a fresh computer for this task…'),
+    groups.some(group => group.index < 0),
     false,
-    'the provisional startup group must not remain as a fake plan step',
+    'startup status must not remain as a fake plan step',
   )
   assert.equal(
     groups[0].subtasks[0]?.id,
     'startup-race',
-    'the real plan must preserve a concrete action that raced ahead of it',
-  )
-  assert.equal(
-    groups[0].startedAt,
-    acceptedAt,
-    'the real plan must preserve the task acceptance time for truthful elapsed duration',
+    'the ready plan must attach subsequent concrete actions to the real first step',
   )
 }
 

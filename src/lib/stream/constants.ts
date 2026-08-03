@@ -5,6 +5,7 @@ export const toolNameToSubtaskType: Record<string, SubtaskType> = {
   image_search: 'image_search',
   execute_command: 'terminal',
   create_file: 'create_file',
+  create_website: 'create_file',
   read_file: 'read_file',
   read_attachment: 'read_file',
   read_skill: 'read_skill',
@@ -13,6 +14,7 @@ export const toolNameToSubtaskType: Record<string, SubtaskType> = {
   edit_file: 'edit_file',
   append_file: 'append_file',
   export_pdf: 'export_pdf',
+  package_files: 'export_pdf',
   read_document: 'read_document',
   http_request: 'http_request',
   run_code: 'run_code',
@@ -100,5 +102,5 @@ export function isHiddenSubtaskActivity(subtask: { toolName?: string; label?: st
     isIncompleteBrowserClickActivity(subtask)
 }
 
-export const FILE_TOOLS = ['create_file', 'read_file', 'read_attachment', 'read_skill', 'delete_file', 'list_files', 'edit_file', 'append_file', 'export_pdf']
+export const FILE_TOOLS = ['create_file', 'create_website', 'read_file', 'read_attachment', 'read_skill', 'delete_file', 'list_files', 'edit_file', 'append_file', 'export_pdf', 'package_files']
 export const BROWSE_TOOLS = ['read_document', 'http_request']

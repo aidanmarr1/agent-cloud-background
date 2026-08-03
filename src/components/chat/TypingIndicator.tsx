@@ -4,7 +4,8 @@ import { useUIStore } from '@/store/ui'
 import type { StreamingStatus } from '@/types'
 
 const statusLabels: Record<Exclude<StreamingStatus, null>, string> = {
-  startup: 'Preparing a fresh computer',
+  startup: 'Initializing computer',
+  planning: 'Planning',
   thinking: 'Thinking',
   searching: 'Searching',
   browsing: 'Browsing',

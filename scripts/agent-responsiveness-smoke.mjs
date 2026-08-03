@@ -107,13 +107,14 @@ assert.doesNotMatch(
 )
 assert.match(
   eventDispatcher,
-  /if \(!this\.planTextParsed\)[\s\S]*queuedComputerPreparationTitle\(event\.content\)[\s\S]*title: startupTitle[\s\S]*status: 'running'[\s\S]*this\.actions\.setTaskGroups/,
-  'durable pre-plan preparation progress must create an immediate visible running group',
+  /if \(!this\.planTextParsed\)[\s\S]*queuedStartupStatus\(event\.content\)[\s\S]*setStreamingStatus\(startupStatus\)/,
+  'pre-plan startup progress must update the status indicator without fabricating a task group',
 )
+assert.doesNotMatch(eventDispatcher, /title:\s*startupTitle/, 'startup status must not appear as a fake plan item')
 assert.match(
   typingIndicator,
-  /startup:\s*'Preparing a fresh computer'/,
-  'the pre-plan task stream indicator must describe actual computer preparation',
+  /startup:\s*'Initializing computer'/,
+  'the pre-plan task stream indicator must describe actual computer initialization',
 )
 assert.match(
   stepTrackerBar,
@@ -127,7 +128,7 @@ assert.doesNotMatch(
 )
 assert.match(
   computerPanelHeader,
-  /startup:\s*'Preparing a fresh computer'/,
+  /startup:\s*'Initializing computer'/,
   'the Computer header must agree with the task-stream cold-start state',
 )
 assert.match(chatRoute, /Promise\.all\(\[[\s\S]*creditsPromise,[\s\S]*messagesPromise,[\s\S]*workerAvailabilityPromise,[\s\S]*attachmentAccessPromise,/, 'task acceptance must await credit, message, worker, and attachment checks running in parallel')
@@ -136,8 +137,8 @@ assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.the
 assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker chat route must not fabricate deterministic visible plans')
 assert.match(
   chatRoute,
-  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Preparing a fresh computer for this task…',\s*\},\s*\]/,
-  'external-worker chat route should immediately persist truthful computer-preparation progress before the worker-owned plan',
+  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Thinking…',\s*\},\s*\]/,
+  'external-worker chat route should immediately persist truthful thinking progress before worker-owned startup stages',
 )
 assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must durably enqueue before returning an accepted stream')
 assert.match(chatRoute, /catch \(error\) \{[\s\S]*error instanceof TaskConversationConflictError[\s\S]*status: 409/, 'atomic enqueue conflicts must remain truthful HTTP 409 responses')

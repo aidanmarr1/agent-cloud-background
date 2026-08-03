@@ -30,6 +30,18 @@ export function DocumentPreview({ artifact, conversationId }: DocumentPreviewPro
 
   const handleDownload = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation()
+    if (conversationId && artifact.filePath) {
+      const params = new URLSearchParams({
+        conversationId,
+        file: artifact.filePath,
+        download: '1',
+      })
+      const a = document.createElement('a')
+      a.href = `/api/files?${params.toString()}`
+      a.download = artifact.fileName
+      a.click()
+      return
+    }
     const blob = new Blob([artifact.content], { type: 'text/plain' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -47,7 +59,7 @@ export function DocumentPreview({ artifact, conversationId }: DocumentPreviewPro
       : extension
         ? extension.toUpperCase()
         : 'Document'
-  const fileSize = formatBytes(new TextEncoder().encode(artifact.content).byteLength)
+  const fileSize = formatBytes(artifact.size ?? new TextEncoder().encode(artifact.content).byteLength)
 
   return (
     <div className="document-preview !mt-0 mb-2 inline-block w-full max-w-[360px] align-top animate-fade-in sm:w-[calc(50%-0.375rem)] sm:[&:nth-child(odd)]:mr-3">

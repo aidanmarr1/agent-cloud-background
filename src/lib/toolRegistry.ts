@@ -13,6 +13,8 @@ import {
   listFilesInSandbox,
   editFileInSandbox,
   appendFileInSandbox,
+  packageFilesInSandbox,
+  createWebsiteBundleInSandbox,
   executeInSandbox,
   isCloudSandboxProviderEnabled,
 } from './sandbox'
@@ -80,8 +82,8 @@ register('create_file', {
   needsConversation: true,
   execute: async (args, ctx) => {
     // Normalize path: strip leading /, ./, and collapse ..
-    let path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
-    if (!path) path = 'output.md'
+    const path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
+    if (!path) return { action: 'created', path: '', error: 'A model-authored filename is required.' }
     return createFileInSandbox(ctx.conversationId!, path, args.content as string)
   },
 })
@@ -118,8 +120,8 @@ register('append_file', {
   required: ['path', 'content'],
   needsConversation: true,
   execute: async (args, ctx) => {
-    let path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
-    if (!path) path = 'output.md'
+    const path = (args.path as string).replace(/^\.?\/+/, '').replace(/\/+/g, '/')
+    if (!path) return { action: 'appended', path: '', error: 'The existing target filename is required.' }
     return appendFileInSandbox(ctx.conversationId!, path, args.content as string)
   },
 })
@@ -134,6 +136,32 @@ register('export_pdf', {
     const { exportPdfFromSandbox } = await import('./pdfExport')
     return exportPdfFromSandbox(ctx.conversationId!, sourcePath, outputPath, title)
   },
+})
+
+register('package_files', {
+  required: ['output_path'],
+  needsConversation: true,
+  execute: async (args, ctx) => {
+    const sourcePaths = Array.isArray(args.source_paths)
+      ? args.source_paths.filter((path): path is string => typeof path === 'string' && !!path.trim())
+      : []
+    if (sourcePaths.length === 0) {
+      return { error: 'Missing required argument: source_paths', path: String(args.output_path || '') }
+    }
+    return packageFilesInSandbox(ctx.conversationId!, String(args.output_path || ''), sourcePaths)
+  },
+})
+
+register('create_website', {
+  required: ['html', 'css', 'javascript'],
+  needsConversation: true,
+  execute: async (args, ctx) => createWebsiteBundleInSandbox(
+    ctx.conversationId!,
+    String(args.output_path || 'index.html'),
+    String(args.html || ''),
+    String(args.css || ''),
+    String(args.javascript || ''),
+  ),
 })
 
 register('execute_command', {

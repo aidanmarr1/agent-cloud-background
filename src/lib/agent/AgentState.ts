@@ -308,6 +308,7 @@ export const BROWSER_INTERACTION_TOOLS = new Set([
 ])
 
 const BUILD_STEP_PATTERN = /\b(?:build|create|code|implement|develop|design|write|draft|style|css|html|assemble|layout|page|component|file|scaffold|set\s*up|setup|configure|config|install|initialize|initialise|init|bootstrap|wire|package|dependencies?|tailwind|next\.?js|tsx|jsx|react|route|preview|test|verify|run|boot|inspect|responsive)\b/i
+const BUILD_LEADING_STEP_PATTERN = /^\s*(?:build|create|code|implement|develop|design|write|draft|style|assemble|layout|scaffold|set\s*up|setup|configure|install|initiali[sz]e|init|bootstrap|wire|package|preview|test|verify|run|boot|inspect)\b/i
 const RESEARCH_STEP_PATTERN = /\b(?:research|gather|find|search|source|sources|collect|asset|assets|image|images|photo|photos|picture|pictures|reference|references|investigate|analy[sz]e|compare|evaluate|assess|impact|risk|policy|evidence|perspective|benefits?|problems?|browse|look\s*up)\b/i
 const SYNTHESIS_STEP_PATTERN = /\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i
 const SYNTHESIS_LEADING_STEP_PATTERN = /^\s*(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|prepare|polish)\b/i
@@ -383,6 +384,11 @@ export function isConcreteBuildStep(
   state: Pick<AgentStateData, 'currentPhase' | 'taskStrategy' | 'buildTask' | 'currentPlanItems' | 'currentPlanScopes' | 'currentStepIdx'>,
   text = currentStepText(state),
 ): boolean {
+  const title = state.currentPlanItems?.[state.currentStepIdx] || ''
+  // A build title owns the phase even when its scope mentions the research or
+  // evidence being rendered. This prevents “Design the findings website” from
+  // retaining search/browser extraction tools and looping instead of writing.
+  if (BUILD_LEADING_STEP_PATTERN.test(title)) return true
   const buildText = isBuildStepText(text)
   const researchText = isResearchStepText(text)
   if (!isBuildStrategyState(state)) return buildText && !researchText

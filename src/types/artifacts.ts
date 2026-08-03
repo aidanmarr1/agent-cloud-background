@@ -5,6 +5,8 @@ export interface Artifact {
   fileName: string
   filePath: string
   content: string
+  /** Exact byte size when the artifact is binary or preview content is truncated. */
+  size?: number
   type: 'document' | 'code' | 'data' | 'image'
   imageUrl?: string
   imageDataUrl?: string
