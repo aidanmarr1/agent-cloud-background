@@ -41,6 +41,7 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0\.30/, 'Serper search pricing must match provider public pricing')
   assert.match(creditPolicy, /E2B_VCPU_USD_PER_SECOND\s*=\s*0\.000014/, 'E2B CPU pricing must be anchored to E2B per-second vCPU pricing')
   assert.match(creditPolicy, /E2B_MEMORY_GIB_USD_PER_SECOND\s*=\s*0\.0000045/, 'E2B memory pricing must be anchored to E2B per-second GiB pricing')
+  assert.match(creditPolicy, /E2B_DEFAULT_MEMORY_GIB\s*=\s*2/, 'E2B memory metering must match the live 2 GiB agent-cloud-browser template')
   assert.match(creditPolicy, /e2bSandboxRuntimeCreditCharge/, 'E2B runtime must have a central credit charge helper')
   assert.match(creditPolicy, /TASK_START_CREDITS\s*=\s*0/, 'task starts must not create a fixed upfront debit')
   assert.match(creditPolicy, /LOCAL_BROWSER_USD_PER_STEP\s*=\s*0/, 'local browser actions must not use Browser Use Cloud pricing')
@@ -140,6 +141,7 @@ import {
   tokenUsageCreditCharge,
   toolCreditCharge,
 } from ${JSON.stringify(join(root, 'src/lib/creditPolicy.ts'))}
+import { estimateUsageCost } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
 import {
   chargeServerActiveTime,
   chargeServerE2BRuntime,
@@ -163,8 +165,8 @@ export async function runCreditPricingSmoke() {
   assert.equal(CREDIT_RATES.imageSearchCredits, 1.8)
   assert.equal(CREDIT_RATES.browserStepCredits, 0)
   assert.equal(CREDIT_RATES.e2bDefaultVcpuCount, 2)
-  assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 0.5)
-  assert.equal(CREDIT_RATES.e2bSandboxUsdPerSecond, (2 * 0.000014) + (0.5 * 0.0000045))
+  assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 2)
+  assert.equal(CREDIT_RATES.e2bSandboxUsdPerSecond, (2 * 0.000014) + (2 * 0.0000045))
   assert.equal(
     CREDIT_RATES.inputTokenCreditsPer1K,
     roundCreditAmount((CREDIT_RATES.modelInputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
@@ -186,12 +188,14 @@ export async function runCreditPricingSmoke() {
   const standardAnalysisRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 15 * 60_000 })
   const standardWebsiteRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 25 * 60_000 })
   const complexAppRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 80 * 60_000 })
-  assert.ok(standardAnalysisRuntimeCharge >= 160 && standardAnalysisRuntimeCharge <= 170)
-  assert.ok(standardWebsiteRuntimeCharge >= 270 && standardWebsiteRuntimeCharge <= 280)
-  assert.ok(complexAppRuntimeCharge >= 870 && complexAppRuntimeCharge <= 880)
+  assert.ok(standardAnalysisRuntimeCharge >= 195 && standardAnalysisRuntimeCharge <= 205)
+  assert.ok(standardWebsiteRuntimeCharge >= 330 && standardWebsiteRuntimeCharge <= 340)
+  assert.ok(complexAppRuntimeCharge >= 1060 && complexAppRuntimeCharge <= 1070)
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.00016) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 32_000, completion_tokens: 1000 }) || 0) - 0.0072) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

@@ -50,12 +50,19 @@ export function estimateUsageCost(input: {
   if (promptTokens === null || completionTokens === null) return null
 
   const pricing = pricingForModel(input.model)
+  const longContext = Math.max(0, promptTokens) >= pricing.longContextThresholdTokens
+  const inputUsdPer1M = longContext
+    ? pricing.longContextInputUsdPer1M
+    : pricing.inputUsdPer1M
+  const outputUsdPer1M = longContext
+    ? pricing.longContextOutputUsdPer1M
+    : pricing.outputUsdPer1M
   const cacheHitTokens = finiteNumber(input.prompt_cache_hit_tokens)
   const cacheMissTokens = finiteNumber(input.prompt_cache_miss_tokens)
   const inputCost = cacheHitTokens !== null || cacheMissTokens !== null
     ? ((Math.max(0, cacheHitTokens || 0) * pricing.cacheHitInputUsdPer1M) +
-      (Math.max(0, cacheMissTokens ?? Math.max(0, promptTokens - Math.max(0, cacheHitTokens || 0))) * pricing.inputUsdPer1M)) / 1_000_000
-    : Math.max(0, promptTokens) * pricing.inputUsdPer1M / 1_000_000
-  const outputCost = Math.max(0, completionTokens) * pricing.outputUsdPer1M / 1_000_000
+      (Math.max(0, cacheMissTokens ?? Math.max(0, promptTokens - Math.max(0, cacheHitTokens || 0))) * inputUsdPer1M)) / 1_000_000
+    : Math.max(0, promptTokens) * inputUsdPer1M / 1_000_000
+  const outputCost = Math.max(0, completionTokens) * outputUsdPer1M / 1_000_000
   return Math.max(0, inputCost + outputCost)
 }

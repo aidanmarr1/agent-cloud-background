@@ -50,7 +50,9 @@ export const MODEL_LONG_CONTEXT_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.longCo
 export const SERPER_SEARCH_USD_PER_1K_REQUESTS = 0.30
 export const LOCAL_BROWSER_USD_PER_STEP = 0
 export const E2B_DEFAULT_VCPU_COUNT = 2
-export const E2B_DEFAULT_MEMORY_GIB = 0.5
+// Verified against the production agent-cloud-browser template. Keep the
+// deployed AGENT_E2B_* overrides in sync if the template is rebuilt.
+export const E2B_DEFAULT_MEMORY_GIB = 2
 export const E2B_VCPU_USD_PER_SECOND = 0.000014
 export const E2B_MEMORY_GIB_USD_PER_SECOND = 0.0000045
 

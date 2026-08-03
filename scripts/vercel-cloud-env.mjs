@@ -56,6 +56,8 @@ const CLOUD_ENV = [
   { name: 'AGENT_SANDBOX_PROVIDER', value: 'e2b' },
   { name: 'E2B_API_KEY', source: 'local', required: true },
   { name: 'E2B_TEMPLATE_ID', value: process.env.E2B_TEMPLATE_ID || 'agent-cloud-browser' },
+  { name: 'AGENT_E2B_VCPU_COUNT', value: '2' },
+  { name: 'AGENT_E2B_MEMORY_GIB', value: '2' },
   { name: 'AGENT_E2B_SANDBOX_TIMEOUT_MS', value: process.env.AGENT_E2B_SANDBOX_TIMEOUT_MS || '3600000' },
   { name: 'AGENT_E2B_COMMAND_TIMEOUT_MS', value: process.env.AGENT_E2B_COMMAND_TIMEOUT_MS || '120000' },
   { name: 'AGENT_E2B_ALLOW_INTERNET', value: process.env.AGENT_E2B_ALLOW_INTERNET || 'true' },

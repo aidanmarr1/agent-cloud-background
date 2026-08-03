@@ -14,6 +14,7 @@ const [
   useAgentStream,
   eventDispatcher,
   typingIndicator,
+  stepTrackerBar,
   computerPanelHeader,
   search,
   chatRoute,
@@ -27,6 +28,7 @@ const [
   readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
   readFile(join(root, 'src/components/chat/TypingIndicator.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/chat/StepTrackerBar.tsx'), 'utf8'),
   readFile(join(root, 'src/components/computer/PanelHeader.tsx'), 'utf8'),
   readFile(join(root, 'src/lib/search.ts'), 'utf8'),
   readFile(join(root, 'src/app/api/chat/route.ts'), 'utf8'),
@@ -112,6 +114,11 @@ assert.match(
   typingIndicator,
   /startup:\s*'Preparing a fresh computer'/,
   'the pre-plan task stream indicator must describe actual computer preparation',
+)
+assert.match(
+  stepTrackerBar,
+  /const plannedTaskGroups = taskGroups\.filter\(\(group\) => group\.index >= 0\)/,
+  'the sticky progress card must hide the pre-plan startup shell so cold-start status is not rendered twice',
 )
 assert.doesNotMatch(
   typingIndicator,

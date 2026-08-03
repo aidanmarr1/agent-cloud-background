@@ -71,6 +71,10 @@ services:
         sync: false
       - key: E2B_TEMPLATE_ID
         value: agent-cloud-browser
+      - key: AGENT_E2B_VCPU_COUNT
+        value: "2"
+      - key: AGENT_E2B_MEMORY_GIB
+        value: "2"
       - key: AGENT_E2B_SANDBOX_TIMEOUT_MS
         value: "3600000"
       - key: AGENT_E2B_COMMAND_TIMEOUT_MS
@@ -166,6 +170,10 @@ services:
         sync: false
       - key: E2B_TEMPLATE_ID
         value: agent-cloud-browser
+      - key: AGENT_E2B_VCPU_COUNT
+        value: "2"
+      - key: AGENT_E2B_MEMORY_GIB
+        value: "2"
       - key: AGENT_E2B_SANDBOX_TIMEOUT_MS
         value: "3600000"
       - key: AGENT_E2B_COMMAND_TIMEOUT_MS

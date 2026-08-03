@@ -11,15 +11,19 @@ interface StepTrackerBarProps {
 
 export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps) {
   const [expanded, setExpanded] = useState(false)
+  // A negative index is the durable cold-start shell shown in the message
+  // stream before the model emits its real plan. Keep that live status in the
+  // message, but do not present it again as a fake one-step plan here.
+  const plannedTaskGroups = taskGroups.filter((group) => group.index >= 0)
 
-  const doneCount = taskGroups.filter((group) => group.status === 'done').length
-  const total = taskGroups.length
+  const doneCount = plannedTaskGroups.filter((group) => group.status === 'done').length
+  const total = plannedTaskGroups.length
   const isComplete = total > 0 && doneCount === total
-  const hasIssue = taskGroups.some((group) => group.status === 'error' || group.status === 'incomplete')
+  const hasIssue = plannedTaskGroups.some((group) => group.status === 'error' || group.status === 'incomplete')
   const isActive = isStreaming && !isComplete && !hasIssue
-  const currentGroup = taskGroups.find((group) => group.status === 'running')
-    || taskGroups.find((group) => group.status === 'pending')
-    || taskGroups[taskGroups.length - 1]
+  const currentGroup = plannedTaskGroups.find((group) => group.status === 'running')
+    || plannedTaskGroups.find((group) => group.status === 'pending')
+    || plannedTaskGroups[plannedTaskGroups.length - 1]
   const currentDisplayTitle = currentGroup?.title || 'Task progress'
 
   useEffect(() => {
@@ -88,7 +92,7 @@ export function StepTrackerBar({ taskGroups, isStreaming }: StepTrackerBarProps)
             <div className="px-4 pb-3">
               <div className="text-[14px] leading-5 text-text-muted">Task progress</div>
               <div className="mb-3 mt-2 max-h-[min(240px,32vh)] space-y-2 overflow-y-auto overflow-x-hidden">
-              {taskGroups.map((group) => (
+              {plannedTaskGroups.map((group) => (
                 <div
                   key={group.id}
                   className="flex min-w-0 items-center gap-2"
