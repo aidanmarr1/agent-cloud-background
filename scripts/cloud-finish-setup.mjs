@@ -229,10 +229,9 @@ const skipRenderEnv = hasFlag('--skip-render-env')
 const waitForWorkerReady = hasFlag('--wait-for-worker-ready')
 const skipWorkerReadyWait = hasFlag('--skip-worker-ready-wait')
 const skipDeployedPreflight = hasFlag('--skip-deployed-preflight')
-// cloud:vercel-env defaults production to render_job. Treat an unset local
-// dispatch mode the same way so this rollout helper cannot activate the web
-// coordinator before the exact-run worker image is live on Render.
-const onDemandDispatch = (env('AGENT_TASK_DISPATCH_MODE') || 'render_job') === 'render_job'
+// The full-time Render worker is the production default. On-demand execution
+// remains opt-in and must be requested explicitly with render_job.
+const onDemandDispatch = env('AGENT_TASK_DISPATCH_MODE') === 'render_job'
 
 const requiredLocalEnv = [
   'AUTH_SECRET',

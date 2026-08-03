@@ -99,7 +99,7 @@ requireRealEnv('TURSO_DATABASE_URL', 'Turso database URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso auth token', validateNonShortToken)
 requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key', validateNonShortToken)
-requireExact('OPENROUTER_MODEL', 'google/gemini-3.5-flash-lite', 'Gemini 3.5 Flash Lite balanced route')
+requireExact('OPENROUTER_MODEL', 'qwen/qwen3.7-flash', 'Qwen 3.7 Flash balanced route')
 requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'configured reasoning effort')
 requireExact('OPENROUTER_REASONING_EXCLUDE', 'true', 'hidden reasoning must stay out of the response')
 requireRealEnv('AUTH_SECRET', 'Auth.js signing secret', validateSecret)
@@ -137,7 +137,7 @@ if (env('AGENT_TASK_QUEUE_NAME') === 'default') {
   fail('AGENT_TASK_QUEUE_NAME must not be default for cloud deployment; use production, staging, or another explicit namespace')
 }
 requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
-requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'false', 'local workers may satisfy production readiness')
+requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'production requires the hosted Render worker')
 requireRealEnv('E2B_API_KEY', 'E2B hosted sandbox API key', validateNonShortToken)
 if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
   pass('E2B browser runtime is configured')

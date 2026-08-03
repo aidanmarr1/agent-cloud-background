@@ -34,7 +34,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.5-flash-lite
+        value: qwen/qwen3.7-flash
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -64,7 +64,7 @@ services:
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
         value: "true"
       - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
-        value: "false"
+        value: "true"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
       - key: E2B_API_KEY
@@ -123,7 +123,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.5-flash-lite
+        value: qwen/qwen3.7-flash
       - key: OPENROUTER_REASONING_EFFORT
         value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
@@ -152,14 +152,6 @@ services:
         value: "930000"
       - key: AGENT_WORKER_CANCEL_HARD_EXIT_MS
         value: "5000"
-      - key: AGENT_TASK_WORKER_DRAIN_RECLAIM_WAIT_MS
-        value: "120000"
-      - key: AGENT_TASK_WORKER_DRAIN_MISSING_GRACE_MS
-        value: "5000"
-      - key: AGENT_TASK_WORKER_DRAIN_MAX_RESTARTS
-        value: "8"
-      - key: AGENT_TASK_WORKER_DRAIN_MAX_RUNTIME_MS
-        value: "3600000"
       - key: AGENT_DEPLOYMENT_VERSION
         value: ""
       - key: AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION
@@ -167,7 +159,7 @@ services:
       - key: AGENT_REQUIRE_TASK_WORKER_HEARTBEAT
         value: "true"
       - key: AGENT_REQUIRE_HOSTED_TASK_WORKER
-        value: "false"
+        value: "true"
       - key: AGENT_SANDBOX_PROVIDER
         value: e2b
       - key: E2B_API_KEY

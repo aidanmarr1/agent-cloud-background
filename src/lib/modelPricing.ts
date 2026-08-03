@@ -1,19 +1,22 @@
 // Plain model IDs use OpenRouter's balanced provider routing (price + speed).
 // Route-specific suffixes such as :nitro/:exacto are opt-in, not the default.
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
+export const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3.7-flash'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.30,
+  inputUsdPer1M: 0.03,
   // OpenRouter reports exact billed cost when available. Keep the fallback
   // conservative because cache discounts can vary by routed provider.
-  cacheHitInputUsdPer1M: 0.03,
-  outputUsdPer1M: 2.50,
-  internalReasoningUsdPer1M: 2.50,
-  longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.30,
-  longContextOutputUsdPer1M: 2.50,
-  contextTokens: 1_048_576,
+  cacheHitInputUsdPer1M: 0.006,
+  outputUsdPer1M: 0.13,
+  internalReasoningUsdPer1M: 0.13,
+  // Qwen 3.7 Flash switches to its first long-context tier at 32K tokens.
+  // Use the highest published override as the conservative fallback because
+  // exact OpenRouter-reported cost remains authoritative when available.
+  longContextThresholdTokens: 32_000,
+  longContextInputUsdPer1M: 0.20,
+  longContextOutputUsdPer1M: 0.80,
+  contextTokens: 1_000_000,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter',
 } as const

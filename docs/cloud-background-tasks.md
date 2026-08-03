@@ -1,18 +1,18 @@
 # Cloud Background Tasks
 
-The primary production architecture is an on-demand executor:
+The primary production architecture uses a full-time Render worker:
 
-1. Vercel serves the Next.js app and starts a durable Vercel Workflow for each accepted task.
-2. Turso stores the queued task, coordinator identity, execution lease, dispatch generations, and replayable task-stream events.
-3. The Workflow launches a targeted Render one-off job from a suspended Render background-worker base.
-4. That finite job runs `npm run worker:drain -- --run-id <run-id>`, claims only the named task, publishes its live events, and exits when the task is terminal.
+1. Vercel serves the Next.js app and writes accepted tasks to Turso.
+2. Turso stores the queue, execution leases, replayable task-stream events, conversations, and durable file metadata.
+3. A continuously running Render `background_worker` polls the production queue with `npm run worker:cloud`.
+4. The worker claims tasks, runs the agent, publishes live events, and stays online for the next task.
 
-The browser is only a viewer. Closing or reconnecting the tab does not own or stop the Workflow, Render job, Turso task, or E2B sandbox.
+The browser is only a viewer. Closing or reconnecting the tab does not own or stop the Render worker, Turso task, or E2B sandbox.
 
-The app also retains two other execution modes:
+The app also retains local development and dormant one-off execution code, but production does not configure the one-off launcher:
 
 - Local development: leave `AGENT_TASK_WORKER_MODE` blank so `/api/chat` runs in the web process.
-- Persistent-worker rollback: use external queue mode without `render_job` dispatch and keep `npm run worker:cloud` alive. This is a supported recovery path, not the normal production topology.
+- On-demand execution is inactive unless `AGENT_TASK_DISPATCH_MODE=render_job` and Render launcher credentials are deliberately restored.
 
 For Manus-style cloud computers, use E2B. Task file operations, terminal commands, and Chromium run inside an E2B microVM. The sandbox identity and durable task files are persisted so a replacement attempt can recover useful state. With the production defaults, completed sandboxes are destroyed rather than left running.
 
@@ -20,99 +20,89 @@ For Manus-style cloud computers, use E2B. Task file operations, terminal command
 
 Production needs these configured resources:
 
-- A Vercel deployment for the web app, Workflow endpoint, durable coordinator, task acceptance, and event replay.
-- Turso for the queue, coordinator/dispatch state, leases, stream events, conversation state, and durable file metadata.
-- One Render `background_worker` service containing the worker image and environment. Keep this base service **suspended** between tasks.
-- Render one-off jobs launched from that suspended base. A one-off job is finite and is billed only while Render runs it; the base service must not be resumed merely to dispatch jobs.
+- A Vercel deployment for the web app, task acceptance, and event replay.
+- Turso for the queue, leases, stream events, conversation state, and durable file metadata.
+- One continuously running Render `background_worker` service with the worker image and environment.
 - E2B for isolated browser, terminal, and file execution.
 - OpenRouter and the configured search provider for model and research calls.
 
-There is no permanently polling worker in the primary path. In particular, the app does not require an idle worker heartbeat before accepting a task. The accepted task immediately receives a durable progress event, then the Workflow creates the task-specific worker process.
+Production requires a fresh hosted-worker heartbeat before accepting a task. If the Render worker is unavailable, `/api/chat` fails closed instead of accepting work that cannot run.
 
-The public `/api/health` endpoint is intentionally lightweight and unauthenticated. It proves only that the web deployment is alive. The signed `cloud:worker-ready` check validates the on-demand executor without launching a job; `cloud:worker-smoke` launches a real diagnostic one-off job and proves completion plus reconnect replay.
+The public `/api/health` endpoint is intentionally lightweight and unauthenticated. It proves only that the web deployment is alive. The signed `cloud:worker-ready` check proves the persistent worker heartbeat; `cloud:worker-smoke` verifies that the live worker can claim and complete a diagnostic job.
 
 The repo includes these deployment helpers:
 
 - `Dockerfile`: builds the worker-compatible application image.
-- `render.yaml`: defines the Render background-worker base. In the primary topology, create/deploy it, then suspend it.
-- `render.worker.env.example`: lists the environment inherited by Render one-off jobs and the persistent rollback worker.
+- `render.yaml`: defines the always-running Render background worker.
+- `render.worker.env.example`: lists the environment required by that worker.
 - `e2b.Dockerfile`: builds the E2B sandbox template used for browser, terminal, and file execution.
-- `docker-compose.cloud.yml`, `Procfile`, and `npm run worker:cloud`: local production-shape and persistent-worker rollback helpers.
+- `docker-compose.cloud.yml`, `Procfile`, and `npm run worker:cloud`: local production-shape and worker helpers.
 - `.node-version`: pins Node 22 for cloud builds.
 
 ## Cost Behavior
 
-Provider prices change, so check each provider before launch. The architecture deliberately separates idle configuration from active task compute:
+Provider prices change, so check each provider before launch:
 
-- The suspended Render base supplies code and environment but should not accrue always-on instance time. Each accepted task can incur a finite Render one-off-job charge while its targeted drain process runs.
-- Vercel serves requests and runs the durable Workflow. Workflow sleeps release active compute while the coordinator waits and monitors recovery, although Vercel plan and Workflow usage charges still apply.
+- The Render background worker has a fixed continuous instance cost because it remains online and polls the queue.
+- Vercel serves web requests and task/event APIs.
 - E2B bills only while a task sandbox is running. Keep `AGENT_E2B_WARM_POOL_ENABLED=false`, `AGENT_E2B_PAUSE_ON_TASK_END=false`, and `AGENT_E2B_KILL_ON_RESET=true` to avoid idle warm-pool or completed-sandbox runtime.
 - Turso usage grows with task state, heartbeats during active jobs, dispatch attempts, and persisted stream events.
 - OpenRouter and search-provider usage grows with actual model and research calls.
-- Resuming the Render base as a persistent worker restores a fixed idle compute cost. Treat that as an explicit reliability rollback, not a free standby.
-
-The deployed background smoke uses a short Render one-off job but does not call the LLM or start E2B. A real agent task can incur all of the task-scoped costs above.
+- The deployed background smoke uses the already-running worker and does not call the LLM or start E2B. A real agent task can incur model, search, and E2B usage.
 
 ## Primary Production Environment
 
-Set these values on the Vercel web/Workflow deployment:
+Set these values on Vercel:
 
 ```bash
 TURSO_DATABASE_URL=...
 TURSO_AUTH_TOKEN=...
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemini-3.5-flash-lite
+OPENROUTER_MODEL=qwen/qwen3.7-flash
 OPENROUTER_REASONING_EFFORT=minimal
 OPENROUTER_REASONING_EXCLUDE=true
 AUTH_SECRET=...
 AGENT_INTERNAL_HEALTH_SECRET=...
 AGENT_TASK_WORKER_MODE=external
-AGENT_TASK_DISPATCH_MODE=render_job
 AGENT_TASK_QUEUE_NAME=production
 AGENT_TASK_WORKER_HEARTBEAT_MS=15000
 AGENT_TASK_WORKER_STALE_MS=60000
 AGENT_TASK_WORKER_MAX_ATTEMPTS=3
-AGENT_TASK_DISPATCH_MAX_ATTEMPTS=8
 AGENT_WORKER_HARD_TASK_EXIT_MS=930000
 AGENT_WORKER_CANCEL_HARD_EXIT_MS=5000
-AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false
-AGENT_REQUIRE_HOSTED_TASK_WORKER=false
-RENDER_API_KEY=...
-RENDER_WORKER_SERVICE_ID=srv-...
-RENDER_ON_DEMAND_JOB_PLAN_ID=plan-srv-006
+AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true
+AGENT_REQUIRE_HOSTED_TASK_WORKER=true
 AGENT_DEPLOYMENT_VERSION=
 AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=false
 ```
 
-The Render base and every one-off job inherit the values in `render.worker.env.example`, including the same Turso credentials, queue name, OpenRouter/search settings, E2B settings, timeouts, and retry limits. Do not put `RENDER_API_KEY` on the Render worker; it is a server-only Vercel dispatch credential.
+The Render worker uses the values in `render.worker.env.example`, including the same Turso queue, OpenRouter/search settings, E2B settings, timeouts, and retry limits.
 
-`AGENT_TASK_QUEUE_NAME` must match between Vercel and the Render base. Use different values for production and staging. `RENDER_WORKER_SERVICE_ID` must identify a Render `background_worker`, and readiness requires that service to be suspended. `RENDER_ON_DEMAND_JOB_PLAN_ID` selects the plan for each one-off job.
+`AGENT_TASK_QUEUE_NAME` must match between Vercel and Render. Use different values for production and staging.
 
-`AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false` is intentional in `render_job` mode: no worker exists until the Workflow launches one. This does not disable execution fencing. Once the one-off process starts, its exact worker/run heartbeat and lease protect the claim, cancellation, stale recovery, and terminal commit.
+`AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true` and `AGENT_REQUIRE_HOSTED_TASK_WORKER=true` ensure production accepts work only when the full-time Render worker is alive.
 
-If you use the persistent rollback and want the web service to reject an old worker deployment, set the same `AGENT_DEPLOYMENT_VERSION` on Vercel and Render, then set `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true`. Version-matched idle heartbeats are a persistent-worker guard; the primary on-demand readiness check instead verifies the configured suspended Render base.
+To reject an old worker deployment, set the same `AGENT_DEPLOYMENT_VERSION` on Vercel and Render, then set `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true`.
 
-Do not run incompatible queue protocols concurrently. Before a protocol cutover, pause intake, let old workers finish or durably cancel their claims, verify there are no queued/running jobs under the old protocol, and stop the old workers. Then follow the Render-first deployment order below.
+Do not run incompatible queue protocols concurrently. Pause intake and drain old work before any future execution-mode cutover.
 
-The one-off drain settings are:
+The Render worker uses two isolated task processes by default:
 
 ```bash
-AGENT_TASK_WORKER_DRAIN_RECLAIM_WAIT_MS=120000
-AGENT_TASK_WORKER_DRAIN_MISSING_GRACE_MS=5000
-AGENT_TASK_WORKER_DRAIN_MAX_RESTARTS=8
-AGENT_TASK_WORKER_DRAIN_MAX_RUNTIME_MS=3600000
+AGENT_TASK_WORKER_CONCURRENCY=2
+AGENT_TASK_WORKER_POLL_MS=100
+AGENT_TASK_WORKER_HEARTBEAT_MS=15000
+AGENT_TASK_WORKER_STALE_MS=60000
 ```
 
-The finite supervisor restarts a crashed drain process only up to `AGENT_TASK_WORKER_DRAIN_MAX_RESTARTS`. `AGENT_TASK_WORKER_DRAIN_MAX_RUNTIME_MS` caps the entire targeted one-off process, including imports, reclaim waits, task attempts, and restart backoff. Its 60-minute default safely covers three 930-second worker attempts plus recovery overhead; only `--drain` uses it, values must be positive and no greater than six hours, and expiry terminates the child and exits nonzero so the durable Workflow can recover without an indefinitely billed Render job. The targeted worker waits through an old lease for at most the reclaim window, exits harmlessly if another live worker still owns the exact run, and never claims a different task. Durable dispatch generations let the Workflow retry a lost launch without treating a transient provider or database failure as a user-task failure.
+Each task process has its own fenced lease and restart boundary, so one crashed or cancelled task does not take the full-time host offline.
 
 Keep `AGENT_E2B_WARM_POOL_ENABLED=false` by default so E2B runtime starts only when a task can be billed. If you explicitly turn warm pooling on for lower startup latency, prewarm time is an operational cost; user runtime billing starts only after a task adopts and confirms the sandbox.
 
 `AGENT_TASK_WORKER_MAX_ATTEMPTS` caps repeated claims for a task whose worker keeps dying before completion. The default is `3`. When the next claim would exceed the cap, the job is marked terminal with a replayable error event and the user's active-task lease is released, preventing an infinite crash/retry loop and unbounded cloud spend.
 
-`AGENT_TASK_DISPATCH_MAX_ATTEMPTS` is a separate, database-enforced cap on Render launch generations. The default is `8`. Duplicate Workflow coordinators share this same budget, every provider POST uses an immutable generation ID, and ambiguous network outcomes remain observable instead of reopening the same request. Reaching the cap stops new launches; it never overrides a live worker or an accepted job that is still provisioning.
-
-`AGENT_WORKER_HARD_TASK_EXIT_MS` is the process-level backstop for SDKs or tool handlers that ignore cooperative abort signals. Keep it above the normal worker run limit plus its cleanup allowance (the default `930000` is 15 minutes plus 30 seconds). When it fires, the worker exits immediately, stops refreshing its fenced claim, and lets the bounded one-off supervisor restart a clean process for durable recovery.
+`AGENT_WORKER_HARD_TASK_EXIT_MS` is the process-level backstop for SDKs or tool handlers that ignore cooperative abort signals. Keep it above the normal worker run limit plus its cleanup allowance (the default `930000` is 15 minutes plus 30 seconds). When it fires, the worker exits immediately, stops refreshing its fenced claim, and lets the persistent supervisor restart a clean process for durable recovery.
 
 `AGENT_WORKER_CANCEL_HARD_EXIT_MS` is the shorter cancellation backstop for the dedicated worker process. After a worker observes a durable stop request it publishes a `stopping` heartbeat, stops refreshing that claim, and gives cooperative cleanup five seconds by default; if the runner is still stuck, the dedicated process exits so ignored aborts cannot continue side effects or E2B billing in the background. Values above 30 seconds are rejected. Keep `AGENT_TASK_WORKER_STALE_MS` greater than the heartbeat interval plus this hard-exit window and the 5-second proof jitter. A cross-instance cancellation remains nonterminal until the exact boot-unique worker/run heartbeat is no longer live, then destroys the sandbox before publishing the terminal event. Heartbeat staleness is the process-loss evidence available across hosts; forced recovery therefore retains an explicit warning that late external side effects could not be ruled out instead of claiming a perfectly clean stop.
 
@@ -268,21 +258,21 @@ npm run cloud:preflight -- --deployed-only --url https://your-deployed-app.examp
 
 Run signed deployed checks from a shell holding the same `AGENT_INTERNAL_HEALTH_SECRET` as Vercel. The scripts can fall back to `AUTH_SECRET`, but production should keep the internal health secret separate from the session-signing secret.
 
-## Persistent Worker Rollback (Legacy Fallback)
+## Persistent Worker Production Mode
 
-This mode is retained for incident recovery when Render one-off dispatch or Vercel Workflow is unavailable. It is not the primary production architecture.
+This is the primary production architecture.
 
 1. Deploy or resume a compatible Render worker and start `npm run worker:cloud`.
 2. Set `AGENT_TASK_DISPATCH_MODE` blank (persistent fallback), `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true`, and the same `AGENT_TASK_QUEUE_NAME` on Vercel and the worker.
-3. Wait for a compatible live heartbeat before routing new tasks. Only then deploy/flip Vercel away from `render_job`.
+3. Wait for a compatible live heartbeat before routing new tasks.
 4. Optionally set the same `AGENT_DEPLOYMENT_VERSION` on both services and enable `AGENT_REQUIRE_WORKER_DEPLOYMENT_VERSION=true` to reject stale worker releases.
 5. Use `AGENT_TASK_WORKER_CONCURRENCY=2` and the documented poll/stale values unless capacity testing justifies a change.
 
 In this fallback, `npm run cloud:check -- --live` verifies a recent persistent-worker heartbeat. With `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=true`, `/api/chat` returns `503 BACKGROUND_WORKER_UNAVAILABLE` instead of accepting work when no compatible idle worker is alive. `AGENT_REQUIRE_HOSTED_TASK_WORKER=true` can exclude a laptop heartbeat when offline-safe hosted execution is required.
 
-The persistent worker has fixed idle compute cost because the Render service is resumed and polling. To return to the primary path, pause intake, finish or cancel fallback jobs, deploy the exact-run worker image to Render first, suspend the base, restore `AGENT_TASK_DISPATCH_MODE=render_job` and `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false`, then deploy Vercel and run the signed readiness plus real one-off smoke.
+The persistent worker has fixed idle compute cost because the Render service is resumed and polling. That continuous availability is intentional.
 
-## Render Service Setup And Legacy Helpers
+## Render Service Setup
 
 The repo includes [render.yaml](/render.yaml), which can create:
 
@@ -291,7 +281,7 @@ agent-web: npm start
 agent-worker: npm run worker:cloud
 ```
 
-For the primary Vercel architecture, only the `agent-worker` entry is needed on Render; the `agent-web` entry is an all-Render or legacy option. The worker Blueprint sets `autoDeployTrigger: off`, because every production worker artifact must go through the exact-commit guarded rollout. Build the E2B template before creating the Blueprint, or replace `E2B_TEMPLATE_ID=agent-cloud-browser` with an existing compatible template. Fill in the worker secrets and suspend `agent-worker` after its code and environment are current.
+For the primary Vercel architecture, only the `agent-worker` entry is needed on Render; the `agent-web` entry is an all-Render option. The worker Blueprint sets `autoDeployTrigger: off` so releases remain deliberate. Build the E2B template before creating the Blueprint, or replace `E2B_TEMPLATE_ID=agent-cloud-browser` with an existing compatible template. Fill in the worker secrets and keep `agent-worker` resumed.
 
 Use [render.worker.env.example](/render.worker.env.example) as the environment contract inherited by every one-off job. It must contain the same `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `OPENROUTER_API_KEY`, `AGENT_TASK_QUEUE_NAME=production`, `AGENT_SANDBOX_PROVIDER=e2b`, `E2B_API_KEY`, and `E2B_TEMPLATE_ID=agent-cloud-browser` expected by Vercel. Keep `AGENT_E2B_VERIFY_ON_WORKER_STARTUP=true` and `AGENT_E2B_VERIFY_BROWSER_ON_WORKER_STARTUP=true`.
 
