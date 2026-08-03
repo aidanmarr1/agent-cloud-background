@@ -1,22 +1,22 @@
-// The assistant is pinned to GPT-5.6 Luna. Provider selection is separately
-// locked to OpenRouter's standard OpenAI endpoint in src/lib/llm.ts.
-export const DEFAULT_OPENROUTER_MODEL = 'openai/gpt-5.6-luna'
+// The assistant is pinned to Gemini 3.5 Flash Lite. The plain model slug uses
+// OpenRouter's balanced standard routing across compatible Google hosts.
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.10,
-  cacheHitInputUsdPer1M: 0.01,
-  outputUsdPer1M: 0.60,
-  internalReasoningUsdPer1M: 0.60,
-  // The standard OpenAI endpoint switches to its published long-context tier
-  // at 272K prompt tokens. Exact OpenRouter-reported cost remains authoritative.
-  longContextThresholdTokens: 272_000,
-  longContextInputUsdPer1M: 0.20,
-  longContextCacheHitInputUsdPer1M: 0.02,
-  longContextOutputUsdPer1M: 0.90,
-  contextTokens: 1_050_000,
-  maxCompletionTokens: 128_000,
-  source: 'OpenRouter (OpenAI)',
+  inputUsdPer1M: 0.30,
+  cacheHitInputUsdPer1M: 0.03,
+  outputUsdPer1M: 2.50,
+  internalReasoningUsdPer1M: 2.50,
+  // No separate long-context price override is currently published. Keep the
+  // generic fallback fields equal to base pricing at the context boundary.
+  longContextThresholdTokens: 1_048_576,
+  longContextInputUsdPer1M: 0.30,
+  longContextCacheHitInputUsdPer1M: 0.03,
+  longContextOutputUsdPer1M: 2.50,
+  contextTokens: 1_048_576,
+  maxCompletionTokens: 65_536,
+  source: 'OpenRouter (Google)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

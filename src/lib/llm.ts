@@ -18,7 +18,6 @@ function trimmedEnv(value: string | undefined): string | undefined {
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
-export const PINNED_OPENROUTER_PROVIDER = 'openai' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -526,17 +525,9 @@ function providerReasoningPayload(
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
   return {
     reasoning: {
-      effort: 'none',
+      effort: 'minimal',
       exclude: true,
     },
-  }
-}
-
-function exactOpenRouterProviderRoute(): NonNullable<ChatCompletionParams['provider']> {
-  return {
-    order: [PINNED_OPENROUTER_PROVIDER],
-    only: [PINNED_OPENROUTER_PROVIDER],
-    allow_fallbacks: false,
   }
 }
 
@@ -604,7 +595,6 @@ function withPinnedModel(
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
-    provider: exactOpenRouterProviderRoute(),
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning),

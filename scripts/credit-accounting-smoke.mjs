@@ -30,16 +30,17 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*30/, 'credit policy must preserve margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'openai\/gpt-5\.6-luna'/, 'default model must be GPT-5.6 Luna')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.10/, 'GPT-5.6 Luna standard OpenAI input pricing must match OpenRouter')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.01/, 'GPT-5.6 Luna standard OpenAI cache-read pricing must match OpenRouter')
-  assert.match(modelPricing, /outputUsdPer1M:\s*0\.60/, 'GPT-5.6 Luna standard OpenAI output pricing must match OpenRouter')
-  assert.match(modelPricing, /longContextThresholdTokens:\s*272_000/, 'GPT-5.6 Luna long-context pricing threshold must match OpenRouter')
-  assert.match(modelPricing, /longContextInputUsdPer1M:\s*0\.20/, 'GPT-5.6 Luna long-context input pricing must match OpenRouter')
-  assert.match(modelPricing, /longContextCacheHitInputUsdPer1M:\s*0\.02/, 'GPT-5.6 Luna long-context cache-read pricing must match OpenRouter')
-  assert.match(modelPricing, /longContextOutputUsdPer1M:\s*0\.90/, 'GPT-5.6 Luna long-context output pricing must match OpenRouter')
-  assert.match(modelPricing, /contextTokens:\s*1_050_000/, 'GPT-5.6 Luna context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*128_000/, 'GPT-5.6 Luna max output token cap must match OpenRouter')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.5-flash-lite'/, 'default model must be Gemini 3.5 Flash Lite')
+  assert.match(modelPricing, /inputUsdPer1M:\s*0\.30/, 'Gemini 3.5 Flash Lite input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.03/, 'Gemini 3.5 Flash Lite cache-read pricing must match OpenRouter')
+  assert.match(modelPricing, /outputUsdPer1M:\s*2\.50/, 'Gemini 3.5 Flash Lite output pricing must match OpenRouter')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*2\.50/, 'Gemini 3.5 Flash Lite reasoning pricing must match OpenRouter')
+  assert.match(modelPricing, /longContextThresholdTokens:\s*1_048_576/, 'Gemini’s no-override boundary must match its context window')
+  assert.match(modelPricing, /longContextInputUsdPer1M:\s*0\.30/, 'Gemini has no separate long-context input price')
+  assert.match(modelPricing, /longContextCacheHitInputUsdPer1M:\s*0\.03/, 'Gemini has no separate long-context cache-read price')
+  assert.match(modelPricing, /longContextOutputUsdPer1M:\s*2\.50/, 'Gemini has no separate long-context output price')
+  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Gemini 3.5 Flash Lite context window must match OpenRouter')
+  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Gemini 3.5 Flash Lite output cap must match OpenRouter')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0\.30/, 'Serper search pricing must match provider public pricing')
@@ -198,14 +199,14 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0007) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 272_000, completion_tokens: 1000 }) || 0) - 0.0553) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0028) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.1525) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
-    prompt_tokens: 272_000,
+    prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
-    prompt_cache_miss_tokens: 172_000,
-  }) || 0) - 0.0373) < 1e-12)
+    prompt_cache_miss_tokens: 400_000,
+  }) || 0) - 0.1255) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

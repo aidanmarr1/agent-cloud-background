@@ -16,10 +16,10 @@ assert.match(
   /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/,
   'the assistant provider must be statically pinned to OpenRouter',
 )
-assert.match(
+assert.doesNotMatch(
   llmSource,
-  /PINNED_OPENROUTER_PROVIDER\s*=\s*'openai'\s+as const/,
-  'the routed inference provider must be statically pinned to OpenAI',
+  /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
+  'Gemini should retain resilient OpenRouter balanced provider routing',
 )
 assert.doesNotMatch(
   llmSource,
@@ -134,18 +134,14 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'openai/gpt-5.6-luna')
+    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite')
     assert.equal('models' in request.body, false)
-    assert.deepEqual(request.body.provider, {
-      order: ['openai'],
-      only: ['openai'],
-      allow_fallbacks: false,
-    })
+    assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'none', exclude: true })
+  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
@@ -159,7 +155,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'mp3' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
-  assert.deepEqual(requests[2].body.reasoning, { effort: 'none', exclude: true })
+  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
     requests[3].body.messages.slice(-2),
     [
@@ -179,7 +175,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('GPT-5.6 Luna exact OpenAI provider and lowest reasoning smoke test passed')
+  console.log('Gemini 3.5 Flash Lite balanced provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }
