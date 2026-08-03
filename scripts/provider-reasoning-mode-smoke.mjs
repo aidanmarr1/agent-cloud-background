@@ -16,10 +16,10 @@ assert.match(
   /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/,
   'the assistant provider must be statically pinned to OpenRouter',
 )
-assert.doesNotMatch(
+assert.match(
   llmSource,
-  /provider:\s*\{\s*sort:\s*'(?:throughput|price|latency)'\s*\}/,
-  'requests must not override the Exacto quality-first provider route',
+  /PINNED_OPENROUTER_PROVIDER\s*=\s*'openai'\s+as const/,
+  'the routed inference provider must be statically pinned to OpenAI',
 )
 assert.doesNotMatch(
   llmSource,
@@ -65,6 +65,7 @@ const common = { retryMaxAttempts: 0, includeTemporalContext: false }
 await llm.createCompletion({
   ...common,
   model: 'stale/client-selected-model',
+  models: ['stale/fallback-model'],
   messages: [{ role: 'user', content: 'Acknowledge.' }],
   max_tokens: 256,
 })
@@ -91,7 +92,7 @@ const stream = await llm.createStreamingCompletion({
   model: 'another/stale-model',
   messages: [{ role: 'user', content: 'Take the next action.' }],
   max_tokens: 384,
-  reasoning: { effort: 'none', exclude: true },
+  reasoning: { effort: 'xhigh', exclude: false },
 })
 for await (const _chunk of stream) {}
 await llm.createCompletion({
@@ -119,8 +120,8 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
       DEEPSEEK_API_KEY: 'ignored-stale-key',
       OPENROUTER_API_KEY: 'smoke-openrouter-key',
       OPENROUTER_MODEL: 'ignored/stale-model',
-      OPENROUTER_REASONING_EFFORT: 'none',
-      OPENROUTER_REASONING_EXCLUDE: 'true',
+      OPENROUTER_REASONING_EFFORT: 'xhigh',
+      OPENROUTER_REASONING_EXCLUDE: 'false',
     },
     maxBuffer: 4 * 1024 * 1024,
   })
@@ -133,8 +134,13 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'qwen/qwen3.7-flash')
-    assert.equal('provider' in request.body, false)
+    assert.equal(request.body.model, 'openai/gpt-5.6-luna')
+    assert.equal('models' in request.body, false)
+    assert.deepEqual(request.body.provider, {
+      order: ['openai'],
+      only: ['openai'],
+      allow_fallbacks: false,
+    })
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
@@ -173,7 +179,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('OpenRouter balanced provider mode smoke test passed')
+  console.log('GPT-5.6 Luna exact OpenAI provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

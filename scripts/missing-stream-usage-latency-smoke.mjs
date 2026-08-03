@@ -78,7 +78,7 @@ export async function runSmoke() {
     state,
     false,
     output => estimateConservativeMissingStreamUsage({
-      model: 'qwen/qwen3.7-flash',
+      model: 'openai/gpt-5.6-luna',
       requestMessages,
       requestTools,
       assistantContent: output.assistantContent,

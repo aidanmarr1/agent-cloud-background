@@ -10,13 +10,13 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// Qwen 3.7 Flash exposes a 1M-token context window (983,616 prompt tokens).
+// GPT-5.6 Luna exposes a 1.05M-token context window (922,000 prompt tokens).
 // Keep the complete bounded agent run in model context instead of discarding
 // all but eight messages. ContextManager still removes redundant file bodies
 // and stale screenshots, which preserves usable evidence without repeatedly
 // paying for content that already exists in the sandbox.
-export const MODEL_MAX_PROMPT_TOKENS = 983_616
-export const MODEL_MAX_COMPLETION_TOKENS = 65_536
+export const MODEL_MAX_PROMPT_TOKENS = 922_000
+export const MODEL_MAX_COMPLETION_TOKENS = 128_000
 export const MAX_CONTEXT_MESSAGES = 4_096
 // A single slow/stalled model turn is ordinary provider jitter, not a reason to
 // terminate an otherwise healthy task. Recovery changes the next request route
@@ -106,7 +106,7 @@ export const PLAN_RETRY_BASE_MS = 350
 export const STREAM_MAX_RETRIES = 0
 export const STREAM_RETRY_BASE_MS = 650
 export const STREAM_RETRY_EXPONENT = 1.2
-// Gemini 3.6 Flash is usually quick, but provider selection and a large native
+// GPT-5.6 Luna is usually quick, but provider startup and a large native
 // tool schema can occasionally take longer than five seconds before response
 // headers arrive. A realistic start window avoids converting healthy turns
 // into rapid null-stream loops while the shorter stream inactivity limits

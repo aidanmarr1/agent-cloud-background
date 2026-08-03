@@ -12,37 +12,15 @@ function trimmedEnv(value: string | undefined): string | undefined {
   return trimmed || undefined
 }
 
-function booleanEnv(value: string | undefined, fallback: boolean): boolean {
-  const normalized = trimmedEnv(value)?.toLowerCase()
-  if (!normalized) return fallback
-  if (['false', '0', 'no', 'off'].includes(normalized)) return false
-  if (['true', '1', 'yes', 'on'].includes(normalized)) return true
-  return fallback
-}
-
 // Keep the provider/model boundary explicit. Individual requests, stale
 // worker environments, and client-supplied model names cannot silently route
 // tasks back to another provider.
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
+export const PINNED_OPENROUTER_PROVIDER = 'openai' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
-
-function normalizeReasoningEffort(value: string | undefined, fallback: ReasoningEffort): ReasoningEffort {
-  const normalized = (value || fallback).toLowerCase().trim().replace(/[\s-]+/g, '_')
-  if (['x_high', 'extra_high'].includes(normalized)) return 'xhigh'
-  if (['none', 'minimal', 'low', 'medium', 'high', 'xhigh'].includes(normalized)) {
-    return normalized as ReasoningEffort
-  }
-  return fallback
-}
-
-const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(
-  trimmedEnv(process.env.OPENROUTER_REASONING_EFFORT),
-  'none',
-)
-const DEFAULT_REASONING_EXCLUDE = booleanEnv(process.env.OPENROUTER_REASONING_EXCLUDE, true)
 
 export type ChatContentPart =
   | { type: 'text'; text: string }
@@ -94,6 +72,9 @@ export type ChatCompletionParams = {
   }
   provider?: {
     sort?: 'throughput' | 'price' | 'latency'
+    order?: string[]
+    only?: string[]
+    allow_fallbacks?: boolean
     require_parameters?: boolean
   }
   requestTimeoutMs?: number
@@ -541,13 +522,21 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 }
 
 function providerReasoningPayload(
-  reasoning: ChatCompletionParams['reasoning'],
+  _reasoning: ChatCompletionParams['reasoning'],
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
   return {
-    reasoning: reasoning ?? {
-      effort: DEFAULT_REASONING_EFFORT,
-      exclude: DEFAULT_REASONING_EXCLUDE,
+    reasoning: {
+      effort: 'none',
+      exclude: true,
     },
+  }
+}
+
+function exactOpenRouterProviderRoute(): NonNullable<ChatCompletionParams['provider']> {
+  return {
+    order: [PINNED_OPENROUTER_PROVIDER],
+    only: [PINNED_OPENROUTER_PROVIDER],
+    allow_fallbacks: false,
   }
 }
 
@@ -596,6 +585,7 @@ function withPinnedModel(
     includeTemporalContext,
     stream: _stream,
     model: _model,
+    models: _models,
     provider: _provider,
     reasoning: _reasoning,
     messages,
@@ -614,6 +604,7 @@ function withPinnedModel(
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
+    provider: exactOpenRouterProviderRoute(),
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning),
