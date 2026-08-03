@@ -2855,11 +2855,11 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   const alreadyShown = recentNarrationPromptExclusions(state, 8)
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
-    'Every available tool schema includes a required, non-empty progress_update. Put one natural completed-result update in that field, sized to the newest evidence rather than a fixed template.',
-    'The field must describe completed work, never only a future action, plan, promise, or command. Never repeat or paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'A sentence beginning "Next, ..." is optional, never required, and never a template. Use it only when it names the exact concrete tool action this same response is starting immediately; never use it for a broader phase, a general shift in analysis, or planned later work.',
-    'progress_update is display-only. Still complete every normal required tool argument and make the tool call without waiting for a separate narration turn.',
-    newWork.length ? `New work:\n- ${newWork.join('\n- ')}` : 'State the newest concrete completed result from the active work; progress_update must not be empty.',
+    'Every available tool schema includes a required, non-empty progress_update. Write one natural completion update for the exact native tool action in this response; the runtime will display it only after that matching action succeeds.',
+    'Use completed tense, but claim only what successful execution of the supplied action itself proves. A successful navigation may say a named page was opened; a search may say the topic was searched. Never invent a finding, extraction, confirmation, statistic, or source content that the tool has not returned yet. You may mention a concrete finding only when it already appears in New work below.',
+    'Never write a future action, plan, promise, command, or a sentence beginning "Next". Never repeat or paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
+    'progress_update is display-only and post-result. Still complete every normal required tool argument and make the tool call immediately without waiting for a separate narration turn.',
+    newWork.length ? `Previously completed work (the only allowed source of specific findings):\n- ${newWork.join('\n- ')}` : 'No prior finding is available to cite; describe only the successful completion of this exact action.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
 }
@@ -2868,7 +2868,7 @@ function cadenceNarrationActionRetryMessage(reason: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
     'Retry the same active phase now in the ordinary action-selection turn.',
-    'Make exactly one concrete native tool call. Put a genuinely new, non-empty completed-result sentence in progress_update.',
+    'Make exactly one concrete native tool call. Put a genuinely new, non-empty completion sentence for that exact action in progress_update; it will be shown only if the matching tool succeeds.',
     'Do not output ordinary prose, planning, speculation, a future action fragment, or narration without a tool call.',
   ].join(' ')
 }
@@ -4973,13 +4973,6 @@ export class AgentLoop {
                 streamProcessor.discardBufferedEmission()
               } else {
                 streamProcessor.commitBufferedEmission()
-                if (lastStreamResult.cadenceProgressUpdate) {
-                  acceptProgressNarration(state, lastStreamResult.cadenceProgressUpdate, {
-                    requireSignal: false,
-                    remainingVisibleActions: lastStreamResult.cadenceProgressVisibleActionsAfter || 0,
-                    resetCadence: true,
-                  })
-                }
               }
               console.log(
                 lastStreamResult.cadenceProgressViolation
@@ -5313,6 +5306,39 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
+            if (lastStreamResult.cadenceProgressUpdate) {
+              const narratedResult = lastToolResults.find(
+                result => result.tc.id === lastStreamResult?.cadenceProgressToolCallId,
+              )
+              if (narratedResult?.acceptedForExecution === true && !narratedResult.isError) {
+                const acceptedNarration = acceptProgressNarration(
+                  state,
+                  lastStreamResult.cadenceProgressUpdate,
+                  {
+                    requireSignal: false,
+                    remainingVisibleActions: 0,
+                    resetCadence: true,
+                  },
+                )
+                if (acceptedNarration.status === 'accepted') {
+                  // ToolPipeline has already emitted the matching tool_result,
+                  // so completion wording can never precede the work it claims.
+                  this.emitter.progressUpdate(acceptedNarration.text, {
+                    stepIndex: state.currentStepIdx,
+                    afterToolId: narratedResult.tc.id,
+                    remainingVisibleActions: 0,
+                  })
+                }
+              } else {
+                console.log('[AgentDiagnostics] Held cadence narration because its matching action did not succeed', {
+                  iteration: state.iterations,
+                  toolCallId: lastStreamResult.cadenceProgressToolCallId || null,
+                  tool: narratedResult?.tc.name || null,
+                  acceptedForExecution: narratedResult?.acceptedForExecution === true,
+                  isError: narratedResult?.isError ?? null,
+                })
+              }
+            }
             const currentPaidTurnProgress = paidTurnProgressForIteration(
               pendingPaidTurnProgress,
               state.iterations,

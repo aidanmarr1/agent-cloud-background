@@ -48,7 +48,7 @@ export interface StreamResult {
   usage: StreamUsage | null
   usageEstimated?: boolean
   cadenceProgressUpdate?: string
-  cadenceProgressVisibleActionsAfter?: number
+  cadenceProgressToolCallId?: string
   cadenceProgressViolation?: CadenceProgressViolation
 }
 
@@ -610,7 +610,7 @@ export class StreamProcessor {
     let stepAdvancedThisIteration = false
     let suppressTextOnlyOverflow = false
     let cadenceProgressUpdate: string | null = null
-    let cadenceProgressVisibleActionsAfter = 0
+    let cadenceProgressToolCallId: string | null = null
     let cadenceProgressViolation: CadenceProgressViolation | null = null
     const rejectedCadenceProgressToolCalls = new Set<number>()
 
@@ -621,14 +621,12 @@ export class StreamProcessor {
       if (!cadenceProgressViolation) cadenceProgressViolation = { code, reason }
     }
 
-    const emitCadenceProgressUpdate = (text: string): void => {
+    const stageCadenceProgressUpdate = (text: string, toolCallId: string): void => {
       cadenceProgressUpdate = text
+      cadenceProgressToolCallId = toolCallId
       assistantContent = assistantContent.trim()
         ? `${assistantContent.trim()}\n\n${text}`
         : text
-      if (contentStreamingStartTime === null) contentStreamingStartTime = Date.now()
-      lastVisibleActivityTime = Date.now()
-      this.emit(() => this.emitter.progressUpdate(text))
     }
 
     const prepareCadenceProgressUpdate = (
@@ -660,7 +658,7 @@ export class StreamProcessor {
         return allowMissing
       }
 
-      emitCadenceProgressUpdate(review.text)
+      stageCadenceProgressUpdate(review.text, toolCall.id)
       return true
     }
 
@@ -677,9 +675,8 @@ export class StreamProcessor {
       const signature = provisionalToolStartSignature(toolCall, earlyArgs)
       if (emittedToolStarts.get(index) === signature) return
       emittedToolStarts.set(index, signature)
-      const newlyCountedVisibleAction = recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
+      recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
       toolCall.provisionalStartEmitted = true
-      if (cadenceProgressUpdate && newlyCountedVisibleAction) cadenceProgressVisibleActionsAfter += 1
       // Current-step file writes need to become visible while the model is
       // still generating their arguments. Their provisional start args are
       // already sanitized and the preview is reconciled with the eventual
@@ -1117,7 +1114,8 @@ export class StreamProcessor {
               // that the whole requested batch is source-only. This prevents a
               // mixed/unsafe second call from flashing a provisional action that
               // the execution policy will subsequently reject.
-              if (isPrimaryToolCall && prepareCadenceProgressUpdate(tc.index, toolCall)) {
+              if (isPrimaryToolCall) {
+                prepareCadenceProgressUpdate(tc.index, toolCall)
                 emitProvisionalToolStart(tc.index, toolCall)
               }
 
@@ -1257,11 +1255,12 @@ export class StreamProcessor {
       )
     }
 
-    // Valid narration is emitted immediately before its action. Missing,
-    // invalid, or duplicate narration stays invisible, while the action still
-    // proceeds and cadence is retried on the next ordinary action turn.
+    // Stage valid narration for post-result release. The action itself remains
+    // genuinely live and must not wait for display prose to finish streaming.
+    // Missing, invalid, or duplicate narration stays invisible, while the
+    // action still proceeds and cadence is retried on the next ordinary turn.
     for (const [index, toolCall] of toolCalls) {
-      if (!prepareCadenceProgressUpdate(index, toolCall, true)) continue
+      prepareCadenceProgressUpdate(index, toolCall, true)
       emitProvisionalToolStart(index, toolCall)
     }
 
@@ -1301,7 +1300,7 @@ export class StreamProcessor {
       usage: resolvedUsage(),
       usageEstimated,
       cadenceProgressUpdate: cadenceProgressUpdate || undefined,
-      cadenceProgressVisibleActionsAfter,
+      cadenceProgressToolCallId: cadenceProgressToolCallId || undefined,
       cadenceProgressViolation: cadenceProgressViolation || undefined,
     }
   }

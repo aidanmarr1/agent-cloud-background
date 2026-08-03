@@ -155,12 +155,12 @@ async function* internalProviderRecoveryChunks() {
 }
 
 async function* validCadenceToolChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_valid_cadence', function: { name: 'web_search', arguments: '{"progress_update":"The official benchmark reports a 2.1-second median agent startup, establishing a concrete latency baseline.","action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark"}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_valid_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks."}' } }] } }] }
 }
 
 async function* cadenceToolUpsertChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_cadence_upsert', function: { name: 'web_search', arguments: '{"progress_update":"The official benchmark reports a 2.1-second median agent startup, establishing a concrete latency baseline.","action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark"' } }] } }] }
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ',"count":5}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_cadence_upsert', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","count":5,"progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks."' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }
 }
 
 async function* invalidCadenceToolChunks() {
@@ -185,13 +185,13 @@ async function* leakedBenchmarkCommandChunks() {
 
 async function* ordinaryAndSchemaCadenceChunks() {
   yield { choices: [{ delta: { content: 'The official benchmark reports a 2.1-second median agent startup.' } }] }
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_ordinary_cadence', function: { name: 'web_search', arguments: '{"progress_update":"The official benchmark reports a 95th-percentile startup under five seconds, establishing a second latency bound.","action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark"}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_ordinary_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for agent startup latency benchmarks."}' } }] } }] }
 }
 
 async function* schemaThenOrdinaryCadenceChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_schema_first', function: { name: 'web_search', arguments: '{"progress_update":"The official benchmark reports a 2.1-second median agent startup, establishing a concrete latency baseline.","action_label":"' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_schema_first', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks' } }] } }] }
   yield { choices: [{ delta: { content: 'A second provider narration must not be shown.' } }] }
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark"}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '."}' } }] } }] }
 }
 
 async function* parallelSourceChunks() {
@@ -636,7 +636,7 @@ export async function runSmoke() {
     'internal provider/API recovery prose must not count as user-visible model progress',
   )
 
-  const cadenceText = 'The official benchmark reports a 2.1-second median agent startup, establishing a concrete latency baseline.'
+  const cadenceText = 'Completed a targeted search of official sources for current agent startup performance benchmarks.'
   assert.equal(
     reviewProgressNarration(
       'The free Serper API blocked the Apple search query, so I navigated directly to the store page instead.',
@@ -653,17 +653,16 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(validCadenceState), true)
   const validCadenceProcessor = new StreamProcessor(validCadenceEmitter as any, timeouts)
   const validCadenceResult = await validCadenceProcessor.processStream(validCadenceToolChunks() as any, validCadenceState, true)
-  const cadenceTextIndex = validCadenceEmitter.events.findIndex(event => event.type === 'progress_update')
   const cadenceToolIndex = validCadenceEmitter.events.findIndex(event => event.type === 'tool_start')
-  assert.equal(validCadenceEmitter.events[cadenceTextIndex]?.content, cadenceText)
-  assert.equal(cadenceToolIndex, cadenceTextIndex + 1, 'accepted schema narration must emit immediately before the provisional tool_start')
+  assert.equal(validCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'completion narration must remain staged until the matching action succeeds')
+  assert.ok(cadenceToolIndex >= 0, 'the provisional action must appear without waiting for post-result narration')
   assert.equal(validCadenceResult.cadenceProgressUpdate, cadenceText)
-  assert.equal(validCadenceResult.cadenceProgressVisibleActionsAfter, 1)
+  assert.equal(validCadenceResult.cadenceProgressToolCallId, 'call_valid_cadence')
   assert.doesNotMatch(validCadenceResult.toolCalls.get(0)?.arguments || '', /progress_update/, 'display-only narration must never reach execution arguments')
   assert.equal((validCadenceEmitter.events[cadenceToolIndex].args as any).progress_update, undefined, 'display-only narration must never leak into persisted tool_start args')
   assert.equal(validCadenceState.recentNarrations.length, 0, 'speculative stream parsing must not reset cadence before billing commits')
-  assert.equal(acceptProgressNarration(validCadenceState, validCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: validCadenceResult.cadenceProgressVisibleActionsAfter, resetCadence: true }).status, 'accepted')
-  assert.equal(validCadenceState.visibleToolActionsSinceLastNarration, 1)
+  assert.equal(acceptProgressNarration(validCadenceState, validCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: 0, resetCadence: true }).status, 'accepted')
+  assert.equal(validCadenceState.visibleToolActionsSinceLastNarration, 0)
 
   const upsertCadenceEmitter = makeEmitter()
   const upsertCadenceState = createInitialState(false, timeouts)
@@ -673,9 +672,9 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(upsertCadenceState), true)
   const upsertCadenceResult = await new StreamProcessor(upsertCadenceEmitter as any, timeouts).processStream(cadenceToolUpsertChunks() as any, upsertCadenceState, true)
   assert.equal(upsertCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'one streamed tool-call ID must create exactly one visible action')
-  assert.equal(upsertCadenceResult.cadenceProgressVisibleActionsAfter, 1, 'provisional upserts for one tool ID must consume exactly one cadence action')
-  assert.equal(acceptProgressNarration(upsertCadenceState, upsertCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: upsertCadenceResult.cadenceProgressVisibleActionsAfter, resetCadence: true }).status, 'accepted')
-  assert.equal(upsertCadenceState.visibleToolActionsSinceLastNarration, 1, 'a same-tool upsert must not make the next narration arrive early')
+  assert.equal(upsertCadenceResult.cadenceProgressToolCallId, 'call_cadence_upsert', 'the staged narration must stay bound to one exact action ID')
+  assert.equal(acceptProgressNarration(upsertCadenceState, upsertCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: 0, resetCadence: true }).status, 'accepted')
+  assert.equal(upsertCadenceState.visibleToolActionsSinceLastNarration, 0, 'a completed narrated action resets cadence at its post-result boundary')
 
   const invalidCadenceEmitter = makeEmitter()
   const invalidCadenceState = createInitialState(false, timeouts)
@@ -685,7 +684,7 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(invalidCadenceState), true)
   const invalidCadenceResult = await new StreamProcessor(invalidCadenceEmitter as any, timeouts).processStream(invalidCadenceToolChunks() as any, invalidCadenceState, true)
   assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'future-only schema text must not emit')
-  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'invalid schema text may keep only the provisional preview hidden')
+  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'invalid display text must never delay the genuine action pill')
   assert.equal(invalidCadenceResult.cadenceProgressUpdate, undefined)
   assert.equal(invalidCadenceResult.toolCalls.size, 1, 'invalid display narration must never discard a valid native action')
   assert.equal(invalidCadenceResult.cadenceProgressViolation, undefined)
@@ -711,7 +710,8 @@ export async function runSmoke() {
   emptyCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(emptyCadenceState), true)
   const emptyCadenceResult = await new StreamProcessor(emptyCadenceEmitter as any, timeouts).processStream(emptyCadenceToolChunks() as any, emptyCadenceState, true)
-  assert.equal(emptyCadenceEmitter.events.length, 0, 'an empty required cadence field must remain invisible')
+  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'an empty required cadence field must remain invisible')
+  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'an empty display field must never delay the genuine action pill')
   assert.equal(emptyCadenceResult.toolCalls.size, 1, 'an empty display field must not discard useful work')
   assert.equal(emptyCadenceResult.cadenceProgressViolation, undefined)
 
@@ -751,7 +751,7 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(duplicateCadenceState), true)
   const duplicateResult = await new StreamProcessor(duplicateCadenceEmitter as any, timeouts).processStream(validCadenceToolChunks() as any, duplicateCadenceState, true)
   assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'duplicate schema text must not emit')
-  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'duplicate schema text may keep only the provisional preview hidden')
+  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'duplicate display text must never delay the genuine action pill')
   assert.equal(duplicateResult.cadenceProgressUpdate, undefined)
   assert.equal(duplicateResult.toolCalls.size, 1, 'duplicate narration must not suppress the native action')
   assert.equal(duplicateResult.cadenceProgressViolation, undefined)
@@ -770,9 +770,9 @@ export async function runSmoke() {
   ordinaryCadenceState.currentStepIdx = 0
   ordinaryCadenceState.visibleToolActionsSinceLastNarration = 3
   const ordinaryCadenceResult = await new StreamProcessor(ordinaryCadenceEmitter as any, timeouts).processStream(ordinaryAndSchemaCadenceChunks() as any, ordinaryCadenceState, true)
-  assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 1, 'ordinary same-turn narration and progress_update must never double-emit')
+  assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'structured narration must remain staged until execution succeeds')
   assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'cadence narration must use its explicit event lane')
-  assert.match(ordinaryCadenceResult.cadenceProgressUpdate || '', /95th-percentile startup/, 'only the required schema lane may satisfy cadence')
+  assert.match(ordinaryCadenceResult.cadenceProgressUpdate || '', /startup latency benchmarks/, 'only the required schema lane may satisfy cadence')
   assert.doesNotMatch(ordinaryCadenceResult.assistantContent, /2\.1-second median/, 'ordinary prose outside progress_update must be ignored on cadence turns')
   assert.doesNotMatch(ordinaryCadenceResult.toolCalls.get(0)?.arguments || '', /progress_update/, 'the accepted schema field must still be stripped before execution and history')
 
@@ -781,10 +781,10 @@ export async function runSmoke() {
   schemaFirstState.currentPlanItems = ['Verify current latency evidence']
   schemaFirstState.currentStepIdx = 0
   const schemaFirstResult = await new StreamProcessor(schemaFirstEmitter as any, timeouts).processStream(schemaThenOrdinaryCadenceChunks() as any, schemaFirstState, true)
-  assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'progress_update').length, 1, 'ordinary prose arriving after an accepted schema update must be suppressed')
+  assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'accepted schema narration must remain staged until execution succeeds')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'accepted cadence updates must not reuse generic assistant text')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'tool_start').length, 1)
-  assert.match(schemaFirstResult.cadenceProgressUpdate || '', /2\.1-second median agent startup/)
+  assert.match(schemaFirstResult.cadenceProgressUpdate || '', /current agent startup performance benchmarks/)
 
   const defaultParallelEmitter = makeEmitter()
   const defaultParallelState = createInitialState(false, timeouts)

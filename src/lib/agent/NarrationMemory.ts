@@ -83,18 +83,18 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
         ...tool.function,
         parameters: {
           ...schema,
-          // Keep this first so providers that respect schema order can finish
-          // the user-visible update before streaming large action arguments.
+          // Keep normal action arguments first so the live action pill can
+          // appear before the model finishes the post-result narration field.
           properties: {
+            ...(schema.properties || {}),
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Write one natural completed-result update advancing the user-visible evidence trace. Size it to the newest evidence: a sentence for one clear result, two when a contrast or implication matters, or a short paragraph for a dense milestone. Choose the wording and structure freely without repeating recent claims. A sentence beginning "Next, ..." is optional and only valid when it names the exact concrete action this same tool-call response begins immediately; never use it for a broader phase or vague later work. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, or raw tool failures. Never write only a future action, plan, promise, tool accounting, empty string, cumulative-summary paraphrase, or generic Next sentence. This field is display-only and is removed before tool execution.',
+              description: 'Required cadence field. Write one natural completion update for this exact tool action. The runtime holds it until the matching action succeeds, so use completed tense but claim only what successful execution of the supplied action itself proves. For example, say that a named report was opened or searched for; never claim that it contained, confirmed, or yielded a specific finding unless that finding already appears in the completed-work context. Size it naturally: one sentence for one clear action, two only when an already-established contrast or implication matters. Choose the wording freely without repeating recent claims. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, or raw tool failures. Never write a future plan, promise, tool accounting, empty string, cumulative-summary paraphrase, or generic Next sentence. This field is display-only and is removed before tool execution.',
               minLength: 1,
-              maxLength: 300,
+              maxLength: 220,
             },
-            ...(schema.properties || {}),
           },
-          required: [CADENCE_PROGRESS_UPDATE_FIELD, ...required.filter(key => key !== CADENCE_PROGRESS_UPDATE_FIELD)],
+          required: [...required.filter(key => key !== CADENCE_PROGRESS_UPDATE_FIELD), CADENCE_PROGRESS_UPDATE_FIELD],
         },
       },
     } as T
