@@ -707,7 +707,7 @@ async function assertSourceContracts() {
   assert.ok((planManager.match(/reasoning:\s*PLANNER_CONTROL_REASONING/g) || []).length >= 4, 'initial plan, repair, and replan calls should use planner control reasoning')
   assert.match(agentLoop, /const maxNormalOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'normal substantive turns must receive the provider\'s full completion budget')
   assert.match(agentLoop, /const maxBuildOutputTokens = MODEL_MAX_COMPLETION_TOKENS[\s\S]*const maxDeliverableOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'build, deliverable, and deadline turns must receive the provider\'s full completion budget')
-  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 983_040[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 65_536[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Gemini 3.5 Flash Lite must use its published context and completion capacity instead of an eight-message cap')
+  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 983_040[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 65_536[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Gemini 3.6 Flash must use its published context and completion capacity instead of an eight-message cap')
   const attemptPlanCallContract = planManager.match(/private async attemptPlanCall[\s\S]*?\n  \/\*\*/)?.[0] || ''
   assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must exhaust model repair before fallback')
   assert.match(planManager, /PLANNER_QUALITY_REPAIR_ATTEMPTS = 1/, 'planner repair must stay bounded so startup does not wait behind repeated repair loops')

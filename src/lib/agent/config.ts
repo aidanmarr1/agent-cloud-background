@@ -10,7 +10,7 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// Gemini 3.5 Flash Lite exposes a 1,048,576-token context window. Reserve its
+// Gemini 3.6 Flash exposes a 1,048,576-token context window. Reserve its
 // full 65,536-token completion allowance, leaving 983,040 prompt tokens.
 // Keep the complete bounded agent run in model context instead of discarding
 // all but eight messages. ContextManager still removes redundant file bodies

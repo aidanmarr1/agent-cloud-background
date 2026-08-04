@@ -143,7 +143,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite')
+    assert.equal(request.body.model, 'google/gemini-3.6-flash')
     assert.equal('models' in request.body, false)
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
@@ -183,7 +183,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Gemini 3.5 Flash Lite balanced provider and lowest reasoning smoke test passed')
+  console.log('Gemini 3.6 Flash balanced provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

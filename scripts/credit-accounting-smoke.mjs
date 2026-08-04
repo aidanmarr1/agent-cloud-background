@@ -30,11 +30,11 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.5-flash-lite'/, 'default model must be Gemini 3.5 Flash Lite')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.30/, 'Gemini base input pricing must match OpenRouter')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.03/, 'Gemini base cache-read pricing must match OpenRouter')
-  assert.match(modelPricing, /outputUsdPer1M:\s*2\.50/, 'Gemini base output pricing must match OpenRouter')
-  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*2\.50/, 'Gemini reasoning pricing must match output pricing')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.6-flash'/, 'default model must be Gemini 3.6 Flash')
+  assert.match(modelPricing, /inputUsdPer1M:\s*1\.50/, 'Gemini base input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.15/, 'Gemini base cache-read pricing must match OpenRouter')
+  assert.match(modelPricing, /outputUsdPer1M:\s*7\.50/, 'Gemini base output pricing must match OpenRouter')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*7\.50/, 'Gemini reasoning pricing must match output pricing')
   assert.match(modelPricing, /contextPriceTiers:\s*\[\]\s*as Array/, 'Gemini must not invent prompt-length price overrides')
   assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Gemini context window must match OpenRouter')
   assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Gemini output cap must match OpenRouter')
@@ -196,14 +196,14 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0028) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.1525) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.009) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.7575) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
     prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
     prompt_cache_miss_tokens: 400_000,
-  }) || 0) - 0.1255) < 1e-12)
+  }) || 0) - 0.6225) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

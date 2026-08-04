@@ -1,13 +1,13 @@
-// The assistant is pinned to Gemini 3.5 Flash Lite. The plain model slug keeps
+// The assistant is pinned to Gemini 3.6 Flash. The plain model slug keeps
 // OpenRouter's balanced price-and-speed routing instead of forcing one host.
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.6-flash'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.30,
-  cacheHitInputUsdPer1M: 0.03,
-  outputUsdPer1M: 2.50,
-  internalReasoningUsdPer1M: 2.50,
+  inputUsdPer1M: 1.50,
+  cacheHitInputUsdPer1M: 0.15,
+  outputUsdPer1M: 7.50,
+  internalReasoningUsdPer1M: 7.50,
   // The current Google endpoint publishes one rate across the full context
   // window, so there are no prompt-length price overrides to apply.
   contextPriceTiers: [] as Array<{
@@ -17,9 +17,9 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 256_000,
-  longContextInputUsdPer1M: 0.30,
-  longContextCacheHitInputUsdPer1M: 0.03,
-  longContextOutputUsdPer1M: 2.50,
+  longContextInputUsdPer1M: 1.50,
+  longContextCacheHitInputUsdPer1M: 0.15,
+  longContextOutputUsdPer1M: 7.50,
   contextTokens: 1_048_576,
   maxCompletionTokens: 65_536,
   source: 'OpenRouter (Google)',
