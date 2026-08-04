@@ -337,13 +337,6 @@ function artifactTargetsMatch(
   return shared >= 1 && shared / Math.min(firstTokens.size, nextTokens.size) >= 0.5
 }
 
-function mergedArtifactLifecycleTitle(titles: string[], scopes: Array<string | null>): string {
-  const combined = titles.map((title, index) => phaseText(title, scopes[index])).join(' ')
-  const file = combined.match(ARTIFACT_FILE_PATTERN)?.[0]
-  if (file) return `Create and verify ${file}`
-  return `${stripTerminalPunctuation(titles[0])} and verify the saved deliverable`
-}
-
 /**
  * Collapse a planner's adjacent draft/save/verify bookkeeping into one real
  * deliverable phase. These labels describe one artifact lifecycle, not three
@@ -389,8 +382,11 @@ export function compactAdjacentArtifactLifecyclePhases(
 
     const runTitles = titles.slice(index, runEnd)
     const runScopes = normalizedScopes.slice(index, runEnd)
-    nextTitles.push(mergedArtifactLifecycleTitle(runTitles, runScopes))
-    nextScopes.push(`Complete one artifact lifecycle in this phase: ${runTitles
+    // Preserve the model-authored phase title. Compaction may combine adjacent
+    // bookkeeping, but it must not replace the model's intent with a stock
+    // "create and verify" workflow that the agent then follows literally.
+    nextTitles.push(runTitles[0])
+    nextScopes.push(`Treat these related outcomes as one coherent phase and decide their natural order: ${runTitles
       .map((title, runIndex) => stripTerminalPunctuation(runScopes[runIndex] || title))
       .join('; ')}.`)
     index = runEnd - 1

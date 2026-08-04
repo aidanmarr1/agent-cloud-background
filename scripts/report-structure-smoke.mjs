@@ -102,6 +102,41 @@ const completeReport = [
   '[1] https://example.com/source',
 ].join('\\n\\n')
 
+const flexibleReport = [
+  '# A Focused Assessment',
+  '## What matters',
+  'The evidence points to a practical distinction between the immediate operational effect and the longer-term strategic implication. This compact structure is intentional: it explains the conclusion directly without manufacturing an executive summary, a five-section skeleton, or a references appendix that the user did not request.',
+  '## Recommendation',
+  'Proceed with the smaller reversible option first, measure the actual result, and expand only if the observed benefit justifies the additional cost and complexity.',
+].join('\\n\\n')
+const flexibleVerification = verifier.verify(
+  flexibleReport,
+  'deliverables/focused-assessment.md',
+  'Write a report explaining the practical recommendation.',
+  'research',
+  null,
+  4,
+)
+assert.equal(
+  flexibleVerification.passed,
+  true,
+  \`an intact report must not be forced into a stock structure: \${flexibleVerification.failures.join('; ')}\`,
+)
+
+const explicitReferencesVerification = verifier.verify(
+  flexibleReport,
+  'deliverables/focused-assessment.md',
+  'Write a report and include a references section with source URLs.',
+  'research',
+  null,
+  2,
+)
+assert.equal(explicitReferencesVerification.passed, false)
+assert.ok(
+  explicitReferencesVerification.failures.some(failure => /requested references or sources section/i.test(failure)),
+  'explicit user-authored section requirements must still be enforced',
+)
+
 assert.match(
   markdownAppendStructureConflict(completeReport, '# A restarted report\\n\\nNew content') || '',
   /top-level report title/i,

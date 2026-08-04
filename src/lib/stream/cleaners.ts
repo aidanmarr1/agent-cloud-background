@@ -222,6 +222,11 @@ function normalizeMarkdownDisplaySegment(segment: string): string {
     })
     .replace(/\b(\d{1,4})([A-Z][a-z]{2,})\b/g, '$1 $2')
     .replace(/\b(\d{1,4})([a-z][a-z]{2,})\b/g, '$1 $2')
+    // Provider/tool boundaries occasionally remove the whitespace between two
+    // complete prose sentences. Repair only unambiguous sentence pronoun or
+    // determiner starts so filenames, URLs, decimals, and identifiers remain
+    // untouched.
+    .replace(/([a-z0-9)'"\]])([.!?])(?=(?:I|We|You|The|This|That|These|Those|He|She|It|They)\b)/g, '$1$2 ')
     .replace(/\n{3,}/g, '\n\n')
 }
 

@@ -32,7 +32,18 @@ function wantsRawFile(searchParams: URLSearchParams): boolean {
 }
 
 function shouldInlineFile(mimeType: string): boolean {
-  return mimeType.startsWith('image/') || mimeType === 'application/pdf'
+  return mimeType.startsWith('image/') || mimeType === 'application/pdf' || mimeType.startsWith('text/html')
+}
+
+function inlineSecurityHeaders(mimeType: string): Record<string, string> {
+  if (!mimeType.startsWith('text/html')) return {}
+  return {
+    // Website deliverables execute inside a unique sandboxed document. They
+    // can render their authored JS/CSS and HTTPS assets, but cannot inherit the
+    // app origin or navigate the parent task UI.
+    'Content-Security-Policy': "sandbox allow-scripts allow-forms allow-modals allow-popups; default-src 'self' data: blob: https:; script-src 'unsafe-inline' https:; style-src 'unsafe-inline' https:; img-src data: blob: https:; font-src data: https:; connect-src https:; frame-src https:;",
+    'Referrer-Policy': 'no-referrer',
+  }
 }
 
 export async function GET(request: Request) {
@@ -80,6 +91,7 @@ export async function GET(request: Request) {
               'Content-Length': String(body.byteLength),
               'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
               'X-Content-Type-Options': 'nosniff',
+              ...inlineSecurityHeaders(inline ? persistedFile.mimeType : ''),
             },
           })
         }
@@ -123,6 +135,7 @@ export async function GET(request: Request) {
           'Content-Length': String(read.size),
           'Cache-Control': 'private, no-cache, no-store, max-age=0, must-revalidate',
           'X-Content-Type-Options': 'nosniff',
+          ...inlineSecurityHeaders(inline ? mimeType : ''),
         },
       })
     }

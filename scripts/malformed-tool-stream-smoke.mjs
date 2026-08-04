@@ -301,10 +301,11 @@ const [readPipelineResult] = await readPipeline.executeAll(new Map([[0, {
 }]]), readPipelineState)
 assert.equal(readPipelineResult?.internalRecovery, undefined, 'a conservatively repaired read_document object must enter normal preflight')
 assert.deepEqual(JSON.parse(readPipelineResult!.tc.arguments), JSON.parse(repairedRead!))
-assert.match(
+assert.equal(readPipelineResult?.acceptedForExecution, true, 'the repaired read_document call must reach normal execution instead of a malformed or duplicate-source block')
+assert.doesNotMatch(
   JSON.stringify(readPipelineResult?.result || {}),
-  /already read in this phase/i,
-  'the repaired read_document call must continue through duplicate-source safety instead of malformed recovery',
+  /malformed tool arguments/i,
+  'the repaired read_document call must never be misclassified as malformed recovery',
 )
 
 const mixedEmitter = makeEmitter()

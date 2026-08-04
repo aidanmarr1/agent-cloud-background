@@ -44,7 +44,7 @@ export interface RequiredPlanStep {
   visualInput?: boolean
 }
 
-type PlannerStep = string | { title?: string; scope?: string | null }
+type PlannerStep = string | { title?: string; scope?: string | null; checklist?: unknown }
 
 interface PlannerResponseObject {
   ack?: string
@@ -70,10 +70,10 @@ const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 const PLANNER_ACK_MAX_TOKENS = 96
 const PLANNER_ACK_STREAM_TIMEOUT_MS = 20_000
 const PLANNER_ACK_DISPLAY_WAIT_MS = 150
-const PLANNER_FAST_JSON_MAX_TOKENS = 520
-const PLANNER_SIMPLE_JSON_MAX_TOKENS = 420
-const PLANNER_MEDIUM_JSON_MAX_TOKENS = 560
-const PLANNER_JSON_MAX_TOKENS = 640
+const PLANNER_FAST_JSON_MAX_TOKENS = 760
+const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
+const PLANNER_MEDIUM_JSON_MAX_TOKENS = 820
+const PLANNER_JSON_MAX_TOKENS = 980
 const REPLAN_JSON_MAX_TOKENS = 520
 const PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 30_000
 const PLANNER_JSON_REQUEST_TIMEOUT_MS = 45_000
@@ -471,11 +471,11 @@ function nonDeliverableStepGuidance(
   }
 
   if ((state.taskStrategy === 'build' || state.taskStrategy === 'code') && isWebsitePreviewStep(stepTitle || '')) {
-    return `RULES:\n- Dedicated website verification: inspect the generated local preview now with browser_screenshot/browser_scroll.\n- Use read_file/edit_file only for targeted fixes; create missing initial files only if genuinely absent.\n- Do NOT skip because preview opened during file writes. Do NOT change the Computer browser viewport or aspect ratio.`
+    return `RULES:\n- This phase concerns website verification. Choose the checks that fit its stated outcome: code/build checks, a rendered preview, interaction checks, or a combination.\n- Use read_file/edit_file only for targeted fixes; create missing initial files only if genuinely absent.\n- Do not repeat a check that already established the same result.`
   }
 
   if (isConcreteBuildStep(state.taskStrategy, stepTitle)) {
-    return `RULES:\n- Build now with create_file, create_website, edit_file, export_pdf, package_files, or read_file. Use append_file for prose or a runtime-confirmed partial streamed write only—never append a second code module to an existing file.\n- Website/page builds default to one create_website call with complete HTML, CSS, and JavaScript inputs. The runtime saves the editable source set and bundles it into one self-contained previewable index.html; never read, verify, list, or append website files before that succeeds. Use React/Next/TSX only when the user explicitly requested that framework or the existing project already uses it. Commit to one coherent brand, visual system, navigation model, and section map. After the preview opens, inspect it and make only targeted edits; do not recreate alternate implementations.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT paste code or claim completion in chat; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact in the requested format, including HTML, PDF, ZIP, code, or data when requested.'}`
+    return `RULES:\n- Build now with create_file, create_website, edit_file, export_pdf, package_files, or read_file. Use append_file for prose or a runtime-confirmed partial streamed write only—never append a second code module to an existing file.\n- Website/page builds default to one create_website call with complete HTML, CSS, and JavaScript inputs. The runtime saves the editable source set and bundles it into one self-contained previewable index.html; never read, verify, list, or append website files before that succeeds. Use React/Next/TSX only when the user explicitly requested that framework or the existing project already uses it. Commit to one coherent brand, visual system, navigation model, and section map. Choose code, build, rendered, and interaction checks according to actual risk; make only targeted edits after a concrete defect is found.\n- Use real coherent assets for image-led work, not emoji/placeholders as the primary visual language. Make links and controls honest and functional.\n- Do NOT browse generic design articles/templates. After file tools start, do NOT paste code or claim completion in chat; call the next tool, report a concrete blocker, or finish.\n- ${strategyGuidance?.deliverable || 'Create the actual working artifact in the requested format, including HTML, PDF, ZIP, code, or data when requested.'}`
   }
 
   if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
@@ -1030,7 +1030,7 @@ Requirements:
       const stepGuidance = imageOnlyStep
         ? `RULES:\n- This is a direct image retrieval step. Call image_search once with the user's requested subject.\n- When image_search downloads or returns images, you are DONE. Do NOT add separate browser, selection, file, or compile steps.`
         : isFirstStepDeliverable
-        ? `RULES:\n- This is the deliverable step. ${strategyGuidance?.deliverable || 'Create the actual final output file using create_file. Choose a concise topic-specific filename yourself unless the user supplied an exact name; never use the plan-step title or a generic fallback filename. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'}\n- For long manuscripts, assemble/collate chapter files into a model-named final manuscript instead of trying one giant write.\n- When the file is created and complete, you are DONE.`
+        ? `RULES:\n- This is the only visible phase, so complete its model-authored title, scope, and internal outcomes as a whole. ${strategyGuidance?.deliverable || 'Create any user-requested artifact with a specific model-chosen filename unless the user supplied an exact name.'}\n- A file write is one possible outcome, not automatic completion. Use any relevant available tools for missing evidence, multiple requested actions or artifacts, integration, and verification.\n- Emit <next_step/> only after every outcome in this phase and the latest user direction is satisfied.`
         : nonDeliverableStepGuidance(state, resolvedPlan[0], this.taskComplexity)
       const msg = {
         role: 'system',
@@ -1183,8 +1183,8 @@ Requirements:
     )
     const stepHint = isLastStep
       ? lastStepNeedsSavedArtifact
-        ? `This is the DELIVERABLE step — the most important step. ${sg?.deliverable || 'Create the actual final output file using create_file. Choose a concise topic-specific filename yourself unless the user supplied an exact name; never use the plan-step title or a generic fallback filename. Use append_file only when the created file genuinely needs additional continuation content. If the user requested PDF, export the completed source with export_pdf. Do NOT write a summary or outline — produce the real deliverable.'} For long manuscripts, collate chapter files into the final manuscript. When the file is complete, you are DONE.`
-        : 'This is the final answer step. Deliver the requested answer directly in chat from completed work. Do not create a file unless the user explicitly requested one.'
+        ? `This is the final active phase. Complete its model-authored title, scope, and internal outcomes as a whole. ${sg?.deliverable || 'Create any user-requested artifact with a specific model-chosen filename unless the user supplied an exact name.'} A saved file is one required outcome, not automatic completion: use any relevant available tools for missing evidence, multiple requested actions or artifacts, integration, and verification. Emit <next_step/> only when the entire phase and latest user direction are satisfied.`
+        : 'This is the final active phase. Complete its model-authored title, scope, and internal outcomes as a whole. You may still use relevant tools if the phase requires actions before the answer. Emit <next_step/> only after the entire phase and latest user direction are satisfied.'
       : nonDeliverableStepGuidance(state, state.currentPlanItems[state.currentStepIdx], this.taskComplexity)
     return {
       role: 'system',
@@ -1216,10 +1216,21 @@ Requirements:
     const allObjects = steps.every(item => item && typeof item === 'object' && typeof (item as { title?: string }).title === 'string')
     if (!allObjects) return null
 
-    const pairs = (steps as Array<{ title?: string; scope?: string | null }>)
+    const pairs = (steps as Array<{ title?: string; scope?: string | null; checklist?: unknown }>)
       .map(step => ({
         title: (step.title || '').trim(),
-        scope: typeof step.scope === 'string' && step.scope.trim() ? step.scope.trim() : null,
+        scope: (() => {
+          const scope = typeof step.scope === 'string' && step.scope.trim() ? step.scope.trim() : ''
+          const checklist = Array.isArray(step.checklist)
+            ? step.checklist
+              .filter((item): item is string => typeof item === 'string' && !!item.trim())
+              .map(item => item.trim())
+              .slice(0, 7)
+            : []
+          if (checklist.length === 0) return scope || null
+          const internalOutcomes = checklist.map((item, index) => `${index + 1}) ${item}`).join('; ')
+          return `${scope ? `${scope} ` : ''}Internal outcomes: ${internalOutcomes}.`
+        })(),
       }))
       .filter(step => step.title)
 
@@ -1281,7 +1292,7 @@ Requirements:
             role: 'system' as const,
             content: `Repair an invalid task-planner response into a valid JSON object only.
 Schema:
-{"ack":"very brief direct acknowledgement paragraph","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"natural task-specific step","scope":"concise intent, constraints, or success conditions"}]}
+{"ack":"very brief direct acknowledgement paragraph","taskType":"research"|"action"|"build"|"code"|"creative"|"analysis"|"general","complexity":1-5,"steps":[{"title":"natural task-specific phase","scope":"concise intent, constraints, and success condition","checklist":["concrete internal outcome","another concrete internal outcome"]}]}
 
 Rules:
 - Return only JSON. No markdown, prose, or code fence.
@@ -1292,6 +1303,7 @@ Rules:
 - The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, but do not enforce or mention a sentence count. Say what Agent will do for the exact task and what it will deliver.
 - The planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title. Preserve explicit user order and real dependencies without forcing stock research, analysis, synthesis, or a literal "Deliver ..." phase. A non-empty plan must still culminate in the requested answer, outcome, confirmation, or artifact, but the last phase may naturally combine final work, verification, synthesis, and handoff. Do not force a separate delivery phase when it adds no useful work.
 - Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
+- Give every non-trivial phase a short internal checklist of concrete, task-specific outcomes. These are execution memory beneath the visible phase, not extra UI phases and not a universal workflow. Include the facts, entities, interactions, files, decisions, or verification that this phase must cover; adapt or replace them when later user direction changes.
 - The agent chooses the least cumbersome research route that fits the evidence gap: web_search for discovery, read_document or HTTP/text extraction for normal webpages and documents, and browser tools only when rendered state, screenshots, scripts, or interaction matter. Browser use is available, not compulsory.
 - "code" means the user asked to write, modify, debug, run, or deploy code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact.
 - Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, writing, verification, and handoff are separate or combined visible phases. The final visible phase should complete the requested concrete result without being forced into a stock title or verb.
@@ -1749,9 +1761,7 @@ Generate an updated list of remaining steps (including a revised current step if
 
     if (isWebsiteBuildTask(this.messages)) {
       requirements.push('Create complete runnable website files')
-      requirements.push('Boot local preview')
-      requirements.push('Visually verify the current browser rendering')
-      requirements.push('Repair blank or broken preview before completion')
+      requirements.push('Choose verification methods that fit the website and the risks actually present')
     }
 
     if (isBrowserActionTask(this.messages)) {

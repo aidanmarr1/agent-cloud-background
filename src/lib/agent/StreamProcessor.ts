@@ -1295,7 +1295,11 @@ export class StreamProcessor {
     for (const [index, preview] of filePreviewState) {
       const toolCall = toolCalls.get(index)
       if (!toolCall) continue
-      const contentKey = toolCall.name === 'edit_file' ? 'new_string' : 'content'
+      const contentKey = toolCall.name === 'edit_file'
+        ? 'new_string'
+        : toolCall.name === 'create_website'
+          ? 'html'
+          : 'content'
       const content = extractPartialStringArg(toolCall.arguments, contentKey)
       if (typeof content === 'string' && content.length > preview.emittedChars) {
         const deltaContent = content.slice(preview.emittedChars)

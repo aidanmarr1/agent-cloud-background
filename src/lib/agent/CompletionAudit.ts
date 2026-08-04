@@ -28,20 +28,6 @@ function requiresFinalInlineAnswer(state: AgentStateData): boolean {
   return true
 }
 
-function isWebsiteLike(state: AgentStateData): boolean {
-  if (!state.buildTask && state.taskStrategy !== 'build' && state.taskStrategy !== 'code') return false
-  return /\b(next\.?js|website|web\s*site|webpage|landing page|site|page\.tsx|layout\.tsx|globals\.css|responsive|preview|localhost)\b/i.test(currentTaskText(state))
-}
-
-function currentTaskText(state: AgentStateData): string {
-  return [
-    state.originalUserRequest || '',
-    ...(state.currentPlanItems || []),
-    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
-    ...state.createdFiles,
-  ].join(' ')
-}
-
 function unresolvedStepSummaries(state: AgentStateData): string[] {
   return [...state.stepFindings.entries()]
     .filter(([, finding]) => finding.startsWith('[INCOMPLETE]') || finding.startsWith('[BLOCKED]'))
@@ -83,15 +69,6 @@ export function auditAgentCompletion(
 
   if (state.partialFileWriteRecoveryPending) {
     missing.push(`partial file write still needs continuation: ${state.partialFileWriteRecoveryPending.path}`)
-  }
-
-  if (isWebsiteLike(state) && state.createdFiles.size > 0 && !state.standaloneWebsiteHandoffReady) {
-    if (!state.websiteBrowserCheckDone && !state.nextWebsitePreviewDone) {
-      missing.push('local website preview was not successfully verified')
-    }
-    if (!state.websiteResponsiveCheckDone) {
-      missing.push('local visual website check was not completed')
-    }
   }
 
   if (terminalReason === 'iteration_cap') {

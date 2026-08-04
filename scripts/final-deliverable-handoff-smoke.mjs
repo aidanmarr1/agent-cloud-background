@@ -5,6 +5,10 @@ const source = await readFile(
   new URL('../src/lib/agent/AgentLoop.ts', import.meta.url),
   'utf8',
 )
+const policySource = await readFile(
+  new URL('../src/lib/agent/PolicyEngine.ts', import.meta.url),
+  'utf8',
+)
 
 function sourceBlock(start, end) {
   const startIndex = source.indexOf(start)
@@ -14,14 +18,14 @@ function sourceBlock(start, end) {
   return source.slice(startIndex, endIndex)
 }
 
-const scheduleBlock = sourceBlock(
-  'function scheduleFinalDeliverableHandoff(',
+const verifiedOutcomeBlock = sourceBlock(
+  'function continueFinalPhaseAfterVerifiedArtifact(',
   'function finalInlineAnswerPrompt(',
 )
-assert.doesNotMatch(
-  scheduleBlock,
-  /contextManager\.push|finalDeliverableHandoffPrompt\(state\)/,
-  'scheduling must not persist a duplicate handoff instruction in shared context',
+assert.match(
+  verifiedOutcomeBlock,
+  /one completed outcome, not automatic completion[\s\S]*latest user direction[\s\S]*whole phase is complete/,
+  'a verified artifact must keep the model-authored final phase open for remaining outcomes',
 )
 
 const promptInjectionCount = (
@@ -59,13 +63,19 @@ const autosaveCompletionBlock = sourceBlock(
 )
 assert.match(
   autosaveCompletionBlock,
-  /scheduleFinalDeliverableHandoff\(state, path, 'file'\)[\s\S]*return 'STREAMING'/,
-  'a verified text-only autosave must reserve a personalized handoff turn',
+  /continueFinalPhaseAfterVerifiedArtifact\(state, path, contextManager\)[\s\S]*return 'STREAMING'/,
+  'a verified text-only autosave must return control to the active phase',
 )
 assert.doesNotMatch(
   autosaveCompletionBlock,
   /state\.currentStepIdx = state\.currentPlanItems\.length|return 'COMPLETE'/,
   'a verified text-only autosave must not complete before its handoff',
+)
+
+assert.match(
+  policySource,
+  /advanceStep\(state, `Saved and verified final deliverable:[\s\S]*state\.finalDeliverableHandoffPending[\s\S]*continueLoop: true/,
+  'the personalized handoff must be scheduled only after the model explicitly completes the whole phase',
 )
 
 const timeoutHandoffBlock = sourceBlock(

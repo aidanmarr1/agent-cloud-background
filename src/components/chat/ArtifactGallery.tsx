@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { Modal } from '@/components/modals/Modal'
-import { Download, Code, FileText, Image as ImageIcon, LayoutGrid } from '@/components/icons'
+import { Download, Code, FileText, Globe, Image as ImageIcon, LayoutGrid } from '@/components/icons'
 import type { Artifact } from '@/types'
 
 interface ArtifactGalleryProps {
@@ -11,7 +11,7 @@ interface ArtifactGalleryProps {
   artifacts: Artifact[]
 }
 
-type FilterTab = 'all' | 'code' | 'document' | 'image'
+type FilterTab = 'all' | 'code' | 'document' | 'image' | 'website'
 
 function filterLabel(tab: FilterTab): string {
   if (tab === 'all') return 'All'
@@ -29,6 +29,7 @@ export function ArtifactGallery({ open, onClose, artifacts }: ArtifactGalleryPro
       case 'code': return Code
       case 'document': return FileText
       case 'image': return ImageIcon
+      case 'website': return Globe
       default: return FileText
     }
   }
@@ -60,7 +61,7 @@ export function ArtifactGallery({ open, onClose, artifacts }: ArtifactGalleryPro
       <div className="space-y-5 p-5">
         {/* Filter tabs */}
         <div className="flex gap-1 bg-bg-secondary border border-border-primary rounded-xl p-1 w-fit">
-          {(['all', 'code', 'document', 'image'] as FilterTab[]).map(tab => (
+          {(['all', 'code', 'document', 'image', 'website'] as FilterTab[]).map(tab => (
             <button
               key={tab}
               onClick={() => setFilter(tab)}

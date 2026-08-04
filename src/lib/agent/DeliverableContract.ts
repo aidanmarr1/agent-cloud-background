@@ -12,15 +12,6 @@ type DeliverableContractState = Pick<
   | 'taskStrategy'
 >
 
-function plannedTaskText(state: DeliverableContractState): string {
-  return [
-    state.originalUserRequest || '',
-    ...(state.currentPlanItems || []),
-    ...((state.currentPlanScopes || []).filter(Boolean) as string[]),
-    ...state.createdFiles,
-  ].join(' ')
-}
-
 function browseRequestCreatesSavedArtifact(request: string): boolean {
   const artifactTarget = String.raw`(?:file|artifact|pdf|markdown|document|docx?|word\s+doc(?:ument)?|pptx|slides?|presentation|deck|spreadsheet|xlsx|csv|notebook|[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|pdf|docx?|pptx|xlsx|csv))`
   const outputAction = new RegExp(
@@ -39,8 +30,8 @@ function browseRequestCreatesSavedArtifact(request: string): boolean {
  *
  * The original user request has priority over planner wording: an explicit
  * inline/quick request must not become a file merely because a generated plan
- * happens to say "report". Conversely, ordinary research/report work defaults
- * to a verified Markdown artifact, even when the final plan title is terse.
+ * happens to say "report". Planner wording is advisory and must never silently
+ * expand the user's output contract.
  */
 export function taskRequiresSavedFinalArtifact(
   state: DeliverableContractState,
@@ -75,8 +66,5 @@ export function taskRequiresSavedFinalArtifact(
   if (userIntent.wantsInlineAnswer || userIntent.wantsQuick) return false
   if (userIntent.requiresSavedArtifact) return true
 
-  const taskText = plannedTaskText(state)
-  const plannedIntent = analyzeTaskIntent([{ role: 'user', content: taskText }])
-  return plannedIntent.explicitSavedArtifact ||
-    taskDefaultsToMarkdownDeliverable(taskText)
+  return taskDefaultsToMarkdownDeliverable(userRequest)
 }

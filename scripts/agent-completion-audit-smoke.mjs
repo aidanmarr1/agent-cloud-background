@@ -136,7 +136,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(policyEngine, /function finalDeliverableRequired[\s\S]{0,260}isBrowserActionTask\(state\)\) return false/, 'browse strategy must not erase an explicit final saved-artifact contract')
   assert.doesNotMatch(policyEngine, /taskIntent\.requiresSavedArtifact\s*$/, 'policy completion must not keep an independent final-output classifier')
   assert.match(deliverableContract, /userIntent\.explicitSavedArtifact[\s\S]*state\.taskStrategy !== 'browse'[\s\S]*browseRequestCreatesSavedArtifact\(userRequest\)[\s\S]*return true[\s\S]*state\.taskStrategy === 'browse'\) return false/, 'an explicit output action must preserve a saved artifact after browser work without treating a browsed input file as a new deliverable')
-  assert.match(deliverableContract, /userIntent\.wantsInlineAnswer \|\| userIntent\.wantsQuick[\s\S]*return false[\s\S]*userIntent\.requiresSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(taskText\)/, 'the shared contract must honor explicit inline/quick requests while preserving saved Markdown research defaults')
+  assert.match(deliverableContract, /userIntent\.wantsInlineAnswer \|\| userIntent\.wantsQuick[\s\S]*return false[\s\S]*userIntent\.requiresSavedArtifact[\s\S]*taskDefaultsToMarkdownDeliverable\(userRequest\)/, 'the shared contract must honor explicit inline/quick requests while preserving saved Markdown research defaults')
   assert.match(taskConstraints, /isFixedWebSearchInlineAnswerState/, 'task constraints must distinguish fixed-search inline answers from fixed-search markdown deliverables')
   assert.match(taskFiles, /create table if not exists task_files/, 'task file schema must create durable task-file records')
   assert.match(taskFiles, /primary key \(user_id, conversation_id, path\)/, 'task file records must be scoped per user and task path')
@@ -483,8 +483,9 @@ export function runCompletionAuditSmoke() {
   inferredReport.taskStrategy = 'research'
   inferredReport.originalUserRequest = ''
   audit = auditAgentCompletion(inferredReport, 'plan_complete')
-  assert.equal(audit.complete, false, 'the completion audit must infer a planned report even if original request text is unavailable')
-  assert.match(audit.message, /no successful final deliverable/)
+  assert.equal(audit.complete, false, 'the completion audit must still require a substantive outcome when original request text is unavailable')
+  assert.match(audit.message, /no substantive final inline answer/)
+  assert.doesNotMatch(audit.message, /no successful final deliverable/, 'planner wording alone must never invent a saved-file contract')
 }
 `, 'utf8')
 

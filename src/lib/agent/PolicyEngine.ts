@@ -379,9 +379,9 @@ function finalStepStartGuidance(state: AgentStateData): string {
     return 'This is the final answer step. Answer directly in chat from the fixed web search result, in the requested length. Do not create, mention, attach, or claim any file, report, artifact, or deliverable.'
   }
   if (!finalDeliverableRequired(state)) {
-    return 'This is the final answer step. Answer directly in chat from the evidence and work already gathered. Do not create files, call more tools, write a status update, or ask to continue.'
+    return 'This is the final active phase. Complete its model-authored scope as a whole, using relevant tools if remaining user-requested actions require them, then provide the answer in chat.'
   }
-  return 'This is the DELIVERABLE step. Create the actual final output as one coherent create_file write whenever it fits. Use append_file only if the first write is genuinely clipped or necessary material is still missing at the current end. If the user requested PDF, save the source first and then call export_pdf. Do NOT write a summary or outline — produce the real deliverable.'
+  return 'This is the final active phase. A requested saved artifact must exist and pass integrity checks, but it may be one of several outcomes. Choose the relevant tools and ordering from the model-authored scope and latest user direction; emit <next_step/> only when the entire phase is complete.'
 }
 
 function finalInlineAnswerRecoveryGuidance(state: AgentStateData): string {
@@ -810,17 +810,6 @@ function websiteQaStatus(state: AgentStateData): string | null {
     return `WEBSITE STRUCTURE CHECK: The generated website still looks incomplete. Missing: ${structure.missing.join(', ')}. Create or repair the missing runnable files before final delivery. Do not leave the user with a lone TSX/page file.`
   }
 
-  if (!state.websiteBrowserCheckDone) {
-    const attempted = state.websiteBrowserCheckAttempted
-      ? ` The last preview attempt failed${state.nextWebsitePreviewError ? `: ${state.nextWebsitePreviewError}` : ''}; repair the files and re-run the local preview.`
-      : ''
-    return `LOCAL VISUAL QA REQUIRED: Boot/open the local website preview and inspect it visually before final delivery.${attempted} A website task is not complete until the local preview renders non-blank.`
-  }
-
-  if (!state.websiteResponsiveCheckDone) {
-    return 'LOCAL VISUAL QA REQUIRED: The website rendered once, but final visual verification is not complete. Use browser_screenshot or browser_scroll on the local preview at the existing browser size, then fix visible layout issues before final delivery.'
-  }
-
   return null
 }
 
@@ -832,7 +821,7 @@ function phaseStartGuidance(state: AgentStateData): string {
     return 'Analyze and cross-reference the evidence already gathered. Produce a substantive finding for this phase without restarting source collection, then advance to the deliverable.'
   }
   if (isWebsiteLikeTask(state)) {
-    return 'Keep website work structured: build the complete runnable file set first, then use the dedicated local visual QA phase for preview inspection and targeted repairs.'
+    return 'Keep website work structured: build the complete runnable result first, then choose only the verification and targeted repairs that materially improve confidence for this task.'
   }
   return 'Continue with this step. Use the right tool for the current phase and do not repeat work from the previous phase.'
 }
@@ -2835,10 +2824,55 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }
 
         advanceStep(state, `Saved and verified final deliverable: ${finalDeliverable.path}`)
+        state.finalDeliverableHandoffPending = {
+          path: finalDeliverable.path,
+          kind: 'file',
+        }
+        state.finalDeliverableHandoffAttempts = 0
         state.consecutiveNoToolCalls = 0
         return [
           { type: 'step_advance' },
-          { type: 'terminate', reason: 'deliverable_created' },
+          {
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: 'The model has confirmed that the complete final phase is finished and its deliverable is verified. Give the user a natural, task-specific handoff now.',
+            },
+            continueLoop: true,
+          },
+        ]
+      }
+
+      if (isCurrentLastStep && currentStepWantsImageArtifact(state)) {
+        const imageDeliverable = latestFinalDeliverableCandidate(state)
+        if (!imageDeliverable || !state.deliverableVerificationDone) {
+          state.consecutiveNoToolCalls = 0
+          return [{
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: stepMsg(state, 'The image outcome is still pending. Create or verify the requested image, complete any other outcomes in this phase, then emit <next_step/>.'),
+            },
+            continueLoop: true,
+          }]
+        }
+        advanceStep(state, `Saved and verified final image: ${imageDeliverable.path}`)
+        state.finalDeliverableHandoffPending = {
+          path: imageDeliverable.path,
+          kind: 'image',
+        }
+        state.finalDeliverableHandoffAttempts = 0
+        state.consecutiveNoToolCalls = 0
+        return [
+          { type: 'step_advance' },
+          {
+            type: 'inject_message',
+            message: {
+              role: 'system',
+              content: 'The model has confirmed that the complete final phase is finished and its image is verified. Give the user a natural, task-specific handoff now.',
+            },
+            continueLoop: true,
+          },
         ]
       }
 

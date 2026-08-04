@@ -7,7 +7,7 @@ export interface StrategyHints {
   temperature: number
 }
 
-const CLEAN_RESEARCH_REPORT_STRUCTURE = `- For research/report deliverables, use a coherent professional structure suited to the request. A common shape is a specific title, optional compact metadata, an opening Executive Summary or overview, substantive topic-specific sections, a conclusion, and References/Sources with inline bracket citations such as [1]. Treat that as guidance, not a rigid template: choose natural headings and numbering for the subject, and keep source details in the final reference section instead of dumping long source lists inside the analysis.`
+const CLEAN_RESEARCH_REPORT_STRUCTURE = `- For research/report deliverables, choose the structure that best serves the user's subject, audience, and requested depth. Use prose, bullets, tables, headings, an opening synthesis, conclusions, and source sections only where they improve this particular report or were requested. Do not force a universal section sequence.`
 
 function normalizeCustomInstructions(customInstructions?: string): string {
   return customInstructions?.trim() || ''
@@ -77,7 +77,7 @@ function compactRuntimePromptForStrategy(prompt: string, strategyType?: string):
 - For website/app builds, skip generic design research unless explicitly requested; gather only task-specific facts/assets.`
 
   const previewBlock = `## Browser Preview Verification
-- For local website/app previews, use browser_screenshot or browser_scroll to verify the rendered page is nonblank, styled, responsive enough for the current viewport, and free of obvious overlaps before delivery.
+- For website/app work, choose verification in proportion to the task. Use a rendered browser preview when visual or interaction QA would materially improve confidence or the user asks for it; otherwise use the most direct code/build checks. The saved website deliverable is previewable in the app.
 - Do not use browser form/click workflows during build/code tasks unless the current step explicitly requires a live web interaction.`
 
   const actionDeliverableBlock = `## How to Write Deliverables
@@ -95,7 +95,7 @@ function compactRuntimePromptForStrategy(prompt: string, strategyType?: string):
   const buildDeliverableBlock = `## How to Write Deliverables
 - Build the requested working files, keep changes scoped, and explain how to test locally. Inspect nearby code/design patterns first, handle meaningful states, run targeted checks, and revise defects. No placeholders, TODO-only outputs, or outlines.
 - Website/page requests default to one complete create_website action: author separate semantic HTML, responsive CSS, and JavaScript inputs, then let the runtime save the editable source set and bundle it into one self-contained previewable index.html. Use React, Next.js, TSX, or another framework only when the user explicitly requests it or an existing repository already uses it.
-- For local website/app previews, inspect the rendered page with browser_screenshot/browser_scroll before delivery and fix blank, unstyled, default-browser, overlapping, awkward spacing, or unresponsive results.
+- Choose verification methods according to the website and its risks. Use rendered browser inspection when visual or interaction QA would materially improve confidence; otherwise use direct build, code, or structural checks. If a rendered defect is observed, fix it before delivery.
 - Do not add login, sign-in, account, profile, dashboard, or authentication UI unless explicitly requested.`
 
   const codeDeliverableBlock = `## How to Write Deliverables
@@ -288,7 +288,7 @@ Before every tool call, do a quick private check. Do NOT write this check in the
 - Indecision burns iterations. ONE strategy → execute → observe → adjust. Not "try this, try that, try this again."
 
 ## How to Write Deliverables
-- Write detailed paragraphs, NOT bullet-point lists.
+- Choose prose, bullets, tables, and other structures according to what communicates each part best; do not force one format throughout.
 - Reports, research findings, and substantial write-ups default to a saved Markdown file unless the user explicitly asks for inline chat/no file. Do not paste the full report into chat when a Markdown deliverable is the right output.
 - Choose a concise topic-specific filename for each new report in the create_file call. The filename is authored by you, not copied from a plan-step label and not supplied by a runtime fallback.
 - Report length must match the user's request and task complexity. Short/simple reports can be concise; deep or complex reports need enough detail for the scope. Do not impose a blanket fixed word target.
@@ -296,7 +296,7 @@ Before every tool call, do a quick private check. Do NOT write this check in the
 - Include specific data, numbers, and source citations when the task calls for research or evidence.
 - Synthesize instead of stacking source notes: connect facts into reasons, mechanisms, examples, tradeoffs, and a clear bottom line.
 - Use ## headers, **bold** key points, and tables where appropriate.
-- Every claim must cite a source. No vague or generic statements. If source quality is weak or a cultural/community claim cannot be verified, state the gap instead of presenting it as established.
+- Cite externally sourced or contestable claims where evidence matters or the user requested citations. Do not manufacture citations or force one onto ordinary synthesis, transitions, and the agent's own clearly identified analysis. State evidence gaps plainly.
 - No placeholders, no TODOs, no outlines. Fully complete content only.
 - Code: inspect the relevant files first, create or edit the actual files, run targeted checks/tests when available, and fix failures. Charts should save image files rather than relying on an interactive viewer.
 - PDF requests: first save the complete polished source as Markdown or HTML, then call export_pdf to produce the actual .pdf. Do not give the user conversion instructions instead of exporting the file.
@@ -306,7 +306,7 @@ Before every tool call, do a quick private check. Do NOT write this check in the
 - Use real coherent imagery/assets when the request is image-led. Do not use emoji, random icon glyphs, empty colored boxes, or placeholder copy as the primary visual system. Make CTA links target real page anchors/routes and make interactive controls behave honestly; do not imply unavailable functionality.
 - In website/app builds, create the initial page, layout, global styles, and only the needed components together during the build phase. Then run one focused visual-polish pass based on the live preview. Do not split first-time file creation across research, cross-validation, or final verification phases.
 - A bundled standalone website is the normal default: keep HTML, CSS, and JavaScript editable under website-src/, and return the self-contained root index.html as the clickable deliverable.
-- Standalone HTML files open automatically on a local sandbox web server in the Computer browser after writes. Explicit Next.js/TSX structures also build into a local preview once their required files exist. Inspect the live preview with browser_screenshot and browser_scroll before finishing, and fix any blank, unstyled, default-browser, overlapping, or broken-interaction result. Do not change the Computer browser viewport or aspect ratio.
+- Website deliverables are previewable directly in the app. Use browser/local-server inspection only when you judge rendered or interaction QA useful for this request, and choose the lightest reliable route yourself. If you do inspect a preview, fix concrete defects you actually observe rather than repeating generic verification loops.
 - Websites/apps: Do NOT add login, sign-in, account, profile, dashboard, or authentication buttons/links unless the user explicitly asks for accounts/authentication. Keep navigation and calls-to-action focused on the requested content.
 - Ordinary reports and research write-ups: use one coherent create_file call with the complete report whenever it fits within the model's full output budget. Append only when the provider genuinely clipped the write or a verified missing section belongs at the end; use edit_file for targeted corrections.
 - Book-, thesis-, or manuscript-length writing: plan the work as intentional chapter/section files, then assemble the final manuscript. Use append_file for genuine continuation chunks; use edit_file only when replacing a specific existing passage.
@@ -418,9 +418,11 @@ ${getCustomInstructionPlanningBlock(customInstructions)}
 ## Per-step scope
 Every step has a "title" and a "scope". Use the title to name the work naturally and the scope to clarify intent, constraints, or success conditions. Steps may overlap or iterate when the task genuinely benefits from it; avoid only accidental duplication and conflicting responsibilities.
 
+Every non-trivial step also has a hidden "checklist" containing concrete task-specific outcomes the agent can execute against. Use it to decompose the phase internally into the relevant facts, entities, interactions, files, decisions, edge cases, or verification—not into a stock research/write/deliver recipe. Keep the visible phase broad enough to read naturally while making its checklist specific enough to prevent aimless work. Checklist items are initial execution memory, not immutable rules: the agent may reorder, combine, replace, or add outcomes when evidence or a later user direction changes the best path.
+
 ## Output
 Return ONLY a JSON object, no markdown:
-{"ack": "short direct paragraph saying what Agent will do for this exact task and what it will deliver", "taskType": "general" | "research" | "action" | "build" | "code" | "creative", "complexity": N, "steps": [{"title": "step 1 title", "scope": "step 1 scope"}, {"title": "step 2 title", "scope": "step 2 scope"}, ...]}
+{"ack": "short direct paragraph saying what Agent will do for this exact task and what it will deliver", "taskType": "general" | "research" | "action" | "build" | "code" | "creative", "complexity": N, "steps": [{"title": "phase 1 title", "scope": "phase intent and success condition", "checklist": ["concrete internal outcome", "another concrete internal outcome"]}, ...]}
 Empty steps [] ONLY for complexity 1 trivial non-tool questions.`
 }
 
@@ -433,7 +435,7 @@ export function getFastPlanningPrompt(customInstructions?: string): string {
   return `You are Agent's fast task planner. Return valid JSON only. Think briefly and choose a useful plan immediately.
 ${customBlock}
 Schema:
-{"ack":"natural very brief direct acknowledgement paragraph","taskType":"general|research|action|build|code|creative","complexity":3,"steps":[{"title":"natural task-specific step","scope":"concise intent, constraints, or success conditions"}]}
+{"ack":"natural very brief direct acknowledgement paragraph","taskType":"general|research|action|build|code|creative","complexity":3,"steps":[{"title":"natural task-specific phase","scope":"concise intent, constraints, and success condition","checklist":["concrete internal outcome","another concrete internal outcome"]}]}
 
 Rules:
 - Extract the real topic/artifact/output. Do not copy wrappers like "research about", "write a report on", or "answer whether".
@@ -444,8 +446,9 @@ Rules:
 - Research/current/comparison/report tasks are research. Reports and substantial findings default to saved .md unless the user asks inline.
 - Website/chat/form tasks are action. Writing, modifying, debugging, running, or deploying code/repositories is code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact. Website/app/file creation is build.
 - Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, and writing are separate or combined visible phases.
-- The requested result must be completed and genuinely verified where needed. Let the model name and shape the final visible work; do not add a generic handoff-only phase when the preceding work can naturally complete the result. Website/app builds still require a real preview/render check before completion.
+- The requested result must be completed and genuinely verified where needed. Let the model name and shape the final visible work; do not add a generic handoff-only phase when the preceding work can naturally complete the result. For website/app builds, decide whether code checks, a rendered preview, interaction checks, or a combination best fits the task.
 - Each title must name the concrete work naturally. Each scope may clarify intent, constraints, dependencies, or success conditions; do not impose word-count ranges or require artificial non-overlap.
+- Give each non-trivial phase a concise hidden checklist of concrete task-specific outcomes. It is internal execution memory, not extra visible phases or a fixed workflow, and it may adapt when evidence or later user direction changes the best path.
 - Output JSON only. No markdown.`
 }
 

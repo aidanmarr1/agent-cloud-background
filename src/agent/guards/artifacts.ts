@@ -5,9 +5,10 @@ import { resolveAndVerify } from '@/lib/sandbox'
 
 export const IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp']
 
-export function inferArtifactType(filePath: string): 'document' | 'code' | 'data' | 'image' {
+export function inferArtifactType(filePath: string): 'document' | 'code' | 'data' | 'image' | 'website' {
   const ext = filePath.split('.').pop()?.toLowerCase()
   if (IMAGE_EXTENSIONS.includes(ext || '')) return 'image'
+  if (['html', 'htm'].includes(ext || '')) return 'website'
   if (['md', 'txt', 'rtf', 'pdf'].includes(ext || '')) return 'document'
   if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext || '')) return 'data'
   return 'code'

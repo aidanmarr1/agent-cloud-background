@@ -32,7 +32,9 @@ export interface CreditLedgerEvent {
 // into billable product credits while leaving room for hosted-worker overhead,
 // payment fees, failed-task refunds, and product margin.
 export const RETAIL_CREDITS_PER_USD = 200
-export const PROVIDER_COST_TO_RETAIL_MULTIPLIER = 30
+// A modest reduction from the original 30x keeps a substantial contribution
+// margin while making longer agent runs noticeably less credit-intensive.
+export const PROVIDER_COST_TO_RETAIL_MULTIPLIER = 27
 export const CREDITS_PER_USD = RETAIL_CREDITS_PER_USD * PROVIDER_COST_TO_RETAIL_MULTIPLIER
 export const TASK_START_CREDITS = 0
 // Runtime wall-clock time and task startup are not billable. Credits are

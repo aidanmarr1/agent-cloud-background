@@ -1,4 +1,7 @@
-export const MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS = 1
+// A single compatibility retry was too brittle for heterogeneous
+// OpenAI-compatible providers: one pass repairs message history, while a
+// second can relax forced tool choice and regenerate a clean native call.
+export const MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS = 3
 
 export type ProviderRequestFailureCategory =
   | 'message_payload_parse'

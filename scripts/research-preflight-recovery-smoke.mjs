@@ -76,6 +76,21 @@ assert.match(
   /internalRecoveryScheduled\?:[\s\S]*'preflight_rejection'/,
   'paid-turn accounting must distinguish a handled preflight rejection from generic no progress',
 )
+assert.doesNotMatch(
+  pipelineSource,
+  /pageLikeHttpRequestBlockReason|normal webpage URL.*Reserve http_request/,
+  'ordinary concrete webpage URLs must be directly extractable through HTTP/text extraction',
+)
+assert.match(
+  pipelineSource,
+  /toolName !== 'read_document' && normalizeUrl\(visited\) === normalized/,
+  'viewing a URL must not block a subsequent text extraction of that same URL',
+)
+assert.doesNotMatch(
+  pipelineSource,
+  /finalSynthesisCarryoverBlockReason|synthesisPhaseResearchBlockReason|final-step \$\{tc\.name\} was skipped/,
+  'the final model-authored phase must not hard-block extraction or research tools',
+)
 
 const workDir = await mkdtemp(join(root, 'scripts/.research-preflight-recovery-smoke-'))
 const runnerPath = join(workDir, 'runner.ts')

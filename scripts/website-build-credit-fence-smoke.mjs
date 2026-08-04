@@ -37,7 +37,7 @@ assert.match(
 )
 assert.match(
   agentLoop,
-  /let requestMessages = standaloneWebsiteNeedsInitialCreate[\s\S]*compactInitialStandaloneWebsiteMessages\(state, allMessages, this\.options\.customInstructions\)/,
+  /let requestMessages = explicitTerminalNeedsInitialAction[\s\S]*standaloneWebsiteNeedsInitialCreate[\s\S]*compactInitialStandaloneWebsiteMessages\(state, allMessages, this\.options\.customInstructions\)/,
   'the first website call must replace the full orchestration history with the compact one-shot build context',
 )
 assert.match(
@@ -112,18 +112,18 @@ assert.match(
 
 assert.match(
   agentLoop,
-  /successfulStandaloneWebsiteCreate[\s\S]*shouldDefaultFrontendToStandaloneHtml[\s\S]*standaloneWebsiteRequiresPostBuildAction[\s\S]*standaloneWebsiteHandoffReady = true[\s\S]*scheduleFinalDeliverableHandoff\(state, finalPath, 'file'\)[\s\S]*skipping redundant post-build model turns/,
-  'a complete default website must go straight to its personalized handoff instead of entering verification and packaging loops',
+  /successfulStandaloneWebsiteCreate[\s\S]*shouldDefaultFrontendToStandaloneHtml[\s\S]*standaloneWebsiteRequiresPostBuildAction[\s\S]*standaloneWebsiteHandoffReady = true[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, finalPath, contextManager\)[\s\S]*keeping the model-authored final phase open/,
+  'a complete default website must avoid mechanical verification loops while leaving the final phase under model control',
 )
 assert.match(
   agentState,
   /standaloneWebsiteHandoffReady: boolean[\s\S]*standaloneWebsiteHandoffReady: false/,
   'standalone website completion must be tracked explicitly instead of inferred from a failed preview process',
 )
-assert.match(
+assert.doesNotMatch(
   completionAudit,
-  /isWebsiteLike\(state\)[\s\S]*!state\.standaloneWebsiteHandoffReady/,
-  'a successfully bundled standalone website must not fail its completion audit solely because preview infrastructure was unavailable',
+  /browser verification|visual verification|standaloneWebsiteHandoffReady/,
+  'website completion must not depend on forced browser, visual, or localhost verification infrastructure',
 )
 
 assert.match(

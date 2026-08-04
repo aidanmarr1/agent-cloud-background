@@ -84,16 +84,16 @@ export function buildStepMessage(
       const hasIncompleteSteps = priorFindings.includes('[INCOMPLETE]') || priorFindings.includes('[BLOCKED]')
       instruction = `FINAL STEP — verify action and report HONESTLY.
 - Verify current state first with screenshot/content/URL.
-- If succeeded, write a short .md report (100-300 words) with exact actions and proof.
-- If failed/partial, write a short failure report naming blocker, page state, and attempts. DO NOT write a guide, pretend success, include "What I Was Asked To Do", or use placeholder data.${hasIncompleteSteps ? `
+- If succeeded, give a concise, natural account of the result and the useful proof. Create a saved report only when the user requested one or it materially serves the task.
+- If failed/partial, name the concrete blocker, current page state, and relevant attempts. DO NOT write a guide, pretend success, include "What I Was Asked To Do", or use placeholder data.${hasIncompleteSteps ? `
 - ⚠ AT LEAST ONE PRIOR STEP DID NOT COMPLETE (see ⚠ markers in FINDINGS above). Your report MUST acknowledge this. Do NOT pretend those steps succeeded.` : ''}
-- The action is the deliverable; the .md only records what happened.`
+- The completed action and verified state are the deliverable.`
     } else if (strategy === 'build' || strategy === 'code') {
       instruction = `FINAL STEP — finalize the artifact.
-- Ensure required files exist, run, match the request, and pass edge-case checks.
-- Websites/apps default to Next.js + TSX: app/page.tsx, app/layout.tsx importing './globals.css', app/globals.css, and components/*.tsx. Use standalone index.html only when explicitly requested.
-- Inspect the local preview with browser_screenshot/browser_scroll at the existing viewport. Fix build errors, blank/unstyled/default-serif/raw-HTML/overlap issues before delivery.
-- Report what was built and how to use it.`
+- Ensure the requested result exists, matches the task, and handles meaningful states or edge cases.
+- Choose the architecture and output files from the user's request and existing project. For a new standalone website, create_website can author separate HTML/CSS/JavaScript source and produce a previewable bundled site; use React/Next/TSX only when requested or already established by the project.
+- Choose code, build, rendered, and interaction checks according to actual risk. Do not repeat checks that already established the same fact; repair concrete defects before delivery.
+- Return every useful requested deliverable and explain the outcome naturally.`
     } else if (strategy === 'creative') {
       instruction = `FINAL STEP — produce the creative deliverable.
 - Final pass for quality, style, and originality.
@@ -107,11 +107,10 @@ export function buildStepMessage(
     } else {
       // 'research', 'general', 'analysis' with an explicit saved artifact request
       instruction = `FINAL STEP — create the deliverable file now.
-- Start synthesis now; first substantive action must produce, inspect, or export the deliverable and must not continue prior research.
-- Use prior findings in context. Search/browse only if this final step explicitly names a critical missing source.
-- Match requested depth/complexity. No outlines, bullet-only sections, or placeholders. Back claims with researched evidence.
-- For report-style research deliverables, use one coherent professional Markdown structure suited to the request. A common shape is a specific title, optional compact metadata, an Executive Summary or overview, substantive topic-specific sections, a conclusion, and References/Sources with inline [n] citations. Choose natural headings and numbering instead of forcing a template.
-- Create exactly ONE deliverable file.`
+- Start synthesis now using the findings already gathered. Fill a genuinely critical evidence gap if necessary, but do not restart broad research.
+- Match requested depth and format. Avoid placeholders and thin outline-only output; support claims with the evidence appropriate to the task.
+- For report-style work, choose a coherent professional Markdown structure from the actual topic, audience, evidence, and user request. Use headings, prose, bullets, tables, an opening synthesis, conclusions, citations, or a source section only where they improve this report; do not force a universal sequence or citation style.
+- Choose the title and filenames from the work itself. Create the requested deliverable or deliverables, including multiple complementary outputs when that best satisfies the request.`
     }
   } else {
     const stepText = planItems[currentIdx]?.toLowerCase() || ''
@@ -129,7 +128,7 @@ export function buildStepMessage(
     } else if (isBuildStrategy && looksLikeWebsitePreviewStep) {
       instruction = `Website verification step. Inspect the existing local preview with browser_screenshot/browser_scroll; use read_file/edit_file only for targeted fixes. Create initial files only if genuinely missing. Do not treat auto-opened preview as already checked. Do not change the viewport.`
     } else if (isBuildStrategy && looksLikeBuildStep && !explicitlyResearch) {
-      instruction = `Build this step directly with create_file, append_file, edit_file, read_file, export_pdf, or preview tools. Website/app builds default to Next.js + TSX; standalone index.html only if requested. Create layout, page, globals, and components before advancing; app/layout.tsx must import './globals.css'. Do not scatter first-time file creation into later phases. Backend opens local previews after required files exist; inspect before final delivery without changing viewport. Do NOT browse generic design/templates. After file tools start, keep calling tools or report a concrete defect/blocker.`
+      instruction = `Build this step directly with the file, website, code, export, or preview tools that fit the request. For a new standalone website, prefer one complete create_website action that authors separate HTML, CSS, and JavaScript source and produces the previewable bundle. Use React/Next/TSX only when requested or already established. Keep the first coherent implementation together, then make targeted revisions only for concrete defects. Choose verification according to actual risk; do not force localhost or browser work. Do NOT browse generic design/templates. After file tools start, keep calling useful tools or report a concrete defect/blocker.`
     } else if (isBuildStrategy) {
       instruction = `Do only the specific asset/source gathering this build step requires. Prefer image_search for requested images/assets. Do NOT browse generic design best-practice articles, inspiration galleries, or template roundups unless the user explicitly asked for that research. Advance once the needed facts/assets are gathered.`
     } else {

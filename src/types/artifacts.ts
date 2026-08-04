@@ -7,7 +7,7 @@ export interface Artifact {
   content: string
   /** Exact byte size when the artifact is binary or preview content is truncated. */
   size?: number
-  type: 'document' | 'code' | 'data' | 'image'
+  type: 'document' | 'code' | 'data' | 'image' | 'website'
   imageUrl?: string
   imageDataUrl?: string
   /**

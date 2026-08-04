@@ -9,6 +9,7 @@ import { MessageActions } from './MessageActions'
 import { CompletionBanner } from './CompletionBanner'
 import { DocumentPreview } from './DocumentPreview'
 import { ImagePreview } from './ImagePreview'
+import { WebsitePreview } from './WebsitePreview'
 import { TaskGroupView } from './TaskGroupView'
 import { TypingIndicator } from './TypingIndicator'
 import { MarkdownLite } from './MarkdownLite'
@@ -36,7 +37,8 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
   const followUps = message.followUps || []
   const artifacts = message.artifacts || []
   const visibleArtifacts = artifacts.filter(a => (a.purpose ?? (a.deliverable === false ? 'support' : 'deliverable')) === 'deliverable')
-  const documentArtifacts = visibleArtifacts.filter(a => a.type === 'document')
+  const websiteArtifacts = visibleArtifacts.filter(a => a.type === 'website')
+  const documentArtifacts = visibleArtifacts.filter(a => a.type !== 'image' && a.type !== 'website')
   const nonImageDeliverableArtifacts = visibleArtifacts.filter(a => a.type !== 'image')
   const imageArtifacts = artifacts.filter(a => (
     a.type === 'image' &&
@@ -182,6 +184,15 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
         {isStreaming && visibleTaskGroups.length === 0 && visibleSteps.length === 0 && (
           <div className={finalContent ? 'mt-4' : ''}>
             <TypingIndicator />
+          </div>
+        )}
+
+        {/* Document previews */}
+        {showFinalDeliverables && websiteArtifacts.length > 0 && (
+          <div className="mt-5 max-w-[860px] space-y-3">
+            {[...websiteArtifacts].reverse().map((artifact) => (
+              <WebsitePreview key={artifact.id} artifact={artifact} conversationId={conversationId} />
+            ))}
           </div>
         )}
 

@@ -8,9 +8,6 @@
 
 import type { WorkingMemory } from './WorkingMemory'
 import {
-  RESEARCH_MIN_WORDS_BY_COMPLEXITY,
-  RESEARCH_MIN_CITATIONS,
-  RESEARCH_MIN_PARAGRAPHS,
   CREATIVE_MIN_WORDS,
   BUILD_MIN_CONTENT_CHARS,
   PLACEHOLDER_PATTERNS,
@@ -93,6 +90,24 @@ export class OutputVerifier {
     return /\b(?:deep|deeper|deepest|comprehensive|thorough|detailed|in[-\s]?depth|extensive|exhaustive)\b/i.test(originalRequest)
   }
 
+  private explicitlyRequestsProseReport(originalRequest: string): boolean {
+    return /\b(?:full|complete|comprehensive|thorough|detailed|in[-\s]?depth|substantive|professional)\b[\s\S]{0,80}\b(?:report|analysis|assessment|briefing|white\s+paper)\b/i.test(originalRequest) ||
+      /\b(?:report|analysis|assessment|briefing|white\s+paper)\b[\s\S]{0,80}\b(?:full|complete|comprehensive|thorough|detailed|in[-\s]?depth|substantive|professional)\b/i.test(originalRequest)
+  }
+
+  private explicitlyRequestsOpeningSynthesis(originalRequest: string): boolean {
+    return /\b(?:executive\s+summary|opening\s+(?:summary|overview)|key\s+findings\s+section)\b/i.test(originalRequest)
+  }
+
+  private explicitlyRequestsSourcesSection(originalRequest: string): boolean {
+    return /\b(?:references|bibliography|works\s+cited|sources)\s+(?:section|list)\b/i.test(originalRequest) ||
+      /\b(?:include|add|provide|finish\s+with|end\s+with)\b[^.!?\n]{0,80}\b(?:references|bibliography|works\s+cited|source\s+list)\b/i.test(originalRequest)
+  }
+
+  private explicitlyRequestsSourceEvidence(originalRequest: string): boolean {
+    return /\b(?:cite|cited|citation|citations|source|sources|source\s+urls?|links?|references|bibliography|works\s+cited)\b/i.test(originalRequest)
+  }
+
   private compactDeliverableHasSubstance(content: string): boolean {
     const headingCount = (content.match(/^#{1,3}\s+\S/gm) || []).length
     const bulletItems = (content.match(/^\s*[-*]\s+(?!\[[ xX]\])\S.+$/gm) || []).length
@@ -170,7 +185,8 @@ export class OutputVerifier {
     if (
       lines.length > 5 &&
       headingOrBulletLines / lines.length > OUTLINE_ONLY_THRESHOLD &&
-      substantiveProseParagraphs < RESEARCH_MIN_PARAGRAPHS &&
+      substantiveProseParagraphs < 2 &&
+      this.explicitlyRequestsProseReport(originalRequest) &&
       !conciseStructuredDeliverable
     ) {
       failures.push(`Content appears to be an outline (${Math.round(headingOrBulletLines / lines.length * 100)}% headings/bullets) — write substantive paragraphs`)
@@ -220,25 +236,20 @@ export class OutputVerifier {
       taskDefaultsToMarkdownDeliverable(originalRequest)
 
     if (savedMarkdownReport && !conciseStructuredDeliverable) {
-      const headingCount = (fileContent.match(/^#{1,3}\s+\S/gm) || []).length
-      if (headingCount < 4) {
-        failures.push('Saved Markdown report needs a title, opening synthesis, substantive sections, conclusion, and references')
-        suggestions.push('Expand the report with a coherent professional structure suited to the request')
-        score -= 0.2
-      }
-      if (!/^#\s+\S/m.test(fileContent)) {
-        failures.push('Saved Markdown report needs a clear top-level title')
-        suggestions.push('Add a specific # title')
+      if (
+        this.explicitlyRequestsOpeningSynthesis(originalRequest) &&
+        !/^##\s+(?:Executive Summary|Summary|Overview|Key Findings)\b/im.test(fileContent)
+      ) {
+        failures.push('The requested opening synthesis section is missing')
+        suggestions.push('Add the opening synthesis section the user requested')
         score -= 0.1
       }
-      if (!/^##\s+(?:Executive Summary|Summary|Overview|Key Findings)\b/im.test(fileContent)) {
-        failures.push('Saved Markdown report needs an opening synthesis section')
-        suggestions.push('Add an Executive Summary, Summary, Overview, or Key Findings section with synthesized findings')
-        score -= 0.1
-      }
-      if (!/^##\s+(?:References|Sources)\b/im.test(fileContent)) {
-        failures.push('Saved Markdown report needs a References section with source URLs')
-        suggestions.push('Add ## References with numbered source entries and URLs')
+      if (
+        this.explicitlyRequestsSourcesSection(originalRequest) &&
+        !/^##\s+(?:References|Sources|Bibliography|Works Cited)\b/im.test(fileContent)
+      ) {
+        failures.push('The requested references or sources section is missing')
+        suggestions.push('Add the references section the user requested')
         score -= 0.1
       }
     }
@@ -284,12 +295,13 @@ export class OutputVerifier {
     failures: string[],
     suggestions: string[],
   ): void {
-    // Word count
+    // Enforce an exact user-authored word target, never a runtime-default
+    // length. The model remains free to choose the natural depth otherwise.
     const words = content.split(/\s+/).filter(w => w.length > 0).length
-    const minWords = this.researchMinimumWords(originalRequest, taskComplexity, filePath)
-    if (words < minWords) {
-      failures.push(`Word count ${words}, minimum ${minWords} for this task depth`)
-      suggestions.push('Expand the report with structured analysis, concrete evidence, caveats, and implications')
+    const requestedWordTarget = this.explicitWordTarget(originalRequest)
+    if (requestedWordTarget && words < requestedWordTarget.minimum) {
+      failures.push(`Word count ${words}, requested approximately ${requestedWordTarget.requested}`)
+      suggestions.push('Meet the user-authored length target without adding repetitive filler')
     }
 
     // Citation count (URLs or "Source:" references)
@@ -299,26 +311,10 @@ export class OutputVerifier {
     const sourceRefs = content.match(sourcePattern) || []
     const citationCount = new Set([...urls]).size + sourceRefs.length
     const explicitSourceCount = requestedBriefInlineSourceCount(originalRequest)
-    const requiredCitations = explicitSourceCount ?? RESEARCH_MIN_CITATIONS
-    if (citationCount < requiredCitations) {
-      failures.push(`Only ${citationCount} citation(s), minimum ${requiredCitations}`)
+    const requiredCitations = explicitSourceCount ?? (this.explicitlyRequestsSourceEvidence(originalRequest) ? 1 : 0)
+    if (requiredCitations > 0 && citationCount < requiredCitations) {
+      failures.push(`Only ${citationCount} source reference(s), requested at least ${requiredCitations}`)
       suggestions.push('Add source URLs to support claims')
-    }
-
-    // Substantive paragraphs (50+ words)
-    const paragraphs = content.split(/\n\s*\n/).filter(p => {
-      const pWords = p.split(/\s+/).filter(w => w.length > 0).length
-      return pWords >= 50
-    })
-    if (
-      paragraphs.length < RESEARCH_MIN_PARAGRAPHS &&
-      !(
-        this.isExplicitlyConciseDeliverableRequest(originalRequest, filePath) &&
-        this.compactDeliverableHasSubstance(content)
-      )
-    ) {
-      failures.push(`Only ${paragraphs.length} substantive paragraph(s), minimum ${RESEARCH_MIN_PARAGRAPHS}`)
-      suggestions.push('Develop each section into full paragraphs with analysis')
     }
 
     // Cross-reference with working memory
@@ -346,26 +342,12 @@ export class OutputVerifier {
     }
   }
 
-  private researchMinimumWords(originalRequest: string, taskComplexity: number, filePath: string): number {
-    const request = originalRequest.toLowerCase()
-    const explicitWordTarget = request.match(/\b(\d{2,5})\s*(?:\+?\s*)?words?\b/)
-    if (explicitWordTarget) {
-      const requested = Number(explicitWordTarget[1])
-      if (Number.isFinite(requested) && requested > 0) {
-        return Math.max(80, Math.floor(requested * 0.9))
-      }
-    }
-
-    if (
-      /\b(?:brief|quick|short|concise|summary|summarise|summarize|one[-\s]?page|1[-\s]?page)\b/.test(request) &&
-      !this.isDeepResearchRequest(originalRequest)
-    ) {
-      const savedResearchReport = filePath.toLowerCase().endsWith('.md') && taskDefaultsToMarkdownDeliverable(originalRequest)
-      return savedResearchReport ? 400 : 180
-    }
-
-    const normalizedComplexity = Math.min(5, Math.max(1, Math.round(taskComplexity))) as keyof typeof RESEARCH_MIN_WORDS_BY_COMPLEXITY
-    return RESEARCH_MIN_WORDS_BY_COMPLEXITY[normalizedComplexity]
+  private explicitWordTarget(originalRequest: string): { requested: number; minimum: number } | null {
+    const match = originalRequest.match(/\b(\d{2,5})\s*(?:\+?\s*)?words?\b/i)
+    if (!match) return null
+    const requested = Number(match[1])
+    if (!Number.isFinite(requested) || requested <= 0) return null
+    return { requested, minimum: Math.max(40, Math.floor(requested * 0.9)) }
   }
 
   private checkBuildCode(

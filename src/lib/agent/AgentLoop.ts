@@ -120,7 +120,6 @@ import {
 } from './frontendDefaults'
 import { analyzeTaskIntent } from './TaskIntent'
 import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
-import { isWebsiteEntryPath } from '@/lib/localWebsiteServer'
 import { getNextWebsiteProjectStatus } from '@/lib/tsxWebsitePreview'
 import { OUT_OF_CREDITS_MESSAGE, type CreditTokenUsage } from '@/lib/creditPolicy'
 import { assertServerCreditsAvailable, chargeServerTokenUsage, isOutOfCreditsError } from '@/lib/serverCredits'
@@ -1552,24 +1551,27 @@ function standaloneWebsiteRequiresPostBuildAction(request: string): boolean {
   return /\b(?:deploy|publish|host|\.zip|zip file|archive|compressed package|test|testing|verify|validate|inspect|qa|audit|debug|benchmark)\b/i.test(request)
 }
 
-function scheduleFinalDeliverableHandoff(
+function continueFinalPhaseAfterVerifiedArtifact(
   state: AgentStateData,
   path: string,
-  kind: 'file' | 'image',
+  contextManager: ContextManager,
 ): void {
   state.fileWriteRepairPending = null
+  state.pendingDeliverableRevision = null
+  state.partialFileWriteRecoveryPending = null
+  state.partialFileWriteRecoveryNudged = false
   state.deliverableRevisionFailureCount = 0
   state.deliverableRevisionSnapshot = null
-  state.finalDeliverableHandoffPending = {
-    path: path || (kind === 'image' ? 'the generated image' : 'the completed deliverable'),
-    kind,
-  }
-  state.finalDeliverableHandoffAttempts = 0
+  state.deliverableVerificationDone = true
   state.forceTextNextIteration = false
   state.phaseEndNarrationPending = false
   state.consecutiveNoToolCalls = 0
   state.consecutiveNullStreams = 0
-  state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
+  state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 3)
+  contextManager.push({
+    role: 'system',
+    content: `VERIFIED OUTCOME: "${path}" was saved and passed integrity checks. This is one completed outcome, not automatic completion of the active phase. Re-read the model-authored phase scope and latest user direction. Continue with any remaining actions, additional artifacts, integration, or verification using whichever tools are relevant. Emit <next_step/> only when the whole phase is complete.`,
+  } as ChatMessageParam)
 }
 
 function finalInlineAnswerPrompt(state: AgentStateData): string {
@@ -2714,13 +2716,6 @@ async function getNextWebsiteCompletionBlocker(
     if (!created.has('index.html')) {
       return 'WEBSITE COMPLETION BLOCKED: The requested website has not been created. Make exactly one create_website call with complete HTML, CSS, and JavaScript. The runtime will save the editable source set and bundle it into a self-contained index.html. Do not read, list, verify, or append website files before creating them.'
     }
-    if (state.standaloneWebsiteHandoffReady) return null
-    if (!state.websiteBrowserCheckDone) {
-      return 'WEBSITE COMPLETION BLOCKED: index.html exists, but its managed local preview has not opened successfully in the Computer panel. Make one targeted edit only if the preview reported a concrete problem; otherwise allow the automatic preview to open before finishing.'
-    }
-    if (!state.websiteResponsiveCheckDone) {
-      return 'WEBSITE COMPLETION BLOCKED: The local index.html preview is open but has not been visually inspected. Use browser_screenshot or browser_scroll once at the existing browser size, then make only a targeted edit if a real defect is visible.'
-    }
     return null
   }
 
@@ -2736,20 +2731,6 @@ async function getNextWebsiteCompletionBlocker(
     ].filter(Boolean).join(' ')
 
     return `WEBSITE COMPLETION BLOCKED: The requested website is not a complete renderable Next.js/TSX build. ${details} Create or edit the actual website files now: app/page.tsx, app/layout.tsx importing './globals.css', and substantive app/globals.css. Reusable components are optional when page.tsx is already cohesive; do not create parallel header/navigation variants merely to satisfy structure.`
-  }
-
-  if (!state.nextWebsitePreviewDone) {
-    const previewProblem = state.nextWebsitePreviewError
-      ? ` Last preview error: ${state.nextWebsitePreviewError}`
-      : state.nextWebsitePreviewAttempted
-        ? ' The preview was attempted but did not open successfully.'
-        : ' The local TSX preview has not run yet.'
-
-    return `WEBSITE COMPLETION BLOCKED: The Next.js/TSX website has not successfully built and opened in the Computer browser.${previewProblem} Fix the generated frontend files or make a targeted frontend edit so the backend rebuilds and opens the local preview.`
-  }
-
-  if (!state.websiteResponsiveCheckDone) {
-    return `WEBSITE COMPLETION BLOCKED: The local website preview opened, but the required visual check has not passed. Use browser_screenshot or browser_scroll on the managed local preview at the existing browser size, then fix visual issues or finish only after the visual check succeeds.`
   }
 
   return null
@@ -2794,6 +2775,16 @@ function shouldForceAgenticToolCall(state: AgentStateData, hasActivePlanStep: bo
   const earlyToolFloor = Math.min(requiredCalls, state.taskComplexity >= 3 ? 2 : 1)
 
   return state.stepToolCallCount < earlyToolFloor
+}
+
+function pendingExplicitToolTargets(state: AgentStateData): string[] {
+  const constraint = explicitTaskToolConstraintFromText(state.originalUserRequest || '')
+  if (!constraint) return []
+  return constraint.required.filter(target =>
+    ![...state.taskSuccessfulToolTypeCounts.keys()].some(toolName =>
+      toolMatchesExplicitTaskToolTarget(target, toolName)
+    )
+  )
 }
 
 const STARTUP_READY_REQUIRED_TOOLS = new Set([
@@ -2901,6 +2892,34 @@ function compactInitialStandaloneWebsiteMessages(
     latestUserMessage || {
       role: 'user',
       content: request,
+    },
+  ]
+}
+
+function compactExplicitTerminalActionMessages(
+  state: AgentStateData,
+  allMessages: ChatMessageParam[],
+): ChatMessageParam[] {
+  const latestUserMessage = [...allMessages].reverse().find(message => message.role === 'user')
+  const request = state.originalUserRequest ||
+    (latestUserMessage ? messageText(latestUserMessage.content).trim() : '') ||
+    'Complete the requested terminal action.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'Complete the terminal action'
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'SANDBOX TERMINAL ACTION REQUIRED: TOOL CALL ONLY.',
+        'A real Linux terminal and execution environment are available.',
+        'Call execute_command now with the shortest safe command that directly completes the request.',
+        'Do not claim the terminal is unavailable, do not give the user instructions to run locally, and do not write prose before the command.',
+        `Current action: ${currentStep.slice(0, 500)}.`,
+      ].join(' '),
+    },
+    {
+      role: 'user',
+      content: request.slice(0, 4_000),
     },
   ]
 }
@@ -3763,10 +3782,9 @@ export class AgentLoop {
       ? latestSavedFinalDeliverablePath(state)
       : null
 
-    // Gemini commonly writes, reads back, and then gives a natural confirmation
-    // in the same final phase. Re-verify the existing artifact at that boundary
-    // and close the plan instead of autosaving the confirmation as a second
-    // Markdown file or asking the model for another action.
+    // A text turn after saving may be progress narration, a finding, or a real
+    // completion signal. Re-verify the artifact, but do not infer that the
+    // whole model-authored phase is complete from the existence of one file.
     if (existingDeliverablePath && state.currentPlanItems) {
       try {
         const verifiedFile = await readFileInSandbox(conversationId, existingDeliverablePath)
@@ -3784,22 +3802,14 @@ export class AgentLoop {
         )
 
         if (deliverableVerificationAccepted(state, verification)) {
-          const stepIdxBefore = state.currentStepIdx
-          state.pendingDeliverableRevision = null
-          state.partialFileWriteRecoveryPending = null
-          state.partialFileWriteRecoveryNudged = false
-          state.deliverableVerificationDone = true
-          state.currentStepIdx = state.currentPlanItems.length
-          for (let i = stepIdxBefore; i < state.currentStepIdx; i++) {
-            this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-          }
-          console.log('[AgentDiagnostics] Existing saved deliverable verified after final text confirmation', {
+          continueFinalPhaseAfterVerifiedArtifact(state, existingDeliverablePath, contextManager)
+          console.log('[AgentDiagnostics] Existing saved deliverable verified without auto-closing the final phase', {
             path: existingDeliverablePath,
             chars: verifiedFile.content?.length || 0,
-            step: stepIdxBefore,
+            step: state.currentStepIdx,
             totalSteps: state.currentPlanItems.length,
           })
-          return 'COMPLETE'
+          return 'STREAMING'
         }
 
         if (state.deliverableRevisionCount < deliverableRevisionLimit(state)) {
@@ -4014,7 +4024,7 @@ export class AgentLoop {
       state.pendingDeliverableRevision = null
       state.partialFileWriteRecoveryPending = null
       state.partialFileWriteRecoveryNudged = false
-      scheduleFinalDeliverableHandoff(state, path, 'file')
+      continueFinalPhaseAfterVerifiedArtifact(state, path, contextManager)
       state.lastIterationEnd = Date.now()
       return 'STREAMING'
     }
@@ -5367,6 +5377,30 @@ export class AgentLoop {
               }
             }
 
+            const stillRequiredExplicitTools = lastStreamResult.toolCalls.size === 0
+              ? pendingExplicitToolTargets(state)
+              : []
+            if (stillRequiredExplicitTools.length > 0) {
+              // Never accept a generic chat refusal or phase completion while
+              // a user-requested runtime action has not actually executed.
+              // This is especially important for one-phase terminal tasks,
+              // which otherwise resemble ordinary final-answer turns.
+              state.consecutiveNoToolCalls += 1
+              state.forceTextNextIteration = false
+              contextManager.push({
+                role: 'system',
+                content: [
+                  `REQUIRED USER ACTION NOT YET EXECUTED: ${stillRequiredExplicitTools.map(explicitTaskToolTargetLabel).join(', ')}.`,
+                  'The sandbox has the declared tools. Do not claim the terminal, filesystem, browser, or execution environment is unavailable unless an actual tool call returned that concrete failure.',
+                  'Discard the prior prose response and make the required native tool call now with strict JSON object arguments. Do not emit <next_step/> or a final answer first.',
+                ].join(' '),
+              } as ChatMessageParam)
+              lastStreamResult = { ...lastStreamResult, assistantContent: '' }
+              state.lastIterationEnd = Date.now()
+              phase = 'STREAMING'
+              break
+            }
+
             if (
               lastStreamResult.toolCalls.size === 0 &&
               shouldCompleteFinalInlineAnswerTurn(state, this.options.messages, lastStreamResult.assistantContent)
@@ -5956,9 +5990,9 @@ export class AgentLoop {
               state.deliverableVerificationDone = true
               state.pendingDeliverableRevision = null
               state.standaloneWebsiteHandoffReady = true
-              scheduleFinalDeliverableHandoff(state, finalPath, 'file')
+              continueFinalPhaseAfterVerifiedArtifact(state, finalPath, contextManager)
               state.lastIterationEnd = Date.now()
-              log.info('Complete standalone website saved — skipping redundant post-build model turns', {
+              log.info('Complete standalone website saved — keeping the model-authored final phase open', {
                 path: finalPath,
                 step: state.currentStepIdx,
                 totalSteps: state.currentPlanItems?.length || 0,
@@ -6009,7 +6043,7 @@ export class AgentLoop {
                   state.fileWriteRepairPending = null
                   state.deliverableRevisionFailureCount = 0
                   state.deliverableRevisionSnapshot = null
-                  scheduleFinalDeliverableHandoff(state, revisionPath, 'file')
+                  continueFinalPhaseAfterVerifiedArtifact(state, revisionPath, contextManager)
                   state.lastIterationEnd = Date.now()
                   log.info('Accepted intact saved deliverable after bounded revision-tool failures', {
                     path: revisionPath,
@@ -6049,7 +6083,8 @@ export class AgentLoop {
                 return ((result.result as { downloaded?: string[] })?.downloaded?.length || 0) > 0
               })
               const imagePath = (imageResult?.result as { downloaded?: string[] } | undefined)?.downloaded?.[0] || 'the generated image'
-              scheduleFinalDeliverableHandoff(state, imagePath, 'image')
+              recordWorkLedgerDeliverable(state, { path: imagePath, purpose: 'deliverable' })
+              continueFinalPhaseAfterVerifiedArtifact(state, imagePath, contextManager)
               state.lastIterationEnd = Date.now()
               log.info('Image artifact created on last step — requesting personalized final handoff')
               phase = 'STREAMING'
@@ -6091,7 +6126,7 @@ export class AgentLoop {
                       state.partialFileWriteRecoveryNudged = false
                       state.deliverableVerificationDone = true
                       state.pendingDeliverableRevision = null
-                      scheduleFinalDeliverableHandoff(state, path, 'file')
+                      continueFinalPhaseAfterVerifiedArtifact(state, path, contextManager)
                       state.lastIterationEnd = Date.now()
                       log.info('Recovered deliverable passed whole-file verification — requesting personalized final handoff')
                       phase = 'STREAMING'
@@ -6206,38 +6241,11 @@ export class AgentLoop {
                       if (websiteProblems.structureIssues.length > 0) {
                         contextManager.push({
                           role: 'system',
-                          content: `NEXT.JS WEBSITE COMPLETENESS REQUIRED: Before finishing, fix these structure/style issues: ${websiteProblems.structureIssues.join(' ')} The site may be one cohesive page, but it must include app/page.tsx, app/layout.tsx importing './globals.css', substantive app/globals.css, and a successful local visual check. Add reusable components only when they improve the architecture; do not create redundant header/navigation variants.`,
+                          content: `NEXT.JS WEBSITE COMPLETENESS REQUIRED: Before finishing, fix these structure/style issues: ${websiteProblems.structureIssues.join(' ')} The site may be one cohesive page, but it must include the runnable files required by the chosen Next.js structure. Add reusable components only when they improve the architecture; do not create redundant header/navigation variants.`,
                         } as ChatMessageParam)
                         phase = 'EVALUATING'
                         break
                       }
-                      if (!state.nextWebsitePreviewDone) {
-                        const previewProblem = state.nextWebsitePreviewError
-                          ? ` Last preview error: ${state.nextWebsitePreviewError}`
-                          : state.nextWebsitePreviewAttempted
-                          ? ' The preview was attempted but did not open successfully.'
-                          : ' The required files exist, but the local TSX preview has not run yet.'
-                        contextManager.push({
-                          role: 'system',
-                          content: `NEXT.JS/TSX LOCAL PREVIEW REQUIRED: The generated website must build and open in the Computer browser before final delivery.${previewProblem} Fix the TSX/CSS using edit_file, or make a small targeted edit to a frontend file so the backend rebuilds and reopens the local preview. Do not finish until the preview succeeds.`,
-                        } as ChatMessageParam)
-                        phase = 'EVALUATING'
-                        break
-                      }
-                    }
-                    if (
-                      args.path &&
-                      isWebsiteEntryPath(args.path) &&
-                      !state.websiteBrowserCheckDone &&
-                      state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS
-                    ) {
-                      state.deliverableRevisionCount++
-                      contextManager.push({
-                        role: 'system',
-                        content: `LOCAL WEBSITE SERVER CHECK REQUIRED: ${args.path} has not been successfully opened and inspected in the Computer browser. Keep working on the same file; after the backend opens it locally, use browser_screenshot and browser_scroll to inspect it before final delivery. Do not change the browser viewport.`,
-                      } as ChatMessageParam)
-                      phase = 'EVALUATING'
-                      break
                     }
                     const verification = outputVerifier.verify(
                       verifiedContent.content || args.content || '',
@@ -6282,34 +6290,6 @@ export class AgentLoop {
                       break
                     }
 
-                    if (
-                      args.path &&
-                      isWebsiteEntryPath(args.path) &&
-                      !state.websiteResponsiveCheckDone
-                    ) {
-                      state.deliverableVerificationDone = true
-                      state.websiteResponsiveCheckPrompted = true
-                      contextManager.push({
-                        role: 'system',
-                        content: `LOCAL VISUAL CHECK REQUIRED: ${args.path} is open on the local sandbox server. Inspect it before final delivery with browser_screenshot or browser_scroll at the existing browser size, and use edit_file if anything is visually broken. Do not change the browser viewport.`,
-                      } as ChatMessageParam)
-                      phase = 'EVALUATING'
-                      break
-                    }
-                    if (
-                      shouldDefaultFrontendToNextTsx(originalRequest) &&
-                      state.nextWebsitePreviewDone &&
-                      !state.websiteResponsiveCheckDone
-                    ) {
-                      state.deliverableVerificationDone = true
-                      state.websiteResponsiveCheckPrompted = true
-                      contextManager.push({
-                        role: 'system',
-                        content: `LOCAL VISUAL CHECK REQUIRED: The Next.js/TSX preview is open in the Computer browser at ${state.nextWebsitePreviewUrl || 'the local preview URL'}. Before final delivery, inspect it with browser_screenshot or browser_scroll at the existing browser size, and use edit_file if anything is visually broken. Do not change the browser viewport.`,
-                      } as ChatMessageParam)
-                      phase = 'EVALUATING'
-                      break
-                    }
                   } catch {
                     state.deliverableVerificationDone = false
                     terminalReason = 'deliverable_verification_failed'
@@ -6336,9 +6316,9 @@ export class AgentLoop {
               const finalPath = deliverableResult
                 ? toolResultPath(deliverableResult) || latestSavedFinalDeliverablePath(state) || 'the completed deliverable'
                 : latestSavedFinalDeliverablePath(state) || 'the completed deliverable'
-              scheduleFinalDeliverableHandoff(state, finalPath, 'file')
+              continueFinalPhaseAfterVerifiedArtifact(state, finalPath, contextManager)
               state.lastIterationEnd = Date.now()
-              log.info('Deliverable file created on last step — requesting personalized final handoff')
+              log.info('Deliverable file created on last step — keeping the full final phase open')
               phase = 'STREAMING'
               break
             }
@@ -6550,51 +6530,6 @@ export class AgentLoop {
                 phase = 'STREAMING'
                 break
               }
-            }
-
-            if (
-              lastStreamResult.toolCalls.size === 0 &&
-              state.currentPlanItems &&
-              state.currentStepIdx === state.currentPlanItems.length - 1 &&
-              state.nextWebsitePreviewAttempted &&
-              !state.nextWebsitePreviewDone
-            ) {
-              contextManager.push({
-                role: 'system',
-                content: `Do not finish yet. A Next.js/TSX website was created, but the required local preview has not successfully built and opened in the Computer browser.${state.nextWebsitePreviewError ? ` Last preview error: ${state.nextWebsitePreviewError}` : ''} Fix the generated frontend files with edit_file so the backend can rebuild and reopen the preview.`,
-              } as ChatMessageParam)
-              phase = 'STREAMING'
-              break
-            }
-
-            if (
-              lastStreamResult.toolCalls.size === 0 &&
-              state.currentPlanItems &&
-              state.currentStepIdx === state.currentPlanItems.length - 1 &&
-              state.websiteBrowserCheckAttempted &&
-              !state.websiteBrowserCheckDone
-            ) {
-              contextManager.push({
-                role: 'system',
-                content: 'Do not finish yet. A website entry file was written, but it has not successfully opened in the Computer browser from the local sandbox server. Continue working on the same file and trigger a new write/edit so the local server check can run.',
-              } as ChatMessageParam)
-              phase = 'STREAMING'
-              break
-            }
-
-            if (
-              lastStreamResult.toolCalls.size === 0 &&
-              state.currentPlanItems &&
-              state.currentStepIdx === state.currentPlanItems.length - 1 &&
-              state.websiteResponsiveCheckPrompted &&
-              !state.websiteResponsiveCheckDone
-            ) {
-              contextManager.push({
-                role: 'system',
-                content: 'Do not finish yet. A website was created, but the required local visual check has not run. Use browser_screenshot or browser_scroll on the currently open local site at the existing browser size, then either fix issues with edit_file or finish if it looks correct.',
-              } as ChatMessageParam)
-              phase = 'STREAMING'
-              break
             }
 
             if (
@@ -7013,6 +6948,8 @@ export class AgentLoop {
       ),
     ) || []
     const explicitTaskToolNeedsInitialAction = pendingExplicitTaskToolTargets.length > 0
+    const explicitTerminalNeedsInitialAction = pendingExplicitTaskToolTargets.length > 0 &&
+      pendingExplicitTaskToolTargets.every(target => target === 'terminal' || target === 'execute_command')
     const hasPersistentExplicitTaskToolRestriction =
       (explicitTaskToolConstraint?.exclusive.length || 0) > 0 ||
       (explicitTaskToolConstraint?.forbidden.length || 0) > 0
@@ -7025,6 +6962,7 @@ export class AgentLoop {
       !hasPersistentExplicitTaskToolRestriction &&
       finalSavedResearchNeedsEvidenceAction(state, this.options.messages)
     const useCompactFinalInlineAnswer = finalInlineAnswerTurn(state, this.options.messages) &&
+      (state.finalInlineAnswerRecoveryAttempts > 0 || state.deadlineFinalizationStarted) &&
       !useCompactNarration &&
       !state.exactExtractionGuardPending &&
       !briefInlineResearchNeedsEvidenceAction &&
@@ -7036,6 +6974,13 @@ export class AgentLoop {
       !explicitTaskToolNeedsInitialAction &&
       !hasPersistentExplicitTaskToolRestriction
     const useCompactFinalDeliverable = finalSavedDeliverableTurn(state, this.options.messages) &&
+      (
+        state.finalSavedDeliverableRecoveryAttempts > 0 ||
+        state.deadlineFinalizationStarted ||
+        !!state.partialFileWriteRecoveryPending ||
+        !!state.fileWriteRepairPending ||
+        !!state.pendingDeliverableRevision
+      ) &&
       !useTextFinalDeliverable &&
       !useCompactNarration &&
       !state.exactExtractionGuardPending &&
@@ -7052,7 +6997,9 @@ export class AgentLoop {
       !!state.currentPlanItems &&
       state.currentStepIdx < state.currentPlanItems.length - 1 &&
       compactResearchEvidenceComplete(state)
-    let requestMessages = standaloneWebsiteNeedsInitialCreate
+    let requestMessages = explicitTerminalNeedsInitialAction
+      ? compactExplicitTerminalActionMessages(state, allMessages)
+      : standaloneWebsiteNeedsInitialCreate
       ? compactInitialStandaloneWebsiteMessages(state, allMessages, this.options.customInstructions)
       : useCompactFinalDeliverableHandoff
         ? compactFinalDeliverableHandoffMessages(state, allMessages, this.options.customInstructions)
@@ -7288,35 +7235,15 @@ export class AgentLoop {
         } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
           activeTools = []
         } else if (finalInlineAnswerTurn(state, this.options.messages)) {
-          activeTools = []
+          // The final phase may still contain model-authored actions before the
+          // answer. Keep tools available and let the model decide from scope.
+          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
         } else if (isLeanFinalSynthesisStep(state)) {
-          if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) {
-            activeTools = []
-          } else {
-            const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
-            const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
-            const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
-            const finalWantsWebsite = shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '')
-            const existingFinalPath = existingFinalDeliverablePath(state)
-            const allowedFinalTools = existingFinalPath
-              ? finalDeliverableRevisionToolNames(state, this.options.messages)
-              : new Set([
-                  'create_file',
-                  'edit_file',
-                  'append_file',
-                  'read_file',
-                  'list_files',
-                  ...(finalWantsPdf ? ['export_pdf'] : []),
-                  ...(finalWantsZip ? ['package_files'] : []),
-                  ...(finalWantsWebsite ? ['create_website'] : []),
-                  ...(finalWantsImage ? ['image_search'] : []),
-                ])
-            activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
-              .filter(t => {
-                const name = t.function?.name || ''
-                return allowedFinalTools.has(name)
-              })
-          }
+          // A final phase is an outcome boundary, not a file-only tool lane.
+          // It can research a missing fact, perform several user-requested
+          // actions, create multiple artifacts, verify them, or answer inline.
+          // Narrow tool recovery is applied only after a concrete failed write.
+          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
         } else if (budgetFraction >= URGENCY_FINAL_FRACTION) {
           const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
           const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
@@ -7758,7 +7685,9 @@ export class AgentLoop {
           !relaxRequiredToolChoice &&
           supportsProviderRequiredToolChoice(model)
         const requestedToolChoice = useRequiredToolCall
-          ? standaloneWebsiteNeedsInitialCreate
+          ? explicitTerminalNeedsInitialAction && activeTools.some(tool => tool.function?.name === 'execute_command')
+            ? { type: 'function', function: { name: 'execute_command' } }
+            : standaloneWebsiteNeedsInitialCreate
             ? { type: 'function', function: { name: 'create_website' } }
             : 'required'
           : undefined
@@ -8094,6 +8023,36 @@ export class AgentLoop {
               },
             })
             console.warn('[AgentDiagnostics] Retrying one normalized provider request before the terminal 4xx fence', {
+              category: deterministicRequestFailure.category,
+              repairAttempt: providerRequestRepairAttempts,
+              iteration: state.iterations,
+              step: state.currentStepIdx,
+              status,
+            })
+            continue
+          }
+
+          if (
+            deterministicRequestFailure.category !== 'authentication' &&
+            providerRequestRepairAttempts < MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS
+          ) {
+            providerRequestRepairAttempts++
+            // Some compatible routes report forced-tool or tool-schema
+            // incompatibilities as a generic 400. Retry voluntarily with a
+            // normalized history and a minimal, explicit native-call contract
+            // instead of converting an internal request mismatch into a dead
+            // task. Active tools are recomputed on the next attempt.
+            relaxRequiredToolChoice = true
+            const normalized = sanitizeProviderRequestMessagesForRetry(requestMessages)
+            requestMessages = [
+              ...(normalized.messages as ChatMessageParam[]),
+              {
+                role: 'system',
+                content: toolJsonRecoveryMessage(state, this.options.messages),
+              } as ChatMessageParam,
+            ]
+            state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+            console.warn('[AgentDiagnostics] Retrying rejected provider request with voluntary strict tool-call compatibility mode', {
               category: deterministicRequestFailure.category,
               repairAttempt: providerRequestRepairAttempts,
               iteration: state.iterations,

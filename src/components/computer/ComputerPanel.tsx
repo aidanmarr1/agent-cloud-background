@@ -49,6 +49,12 @@ function isLivePanelItem(item: ComputerPanelItem): boolean {
   return !!data?.liveFrame
 }
 
+function isEmptyPathlessFileItem(item: ComputerPanelItem): boolean {
+  if (item.type !== 'file') return false
+  const data = item.data as FileResult | undefined
+  return !data?.path?.trim() && !data?.content && (!data?.files || data.files.length === 0)
+}
+
 function FilePreview({ result, streaming, conversationId }: { result: FileResult; streaming?: boolean; conversationId?: string }) {
   const safeResult: FileResult = result && typeof result === 'object'
     ? {
@@ -140,7 +146,9 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   const [filterType, setFilterType] = useState<'all' | 'search' | 'browse' | 'terminal' | 'file' | 'image_search' | 'browser'>('all')
   const contentRef = useRef<HTMLDivElement>(null)
   const resizeCleanupRef = useRef<(() => void) | null>(null)
-  const visibleItems = items.filter((item) => !isViewportResizePanelItem(item))
+  const visibleItems = items.filter((item) =>
+    !isViewportResizePanelItem(item) && !isEmptyPathlessFileItem(item)
+  )
   const focusedVisibleIndex = computerPanelActiveItemId
     ? visibleItems.findIndex((item) => item.id === computerPanelActiveItemId)
     : -1

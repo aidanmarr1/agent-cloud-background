@@ -29,7 +29,6 @@ import {
   satisfyWorkLedgerRequirement,
   currentStepText,
   isConcreteBuildStep,
-  isCurrentSynthesisStep,
   isResearchStepText,
 } from './AgentState'
 import { inferArtifactType, tryEncodeImageBase64, IMAGE_EXTENSIONS } from './guards'
@@ -144,35 +143,6 @@ import { toolTypeRateLimitForState } from './ToolLimits'
 const RESEARCH_TOOLS = new Set([
   'web_search', 'browser_navigate', 'browser_get_content', 'browse_page',
   'browser_find_text', 'http_request', 'read_document', 'image_search',
-])
-
-const DELIVERABLE_STEP_TOOLS = new Set([
-  'create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files', 'read_file', 'list_files',
-  'image_search', 'browser_screenshot', 'browser_scroll',
-])
-
-const FINAL_SYNTHESIS_CARRYOVER_TOOLS = new Set([
-  'web_search',
-  'image_search',
-  'browser_navigate',
-  'browser_get_content',
-  'browser_find_text',
-  'browser_screenshot',
-  'browser_scroll',
-  'browse_page',
-  'read_document',
-  'http_request',
-])
-
-const SYNTHESIS_STEP_RESEARCH_TOOLS = new Set([
-  'web_search',
-  'image_search',
-  'browser_navigate',
-  'browser_get_content',
-  'browser_find_text',
-  'browse_page',
-  'read_document',
-  'http_request',
 ])
 
 const SOURCE_EXTRACTION_TOOLS = new Set([
@@ -1168,72 +1138,6 @@ function isToolExecutionErrorResult(toolName: string, result: unknown): boolean 
   return false
 }
 
-function allowNonDeliverableToolOnFinalStep(
-  toolName: string,
-  args: Record<string, unknown>,
-  state: AgentStateData,
-): boolean {
-  if (state.taskStrategy === 'browse' && (BROWSER_VISION_TOOLS.has(toolName) || toolName === 'browser_get_content')) {
-    return true
-  }
-
-  const websiteCheckInProgress = state.websiteResponsiveCheckPrompted && !state.websiteResponsiveCheckDone
-  if (websiteCheckInProgress && (BROWSER_VISION_TOOLS.has(toolName) || toolName === 'browser_get_content')) {
-    return true
-  }
-
-  if (toolName === 'browser_navigate' && isManagedLocalBrowserUrl(args.url)) {
-    return true
-  }
-
-  return false
-}
-
-function isResearchSynthesisFinalStep(state: AgentStateData): boolean {
-  return !!state.currentPlanItems &&
-    state.currentPlanItems.length > 0 &&
-    state.currentStepIdx === state.currentPlanItems.length - 1 &&
-    (state.taskStrategy === 'research' || state.taskStrategy === 'analysis' || state.taskStrategy === 'general') &&
-    !state.buildTask
-}
-
-function finalSynthesisCarryoverBlockReason(
-  toolName: string,
-  state: AgentStateData,
-): string | null {
-  if (!isResearchSynthesisFinalStep(state)) return null
-  if (!FINAL_SYNTHESIS_CARRYOVER_TOOLS.has(toolName)) return null
-  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'the final deliverable step'
-  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${currentStep}") is the final synthesis/deliverable phase, not a continuation of the previous research phase. Do not mention this to the user. Use create_file for the initial deliverable, append_file for continuation chunks, edit_file for targeted revisions, read_file/list_files only to inspect existing work, or export_pdf after the source file exists.`
-}
-
-function stepIsSynthesisOnly(state: AgentStateData): boolean {
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.taskStrategy === 'browse') return false
-  if (state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
-  if (isCurrentSynthesisStep(state)) return true
-
-  const stepText = [
-    state.currentPlanItems[state.currentStepIdx] || '',
-    state.currentPlanScopes?.[state.currentStepIdx] || '',
-  ].join(' ')
-  if (!/\b(?:synthesi[sz]e|compile|write|draft|assemble|produce|deliver|finali[sz]e|summari[sz]e|report|answer|conclusion|recommendation|verdict|polish)\b/i.test(stepText)) {
-    return false
-  }
-
-  return !/\b(?:research|search|source|sources|evidence|gather|collect|find|investigate|verify|validate|audit|browse|read|extract|look up|current|latest|image|asset|reference)\b/i.test(stepText)
-}
-
-function synthesisPhaseResearchBlockReason(
-  toolName: string,
-  state: AgentStateData,
-): string | null {
-  if (!stepIsSynthesisOnly(state)) return null
-  if (!SYNTHESIS_STEP_RESEARCH_TOOLS.has(toolName)) return null
-  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'the active synthesis step'
-  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${currentStep}") is for synthesizing, writing, or delivering from existing work, not gathering new sources. Stay inside this phase: write the answer/deliverable, inspect existing files only if needed, or emit <next_step/> if this phase is complete.`
-}
-
 async function applyVisualQualityGate(
   result: BrowserActionResult,
   context: string,
@@ -2070,32 +1974,6 @@ function directNavigationBeforeSearchTarget(
   return userUrl
 }
 
-function isLikelyStructuredEndpoint(rawUrl: string): boolean {
-  try {
-    const url = new URL(rawUrl)
-    const host = url.hostname.toLowerCase()
-    const path = url.pathname.toLowerCase()
-    if (host.startsWith('api.') || host.includes('.api.') || host.includes('eutils.ncbi.nlm.nih.gov')) return true
-    if (/\/(?:api|apis|graphql|rest|v\d+)(?:\/|$)/i.test(path)) return true
-    if (/\.(?:json|xml|csv|tsv|txt|rss|atom)(?:$|\?)/i.test(path)) return true
-    if (url.searchParams.has('format') || url.searchParams.has('retmode') || url.searchParams.has('output')) return true
-    return false
-  } catch {
-    return false
-  }
-}
-
-function pageLikeHttpRequestBlockReason(toolName: string, args: Record<string, unknown>): string | null {
-  if (toolName !== 'http_request') return null
-  const method = String(args.method || 'GET').toUpperCase()
-  const url = String(args.url || '').trim()
-  if (!url || !/^https?:\/\//i.test(url)) return null
-  if (method !== 'GET' && method !== 'HEAD') return null
-  if (isLikelyStructuredEndpoint(url)) return null
-
-  return `INTERNAL_RECOVERY: http_request GET/HEAD was skipped for a normal webpage URL (${url}). Do not mention this to the user. Use browser_navigate for rendered pages, read_document for PDFs/documents, or web_search for alternatives. Reserve http_request for structured API/data endpoints only.`
-}
-
 function duplicateSourceOpenBlockReason(
   toolName: string,
   args: Record<string, unknown>,
@@ -2107,7 +1985,7 @@ function duplicateSourceOpenBlockReason(
   if (!url) return null
   const normalized = normalizeUrl(url)
   for (const visited of state.stepVisitedUrls) {
-    if (normalizeUrl(visited) === normalized) {
+    if (toolName !== 'read_document' && normalizeUrl(visited) === normalized) {
       const verb = toolName === 'read_document' ? 'read' : 'opened'
       return `INTERNAL_RECOVERY: ${url} was already ${verb} in this phase. Do not open the same URL again with ${toolName}. Use browser_get_content if the current rendered page needs content extraction, choose a different source, or emit <next_step/> if this phase has enough evidence.`
     }
@@ -4014,11 +3892,9 @@ export class ToolPipeline {
             logWork(state, `${tc.name === 'create_file' ? 'Recovered and created' : 'Recovered and appended'} file: ${partial.path}`)
             if (this.memory) this.memory.recordFileCreated(partial.path, state.currentStepIdx)
             await this.emitFileArtifact(tc.id, { path: partial.path, content: partial.content }, result, state)
-            let recoveredResult = await this.maybeLaunchWebsiteAfterWrite(tc.id, partial.path, result, state)
-            recoveredResult = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, partial.path, recoveredResult, state)
-            const recoveredObject = recoveredResult && typeof recoveredResult === 'object'
-              ? recoveredResult as Record<string, unknown>
-              : { result: recoveredResult }
+            const recoveredObject = result && typeof result === 'object'
+              ? result as unknown as Record<string, unknown>
+              : { result }
             return {
               tc,
               result: {
@@ -4105,10 +3981,6 @@ export class ToolPipeline {
     }
 
     // --- Pre-validation guards ---
-
-    const isFinalDeliverableStep = !!state.currentPlanItems &&
-      state.currentPlanItems.length > 0 &&
-      state.currentStepIdx === state.currentPlanItems.length - 1
 
     const stepIndexReason = planStepIndexBlockReason(args, state)
     if (stepIndexReason) {
@@ -4234,58 +4106,6 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
-    // The final step is for writing/saving the deliverable. Do not let the model
-    // keep browsing or fetching sources after the plan has reached synthesis.
-    const finalSynthesisCarryoverReason = finalSynthesisCarryoverBlockReason(tc.name, state)
-    if (finalSynthesisCarryoverReason) {
-      const errorResult = { error: finalSynthesisCarryoverReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: finalSynthesisCarryoverReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.stepFailureCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
-
-    const synthesisPhaseResearchReason = synthesisPhaseResearchBlockReason(tc.name, state)
-    if (synthesisPhaseResearchReason) {
-      const errorResult = { error: synthesisPhaseResearchReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: synthesisPhaseResearchReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.stepFailureCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
-
-    if (
-      isFinalDeliverableStep &&
-      !DELIVERABLE_STEP_TOOLS.has(tc.name) &&
-      !allowNonDeliverableToolOnFinalStep(tc.name, args, state)
-    ) {
-      const errorResult = {
-        error: `INTERNAL_RECOVERY: final-step ${tc.name} was skipped because the current step needs the saved deliverable, not another external action. Do not mention this to the user. Use create_file for the initial written/code deliverable, append_file for large continuation chunks, edit_file for targeted revisions, export_pdf after saving a Markdown/HTML source when the user requested PDF, or image_search only when the requested deliverable is an image. Use the findings and assets already gathered.`,
-      }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: errorResult.error,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.stepFailureCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
-
     const singleSearchLimitReason = singleWebSearchLimitBlockReason(tc.name, state)
     if (singleSearchLimitReason) {
       const errorResult = { error: singleSearchLimitReason }
@@ -4361,20 +4181,6 @@ export class ToolPipeline {
 
     const browserPreflightBlock = await this.maybeBlockBrowserActionPreflight(tc, args, state, startTime)
     if (browserPreflightBlock) return browserPreflightBlock
-
-    const httpRequestBlockReason = pageLikeHttpRequestBlockReason(tc.name, args)
-    if (httpRequestBlockReason) {
-      const errorResult = { error: httpRequestBlockReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: httpRequestBlockReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
 
     const activityKind = researchActivityKindForTool(tc.name)
     const activityQuery = researchQueryFromToolArgs(tc.name, args)
@@ -5319,12 +5125,8 @@ export class ToolPipeline {
     // Emit/update artifact for deliverable file writes.
     if (!isError && (tc.name === 'create_file' || tc.name === 'append_file') && args.content) {
       await this.emitFileArtifact(tc.id, args, result, state)
-      result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
-      result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
     } else if (!isError && tc.name === 'edit_file') {
       await this.emitFileArtifact(tc.id, args, result, state)
-      result = await this.maybeLaunchWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
-      result = await this.maybeLaunchNextWebsiteAfterWrite(tc.id, String(args.path || ''), result, state)
     } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string; size?: number } | undefined
       if (pdfResult?.path && pdfResult.size !== undefined) {
@@ -5339,7 +5141,6 @@ export class ToolPipeline {
       const websiteResult = result as { path?: string; size?: number } | undefined
       if (websiteResult?.path && websiteResult.size !== undefined) {
         await this.emitFileArtifact(tc.id, { path: websiteResult.path, content: '' }, result, state)
-        result = await this.maybeLaunchWebsiteAfterWrite(tc.id, websiteResult.path, result, state)
       }
     }
 

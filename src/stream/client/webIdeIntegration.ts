@@ -98,15 +98,20 @@ export class WebIdeHandler {
     upsertPanel: (convId: string, item: ComputerPanelItem) => void,
     openPanel: () => void,
   ): void {
+    const normalizedFilePath = filePath.trim()
+    if (!normalizedFilePath) return
+
     const uiState = useUIStore.getState()
     const isActiveConversation = this.isActiveConversation(conversationId)
-    const entryFile = inferWebIdeEntryFile(filePath)
+    const entryFile = inferWebIdeEntryFile(normalizedFilePath)
     const isAppend = toolName === 'append_file'
     const isEdit = toolName === 'edit_file'
-    const existingForEvent = this.filePathByEventId[eventId] === filePath && this.fileContentAccum[eventId] !== undefined
+    const existingForEvent = this.filePathByEventId[eventId] === normalizedFilePath && this.fileContentAccum[eventId] !== undefined
+    const bufferedBeforeStart = this.fileContentAccum[eventId] || ''
+    const baseContent = isAppend ? this.getExistingFileContent(conversationId, normalizedFilePath) : ''
     const initialContent = existingForEvent
       ? this.fileContentAccum[eventId]
-      : isAppend ? this.getExistingFileContent(conversationId, filePath) : ''
+      : `${baseContent}${bufferedBeforeStart}`
     const action = isEdit ? 'edited' as const : isAppend ? 'appended' as const : 'created' as const
     const titleVerb = isEdit ? 'Editing' : isAppend ? 'Appending' : 'Writing'
 
@@ -115,25 +120,25 @@ export class WebIdeHandler {
     }
 
     if (isActiveConversation) {
-      uiState.setWebIdeStreamingFile({ path: filePath, content: initialContent })
-      uiState.setWebIdeSelectedFile(filePath)
+      uiState.setWebIdeStreamingFile({ path: normalizedFilePath, content: initialContent })
+      uiState.setWebIdeSelectedFile(normalizedFilePath)
     }
     if (isActiveConversation && uiState.webIdeMode) {
       uiState.setWebIdeActiveTab('code')
     }
 
-    this.filePathByEventId[eventId] = filePath
+    this.filePathByEventId[eventId] = normalizedFilePath
     this.fileToolByEventId[eventId] = toolName || 'create_file'
     if (this.fileInitialContentByEventId[eventId] === undefined) {
-      this.fileInitialContentByEventId[eventId] = initialContent
+      this.fileInitialContentByEventId[eventId] = baseContent
     }
     this.fileContentAccum[eventId] = initialContent
-    this.fileContentByPath[filePath] = initialContent
+    this.fileContentByPath[normalizedFilePath] = initialContent
     upsertPanel(conversationId, {
       id: eventId,
       type: 'file',
-      title: `${titleVerb}: ${filePath.split('/').pop() || 'file'}`,
-      data: { action, path: filePath, content: initialContent } as FileResult,
+      title: `${titleVerb}: ${normalizedFilePath.split('/').pop()}`,
+      data: { action, path: normalizedFilePath, content: initialContent } as FileResult,
       timestamp: Date.now(),
       streaming: true,
     })
@@ -170,10 +175,15 @@ export class WebIdeHandler {
       const action = isEdit ? 'edited' as const : isAppend ? 'appended' as const : 'created' as const
       const titleVerb = isEdit ? 'Editing' : isAppend ? 'Appending' : 'Writing'
       if (filePath) this.fileContentByPath[filePath] = this.fileContentAccum[eventId]
+      // A reconnect can deliver content before the corresponding start event.
+      // Keep those bytes buffered, but never create a misleading pathless
+      // "file" panel item. The start event will reveal the real filename and
+      // the already-accumulated content together.
+      if (!filePath) return
       upsertPanel(conversationId, {
         id: eventId,
         type: 'file',
-        title: `${titleVerb}: ${filePath.split('/').pop() || 'file'}`,
+        title: `${titleVerb}: ${filePath.split('/').pop()}`,
         data: { action, path: filePath, content: this.fileContentAccum[eventId] } as FileResult,
         timestamp: Date.now(),
         streaming: true,
@@ -182,7 +192,7 @@ export class WebIdeHandler {
   }
 
   handleToolResult(eventId: string, eventName: string, eventResult: unknown, conversationId: string): void {
-    if (eventName !== 'create_file' && eventName !== 'append_file' && eventName !== 'edit_file') return
+    if (eventName !== 'create_file' && eventName !== 'create_website' && eventName !== 'append_file' && eventName !== 'edit_file') return
 
     const uiState = useUIStore.getState()
     const isActiveConversation = this.isActiveConversation(conversationId)

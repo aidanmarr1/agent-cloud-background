@@ -95,7 +95,10 @@ const EXPLICIT_TOOL_TARGETS: ExplicitToolTargetDefinition[] = [
     .map(name => ({ target: name, pattern: name })),
 ]
 
-const TERMINAL_TOOL_NAMES = new Set(['execute_command', 'run_code'])
+// "Terminal" means a real shell command. run_code remains explicitly
+// selectable by name, but must not silently satisfy a request to use the
+// sandbox terminal.
+const TERMINAL_TOOL_NAMES = new Set(['execute_command'])
 const FILE_TOOL_NAMES = new Set([
   'create_file',
   'read_file',

@@ -28,7 +28,7 @@ async function assertSourceContracts() {
   ])
 
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
-  assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*30/, 'credit policy must preserve margin for hosted infrastructure and failed-task refunds')
+  assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
   assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.5-flash-lite'/, 'default model must be Gemini 3.5 Flash Lite')
   assert.match(modelPricing, /inputUsdPer1M:\s*0\.30/, 'Gemini base input pricing must match OpenRouter')
@@ -161,10 +161,10 @@ import { rm } from 'node:fs/promises'
 
 export async function runCreditPricingSmoke() {
   assert.equal(CREDIT_RATES.retailCreditsPerUsd, 200)
-  assert.equal(CREDIT_RATES.providerCostToRetailMultiplier, 30)
-  assert.equal(CREDIT_RATES.creditsPerUsd, 6000)
-  assert.equal(CREDIT_RATES.webSearchCredits, 1.8)
-  assert.equal(CREDIT_RATES.imageSearchCredits, 1.8)
+  assert.equal(CREDIT_RATES.providerCostToRetailMultiplier, 27)
+  assert.equal(CREDIT_RATES.creditsPerUsd, 5400)
+  assert.equal(CREDIT_RATES.webSearchCredits, 1.62)
+  assert.equal(CREDIT_RATES.imageSearchCredits, 1.62)
   assert.equal(CREDIT_RATES.browserStepCredits, 0)
   assert.equal(CREDIT_RATES.e2bDefaultVcpuCount, 2)
   assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 2)
@@ -177,8 +177,8 @@ export async function runCreditPricingSmoke() {
     CREDIT_RATES.outputTokenCreditsPer1K,
     roundCreditAmount((CREDIT_RATES.modelOutputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
   )
-  assert.equal(toolCreditCharge('web_search'), 1.8)
-  assert.equal(toolCreditCharge('image_search'), 1.8)
+  assert.equal(toolCreditCharge('web_search'), 1.62)
+  assert.equal(toolCreditCharge('image_search'), 1.62)
   assert.equal(toolCreditCharge('browser_navigate'), 0)
   assert.equal(toolCreditCharge('browser_click_at'), 0)
   assert.equal(toolCreditCharge('browser_screenshot'), 0)
@@ -190,9 +190,9 @@ export async function runCreditPricingSmoke() {
   const standardAnalysisRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 15 * 60_000 })
   const standardWebsiteRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 25 * 60_000 })
   const complexAppRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 80 * 60_000 })
-  assert.ok(standardAnalysisRuntimeCharge >= 195 && standardAnalysisRuntimeCharge <= 205)
-  assert.ok(standardWebsiteRuntimeCharge >= 330 && standardWebsiteRuntimeCharge <= 340)
-  assert.ok(complexAppRuntimeCharge >= 1060 && complexAppRuntimeCharge <= 1070)
+  assert.ok(standardAnalysisRuntimeCharge >= 175 && standardAnalysisRuntimeCharge <= 185)
+  assert.ok(standardWebsiteRuntimeCharge >= 295 && standardWebsiteRuntimeCharge <= 305)
+  assert.ok(complexAppRuntimeCharge >= 955 && complexAppRuntimeCharge <= 965)
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)

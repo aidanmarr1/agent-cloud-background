@@ -398,6 +398,7 @@ export class EventDispatcher {
         this.handleBrowserFrame(event.frame, event.timestamp)
         break
       case 'file_content_start':
+        if (!event.path.trim()) break
         this.webIde.handleFileContentStart(
           event.id, event.path, event.toolName, this.conversationId,
           this.actions.upsertComputerPanelItem,
@@ -798,7 +799,7 @@ export class EventDispatcher {
     const s = tn === 'web_search' || tn === 'image_search' ? 'searching' as const
       : tn.startsWith('browser_') ? 'browsing' as const
       : tn === 'execute_command' || tn === 'run_code' ? 'running' as const
-      : tn === 'create_file' || tn === 'edit_file' || tn === 'append_file' || tn === 'export_pdf' ? 'coding' as const
+      : tn === 'create_file' || tn === 'create_website' || tn === 'edit_file' || tn === 'append_file' || tn === 'export_pdf' ? 'coding' as const
       : 'analyzing' as const
     const uiState = useUIStore.getState()
     if (this.isActiveConversation()) uiState.setStreamingStatus(s)
@@ -861,7 +862,11 @@ export class EventDispatcher {
       this.openComputerPanel()
     }
 
-    if ((event.name === 'create_file' || event.name === 'append_file' || event.name === 'edit_file') && event.args.path) {
+    if (
+      (event.name === 'create_file' || event.name === 'create_website' || event.name === 'append_file' || event.name === 'edit_file') &&
+      typeof event.args.path === 'string' &&
+      event.args.path.trim()
+    ) {
         this.webIde.handleFileContentStart(
           event.id,
           event.args.path as string,
@@ -1564,7 +1569,13 @@ export class EventDispatcher {
             fileName,
             filePath: fileData?.path || fileName,
             content: fileData?.content || '',
-            type: 'document',
+            type: /\.html?$/i.test(fileName)
+              ? 'website'
+              : /\.(?:csv|json|xml|ya?ml)$/i.test(fileName)
+                ? 'data'
+                : /\.(?:md|markdown|txt|rtf|pdf)$/i.test(fileName)
+                  ? 'document'
+                  : 'code',
             deliverable: true,
             purpose: 'deliverable',
             createdAt: Date.now(),
