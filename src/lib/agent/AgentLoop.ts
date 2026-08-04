@@ -1899,8 +1899,13 @@ function tierTimeoutsForIteration(
   if (finalSavedDeliverableTurn(state, messages)) {
     return {
       ...state.tierTimeouts,
-      iterationTimeoutMs: Math.min(state.tierTimeouts.iterationTimeoutMs, FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS),
-      inactivityTimeoutMs: Math.min(state.tierTimeouts.inactivityTimeoutMs, FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS),
+      // A saved report streams its body inside the native file arguments. The
+      // final-write window is therefore a minimum allowance, not a cap. Using
+      // Math.min here silently reduced research reports to the generic 25s
+      // strategy timeout, clipping healthy Qwen streams into repeated partial
+      // create/append recovery turns.
+      iterationTimeoutMs: Math.max(state.tierTimeouts.iterationTimeoutMs, FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS),
+      inactivityTimeoutMs: Math.max(state.tierTimeouts.inactivityTimeoutMs, FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS),
       contentOnlyTimeoutMs: FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS,
       contentOnlyMinChars: FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS,
     }
@@ -6213,7 +6218,7 @@ export class AgentLoop {
               if (deliverableResult && recoveredPartialWrite) {
                 const pending = state.partialFileWriteRecoveryPending
                 const path = pending?.path || toolResultPath(deliverableResult) || 'the saved deliverable'
-                if (partialRecoveryResult?.partialWriteRecoveryLimitReached && conversationId && path !== 'the saved deliverable') {
+                if (conversationId && path !== 'the saved deliverable') {
                   try {
                     const verifiedContent = await deliverableContentForVerification(conversationId, deliverableResult)
                     const originalRequest = messages[messages.length - 1]?.content || ''
@@ -6244,54 +6249,58 @@ export class AgentLoop {
                       break
                     }
 
-                    const appendRecoveryCount = partialAppendRecoveryCountForPath(state, path)
-                    const closingAppendAlreadyGranted =
-                      appendRecoveryCount > PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH ||
-                      state.deliverableRevisionCount >= deliverableRevisionLimit(state)
-                    if (!closingAppendAlreadyGranted) {
-                      state.deliverableRevisionCount = deliverableRevisionLimit(state)
+                    if (partialRecoveryResult?.partialWriteRecoveryLimitReached) {
+                      const appendRecoveryCount = partialAppendRecoveryCountForPath(state, path)
+                      const closingAppendAlreadyGranted =
+                        appendRecoveryCount > PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH ||
+                        state.deliverableRevisionCount >= deliverableRevisionLimit(state)
+                      if (!closingAppendAlreadyGranted) {
+                        state.deliverableRevisionCount = deliverableRevisionLimit(state)
+                        state.pendingDeliverableRevision = {
+                          path,
+                          failures: verification.failures,
+                          suggestions: verification.suggestions,
+                          createdAt: Date.now(),
+                        }
+                        contextManager.push({
+                          role: 'system',
+                          content: `PARTIAL APPEND RECOVERY LIMIT REACHED: "${path}" has been read back and verified as a whole. Make exactly one final small append_file call to the same path, limited to the most important missing closing material (${verification.failures.join('; ')}). Keep it to roughly 180–300 words, finish at a clean sentence or section boundary, and do not repeat existing content. This is the only remaining append attempt; do not write visible prose or emit <next_step/>.`,
+                        } as ChatMessageParam)
+                        log.info('Partial append recovery limit reached — allowing one bounded closing append')
+                        phase = 'EVALUATING'
+                        break
+                      }
+
+                      state.partialFileWriteRecoveryPending = null
+                      state.partialFileWriteRecoveryNudged = false
                       state.pendingDeliverableRevision = {
                         path,
                         failures: verification.failures,
                         suggestions: verification.suggestions,
                         createdAt: Date.now(),
                       }
-                      contextManager.push({
-                        role: 'system',
-                        content: `PARTIAL APPEND RECOVERY LIMIT REACHED: "${path}" has been read back and verified as a whole. Make exactly one final small append_file call to the same path, limited to the most important missing closing material (${verification.failures.join('; ')}). Keep it to roughly 180–300 words, finish at a clean sentence or section boundary, and do not repeat existing content. This is the only remaining append attempt; do not write visible prose or emit <next_step/>.`,
-                      } as ChatMessageParam)
-                      log.info('Partial append recovery limit reached — allowing one bounded closing append')
-                      phase = 'EVALUATING'
+                      state.deliverableVerificationDone = false
+                      terminalReason = 'deliverable_verification_failed'
+                      log.warn('Recovered deliverable still failed verification after bounded closing append', {
+                        path,
+                        failures: verification.failures,
+                      })
+                      phase = 'COMPLETE'
                       break
                     }
-
-                    state.partialFileWriteRecoveryPending = null
-                    state.partialFileWriteRecoveryNudged = false
-                    state.pendingDeliverableRevision = {
-                      path,
-                      failures: verification.failures,
-                      suggestions: verification.suggestions,
-                      createdAt: Date.now(),
-                    }
-                    state.deliverableVerificationDone = false
-                    terminalReason = 'deliverable_verification_failed'
-                    log.warn('Recovered deliverable still failed verification after bounded closing append', {
-                      path,
-                      failures: verification.failures,
-                    })
-                    phase = 'COMPLETE'
-                    break
                   } catch (error) {
-                    state.partialFileWriteRecoveryPending = null
-                    state.partialFileWriteRecoveryNudged = false
-                    state.deliverableVerificationDone = false
-                    terminalReason = 'deliverable_verification_failed'
-                    log.warn('Could not verify recovered deliverable after append recovery limit', {
+                    log.warn('Could not verify recovered deliverable before continuation', {
                       path,
                       error: error instanceof Error ? error.message : String(error),
                     })
-                    phase = 'COMPLETE'
-                    break
+                    if (partialRecoveryResult?.partialWriteRecoveryLimitReached) {
+                      state.partialFileWriteRecoveryPending = null
+                      state.partialFileWriteRecoveryNudged = false
+                      state.deliverableVerificationDone = false
+                      terminalReason = 'deliverable_verification_failed'
+                      phase = 'COMPLETE'
+                      break
+                    }
                   }
                 }
                 log.info('Recovered partial deliverable write on last step — requiring append continuation')
