@@ -4,7 +4,7 @@ import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
 import { defaultFileActionLabel, formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
-import { NARRATION_THRESHOLD_DEFAULT } from './config'
+import { NARRATION_MAX_VISIBLE_ACTION_GAP, NARRATION_THRESHOLD_DEFAULT } from './config'
 import { sanitizeToolStartArgs } from './toolEventSanitizer'
 import {
   extractCadenceProgressUpdate,
@@ -474,7 +474,6 @@ function recordVisibleToolStartForNarration(
   args: Record<string, unknown>,
   state: AgentStateData,
 ): boolean {
-  if (toolCall.name === 'browser_screenshot' || toolCall.name === 'browser_resize') return false
   if (!strictActionLabelFromArgs(args)) return false
   if (state.visibleNarrationToolStartIds.has(toolCall.id)) return false
   state.visibleNarrationToolStartIds.add(toolCall.id)
@@ -612,6 +611,11 @@ export class StreamProcessor {
     let cadenceProgressToolCallId: string | null = null
     let cadenceProgressViolation: CadenceProgressViolation | null = null
     const rejectedCadenceProgressToolCalls = new Set<number>()
+    // Action three is the preferred cadence point. Once three visible actions
+    // already exist, action four is a hard boundary: it cannot execute unless
+    // the model supplied a valid post-result progress update for that action.
+    const hardCadenceBoundary = cadenceProgressUpdateEnabled &&
+      state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
 
     const markCadenceProgressViolation = (
       code: CadenceProgressViolationCode,
@@ -645,6 +649,13 @@ export class StreamProcessor {
         // buy a second model turn merely to repair prose.
         if (allowMissing) {
           rejectedCadenceProgressToolCalls.add(index)
+          if (hardCadenceBoundary) {
+            markCadenceProgressViolation(
+              'missing_progress_update',
+              'the fourth-action cadence boundary requires a non-empty progress_update on the native tool call',
+            )
+            return false
+          }
           return true
         }
         return false
@@ -652,8 +663,17 @@ export class StreamProcessor {
       const review = reviewProgressNarration(state, rawUpdate, { requireSignal: false })
       if (review.status !== 'accepted') {
         rejectedCadenceProgressToolCalls.add(index)
-        // Suppress invalid/duplicate display text, but preserve the valid
-        // native tool call. Cadence remains due at the next action frontier.
+        if (hardCadenceBoundary) {
+          markCadenceProgressViolation(
+            review.status === 'duplicate' ? 'duplicate_progress_update' : 'invalid_progress_update',
+            review.status === 'duplicate'
+              ? 'the fourth-action cadence boundary requires a genuinely new progress_update'
+              : 'the fourth-action cadence boundary requires a valid completed-work progress_update',
+          )
+          return false
+        }
+        // Action three may still fail open so useful work is not lost; action
+        // four then becomes the mandatory retry boundary.
         return allowMissing
       }
 
@@ -1112,8 +1132,8 @@ export class StreamProcessor {
               // mixed/unsafe second call from flashing a provisional action that
               // the execution policy will subsequently reject.
               if (isPrimaryToolCall) {
-                prepareCadenceProgressUpdate(tc.index, toolCall)
-                emitProvisionalToolStart(tc.index, toolCall)
+                const cadenceReady = prepareCadenceProgressUpdate(tc.index, toolCall)
+                if (!hardCadenceBoundary || cadenceReady) emitProvisionalToolStart(tc.index, toolCall)
               }
 
               if (STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)) {
@@ -1254,11 +1274,12 @@ export class StreamProcessor {
 
     // Stage valid narration for post-result release. The action itself remains
     // genuinely live and must not wait for display prose to finish streaming.
-    // Missing, invalid, or duplicate narration stays invisible, while the
-    // action still proceeds and cadence is retried on the next ordinary turn.
+    // Action three may retry naturally after unusable narration. At the hard
+    // fourth-action boundary, reject the turn before execution and ask the LLM
+    // to repair the same action contract; no fifth silent action can slip past.
     for (const [index, toolCall] of toolCalls) {
-      prepareCadenceProgressUpdate(index, toolCall, true)
-      emitProvisionalToolStart(index, toolCall)
+      const cadenceReady = prepareCadenceProgressUpdate(index, toolCall, true)
+      if (!hardCadenceBoundary || cadenceReady) emitProvisionalToolStart(index, toolCall)
     }
 
     for (const [index, preview] of filePreviewState) {
@@ -1281,10 +1302,10 @@ export class StreamProcessor {
     for (const toolCall of toolCalls.values()) {
       toolCall.arguments = stripCadenceProgressUpdateFromArguments(toolCall.arguments)
     }
-    // A prose-only cadence turn still has no executable action and may use the
-    // bounded no-progress recovery. A valid native action is never cleared
-    // solely because its optional display narration was unusable.
-    if (cadenceProgressViolation && toolCalls.size === 0) toolCalls.clear()
+    // At the hard boundary an invalid display contract rejects the unexecuted
+    // action. At the preferred action-three boundary, valid work still fails
+    // open and the cadence field is retried with action four.
+    if (cadenceProgressViolation && (toolCalls.size === 0 || hardCadenceBoundary)) toolCalls.clear()
 
     return {
       assistantContent,

@@ -213,7 +213,6 @@ const BROWSER_VISUAL_RECOVERY_PROGRESS = new Set([
   'no_progress_same_page',
 ])
 
-const NARRATION_HIDDEN_TOOLS = new Set(['browser_screenshot', 'browser_resize'])
 
 const BROWSER_ACTION_PREFLIGHT_TOOLS = new Set([
   'browser_click', 'browser_click_at', 'browser_type', 'browser_select',
@@ -879,7 +878,6 @@ function narrationCadenceBlockReason(
   _assistantContent: string,
 ): string | null {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
-  if (NARRATION_HIDDEN_TOOLS.has(toolName)) return null
   if (!strictActionLabelFromArgs(args)) return null
   // Cadence is display-only and never blocks execution. Crucially, ordinary
   // assistant prose carried beside a tool does not reset the action clock:
@@ -1072,7 +1070,6 @@ function countVisibleToolActionForNarration(
   args: Record<string, unknown>,
   state: AgentStateData,
 ): void {
-  if (NARRATION_HIDDEN_TOOLS.has(toolName)) return
   if (!strictActionLabelFromArgs(args)) return
   if (state.visibleNarrationToolStartIds.has(toolCallId)) return
   state.visibleNarrationToolStartIds.add(toolCallId)

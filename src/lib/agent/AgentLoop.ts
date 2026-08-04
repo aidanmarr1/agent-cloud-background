@@ -1427,11 +1427,11 @@ function finalDeliverableHandoffPrompt(state: AgentStateData): string {
     `Completed artifact: ${target}.`,
     'Write the user-facing final response now with no tool call.',
     'Tailor it to this exact task: lead with the real outcome, then mention the most useful concrete findings, design choices, behavior, caveats, or usage detail from the completed work.',
-    'Mention the artifact and format naturally so the attachment card below is understandable.',
-    'This final handoff is more flexible than the opening acknowledgement: use one to three short paragraphs, a compact heading, or a few bullets when that best fits the result. It does not need to be one sentence.',
+    'If one or more files are attached below, make it clear in natural task-specific wording that the user can open those attachments, and identify what they contain when useful.',
+    'Choose the length and structure from the task and completed context. A sentence, several paragraphs, headings, bullets, or another clear shape are all acceptable; do not force the same layout across tasks.',
     'Write natural completion prose in your own words. Do not copy a plan-step title or form broken phrases such as "I finished synthesize"; use grammatical past-tense wording.',
-    'Do not use a fixed handoff sentence such as "The completed file is attached below", do not repeat the whole deliverable, and do not narrate internal steps, source counts, tool calls, verification mechanics, or phases.',
-    'Keep it concise but substantive, use natural Markdown only when it helps, and finish with a complete sentence.',
+    'Avoid falling back to the same stock handoff sentence across tasks. Do not repeat the whole deliverable or narrate internal steps, source counts, tool calls, verification mechanics, or phases.',
+    'Use natural Markdown only when it helps and finish cleanly.',
   ].filter(Boolean).join(' ')
 }
 
@@ -1441,7 +1441,6 @@ function finalDeliverableHandoffHasInvalidForm(
 ): boolean {
   const text = content.trim()
   if (!text || !/[A-Za-z0-9]/.test(text)) return true
-  if (/^(?:the completed file|the completed files|here(?:'|’)?s the completed deliverable)\b/i.test(text)) return true
   if (/^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)) return true
   if (/\bi (?:have )?finished\s+(?:synthesize|write|create|compile|generate|produce|build|draft|prepare|research|analyze|summarize)\b/i.test(text)) {
     return true
@@ -1755,7 +1754,6 @@ function shouldUseNaturalCadenceNarration(
     (state.forceTextNextIteration || state.exactExtractionGuardPending) &&
     !hardWindowOpen
   ) return false
-  if (state.deadlineFinalizationStarted) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (state.narrationCadenceInFlight) return false
   if (state.visibleToolActionsSinceLastNarration < state.narrationNextAttemptAt) return false
@@ -5070,9 +5068,9 @@ export class AgentLoop {
               throw error
             }
 
-            // A cadence violation is only possible when the turn supplied no
-            // executable tool call. Missing or unusable display narration on
-            // a valid native action fails open inside StreamProcessor.
+            // Cadence-only prose and fourth-action tool calls without a valid
+            // LLM-authored progress update are rejected before execution. The
+            // same ordinary action turn is repaired immediately.
             if (lastStreamResult.cadenceProgressViolation) {
               contextManager.push({
                 role: 'system',

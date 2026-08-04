@@ -86,16 +86,17 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
         ...tool.function,
         parameters: {
           ...schema,
-          // Keep normal action arguments first so the live action pill can
-          // appear before the model finishes the post-result narration field.
+          // Put the short cadence field first. On the hard fourth-action
+          // boundary the runtime validates it before revealing/executing the
+          // action, then streams large file/content arguments genuinely live.
           properties: {
-            ...(schema.properties || {}),
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
               description: 'Required cadence field. Write one natural completion update for this exact tool action. The runtime holds it until the matching action succeeds, so use completed tense but claim only what successful execution of the supplied action itself proves. For example, say that a named report was opened or searched for; never claim that it contained, confirmed, or yielded a specific finding unless that finding already appears in the completed-work context. Size it naturally: one sentence for one clear action, two only when an already-established contrast or implication matters. Choose the wording freely without repeating recent claims. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, or raw tool failures. Never write a future plan, promise, tool accounting, empty string, cumulative-summary paraphrase, or generic Next sentence. This field is display-only and is removed before tool execution.',
               minLength: 1,
               maxLength: 220,
             },
+            ...(schema.properties || {}),
           },
           required: [...required.filter(key => key !== CADENCE_PROGRESS_UPDATE_FIELD), CADENCE_PROGRESS_UPDATE_FIELD],
         },

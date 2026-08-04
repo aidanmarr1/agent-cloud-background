@@ -1,22 +1,37 @@
-// The assistant is pinned to Gemini 3.5 Flash Lite. The plain model slug uses
-// OpenRouter's balanced standard routing across compatible Google hosts.
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
+// The assistant is pinned to Qwen3.7 Flash. The plain model slug keeps
+// OpenRouter's balanced price-and-speed routing instead of forcing one host.
+export const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3.7-flash'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.30,
-  cacheHitInputUsdPer1M: 0.03,
-  outputUsdPer1M: 2.50,
-  internalReasoningUsdPer1M: 2.50,
-  // No separate long-context price override is currently published. Keep the
-  // generic fallback fields equal to base pricing at the context boundary.
-  longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.30,
-  longContextCacheHitInputUsdPer1M: 0.03,
-  longContextOutputUsdPer1M: 2.50,
-  contextTokens: 1_048_576,
+  inputUsdPer1M: 0.03,
+  cacheHitInputUsdPer1M: 0.006,
+  outputUsdPer1M: 0.13,
+  internalReasoningUsdPer1M: 0.13,
+  // OpenRouter publishes two context-length overrides for Qwen3.7 Flash.
+  // Keep both so estimated usage remains exact when inline cost metadata is
+  // absent, including the large-context agent turns this runtime permits.
+  contextPriceTiers: [
+    {
+      minPromptTokens: 32_000,
+      inputUsdPer1M: 0.10,
+      cacheHitInputUsdPer1M: 0.02,
+      outputUsdPer1M: 0.40,
+    },
+    {
+      minPromptTokens: 256_000,
+      inputUsdPer1M: 0.20,
+      cacheHitInputUsdPer1M: 0.04,
+      outputUsdPer1M: 0.80,
+    },
+  ],
+  longContextThresholdTokens: 256_000,
+  longContextInputUsdPer1M: 0.20,
+  longContextCacheHitInputUsdPer1M: 0.04,
+  longContextOutputUsdPer1M: 0.80,
+  contextTokens: 1_000_000,
   maxCompletionTokens: 65_536,
-  source: 'OpenRouter (Google)',
+  source: 'OpenRouter (Qwen)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING
@@ -48,16 +63,12 @@ export function estimateUsageCost(input: {
   if (promptTokens === null || completionTokens === null) return null
 
   const pricing = pricingForModel(input.model)
-  const longContext = Math.max(0, promptTokens) >= pricing.longContextThresholdTokens
-  const inputUsdPer1M = longContext
-    ? pricing.longContextInputUsdPer1M
-    : pricing.inputUsdPer1M
-  const outputUsdPer1M = longContext
-    ? pricing.longContextOutputUsdPer1M
-    : pricing.outputUsdPer1M
-  const cacheHitInputUsdPer1M = longContext
-    ? pricing.longContextCacheHitInputUsdPer1M
-    : pricing.cacheHitInputUsdPer1M
+  const applicableTier = [...pricing.contextPriceTiers]
+    .reverse()
+    .find(tier => Math.max(0, promptTokens) >= tier.minPromptTokens)
+  const inputUsdPer1M = applicableTier?.inputUsdPer1M ?? pricing.inputUsdPer1M
+  const outputUsdPer1M = applicableTier?.outputUsdPer1M ?? pricing.outputUsdPer1M
+  const cacheHitInputUsdPer1M = applicableTier?.cacheHitInputUsdPer1M ?? pricing.cacheHitInputUsdPer1M
   const cacheHitTokens = finiteNumber(input.prompt_cache_hit_tokens)
   const cacheMissTokens = finiteNumber(input.prompt_cache_miss_tokens)
   const inputCost = cacheHitTokens !== null || cacheMissTokens !== null

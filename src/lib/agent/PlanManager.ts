@@ -90,7 +90,7 @@ const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
 const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
-const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
+const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 
 class PlannerUsageRecordingError extends Error {
@@ -691,14 +691,15 @@ export class PlanManager {
     const alignedScopes = this.alignScopesToTitles(titles, scopes)
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(titles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
+    const withDelivery = this.ensureFinalDeliveryStep(withRequired.titles, withRequired.scopes)
 
-    if (options.emitPlan !== false) this.emitter.plan(withRequired.titles)
-    state.planItems = withRequired.titles
-    state.planScopes = withRequired.scopes
+    if (options.emitPlan !== false) this.emitter.plan(withDelivery.titles)
+    state.planItems = withDelivery.titles
+    state.planScopes = withDelivery.scopes
     state.planEmitted = true
     this.planPromise = Promise.resolve(null)
     console.log('[AgentDiagnostics] Using route startup plan for worker', {
-      steps: withRequired.titles.length,
+      steps: withDelivery.titles.length,
       emitted: options.emitPlan !== false,
     })
     return true
@@ -1289,11 +1290,11 @@ Rules:
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, but do not enforce or mention a sentence count. Say what Agent will do for the exact task and what it will deliver.
-- The planning model owns the visible plan's wording, step count, boundaries, and order. Preserve explicit user order and real dependencies, but do not force "research → analyze → synthesize → deliver", a phase named "Analyze", or any preferred verb/template.
+- The planning model owns the visible plan's wording, step count, boundaries, and order. Preserve explicit user order and real dependencies without forcing stock research, analysis, or synthesis phases. Every non-empty plan must end with a concise, task-specific delivery step naming the answer, outcome, confirmation, or artifact Agent will return.
 - Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
 - Research work starts after the plan with targeted web_search calls chosen by the agent for the current evidence gap, then read_document/browser tools for rich sources.
 - "code" means the user asked to write, modify, debug, run, or deploy code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact.
-- Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, writing, verification, and delivery are separate or combined visible phases. The requested result must still be completed.
+- Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, writing, and verification are separate or combined visible phases. The final visible step must deliver the requested concrete result and may combine any last verification with that handoff.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
 - If saved custom instructions require todo.md or another tracking file, preserve that support step; otherwise do not invent tracking files.
 - If the broken response contains useful task details, preserve them. If it does not, derive a specific plan from the user request.
@@ -1378,13 +1379,14 @@ Rules:
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
-    assertPlannerVisibleTextQuality(obj.ack, withRequired.titles, withRequired.scopes)
+    const withDelivery = this.ensureFinalDeliveryStep(withRequired.titles, withRequired.scopes)
+    assertPlannerVisibleTextQuality(obj.ack, withDelivery.titles, withDelivery.scopes)
 
     await this.emitAcknowledgement(obj.ack, mappedTaskType)
     this.throwIfPlannerAborted()
-    this.emitter.plan(withRequired.titles)
-    state.planItems = withRequired.titles
-    state.planScopes = withRequired.scopes
+    this.emitter.plan(withDelivery.titles)
+    state.planItems = withDelivery.titles
+    state.planScopes = withDelivery.scopes
     state.planEmitted = true
     return true
   }
@@ -1567,7 +1569,7 @@ REMAINING STEPS: ${remainingSteps.map((s, i) => `${state.currentStepIdx + 2 + i}
 REASON FOR REPLANNING: ${reason}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force a fixed count or a stock research/analyze/synthesize/deliver sequence. Keep the steps actionable and specific.`,
+Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force stock research, analysis, or synthesis phases. The final remaining step must explicitly deliver the task-specific answer, outcome, confirmation, or artifact. Keep every step actionable and specific.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
@@ -1588,13 +1590,18 @@ Generate an updated list of remaining steps (including a revised current step if
         const newSteps = JSON.parse(jsonMatch[0]) as string[]
         if (Array.isArray(newSteps) && newSteps.length > 0 && newSteps.every(s => typeof s === 'string')) {
           // Replace remaining plan from current step onward
-          const updatedPlan = [...completedSteps, ...newSteps]
+          const deliveryRemaining = this.ensureFinalDeliveryStep(
+            newSteps,
+            newSteps.map(() => null),
+            completedSteps.length,
+          )
+          const updatedPlan = [...completedSteps, ...deliveryRemaining.titles]
           state.currentPlanItems = updatedPlan
           // Replan currently returns titles only — pad scopes with nulls so the
           // parallel arrays stay 1:1. Future enhancement: have replan ask for scopes too.
           if (state.currentPlanScopes) {
             const completedScopes = state.currentPlanScopes.slice(0, state.currentStepIdx)
-            state.currentPlanScopes = [...completedScopes, ...newSteps.map(() => null)]
+            state.currentPlanScopes = [...completedScopes, ...deliveryRemaining.scopes]
           }
           state.replanCount++
           state.stepFailureCount = 0
@@ -1605,7 +1612,7 @@ Generate an updated list of remaining steps (including a revised current step if
 
           // Recalculate budgets for remaining steps
           const remainingIterations = state.dynamicIterationLimit - state.iterations
-          const remainingStepCount = newSteps.length
+          const remainingStepCount = deliveryRemaining.titles.length
           if (remainingStepCount > 1) {
             const baseBudget = Math.floor(remainingIterations / remainingStepCount)
             state.perStepBudget = Math.max(MIN_STEP_BUDGET, baseBudget)
@@ -1642,6 +1649,41 @@ Generate an updated list of remaining steps (including a revised current step if
 
   private customInstructionVisibleStepCount(): number | null {
     return parseVisibleStepCountInstruction(this.customInstructions)
+  }
+
+  private ensureFinalDeliveryStep(
+    titles: string[],
+    scopes: Array<string | null>,
+    completedStepCount = 0,
+  ): { titles: string[]; scopes: Array<string | null> } {
+    if (titles.length === 0) return { titles, scopes }
+    const lastIndex = titles.length - 1
+    if (/\b(?:deliver|present|hand\s*off|return|provide|share)\b/i.test(titles[lastIndex])) {
+      return { titles, scopes }
+    }
+
+    const target = conciseTopicLabel(requestedTargetLabel(this.messages))
+    const deliveryTitle = `Deliver ${target}`
+    const deliveryScope = `Return the completed answer, outcome, confirmation, or artifact for ${target} in the requested form, after any necessary final checks.`
+    const fixedVisibleCount = this.customInstructionVisibleStepCount()
+
+    if (
+      titles.length >= 8 ||
+      (fixedVisibleCount !== null && titles.length + completedStepCount >= fixedVisibleCount)
+    ) {
+      return {
+        titles: [...titles.slice(0, lastIndex), deliveryTitle],
+        scopes: [
+          ...scopes.slice(0, lastIndex),
+          `${scopes[lastIndex] || `Complete: ${titles[lastIndex]}.`} ${deliveryScope}`,
+        ],
+      }
+    }
+
+    return {
+      titles: [...titles, deliveryTitle],
+      scopes: [...scopes, deliveryScope],
+    }
   }
 
   private applyCustomInstructionPlanRequirements(
@@ -1818,7 +1860,7 @@ ${trigger.workingMemorySnapshot || '(no facts collected yet)'}
 REASON FOR REPLANNING: ${reasonText}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force a fixed count or a stock research/analyze/synthesize/deliver sequence. The steps should account for what was learned.`,
+Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order; do not force stock research, analysis, or synthesis phases. The final remaining step must explicitly deliver the task-specific answer, outcome, confirmation, or artifact. The steps should account for what was learned.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
@@ -1838,11 +1880,16 @@ Generate an updated list of remaining steps (starting from a revised current ste
       if (jsonMatch) {
         const newSteps = JSON.parse(jsonMatch[0]) as string[]
         if (Array.isArray(newSteps) && newSteps.length > 0 && newSteps.every(s => typeof s === 'string')) {
-          const updatedPlan = [...completedSteps, ...newSteps]
+          const deliveryRemaining = this.ensureFinalDeliveryStep(
+            newSteps,
+            newSteps.map(() => null),
+            completedSteps.length,
+          )
+          const updatedPlan = [...completedSteps, ...deliveryRemaining.titles]
           state.currentPlanItems = updatedPlan
           if (state.currentPlanScopes) {
             const completedScopes = state.currentPlanScopes.slice(0, state.currentStepIdx)
-            state.currentPlanScopes = [...completedScopes, ...newSteps.map(() => null)]
+            state.currentPlanScopes = [...completedScopes, ...deliveryRemaining.scopes]
           }
           state.replanCount++
           state.stepFailureCount = 0
@@ -1855,7 +1902,7 @@ Generate an updated list of remaining steps (starting from a revised current ste
 
           // Recalculate budgets
           const remainingIterations = state.dynamicIterationLimit - state.iterations
-          const remainingStepCount = newSteps.length
+          const remainingStepCount = deliveryRemaining.titles.length
           if (remainingStepCount > 1) {
             const baseBudget = Math.floor(remainingIterations / remainingStepCount)
             state.perStepBudget = Math.max(MIN_STEP_BUDGET, baseBudget)

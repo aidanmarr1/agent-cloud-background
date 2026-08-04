@@ -680,7 +680,7 @@ export async function runSmoke() {
   const invalidCadenceState = createInitialState(false, timeouts)
   invalidCadenceState.currentPlanItems = ['Verify current latency evidence']
   invalidCadenceState.currentStepIdx = 0
-  invalidCadenceState.visibleToolActionsSinceLastNarration = 3
+  invalidCadenceState.visibleToolActionsSinceLastNarration = 2
   assert.equal(beginNarrationCadenceAttempt(invalidCadenceState), true)
   const invalidCadenceResult = await new StreamProcessor(invalidCadenceEmitter as any, timeouts).processStream(invalidCadenceToolChunks() as any, invalidCadenceState, true)
   assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'future-only schema text must not emit')
@@ -688,26 +688,26 @@ export async function runSmoke() {
   assert.equal(invalidCadenceResult.cadenceProgressUpdate, undefined)
   assert.equal(invalidCadenceResult.toolCalls.size, 1, 'invalid display narration must never discard a valid native action')
   assert.equal(invalidCadenceResult.cadenceProgressViolation, undefined)
-  assert.equal(invalidCadenceState.narrationNextAttemptAt, 4, 'invalid schema text must keep cadence due at the next action frontier')
+  assert.equal(invalidCadenceState.narrationNextAttemptAt, 3, 'invalid action-three schema text must keep cadence due at the next action frontier')
 
   const missingCadenceEmitter = makeEmitter()
   const missingCadenceState = createInitialState(false, timeouts)
   missingCadenceState.currentPlanItems = ['Verify current latency evidence']
   missingCadenceState.currentStepIdx = 0
-  missingCadenceState.visibleToolActionsSinceLastNarration = 3
+  missingCadenceState.visibleToolActionsSinceLastNarration = 2
   assert.equal(beginNarrationCadenceAttempt(missingCadenceState), true)
   const missingCadenceResult = await new StreamProcessor(missingCadenceEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, missingCadenceState, true)
   assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0)
   assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'a missing display field must still reveal the valid action')
   assert.equal(missingCadenceResult.toolCalls.size, 1, 'a missing display field must not block execution')
   assert.equal(missingCadenceResult.cadenceProgressViolation, undefined)
-  assert.equal(missingCadenceState.narrationNextAttemptAt, 4)
+  assert.equal(missingCadenceState.narrationNextAttemptAt, 3)
 
   const emptyCadenceEmitter = makeEmitter()
   const emptyCadenceState = createInitialState(false, timeouts)
   emptyCadenceState.currentPlanItems = ['Verify current latency evidence']
   emptyCadenceState.currentStepIdx = 0
-  emptyCadenceState.visibleToolActionsSinceLastNarration = 3
+  emptyCadenceState.visibleToolActionsSinceLastNarration = 2
   assert.equal(beginNarrationCadenceAttempt(emptyCadenceState), true)
   const emptyCadenceResult = await new StreamProcessor(emptyCadenceEmitter as any, timeouts).processStream(emptyCadenceToolChunks() as any, emptyCadenceState, true)
   assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'an empty required cadence field must remain invisible')
@@ -731,14 +731,14 @@ export async function runSmoke() {
   const maxGapViolationState = createInitialState(false, timeouts)
   maxGapViolationState.currentPlanItems = ['Verify current latency evidence']
   maxGapViolationState.currentStepIdx = 0
-  maxGapViolationState.visibleToolActionsSinceLastNarration = 4
+  maxGapViolationState.visibleToolActionsSinceLastNarration = 3
   maxGapViolationState.workLog.push('[1] Read document: official agent startup benchmark')
   assert.equal(beginNarrationCadenceAttempt(maxGapViolationState), true)
   const maxGapViolationResult = await new StreamProcessor(maxGapViolationEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, maxGapViolationState, true)
   assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'the runtime must not invent max-gap narration')
-  assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'even a max-gap narration miss must not stall the real action')
-  assert.equal(maxGapViolationResult.toolCalls.size, 1)
-  assert.equal(maxGapViolationResult.cadenceProgressViolation, undefined)
+  assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'the hard fourth-action boundary must hold an action whose narration contract is missing')
+  assert.equal(maxGapViolationResult.toolCalls.size, 0)
+  assert.equal(maxGapViolationResult.cadenceProgressViolation?.code, 'missing_progress_update')
 
   const duplicateCadenceEmitter = makeEmitter()
   const duplicateCadenceState = createInitialState(false, timeouts)
@@ -747,7 +747,7 @@ export async function runSmoke() {
   duplicateCadenceState.iterations = 1
   assert.equal(acceptProgressNarration(duplicateCadenceState, cadenceText, { requireSignal: false, remainingVisibleActions: 0 }).status, 'accepted')
   duplicateCadenceState.iterations = 2
-  duplicateCadenceState.visibleToolActionsSinceLastNarration = 3
+  duplicateCadenceState.visibleToolActionsSinceLastNarration = 2
   assert.equal(beginNarrationCadenceAttempt(duplicateCadenceState), true)
   const duplicateResult = await new StreamProcessor(duplicateCadenceEmitter as any, timeouts).processStream(validCadenceToolChunks() as any, duplicateCadenceState, true)
   assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'duplicate schema text must not emit')
@@ -756,7 +756,7 @@ export async function runSmoke() {
   assert.equal(duplicateResult.toolCalls.size, 1, 'duplicate narration must not suppress the native action')
   assert.equal(duplicateResult.cadenceProgressViolation, undefined)
   assert.equal(duplicateCadenceState.recentNarrations.length, 1, 'duplicate schema text must not reset or extend accepted narration memory')
-  assert.equal(duplicateCadenceState.narrationNextAttemptAt, 4, 'duplicate schema text must keep cadence due')
+  assert.equal(duplicateCadenceState.narrationNextAttemptAt, 3, 'duplicate schema text must keep cadence due')
 
   const leakedCommandEmitter = makeEmitter()
   const leakedCommandState = createInitialState(false, timeouts)

@@ -19,7 +19,7 @@ assert.match(
 assert.doesNotMatch(
   llmSource,
   /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
-  'Gemini should retain resilient OpenRouter balanced provider routing',
+  'Qwen should retain resilient OpenRouter balanced provider routing',
 )
 assert.doesNotMatch(
   llmSource,
@@ -134,7 +134,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite')
+    assert.equal(request.body.model, 'qwen/qwen3.7-flash')
     assert.equal('models' in request.body, false)
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
@@ -159,13 +159,10 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   assert.deepEqual(
     requests[3].body.messages.slice(-2),
     [
+      { role: 'assistant', content: 'I have gathered the first result.' },
       { role: 'system', content: 'Continue with the next concrete action.' },
-      {
-        role: 'user',
-        content: 'Continue the active task from the context above and take the next concrete action.',
-      },
     ],
-    'assistant-ended Gemini histories must retain their directives and append one provider-compatible user continuation',
+    'Qwen histories must preserve the exact task context without a synthetic provider workaround turn',
   )
   assert.equal(
     requests[3].body.messages.some(message =>
@@ -175,7 +172,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Gemini 3.5 Flash Lite balanced provider and lowest reasoning smoke test passed')
+  console.log('Qwen3.7 Flash balanced provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

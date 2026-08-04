@@ -531,39 +531,6 @@ function providerReasoningPayload(
   }
 }
 
-const PROVIDER_CONTINUATION_PROMPT =
-  'Continue the active task from the context above and take the next concrete action.'
-
-/**
- * Gemini rejects a request when its conversational history ends on a model
- * turn, even if one or more system directives follow it. Preserve the complete
- * history and add a neutral user continuation only for that provider-invalid
- * shape. This changes no agent policy or tool decision; it only makes the
- * existing continuation request valid for the pinned provider.
- */
-function withProviderCompatibleContinuation(
-  messages: ChatMessageParam[],
-): ChatMessageParam[] {
-  let lastConversationalMessage: ChatMessageParam | undefined
-
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index]
-    if (message.role === 'system') continue
-    lastConversationalMessage = message
-    break
-  }
-
-  if (lastConversationalMessage?.role !== 'assistant') return messages
-
-  return [
-    ...messages,
-    {
-      role: 'user',
-      content: PROVIDER_CONTINUATION_PROMPT,
-    },
-  ]
-}
-
 function withPinnedModel(
   params: ChatCompletionParams,
   stream: boolean,
@@ -591,7 +558,7 @@ function withPinnedModel(
     : withCurrentTemporalContext(messages)
   return {
     ...rest,
-    messages: withProviderCompatibleContinuation(contextualMessages),
+    messages: contextualMessages,
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
