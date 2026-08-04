@@ -42,7 +42,7 @@ assert.match(config, /export const STREAM_REQUEST_TIMEOUT_MS = 60_000/, 'streami
 assert.match(config, /export const STREAM_RETRY_MAX_DELAY_MS = 1_500/, 'stream retries must not sleep for provider-scale retry windows')
 assert.match(config, /export const STREAM_MAX_RETRIES = 0/, 'agent streaming retries must not hide slow starts behind invisible retry waits')
 assert.match(config, /export const WEB_SEARCH_TOOL_TIMEOUT_MS = .*3_500/, 'web search needs a bounded timeout that covers Serper-backed search calls')
-assert.match(config, /export const BROWSER_TOOL_TIMEOUT_MS = .*8_000/, 'browser actions need enough time to return real rendered state without entering rapid retry loops')
+assert.match(config, /export const BROWSER_TOOL_TIMEOUT_MS = .*20_000/, 'browser actions need enough time to return real rendered state without entering rapid retry loops')
 assert.match(config, /export const DOCUMENT_TOOL_TIMEOUT_MS = .*15_000/, 'document reads need enough time to return extracted content or a structured recovery result')
 assert.match(config, /export const FILE_WRITE_TOOL_TIMEOUT_MS = .*8_000/, 'file writes must not wait for multi-minute stalls')
 

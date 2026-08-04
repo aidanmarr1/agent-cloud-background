@@ -91,7 +91,7 @@ export const TIER_TIMEOUTS = {
 // --- Tool execution ---
 export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
 export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
-export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 8_000
+export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 20_000
 export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 15_000
 export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
 // Give an aborted handler a brief chance to settle, but never turn a tool
