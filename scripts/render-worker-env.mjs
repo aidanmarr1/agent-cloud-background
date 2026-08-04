@@ -1358,8 +1358,12 @@ async function main() {
         'an unguarded deploy trigger can fail or briefly expose the production queue.',
       )
     }
-    const triggered = await triggerDeploy(serviceId)
-    if (waitForDeployAfterTrigger) await waitForDeploy(serviceId, triggered.deployId)
+    const commitId = exactCommitId()
+    const triggered = await triggerDeploy(serviceId, commitId)
+    if (waitForDeployAfterTrigger) {
+      const liveDeploy = await waitForDeploy(serviceId, triggered.deployId)
+      verifyDeployCommit(liveDeploy, commitId, triggered.deployId)
+    }
   }
 }
 
