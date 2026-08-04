@@ -2085,9 +2085,15 @@ class TaskJobEmitter implements AgentEventEmitter {
   }
 
   async flush(): Promise<void> {
+    // A pre-side-effect fence only needs to persist events that existed when
+    // the fence was requested. Browser screencast frames, usage checkpoints,
+    // and other live events may continue arriving while that write is in
+    // flight; chasing the moving tail can otherwise keep a completed report
+    // tool call waiting forever before its sandbox write even begins.
     flushPendingEventPersistence(this.job)
-    await this.job.persistChain
-    await awaitTaskJobPersistenceIdle(this.job)
+    scheduleEventPersistence(this.job)
+    const persistenceBoundary = this.job.persistChain
+    await persistenceBoundary
     if (this.job.persistenceFailure) {
       throw this.job.persistenceFailure
     }
