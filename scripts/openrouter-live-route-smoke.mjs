@@ -49,7 +49,7 @@ try {
         },
       },
     }],
-    tool_choice: 'required',
+    tool_choice: { type: 'function', function: { name: 'route_probe' } },
     parallel_tool_calls: false,
     max_tokens: 64,
   })

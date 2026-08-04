@@ -270,6 +270,7 @@ export interface AgentStateData {
   websiteBrowserCheckPath: string | null
   websiteResponsiveCheckPrompted: boolean
   websiteResponsiveCheckDone: boolean
+  standaloneWebsiteHandoffReady: boolean
   nextWebsitePreviewAttempted: boolean
   nextWebsitePreviewDone: boolean
   nextWebsitePreviewUrl: string | null
@@ -557,6 +558,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     websiteBrowserCheckPath: null,
     websiteResponsiveCheckPrompted: false,
     websiteResponsiveCheckDone: false,
+    standaloneWebsiteHandoffReady: false,
     nextWebsitePreviewAttempted: false,
     nextWebsitePreviewDone: false,
     nextWebsitePreviewUrl: null,

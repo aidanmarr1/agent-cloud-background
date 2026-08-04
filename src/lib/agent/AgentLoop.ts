@@ -315,6 +315,8 @@ const FAST_SOURCE_ACTION_INACTIVITY_TIMEOUT_MS = 15_000
 const FAST_ACTION_INACTIVITY_TIMEOUT_MS = 15_000
 const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 320
+const INITIAL_STANDALONE_WEBSITE_ITERATION_TIMEOUT_MS = 180_000
+const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
 // Routed models may spend part of this allowance on hidden reasoning before
 // emitting a native tool call. A 260-token ceiling repeatedly cut otherwise
 // tiny search JSON at the stream boundary, making the runtime pay for a full
@@ -326,6 +328,12 @@ const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 // Qwen provider scheduling slower without adding useful capability. Full output
 // capacity remains available for synthesis, reports, code, and deliverables.
 const FAST_ACTION_MAX_TOKENS = 1_024
+// A complete create_website envelope contains the page's full HTML, CSS, and
+// JavaScript. The old 1k action cap clipped it, while the global 65k ceiling
+// encouraged Gemini to buffer an oversized function call for minutes. Live
+// route validation shows 12k leaves ample room for a polished one-shot site
+// while retaining a firm latency/cost boundary.
+const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
 const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
 const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
@@ -814,6 +822,8 @@ const NON_REOPENABLE_WEBSITE_TERMINAL_REASONS = new Set([
   'browser_stuck_step',
   'deliverable_verification_failed',
   'saved_deliverable_model_start_timeout',
+  'deliverable_handoff_complete',
+  'deliverable_handoff_fallback',
 ])
 const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 const MAX_PLANNING_SKILL_CHARS = 18_000
@@ -1508,6 +1518,40 @@ function shouldRejectBuildTextOnlyEmission(
   return state.currentPhase === 'build' || codeOrFalseCompletion
 }
 
+function isInitialStandaloneWebsiteCreateTurn(state: AgentStateData): boolean {
+  return (state.currentPhase === 'build' || state.currentPhase === 'deliver') &&
+    shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
+    !normalizedCreatedFileSet(state.createdFiles).has('index.html')
+}
+
+function hasCompleteInitialStandaloneWebsiteCreateCall(
+  result: Pick<StreamResult, 'toolCalls'>,
+): boolean {
+  const calls = [...result.toolCalls.values()]
+  if (calls.length !== 1 || calls[0].name !== 'create_website') return false
+
+  try {
+    const args = JSON.parse(calls[0].arguments) as {
+      html?: unknown
+      css?: unknown
+      javascript?: unknown
+    }
+    const html = typeof args.html === 'string' ? args.html.trim() : ''
+    const css = typeof args.css === 'string' ? args.css.trim() : ''
+    return html.length >= 120 &&
+      css.length >= 80 &&
+      typeof args.javascript === 'string' &&
+      /<(?:html|body|main)\b/i.test(html) &&
+      /\{[\s\S]*?\}/.test(css)
+  } catch {
+    return false
+  }
+}
+
+function standaloneWebsiteRequiresPostBuildAction(request: string): boolean {
+  return /\b(?:deploy|publish|host|\.zip|zip file|archive|compressed package|test|testing|verify|validate|inspect|qa|audit|debug|benchmark)\b/i.test(request)
+}
+
 function scheduleFinalDeliverableHandoff(
   state: AgentStateData,
   path: string,
@@ -1676,6 +1720,7 @@ function isFastActionToolTurn(
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (isCurrentSynthesisStep(state)) return false
   if (state.currentPhase === 'deliver') return false
+  if (isInitialStandaloneWebsiteCreateTurn(state)) return false
 
   return state.taskStrategy === 'browse' ||
     state.taskStrategy === 'research' ||
@@ -1795,6 +1840,19 @@ function tierTimeoutsForIteration(
       inactivityTimeoutMs: FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS,
       contentOnlyTimeoutMs: 1_200,
       contentOnlyMinChars: 80,
+    }
+  }
+  if (isInitialStandaloneWebsiteCreateTurn(state)) {
+    return {
+      ...state.tierTimeouts,
+      iterationTimeoutMs: Math.max(
+        state.tierTimeouts.iterationTimeoutMs,
+        INITIAL_STANDALONE_WEBSITE_ITERATION_TIMEOUT_MS,
+      ),
+      inactivityTimeoutMs: Math.max(
+        state.tierTimeouts.inactivityTimeoutMs,
+        INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS,
+      ),
     }
   }
   if (shouldUseTextSavedFinalDeliverable(state, messages)) {
@@ -2656,6 +2714,7 @@ async function getNextWebsiteCompletionBlocker(
     if (!created.has('index.html')) {
       return 'WEBSITE COMPLETION BLOCKED: The requested website has not been created. Make exactly one create_website call with complete HTML, CSS, and JavaScript. The runtime will save the editable source set and bundle it into a self-contained index.html. Do not read, list, verify, or append website files before creating them.'
     }
+    if (state.standaloneWebsiteHandoffReady) return null
     if (!state.websiteBrowserCheckDone) {
       return 'WEBSITE COMPLETION BLOCKED: index.html exists, but its managed local preview has not opened successfully in the Computer panel. Make one targeted edit only if the preview reported a concrete problem; otherwise allow the automatic preview to open before finishing.'
     }
@@ -2804,6 +2863,82 @@ function latestUserMessageText(messages: ChatMessageParam[]): string {
     }
   }
   return ''
+}
+
+function compactInitialStandaloneWebsiteMessages(
+  state: AgentStateData,
+  allMessages: ChatMessageParam[],
+  customInstructions?: string,
+): ChatMessageParam[] {
+  const latestUserMessage = [...allMessages].reverse().find(message => message.role === 'user')
+  const request = state.originalUserRequest ||
+    (latestUserMessage ? messageText(latestUserMessage.content).trim() : '') ||
+    'Build the requested website.'
+  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'Build the website'
+  const currentScope = state.currentPlanScopes?.[state.currentStepIdx]?.trim()
+  const boundedCustomInstructions = customInstructions?.trim().slice(0, 2_400)
+  const latestUserText = latestUserMessage ? messageText(latestUserMessage.content).trim() : ''
+  const requestContext = latestUserText && request.includes(latestUserText)
+    ? ''
+    : `Complete request context: ${request.slice(0, 4_000)}`
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'INITIAL WEBSITE BUILD REQUIRED: TOOL CALL ONLY.',
+        'Use the available create_website function exactly once to create the complete first working version now.',
+        'Return semantic HTML, responsive CSS, and only the JavaScript the experience actually needs.',
+        'Make the result polished and faithful to the user request and any attached reference content.',
+        'Keep the source concise enough for one reliable tool call: HTML must stay between 4,000 and 7,000 characters, CSS between 4,000 and 7,000 characters, JavaScript at or below 1,500 characters, and the complete tool arguments at or below about 16,000 characters.',
+        'Do not use data URIs, embedded base64, long SVG paths, duplicated sections, repeated declarations, filler, visible status prose, or any other tool.',
+        `Active build task: ${currentStep.slice(0, 500)}.`,
+        currentScope ? `Design/build brief: ${currentScope.slice(0, 1_600)}` : '',
+        requestContext,
+        boundedCustomInstructions ? `Applicable custom instructions:\n${boundedCustomInstructions}` : '',
+      ].filter(Boolean).join('\n\n'),
+    },
+    latestUserMessage || {
+      role: 'user',
+      content: request,
+    },
+  ]
+}
+
+function compactFinalDeliverableHandoffMessages(
+  state: AgentStateData,
+  allMessages: ChatMessageParam[],
+  customInstructions?: string,
+): ChatMessageParam[] {
+  const pending = state.finalDeliverableHandoffPending
+  const recentEvidence = recentNarrationToolEvidence(allMessages, 4)
+  const recentWork = state.workLog
+    .slice(-6)
+    .map(entry => entry.replace(/^\[\d+\]\s*/, '').trim())
+    .filter(Boolean)
+  const planSummary = (state.currentPlanItems || []).slice(0, 6)
+  const boundedCustomInstructions = customInstructions?.trim().slice(0, 1_600)
+
+  return [
+    {
+      role: 'system',
+      content: [
+        finalDeliverableHandoffPrompt(state),
+        boundedCustomInstructions ? `Applicable custom instructions:\n${boundedCustomInstructions}` : '',
+      ].filter(Boolean).join('\n\n'),
+    },
+    {
+      role: 'user',
+      content: [
+        `Original request: ${state.originalUserRequest || latestUserMessageText(allMessages) || 'Complete the requested task.'}`,
+        `Completed attachment: ${pending?.path || 'the completed deliverable'}`,
+        planSummary.length ? `Requested outcome:\n- ${planSummary.join('\n- ')}` : '',
+        recentEvidence.length ? `Latest verified tool results:\n- ${recentEvidence.join('\n- ')}` : '',
+        recentWork.length ? `Completed work:\n- ${recentWork.join('\n- ')}` : '',
+        state.createdFiles.size > 0 ? `Saved files: ${[...state.createdFiles].slice(-8).join(', ')}` : '',
+      ].filter(Boolean).join('\n\n'),
+    },
+  ]
 }
 
 function recentNarrationToolEvidence(messages: ChatMessageParam[], limit = 3): string[] {
@@ -4361,6 +4496,39 @@ export class AgentLoop {
                 state.autonomousRecoveryEscalations = 0
               }
 
+              const initialWebsiteActionRetryFenced =
+                isInitialStandaloneWebsiteCreateTurn(state) &&
+                (
+                  progressDecision.kind === 'stop' ||
+                  (
+                    progressDecision.kind === 'allow_internal_recovery' &&
+                    progressDecision.consecutiveInternalRecoveryTurns >= 2
+                  )
+                )
+              if (initialWebsiteActionRetryFenced) {
+                const trigger = progressDecision.kind === 'stop'
+                  ? progressDecision.reason
+                  : 'internal_recovery_cap'
+                terminalReason = 'initial_website_action_rejected'
+                state.lastModelErrorForUser = 'The website action could not be saved after repeated invalid internal responses. The retry loop was stopped before it could consume more credits; please retry the task.'
+                this.options.diagnostics?.({
+                  type: 'initial_website_action_retry_fenced',
+                  data: {
+                    iteration: priorTurn.iteration,
+                    step: state.currentStepIdx,
+                    trigger,
+                    consecutiveNoProgressTurns: consecutivePaidNoProgressTurns,
+                    consecutiveInternalRecoveryTurns: consecutivePaidInternalRecoveryTurns,
+                  },
+                })
+                console.error('[AgentDiagnostics] Stopped rejected initial website actions at the bounded retry fence', {
+                  step: state.currentStepIdx,
+                  trigger,
+                })
+                phase = 'ERROR'
+                break
+              }
+
               if (progressDecision.kind === 'allow_recovery') {
                 const activeStep =
                   state.currentPlanItems?.[state.currentStepIdx] ||
@@ -5003,13 +5171,29 @@ export class AgentLoop {
               finalSavedDeliverableTurn(state, this.options.messages) &&
               !hasSavedFinalDeliverableCandidate(state) &&
               lastStreamResult.assistantContent.trim().length > 0
+            const rejectedInitialWebsiteCreateEmission =
+              isInitialStandaloneWebsiteCreateTurn(state) &&
+              !hasCompleteInitialStandaloneWebsiteCreateCall(lastStreamResult)
             const rejectedModelEmission =
               rejectedHandoffEmission ||
               rejectedBuildTextOnlyEmission ||
-              rejectedUnsavedFinalDeliverableDraft
+              rejectedUnsavedFinalDeliverableDraft ||
+              rejectedInitialWebsiteCreateEmission
+            // A cadence/display-contract failure or malformed initial website
+            // action is an internal orchestration miss: no model output is
+            // released and no executable action is admitted. Do not make the
+            // user pay for a turn the product itself rejects.
+            const nonBillableInternalTurn =
+              !!lastStreamResult.cadenceProgressViolation ||
+              rejectedModelEmission
             const usageDebitStartedAt = Date.now()
             try {
-              if (this.options.userId && this.options.conversationId && this.options.creditRunId) {
+              if (
+                !nonBillableInternalTurn &&
+                this.options.userId &&
+                this.options.conversationId &&
+                this.options.creditRunId
+              ) {
                 const recorded = await chargeServerTokenUsage(
                   this.options.userId,
                   this.options.conversationId,
@@ -5034,8 +5218,8 @@ export class AgentLoop {
                 streamProcessor.commitBufferedEmission()
               }
               console.log(
-                lastStreamResult.cadenceProgressViolation
-                  ? '[AgentDiagnostics] Discarded cadence-contract-invalid model-turn emissions'
+                nonBillableInternalTurn
+                  ? '[AgentDiagnostics] Discarded an unbilled internal model-turn failure'
                   : rejectedHandoffEmission
                     ? '[AgentDiagnostics] Held back an unaccepted personalized handoff'
                     : rejectedBuildTextOnlyEmission
@@ -5053,6 +5237,8 @@ export class AgentLoop {
                   rejectedHandoffEmission,
                   rejectedBuildTextOnlyEmission,
                   rejectedUnsavedFinalDeliverableDraft,
+                  rejectedInitialWebsiteCreateEmission,
+                  userDebitSkipped: nonBillableInternalTurn,
                 },
               )
               pendingPaidTurnProgress = {
@@ -5062,7 +5248,7 @@ export class AgentLoop {
                   !rejectedModelEmission &&
                   lastStreamResult.assistantContent.trim().length > 0,
                 acceptedToolCall: false,
-                ...(lastStreamResult.cadenceProgressViolation || rejectedModelEmission
+                ...(nonBillableInternalTurn
                   ? { internalRecoveryScheduled: 'display_contract' as const }
                   : {}),
               }
@@ -5757,6 +5943,29 @@ export class AgentLoop {
 
             // Update session health summary for context injection
             state.sessionHealthSummary = errorRecovery.getSessionHealthSummary()
+
+            const successfulStandaloneWebsiteCreate = lastToolResults.find(result => (
+              result.tc.name === 'create_website' && !result.isError
+            ))
+            if (
+              successfulStandaloneWebsiteCreate &&
+              shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
+              !standaloneWebsiteRequiresPostBuildAction(state.originalUserRequest || '')
+            ) {
+              const finalPath = toolResultPath(successfulStandaloneWebsiteCreate) || 'index.html'
+              state.deliverableVerificationDone = true
+              state.pendingDeliverableRevision = null
+              state.standaloneWebsiteHandoffReady = true
+              scheduleFinalDeliverableHandoff(state, finalPath, 'file')
+              state.lastIterationEnd = Date.now()
+              log.info('Complete standalone website saved — skipping redundant post-build model turns', {
+                path: finalPath,
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems?.length || 0,
+              })
+              phase = 'STREAMING'
+              break
+            }
 
             // Check deliverable on last step
             const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
@@ -6795,6 +7004,8 @@ export class AgentLoop {
     const useCompactForcedNarration = false
     const useCompactNarration = useCompactForcedNarration
     const scopedTaskRequest = state.originalUserRequest || effectiveTaskRequest(this.options.messages)
+    const standaloneWebsiteNeedsInitialCreate = isInitialStandaloneWebsiteCreateTurn(state)
+    const useCompactFinalDeliverableHandoff = !!state.finalDeliverableHandoffPending
     const explicitTaskToolConstraint = explicitTaskToolConstraintFromText(scopedTaskRequest)
     const pendingExplicitTaskToolTargets = explicitTaskToolConstraint?.required.filter(
       target => ![...state.taskSuccessfulToolTypeCounts.keys()].some(
@@ -6841,8 +7052,12 @@ export class AgentLoop {
       !!state.currentPlanItems &&
       state.currentStepIdx < state.currentPlanItems.length - 1 &&
       compactResearchEvidenceComplete(state)
-    let requestMessages = useCompactNarration
-      ? compactForcedNarrationMessages(state, allMessages)
+    let requestMessages = standaloneWebsiteNeedsInitialCreate
+      ? compactInitialStandaloneWebsiteMessages(state, allMessages, this.options.customInstructions)
+      : useCompactFinalDeliverableHandoff
+        ? compactFinalDeliverableHandoffMessages(state, allMessages, this.options.customInstructions)
+      : useCompactNarration
+        ? compactForcedNarrationMessages(state, allMessages)
       : useCompactFinalInlineAnswer
         ? compactFinalInlineAnswerMessages(state, allMessages)
         : useTextFinalDeliverable
@@ -6955,7 +7170,7 @@ export class AgentLoop {
           content: 'LIVE EVIDENCE REQUIRED BEFORE WRITING: The requested saved research output does not yet have usable source-page evidence from this run. Choose the most direct research action now. Select a concrete source URL before calling a source reader, do not reopen an already extracted source, and do not create or revise the deliverable until evidence exists.',
         } as ChatMessageParam,
       ]
-    } else if (state.finalDeliverableHandoffPending) {
+    } else if (state.finalDeliverableHandoffPending && !useCompactFinalDeliverableHandoff) {
       requestMessages = [
         ...requestMessages,
         {
@@ -7161,20 +7376,9 @@ export class AgentLoop {
           }
         }
         activeTools = pruneToolsForCurrentStep(compactResearchToolState, activeTools)
-        const standaloneWebsiteNeedsInitialCreate =
-          (state.currentPhase === 'build' || state.currentPhase === 'deliver') &&
-          shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
-          !normalizedCreatedFileSet(state.createdFiles).has('index.html')
         if (standaloneWebsiteNeedsInitialCreate) {
           const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
           activeTools = activeTools.filter(tool => tool.function?.name === 'create_website')
-          requestMessages = [
-            ...requestMessages,
-            {
-              role: 'system',
-              content: 'INITIAL WEBSITE BUILD REQUIRED: Make exactly one native create_website call now. Supply a complete semantic HTML document, a complete responsive CSS stylesheet, and any needed JavaScript. The runtime will save the three editable source files and bundle them into one previewable index.html. Do not call read_file, list_files, append_file, browser tools, or verification before this succeeds. Do not emit visible status prose.',
-            } as ChatMessageParam,
-          ]
           console.log('[AgentDiagnostics] Narrowed initial website action to create_website', {
             step: state.currentStepIdx,
             beforeTools,
@@ -7550,9 +7754,14 @@ export class AgentLoop {
             } as ChatMessageParam,
           ]
         }
-        const useRequiredToolCall = requiredToolIntent &&
+        const useRequiredToolCall = (standaloneWebsiteNeedsInitialCreate || requiredToolIntent) &&
           !relaxRequiredToolChoice &&
           supportsProviderRequiredToolChoice(model)
+        const requestedToolChoice = useRequiredToolCall
+          ? standaloneWebsiteNeedsInitialCreate
+            ? { type: 'function', function: { name: 'create_website' } }
+            : 'required'
+          : undefined
         lastShouldRequireToolCall = useRequiredToolCall
 
         const approxChars = requestMessages.reduce((sum, m) => {
@@ -7589,6 +7798,8 @@ export class AgentLoop {
           ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS)
           : isFinalSavedDeliverableTurn
           ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_MAX_TOKENS)
+          : standaloneWebsiteNeedsInitialCreate
+          ? Math.min(maxTokensForIteration(state), INITIAL_STANDALONE_WEBSITE_MAX_TOKENS)
           : fastSourceActionTurn
           ? Math.min(maxTokensForIteration(state), FAST_SOURCE_ACTION_MAX_TOKENS)
           : fastActionTurn
@@ -7660,6 +7871,12 @@ export class AgentLoop {
           maxTokens,
           finalInlineAnswer: isFinalInlineAnswerTurn,
           finalSavedDeliverable: isFinalSavedDeliverableTurn,
+          initialStandaloneWebsiteCreate: standaloneWebsiteNeedsInitialCreate,
+          requestedToolChoice: standaloneWebsiteNeedsInitialCreate && useRequiredToolCall
+            ? 'create_website'
+            : useRequiredToolCall
+              ? 'required'
+              : null,
           requestTimeoutMs,
         })
         // Preserve the exact request envelope for the synchronous conservative
@@ -7684,7 +7901,7 @@ export class AgentLoop {
           ...(modelTools.length > 0
             ? { tools: modelTools as unknown as ChatCompletionTool[] }
             : {}),
-          ...(useRequiredToolCall ? { tool_choice: 'required' } : {}),
+          ...(requestedToolChoice !== undefined ? { tool_choice: requestedToolChoice } : {}),
           temperature: requestTemperature,
           parallel_tool_calls: allowParallelSourceToolCalls,
           max_tokens: maxTokens,
@@ -8087,6 +8304,22 @@ export class AgentLoop {
         }
 
         state.lastModelErrorForUser = 'The final answer took too long to respond. Please try again.'
+        return 'ERROR'
+      }
+
+      if (isInitialStandaloneWebsiteCreateTurn(state)) {
+        if (state.timeoutNudgeCount < 1) {
+          state.timeoutNudgeCount++
+          contextManager.push({
+            role: 'system',
+            content: 'WEBSITE GENERATION RETRY: the previous exact create_website stream did not finish. Make the same single complete native create_website call now. Do not switch tools, emit prose, or split the website across calls.',
+          } as ChatMessageParam)
+          state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+          state.lastIterationEnd = Date.now()
+          return 'STREAMING'
+        }
+
+        state.lastModelErrorForUser = 'The website generation stream stalled twice. Those incomplete internal attempts were not charged; please retry the task.'
         return 'ERROR'
       }
 

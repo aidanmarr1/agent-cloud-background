@@ -85,7 +85,7 @@ export function auditAgentCompletion(
     missing.push(`partial file write still needs continuation: ${state.partialFileWriteRecoveryPending.path}`)
   }
 
-  if (isWebsiteLike(state) && state.createdFiles.size > 0) {
+  if (isWebsiteLike(state) && state.createdFiles.size > 0 && !state.standaloneWebsiteHandoffReady) {
     if (!state.websiteBrowserCheckDone && !state.nextWebsitePreviewDone) {
       missing.push('local website preview was not successfully verified')
     }

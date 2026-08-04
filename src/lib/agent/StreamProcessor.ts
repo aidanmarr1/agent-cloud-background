@@ -82,6 +82,11 @@ const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
 const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
 const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000
 const FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 3_000
+// create_website streams the complete HTML, CSS, and JavaScript through one
+// native tool envelope. Once that visible action has started, let a healthy
+// stream finish instead of clipping it at the generic 60-second turn boundary.
+const WEBSITE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 180_000
+const WEBSITE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 20_000
 const STABLE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 8_000
 const STABLE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 2_500
 const STABLE_READ_ONLY_SOURCE_TOOLS = new Set(['web_search', 'read_document'])
@@ -790,13 +795,18 @@ export class StreamProcessor {
       // This prevents normal provider pauses from cutting small calls mid-JSON,
       // while incomplete hidden prefixes still fail forward on the normal timer.
       const isStreamingToolArgs = [...toolCalls.values()].some(tc => STREAMED_FILE_WRITE_TOOLS.has(tc.name))
+      const isStreamingWebsiteArgs = [...toolCalls.values()].some(tc => tc.name === 'create_website')
       const hasStableToolArgs = hasStableToolArgumentEnvelope(toolCalls, state)
-      const effectiveInactivityMs = isStreamingToolArgs
+      const effectiveInactivityMs = isStreamingWebsiteArgs
+        ? Math.max(this.tierTimeouts.inactivityTimeoutMs, WEBSITE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
+        : isStreamingToolArgs
         ? Math.max(this.tierTimeouts.inactivityTimeoutMs * 2, FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
         : hasStableToolArgs
           ? Math.max(this.tierTimeouts.inactivityTimeoutMs, STABLE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS)
         : this.tierTimeouts.inactivityTimeoutMs
-      const effectiveIterationMs = isStreamingToolArgs
+      const effectiveIterationMs = isStreamingWebsiteArgs
+        ? Math.max(this.tierTimeouts.iterationTimeoutMs, WEBSITE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)
+        : isStreamingToolArgs
         ? Math.max(this.tierTimeouts.iterationTimeoutMs, FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)
         : hasStableToolArgs
           ? Math.max(this.tierTimeouts.iterationTimeoutMs, STABLE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS)

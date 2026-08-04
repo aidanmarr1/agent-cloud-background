@@ -42,6 +42,7 @@
     "test:on-demand": "node scripts/on-demand-task-executor-smoke.mjs",
     "agent:orchestration-smoke": "node scripts/agent-orchestration-smoke.mjs",
     "agent:latest-regression-smoke": "node scripts/latest-agent-regression-smoke.mjs",
+    "agent:website-credit-smoke": "node scripts/website-build-credit-fence-smoke.mjs",
     "agent:start-protocol-smoke": "node scripts/task-start-protocol-smoke.mjs",
     "agent:start-recovery-smoke": "node scripts/client-task-start-recovery-smoke.mjs",
     "cloud:worker-ready": "node scripts/prod-background-worker-ready.mjs",

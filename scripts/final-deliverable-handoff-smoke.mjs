@@ -44,12 +44,12 @@ assert.match(
 )
 assert.match(
   modelEmissionBlock,
-  /lastStreamResult\.cadenceProgressViolation \|\| rejectedModelEmission[\s\S]*streamProcessor\.discardBufferedEmission\(\)/,
+  /const nonBillableInternalTurn[\s\S]*lastStreamResult\.cadenceProgressViolation[\s\S]*rejectedModelEmission[\s\S]*streamProcessor\.discardBufferedEmission\(\)/,
   'every rejected model emission must be discarded before buffered text reaches the client',
 )
 assert.match(
   modelEmissionBlock,
-  /visibleText:[\s\S]*!rejectedModelEmission[\s\S]*lastStreamResult\.cadenceProgressViolation \|\| rejectedModelEmission[\s\S]*internalRecoveryScheduled: 'display_contract'/,
+  /visibleText:[\s\S]*!rejectedModelEmission[\s\S]*nonBillableInternalTurn[\s\S]*internalRecoveryScheduled: 'display_contract'/,
   'every withheld model emission must be recorded as an intentional display recovery',
 )
 

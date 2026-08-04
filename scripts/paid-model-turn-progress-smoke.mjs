@@ -24,8 +24,8 @@ assert.ok(
 )
 assert.match(
   streamingCase,
-  /A cadence violation is only possible when the turn supplied no[\s\S]*executable tool call[\s\S]*if \(lastStreamResult\.cadenceProgressViolation\)/,
-  'display narration must never turn a valid tool call into a paid no-progress retry',
+  /if \(lastStreamResult\.cadenceProgressViolation\)[\s\S]*phase = 'STREAMING'[\s\S]*break[\s\S]*updatePhase\(state\)/,
+  'a cadence-invalid turn must be repaired before any provisional tool call can execute',
 )
 assert.match(
   loopSource,
