@@ -2,6 +2,7 @@ import {
   DEFAULT_OPENROUTER_MODEL,
   estimateUsageCost,
 } from '@/lib/modelPricing'
+import { ensureProviderRequestEndsWithInputTurn } from '@/lib/agent/ProviderRequestFailure'
 
 const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const GENERATION_URL = `${OPENROUTER_BASE_URL}/generation`
@@ -556,9 +557,10 @@ function withPinnedModel(
   const contextualMessages = includeTemporalContext === false
     ? messages
     : withCurrentTemporalContext(messages)
+  const compatibleMessages = ensureProviderRequestEndsWithInputTurn(contextualMessages)
   return {
     ...rest,
-    messages: contextualMessages,
+    messages: compatibleMessages.messages as ChatMessageParam[],
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },

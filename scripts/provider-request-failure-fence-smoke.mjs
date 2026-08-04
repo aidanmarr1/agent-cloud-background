@@ -24,7 +24,7 @@ assert.doesNotMatch(
 assert.match(
   loopSource,
   /maxModelStartAttempts\s*=\s*state\.finalDeliverableHandoffPending\s*\?\s*1\s*:\s*STREAM_MAX_RETRIES\s*\+\s*MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS\s*\+\s*1/,
-  'handoff turns must have one provider-start attempt while ordinary turns retain one local request-repair allowance',
+  'handoff turns must have one provider-start attempt while ordinary turns retain bounded local compatibility repairs',
 )
 
 const nullStreamBranch = loopSource.slice(
@@ -46,6 +46,7 @@ try {
 import assert from 'node:assert/strict'
 import {
   classifyDeterministicProviderRequestFailure,
+  ensureProviderRequestEndsWithInputTurn,
   MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS,
   normalizeLiteralJsonEscapes,
   sanitizeProviderRequestMessagesForRetry,
@@ -64,6 +65,27 @@ assert.deepEqual(classifyDeterministicProviderRequestFailure(401, 'invalid API k
   deterministic: true,
   messagePayloadRepairable: false,
 })
+assert.deepEqual(
+  classifyDeterministicProviderRequestFailure(400, 'Requests ending with a model turn are not supported.'),
+  {
+    category: 'model_turn_ending',
+    deterministic: true,
+    messagePayloadRepairable: true,
+  },
+)
+
+const assistantEnded = ensureProviderRequestEndsWithInputTurn([
+  { role: 'user', content: 'Begin.' },
+  { role: 'assistant', content: 'The first result is ready.' },
+  { role: 'system', content: 'Continue.' },
+])
+assert.equal(assistantEnded.changed, true)
+assert.equal(assistantEnded.messages.at(-1).role, 'user')
+assert.match(assistantEnded.messages.at(-1).content, /LLM-authored action or progress update/)
+assert.deepEqual(
+  ensureProviderRequestEndsWithInputTurn([{ role: 'user', content: 'Continue.' }]),
+  { messages: [{ role: 'user', content: 'Continue.' }], changed: false },
+)
 
 const slash = String.fromCharCode(92)
 const brokenEscape = normalizeLiteralJsonEscapes('preview ends in ' + slash + 'u')

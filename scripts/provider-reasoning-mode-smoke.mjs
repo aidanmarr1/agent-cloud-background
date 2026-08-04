@@ -168,12 +168,16 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   ])
   assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
-    requests[3].body.messages.slice(-2),
+    requests[3].body.messages.slice(-3),
     [
       { role: 'assistant', content: 'I have gathered the first result.' },
       { role: 'system', content: 'Continue with the next concrete action.' },
+      {
+        role: 'user',
+        content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
+      },
     ],
-    'Gemini histories must preserve the exact task context without a synthetic provider workaround turn',
+    'Gemini histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[3].body.messages.some(message =>

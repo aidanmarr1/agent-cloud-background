@@ -42,9 +42,9 @@ import {
   deferNarrationCadenceAttempt,
   finishNarrationCadenceAttempt,
   recentNarrationPromptExclusions,
+  reviewProgressNarration,
   retryNarrationCadenceAfterNoProgress,
   retryNarrationCadenceAttemptWithoutNewAction,
-  visibleNarrationActionHeadroom,
   withCadenceProgressUpdateSchemas,
   workLogSinceAcceptedNarration,
 } from './NarrationMemory'
@@ -59,6 +59,7 @@ import {
   AGENT_RUN_MAX_DURATION_MS, AGENT_DEADLINE_FINALIZATION_BUFFER_MS,
   AGENT_DEADLINE_MODEL_TURN_TIMEOUT_MS, AGENT_DEADLINE_HARD_STOP_BUFFER_MS,
   NARRATION_MAX_VISIBLE_ACTION_GAP,
+  NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
 } from './config'
 import {
   StreamProcessor,
@@ -3730,11 +3731,11 @@ const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
 const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 420
 const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
-const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 5_000
-const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 5_000
-const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 650
-const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 650
-const FORCED_NARRATION_MAX_TOKENS = 48
+const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 6_000
+const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 6_000
+const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_CONTENT_ONLY_TIMEOUT_MS = 2_000
+const FORCED_NARRATION_MAX_TOKENS = 128
 const CREDIT_PREFLIGHT_CACHE_MS = 60_000
 
 export class AgentLoop {
@@ -4893,6 +4894,25 @@ export class AgentLoop {
               }
               if (wasForcedNarrationRecovery || wasCompactCadenceNarration) {
                 const phaseEndNarrationWasPending = state.phaseEndNarrationPending
+                if (phaseEndNarrationWasPending) {
+                  state.forcedNarrationRepairAttempts += 1
+                  state.forceTextNextIteration = true
+                  state.phaseEndNarrationPending = true
+                  state.consecutiveNullStreams = 0
+                  state.iterationDelayMs = MIN_ITERATION_DELAY_MS
+                  contextManager.push({
+                    role: 'system',
+                    content: 'The phase progress update did not start streaming. Retry it immediately from the completed evidence, keeping it natural, concrete, and result-first, then put <next_step/> on its own final line. Do not call tools and do not substitute a stock status sentence.',
+                  } as ChatMessageParam)
+                  state.lastIterationEnd = Date.now()
+                  console.log('[AgentDiagnostics] Retrying required LLM-authored phase narration after model-start timeout', {
+                    step: state.currentStepIdx,
+                    totalSteps: state.currentPlanItems?.length || 0,
+                    repairAttempt: state.forcedNarrationRepairAttempts,
+                  })
+                  phase = 'STREAMING'
+                  break
+                }
                 deferNarrationCadenceAttempt(state)
                 state.consecutiveNullStreams = 0
                 state.iterationDelayMs = MIN_ITERATION_DELAY_MS
@@ -5164,6 +5184,18 @@ export class AgentLoop {
               lastStreamResult.toolCalls.size === 0
                 ? lastStreamResult.assistantContent.trim()
                 : null
+            const compactNarrationReview =
+              processedCompactNarrationTurn &&
+              lastStreamResult.toolCalls.size === 0
+                ? reviewProgressNarration(
+                    state,
+                    lastStreamResult.assistantContent,
+                    { requireSignal: false },
+                  )
+                : null
+            const rejectedCompactNarrationEmission =
+              compactNarrationReview !== null &&
+              compactNarrationReview.status !== 'accepted'
             const rejectedHandoffEmission =
               pendingHandoffText !== null &&
               !shouldAcceptFinalDeliverableHandoff(
@@ -5185,6 +5217,7 @@ export class AgentLoop {
               isInitialStandaloneWebsiteCreateTurn(state) &&
               !hasCompleteInitialStandaloneWebsiteCreateCall(lastStreamResult)
             const rejectedModelEmission =
+              rejectedCompactNarrationEmission ||
               rejectedHandoffEmission ||
               rejectedBuildTextOnlyEmission ||
               rejectedUnsavedFinalDeliverableDraft ||
@@ -5245,6 +5278,7 @@ export class AgentLoop {
                     : Date.now() - lastStreamResult.contentStreamingStartTime,
                   cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
                   rejectedHandoffEmission,
+                  rejectedCompactNarrationEmission,
                   rejectedBuildTextOnlyEmission,
                   rejectedUnsavedFinalDeliverableDraft,
                   rejectedInitialWebsiteCreateEmission,
@@ -5355,15 +5389,42 @@ export class AgentLoop {
 
             if (
               processedCompactNarrationTurn &&
-              !state.phaseEndNarrationPending &&
               lastStreamResult.toolCalls.size === 0
             ) {
-              const narration = acceptProgressNarration(state, lastStreamResult.assistantContent, {
-                requireSignal: false,
-                remainingVisibleActions: 0,
-              })
+              const phaseEndNarrationWasPending = state.phaseEndNarrationPending
+              const narration = compactNarrationReview?.status === 'accepted'
+                ? acceptProgressNarration(state, lastStreamResult.assistantContent, {
+                    requireSignal: false,
+                    remainingVisibleActions: 0,
+                    clearPhaseEndPending: phaseEndNarrationWasPending,
+                    resetCadence: phaseEndNarrationWasPending,
+                  })
+                : compactNarrationReview!
               if (narration.status === 'accepted') {
                 state.consecutiveNoToolCalls = 0
+              } else if (phaseEndNarrationWasPending) {
+                state.forcedNarrationRepairAttempts += 1
+                state.phaseEndNarrationPending = true
+                state.forceTextNextIteration = true
+                state.consecutiveNoToolCalls = 0
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    `The prior phase update was ${narration.status === 'duplicate' ? 'too close to an update already shown' : 'empty, incomplete, or not grounded in a completed result'}.`,
+                    'Retry immediately from the newest completed evidence. State the useful finding, comparison, verified state, completed change, or real blocker in natural language, then put <next_step/> on its own final line.',
+                    'Do not call tools, repeat visible action labels, write future-only intent, or use a canned status sentence.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                lastStreamResult = { ...lastStreamResult, assistantContent: '' }
+                state.lastIterationEnd = Date.now()
+                console.log('[AgentDiagnostics] Retrying required LLM-authored phase narration', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  repairAttempt: state.forcedNarrationRepairAttempts,
+                  review: narration.status,
+                })
+                phase = 'STREAMING'
+                break
               } else {
                 deferNarrationCadenceAttempt(state)
                 contextManager.push({
@@ -7093,10 +7154,10 @@ export class AgentLoop {
         {
           role: 'system',
           content: sourceOpeningExhausted
-            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, one parallel batch of up to 3 read_document/http_request calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
+            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, one parallel batch of up to 2 read_document/http_request calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
             : state.suppressedResearchToolName === 'read_document'
               ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now. Open a usable untried URL from the Remaining candidate URLs block with browser_navigate, browser_get_content from a different already-open useful page, or http_request when appropriate. If no remaining candidate is visible or the remaining candidates are already attempted, blocked, or unusable, make one targeted web_search for a new authoritative domain. Do not retry the same cached URL or repeat the same search query.'
-              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using one parallel batch of up to 3 read_document/http_request calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
+              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using one parallel batch of up to 2 read_document/http_request calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
         } as ChatMessageParam,
       ]
     }
@@ -7655,14 +7716,18 @@ export class AgentLoop {
         }
         fastActionTurn = fastActionTurn && activeTools.length > 0
         fastSourceActionTurn = fastSourceActionTurn && activeTools.length > 0
-        // A source batch can contain up to three visible actions. It is one
-        // optional model-selected batch for the latest result set, and it must
-        // stay within the max-four narration frontier.
+        // Reserve the next action for the narration-carrying request. Without
+        // this reservation, a parallel batch could silently consume actions
+        // two through four and make the update appear only on action five.
+        const sourceBatchRoomBeforeNarration = Math.max(
+          0,
+          NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS - state.visibleToolActionsSinceLastNarration,
+        )
         const allowParallelSourceToolCalls = fastSourceActionTurn &&
           !sourceExtractionBatchConsumedForLatestSearch(state) &&
-          visibleNarrationActionHeadroom(state) >= 3
+          sourceBatchRoomBeforeNarration >= 2
         const maxParallelSourceExtractionCalls = allowParallelSourceToolCalls
-          ? Math.min(3, visibleNarrationActionHeadroom(state))
+          ? Math.min(2, sourceBatchRoomBeforeNarration)
           : 1
         // Source recovery can deliberately remove the last unsafe route after
         // the initial requirement calculation. Never ask a provider to require
@@ -7675,7 +7740,7 @@ export class AgentLoop {
               role: 'system',
               content: fastSourceActionTurn
                 ? allowParallelSourceToolCalls
-                ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs and no extraction batch has been used for that search set, make one parallel batch of up to 3 source extraction calls using read_document or http_request. Do not use parallel browser navigation/state tools or file tools. Do not write ordinary prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
+                ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs and no extraction batch has been used for that search set, make one parallel batch of up to 2 source extraction calls using read_document or http_request. Do not use parallel browser navigation/state tools or file tools. Do not write ordinary prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
                 : 'HOT PATH SOURCE ACTION TURN: decide immediately and make exactly one native evidence tool call. Cadence headroom is intentionally reserving the next source actions for the following ordinary turn. Do not write prose, status, plans, apologies, or hidden reasoning.'
                 : 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
             } as ChatMessageParam,
@@ -7921,8 +7986,8 @@ export class AgentLoop {
             continue
           }
           state.pendingToolJsonRecovery = false
-          state.lastModelErrorForUser = 'The assistant rejected malformed tool-call data after one bounded repair attempt. Please retry the task.'
-          console.error('[Agent] Assistant service rejected malformed tool-call JSON after its bounded repair; stopping the run.')
+          state.lastModelErrorForUser = 'The assistant rejected malformed tool-call data after bounded compatibility repairs. Please retry the task.'
+          console.error('[Agent] Assistant service rejected malformed tool-call JSON after bounded compatibility repairs; stopping the run.')
           return null
         }
         const providerRejectedForcedToolMode = status === 400 &&
@@ -7968,8 +8033,8 @@ export class AgentLoop {
             continue
           }
           state.pendingToolJsonRecovery = false
-          state.lastModelErrorForUser = 'The assistant rejected the tool-call request after one bounded compatibility repair. Please retry the task.'
-          console.error('[Agent] Assistant service rejected forced tool-call mode after its bounded repair; stopping the run.')
+          state.lastModelErrorForUser = 'The assistant rejected the tool-call request after bounded compatibility repairs. Please retry the task.'
+          console.error('[Agent] Assistant service rejected forced tool-call mode after bounded compatibility repairs; stopping the run.')
           return null
         }
         if (status === 402) {
@@ -8091,7 +8156,7 @@ export class AgentLoop {
           state.lastModelErrorForUser = deterministicRequestFailure.category === 'authentication'
             ? 'The assistant service credentials were rejected. Please check the configured provider credentials and retry the task.'
             : providerRequestRepairAttempts > 0
-              ? 'The assistant rejected its request data after one bounded repair attempt. Please retry the task.'
+              ? 'The assistant rejected its request data after bounded compatibility repairs. Please retry the task.'
               : 'The assistant rejected the request data before the next action could start. Please retry the task.'
           return null
         }

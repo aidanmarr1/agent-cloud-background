@@ -1,10 +1,14 @@
-// A single compatibility retry was too brittle for heterogeneous
-// OpenAI-compatible providers: one pass repairs message history, while a
-// second can relax forced tool choice and regenerate a clean native call.
+// Provider compatibility repair remains local to the same agent iteration.
+// Multiple attempts allow one request-shape repair and, when necessary, one
+// native tool-call regeneration without turning the failure into a new task.
 export const MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS = 3
+
+const PROVIDER_INPUT_CONTINUATION =
+  'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.'
 
 export type ProviderRequestFailureCategory =
   | 'message_payload_parse'
+  | 'model_turn_ending'
   | 'request_schema'
   | 'authentication'
   | 'request_rejected'
@@ -59,6 +63,19 @@ export function classifyDeterministicProviderRequestFailure(
     }
   }
 
+  const modelTurnEndingFailure = (status === 400 || status === 422) &&
+    errorTextMatches(
+      errorText,
+      /requests? ending with (?:a )?(?:model|assistant) turn (?:are|is) not supported/i,
+    )
+  if (modelTurnEndingFailure) {
+    return {
+      category: 'model_turn_ending',
+      deterministic: true,
+      messagePayloadRepairable: true,
+    }
+  }
+
   const schemaFailure = (status === 400 || status === 422) &&
     errorTextMatches(
       errorText,
@@ -76,6 +93,43 @@ export function classifyDeterministicProviderRequestFailure(
     category: 'request_rejected',
     deterministic: true,
     messagePayloadRepairable: false,
+  }
+}
+
+/**
+ * Gemini-compatible chat requests may contain trailing system instructions,
+ * but their conversational history cannot end on an assistant/model turn.
+ * Preserve the complete history and add a real input turn only for that exact
+ * shape. This is request-envelope normalisation; all visible output and action
+ * selection remain authored by the model.
+ */
+export function ensureProviderRequestEndsWithInputTurn<T extends ProviderMessageLike>(
+  messages: T[],
+): { messages: T[]; changed: boolean } {
+  let lastConversationRole = ''
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const rawRole = messages[index]?.role
+    const role = typeof rawRole === 'string'
+      ? rawRole.trim().toLowerCase()
+      : ''
+    if (!role || role === 'system' || role === 'developer') continue
+    lastConversationRole = role
+    break
+  }
+
+  if (lastConversationRole !== 'assistant' && lastConversationRole !== 'model') {
+    return { messages, changed: false }
+  }
+
+  return {
+    messages: [
+      ...messages,
+      {
+        role: 'user',
+        content: PROVIDER_INPUT_CONTINUATION,
+      } as T,
+    ],
+    changed: true,
   }
 }
 
@@ -192,7 +246,7 @@ function sanitizeToolCalls(toolCalls: unknown): { toolCalls: unknown; changed: b
 
 /**
  * Returns a fresh request message array only when a concrete repair was made.
- * Callers must not spend their single repair allowance on an unchanged request.
+ * Callers must not spend a repair allowance on an unchanged request.
  */
 export function sanitizeProviderRequestMessagesForRetry<T extends ProviderMessageLike>(
   messages: T[],
@@ -236,5 +290,9 @@ export function sanitizeProviderRequestMessagesForRetry<T extends ProviderMessag
     return nextMessage as T
   })
 
-  return { messages: sanitized, changed }
+  const inputTurnRepair = ensureProviderRequestEndsWithInputTurn(sanitized)
+  return {
+    messages: inputTurnRepair.messages,
+    changed: changed || inputTurnRepair.changed,
+  }
 }
