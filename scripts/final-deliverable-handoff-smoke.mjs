@@ -24,8 +24,14 @@ const verifiedOutcomeBlock = sourceBlock(
 )
 assert.match(
   verifiedOutcomeBlock,
-  /one completed outcome, not automatic completion[\s\S]*latest user direction[\s\S]*whole phase is complete/,
-  'a verified artifact must keep the model-authored final phase open for remaining outcomes',
+  /already saved[\s\S]*Do not re-read it or run generic verification commands[\s\S]*one completed outcome[\s\S]*anything explicitly requested remains[\s\S]*natural handoff is the completion decision/,
+  'a verified artifact must keep genuinely remaining outcomes open without inviting redundant verification loops',
+)
+
+assert.match(
+  source,
+  /function verifiedFinalPhaseNaturalHandoffPath\([\s\S]*LLM-authored completion decision[\s\S]*completionCue[\s\S]*const naturalVerifiedHandoffPath[\s\S]*!processedCompactNarrationTurn[\s\S]*Natural verified-phase handoff accepted[\s\S]*terminalReason = 'deliverable_handoff_complete'/,
+  'a natural LLM-authored handoff after a verified saved artifact must complete the phase without requiring an internal marker or another tool loop',
 )
 
 const promptInjectionCount = (
@@ -43,8 +49,8 @@ const modelEmissionBlock = sourceBlock(
 )
 assert.match(
   modelEmissionBlock,
-  /const rejectedModelEmission\s*=\s*rejectedHandoffEmission\s*\|\|\s*rejectedBuildTextOnlyEmission/,
-  'handoff and build-text drift rejection must share one model-emission fence',
+  /const rejectedModelEmission\s*=\s*rejectedCompactNarrationEmission\s*\|\|\s*rejectedHandoffEmission\s*\|\|\s*rejectedBuildTextOnlyEmission/,
+  'narration, handoff, and build-text drift rejection must share one model-emission fence',
 )
 assert.match(
   modelEmissionBlock,

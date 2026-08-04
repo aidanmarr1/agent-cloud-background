@@ -1505,6 +1505,30 @@ function shouldAcceptFinalDeliverableHandoff(
     )
 }
 
+function verifiedFinalPhaseNaturalHandoffPath(
+  state: AgentStateData,
+  content: string,
+): string | null {
+  if (state.finalDeliverableHandoffPending) return null
+  if (!state.deliverableVerificationDone) return null
+  if (state.pendingDeliverableRevision || state.fileWriteRepairPending || state.partialFileWriteRecoveryPending) return null
+  if (!state.currentPlanItems || state.currentStepIdx !== state.currentPlanItems.length - 1) return null
+
+  const path = latestSavedFinalDeliverablePath(state)
+  if (!path || !shouldAcceptFinalDeliverableHandoff(content, 1, state)) return null
+
+  const text = content.trim()
+  const explicitlyContinuing = /\b(?:next\s+i(?:'|’)?ll|next\s+i\s+will|i\s+(?:still\s+)?need\s+to|i(?:'|’)?ll\s+(?:now\s+)?continue|i\s+will\s+(?:now\s+)?continue|remaining\s+(?:work|steps?|tasks?|actions?)|proceeding\s+to)\b/i.test(text)
+  if (explicitlyContinuing) return null
+
+  // This is an LLM-authored completion decision, not a runtime-generated
+  // fallback. A natural saved/ready/attached handoff after whole-file
+  // verification is equivalent to an internal phase marker and should end the
+  // task instead of being followed by generic read/grep verification loops.
+  const completionCue = /\b(?:complete|completed|finished|ready|saved|created|built|delivered|attached|available|open|download|review)\b/i.test(text)
+  return completionCue ? path : null
+}
+
 function shouldRejectBuildTextOnlyEmission(
   state: AgentStateData,
   result: Pick<StreamResult, 'assistantContent' | 'toolCalls' | 'stepAdvancedThisIteration'>,
@@ -1576,7 +1600,7 @@ function continueFinalPhaseAfterVerifiedArtifact(
   state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 3)
   contextManager.push({
     role: 'system',
-    content: `VERIFIED OUTCOME: "${path}" was saved and passed integrity checks. This is one completed outcome, not automatic completion of the active phase. Re-read the model-authored phase scope and latest user direction. Continue with any remaining actions, additional artifacts, integration, or verification using whichever tools are relevant. Emit <next_step/> only when the whole phase is complete.`,
+    content: `VERIFIED OUTCOME: "${path}" is already saved and has passed whole-file integrity checks. Do not re-read it or run generic verification commands for work the runtime has already verified. Treat it as one completed outcome, then use the model-authored phase scope and latest user direction to decide naturally whether anything explicitly requested remains. If the requested phase is complete, give the user the task-specific final handoff now with no tool call; that natural handoff is the completion decision. If a distinct requested action, artifact, integration, or test remains, perform only that relevant work before the handoff.`,
   } as ChatMessageParam)
 }
 
@@ -5323,6 +5347,38 @@ export class AgentLoop {
             }
 
             updatePhase(state)
+
+            const naturalVerifiedHandoffPath =
+              !processedCompactNarrationTurn &&
+              lastStreamResult.toolCalls.size === 0
+                ? verifiedFinalPhaseNaturalHandoffPath(
+                    state,
+                    lastStreamResult.assistantContent,
+                  )
+                : null
+            if (naturalVerifiedHandoffPath) {
+              const stepBeforeComplete = state.currentStepIdx
+              contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              state.finalDeliverableHandoffPending = null
+              state.finalDeliverableHandoffAttempts = 1
+              if (state.currentPlanItems) {
+                state.currentStepIdx = state.currentPlanItems.length
+              }
+              state.lastIterationEnd = Date.now()
+              terminalReason = 'deliverable_handoff_complete'
+              for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
+              }
+              console.log('[AgentDiagnostics] Natural verified-phase handoff accepted', {
+                iteration: state.iterations,
+                chars: lastStreamResult.assistantContent.trim().length,
+                path: naturalVerifiedHandoffPath,
+                step: stepBeforeComplete,
+                totalSteps: state.currentPlanItems?.length || 0,
+              })
+              phase = 'COMPLETE'
+              break
+            }
 
             if (
               state.finalDeliverableHandoffPending &&
