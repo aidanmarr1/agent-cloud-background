@@ -6,7 +6,10 @@
  */
 
 import {
+  ASSISTANT_SUPPORTS_AUDIO_INPUT,
+  ASSISTANT_SUPPORTS_FILE_INPUT,
   ASSISTANT_SUPPORTS_IMAGE_INPUT,
+  ASSISTANT_SUPPORTS_VIDEO_INPUT,
   ASSISTANT_PROVIDER,
   createStreamingCompletion,
   type ChatContentPart,
@@ -330,13 +333,15 @@ const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 const FAST_ACTION_MAX_TOKENS = 1_024
 // A complete create_website envelope contains the page's full HTML, CSS, and
 // JavaScript. The old 1k action cap clipped it, while the global 65k ceiling
-// encouraged Gemini to buffer an oversized function call for minutes. Live
+// encouraged earlier provider routes to buffer an oversized function call for minutes. Live
 // route validation shows 12k leaves ample room for a polished one-shot site
 // while retaining a firm latency/cost boundary.
 const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PRESENTATION_REASONING = { enabled: false, exclude: true }
+const FAST_ACTION_REASONING = { max_tokens: 192, exclude: true }
+const TASK_REASONING = { max_tokens: 1_024, exclude: true }
+const DEEP_TASK_REASONING = { max_tokens: 2_048, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -2333,16 +2338,19 @@ function visualImageUploadedAttachments(messages: AgentLoopOptions['messages']):
   )
 }
 
+function assistantSupportsNativeAttachment(attachment: AgentAttachment): boolean {
+  if (attachment.type.startsWith('image/')) return ASSISTANT_SUPPORTS_IMAGE_INPUT
+  if (attachment.type.startsWith('video/')) return ASSISTANT_SUPPORTS_VIDEO_INPUT
+  if (attachment.type.startsWith('audio/')) return ASSISTANT_SUPPORTS_AUDIO_INPUT
+  if (attachment.type === 'application/pdf') return ASSISTANT_SUPPORTS_FILE_INPUT
+  return false
+}
+
 function nativeMultimodalUploadedAttachments(messages: AgentLoopOptions['messages']): AgentAttachment[] {
   return uploadedAttachments(messages).filter((attachment) => (
     !!attachment.content &&
     attachment.contentEncoding === 'data-url' &&
-    (
-      attachment.type.startsWith('image/') ||
-      attachment.type.startsWith('audio/') ||
-      attachment.type.startsWith('video/') ||
-      attachment.type === 'application/pdf'
-    )
+    assistantSupportsNativeAttachment(attachment)
   ))
 }
 
@@ -2359,7 +2367,11 @@ function audioFormatForAttachment(attachment: AgentAttachment): string {
 
 function nativeAttachmentContentPart(attachment: AgentAttachment): ChatContentPart | null {
   const content = attachment.content
-  if (!content || attachment.contentEncoding !== 'data-url') return null
+  if (
+    !content ||
+    attachment.contentEncoding !== 'data-url' ||
+    !assistantSupportsNativeAttachment(attachment)
+  ) return null
   if (attachment.type.startsWith('image/')) {
     return {
       type: 'image_url',
@@ -2439,28 +2451,16 @@ function attachmentContextForPlanning(message: AgentLoopOptions['messages'][numb
         ? `${content.slice(0, MAX_PLANNING_ATTACHMENT_CHARS)}\n... [truncated from ${content.length} characters]`
         : content
       sections.push(`--- Uploaded attachment text: ${attachment.name} ---\n${excerpt}\n--- End uploaded attachment text: ${attachment.name} ---`)
-    } else if (
-      attachment.type.startsWith('image/') ||
-      attachment.type.startsWith('audio/') ||
-      attachment.type.startsWith('video/') ||
-      attachment.type === 'application/pdf'
-    ) {
-      sections.push(ASSISTANT_SUPPORTS_IMAGE_INPUT
-        ? [
+    } else if (assistantSupportsNativeAttachment(attachment)) {
+      sections.push([
             `Attachment ${attachment.name} is already available as native multimodal input at runtime.`,
             'Inspect the uploaded content directly.',
             'Do not create browser/open/current-view/read_file/web_search steps for its filename.',
-          ].join(' ')
-        : [
-            `Image attachment ${attachment.name} was uploaded, but the active model route does not accept direct image input.`,
-            'Use any extracted text or metadata already present.',
-            'If the user needs visual interpretation of the image itself, explain that direct image inspection is not available on this route.',
-            'Do not web_search the uploaded image filename unless the user explicitly asks for outside/current information.',
           ].join(' '))
+    } else if (attachment.sandboxPath) {
+      sections.push(`Attachment ${attachment.name} is not a native input modality for this model route. Inspect its exact sandbox path with the appropriate document or terminal tool; do not search the web for its filename.`)
     } else {
-      sections.push(attachment.sandboxPath
-        ? `No extracted text is currently loaded for ${attachment.name}. A sandbox copy is listed at ${attachment.sandboxPath}; use that path with document or terminal tools if the file contents are required.`
-        : `No extracted text is currently loaded for ${attachment.name}. If runtime still lacks content, report that this uploaded file could not be read instead of searching the web for the filename.`)
+      sections.push(`No extracted text is currently loaded for ${attachment.name}. If runtime still lacks content, report that this uploaded file could not be read instead of searching the web for the filename.`)
     }
   }
 
@@ -2511,15 +2511,9 @@ function buildPlanningMessages(messages: AgentLoopOptions['messages']): Array<{ 
 
 function requiredAttachmentPlanSteps(messages: AgentLoopOptions['messages']): RequiredPlanStep[] {
   const attachments = uploadedAttachments(messages).filter((attachment) => !(
-    ASSISTANT_SUPPORTS_IMAGE_INPUT &&
     attachment.contentEncoding === 'data-url' &&
     !!attachment.content &&
-    (
-      attachment.type.startsWith('image/') ||
-      attachment.type.startsWith('audio/') ||
-      attachment.type.startsWith('video/') ||
-      attachment.type === 'application/pdf'
-    )
+    assistantSupportsNativeAttachment(attachment)
   ))
   if (attachments.length === 0) return []
 
@@ -2633,7 +2627,7 @@ export function preprocessMessagesForAgentContext(messages: AgentLoopOptions['me
       textContent += `\n\n--- ${label}: ${att.name} ---${instruction}\n${truncated}\n--- End of ${att.name} ---`
     }
 
-    if (nativeMultimodalAttachments.length > 0 && ASSISTANT_SUPPORTS_IMAGE_INPUT) {
+    if (nativeMultimodalAttachments.length > 0) {
       textContent += '\n\nUse the attached multimodal content below directly; do not claim the attachment was unavailable.'
       const parts: ChatContentPart[] = [
         { type: 'text', text: textContent },
@@ -3062,7 +3056,7 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
     'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
     'The visible action pills already say what was searched, opened, read, inspected, or written. Do not repeat those operations or write vague purpose text such as "to expand the evidence base." State what the preceding results established and include a concrete anchor when available. The current tool has not returned yet, so never invent what it will find.',
     'When the immediate direction genuinely improves continuity, you may add one short forward-looking clause or sentence. Use it sparingly; never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'progress_update is display-only. The runtime will place it after this native action succeeds; still complete every normal required tool argument and make the tool call immediately.',
+    'progress_update is display-only. The runtime will place it after this native action settles, whether it succeeds or fails. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
     newWork.length ? `New completed work to synthesize (use its outcomes, not its action labels):\n- ${newWork.join('\n- ')}` : 'Use the concrete completed tool-result context already in the conversation. If evidence access failed, state that user-relevant blocker and the alternate evidence route—not that a search or page-open happened.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
@@ -3072,7 +3066,7 @@ function cadenceNarrationActionRetryMessage(reason: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
     'Retry the same active phase now in the ordinary action-selection turn.',
-    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate the current tool operation. It will be shown only if the matching tool succeeds.',
+    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown after that action settles.',
     'Do not output ordinary prose, planning, speculation, a future-only action fragment, or narration without a tool call.',
   ].join(' ')
 }
@@ -4771,8 +4765,9 @@ export class AgentLoop {
 
             const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
             // Arm after two completed visible actions so the third native tool
-            // call carries the LLM-authored update. The runtime holds it until
-            // that action succeeds; a missed update retries on action four.
+            // call carries the LLM-authored update. It summarizes preceding
+            // settled work and appears only after this action also settles; a
+            // missed update retries on action four.
             // Keeping it in the work request avoids a competing provider call.
             const cadenceNarrationInMainTurn =
               shouldUseNaturalCadenceNarration(state, this.options.messages) &&
@@ -5650,7 +5645,7 @@ export class AgentLoop {
               const narratedResult = lastToolResults.find(
                 result => result.tc.id === lastStreamResult?.cadenceProgressToolCallId,
               )
-              if (narratedResult?.acceptedForExecution === true && !narratedResult.isError) {
+              if (narratedResult) {
                 const acceptedNarration = acceptProgressNarration(
                   state,
                   lastStreamResult.cadenceProgressUpdate,
@@ -5661,8 +5656,10 @@ export class AgentLoop {
                   },
                 )
                 if (acceptedNarration.status === 'accepted') {
-                  // ToolPipeline has already emitted the matching tool_result,
-                  // so completion wording can never precede the work it claims.
+                  // ToolPipeline has already emitted the matching tool_result.
+                  // This update describes preceding settled work, so a failure
+                  // in the newest action must not suppress the 3–4-action
+                  // cadence or buy repeated narration turns.
                   this.emitter.progressUpdate(acceptedNarration.text, {
                     stepIndex: state.currentStepIdx,
                     afterToolId: narratedResult.tc.id,
@@ -5670,12 +5667,9 @@ export class AgentLoop {
                   })
                 }
               } else {
-                console.log('[AgentDiagnostics] Held cadence narration because its matching action did not succeed', {
+                console.log('[AgentDiagnostics] Cadence narration had no matching settled action result', {
                   iteration: state.iterations,
                   toolCallId: lastStreamResult.cadenceProgressToolCallId || null,
-                  tool: narratedResult?.tc.name || null,
-                  acceptedForExecution: narratedResult?.acceptedForExecution === true,
-                  isError: narratedResult?.isError ?? null,
                 })
               }
             }
@@ -7809,15 +7803,17 @@ export class AgentLoop {
               ? Math.min(0.35, state.strategyConfig?.temperature ?? strategy.temperature)
             : state.strategyConfig?.temperature ?? strategy.temperature
         const requestReasoning = useCompactNarration
-          ? { reasoning: MINIMAL_THINKING_REASONING }
+          ? { reasoning: PRESENTATION_REASONING }
           : isFinalDeliverableHandoffTurn
-            ? { reasoning: MINIMAL_THINKING_REASONING }
+            ? { reasoning: PRESENTATION_REASONING }
           : isFinalInlineAnswerTurn
-            ? { reasoning: TASK_REASONING }
+            ? { reasoning: DEEP_TASK_REASONING }
             : isFinalSavedDeliverableTurn
-              ? { reasoning: TASK_REASONING }
+              ? { reasoning: DEEP_TASK_REASONING }
+              : standaloneWebsiteNeedsInitialCreate
+                ? { reasoning: DEEP_TASK_REASONING }
               : fastActionTurn
-                ? { reasoning: TASK_REASONING }
+                ? { reasoning: FAST_ACTION_REASONING }
             : { reasoning: TASK_REASONING }
         const requestTimeoutMs = useCompactNarration
             ? FORCED_NARRATION_REQUEST_TIMEOUT_MS

@@ -195,7 +195,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'http_request',
-      description: 'Call API/data endpoint; use browser_navigate for webpages.',
+      description: 'Call an API or structured data endpoint. For ordinary readable webpages use read_document; use browser_navigate only when rendered state, scripts, screenshots, or interaction are actually needed.',
       parameters: {
         type: 'object',
         properties: {
@@ -216,7 +216,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_navigate',
-      description: 'Open an exact, complete webpage URL and return live rendered page state/elements. Use this first when the user supplies a URL/domain unless they explicitly require another method. Copy surfaced URLs verbatim; never abbreviate, shorten, or replace any part with "..." or an ellipsis.',
+      description: 'Open an exact, complete webpage URL and return live rendered page state/elements. Use this when rendered state, scripts, screenshots, or interaction are needed; use read_document for ordinary readable pages. Copy surfaced URLs verbatim; never abbreviate, shorten, or replace any part with "..." or an ellipsis.',
       parameters: {
         type: 'object',
         properties: {

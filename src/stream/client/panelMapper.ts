@@ -57,14 +57,14 @@ function normalizeDocumentTitle(title: string, url: string, content: string, err
   const failureText = `${error} ${content}`.trim()
   const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(error) ||
     /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(content)
-  if (internalRecovery) return 'Source needs browser rendering'
+  if (internalRecovery) return 'Source extraction unavailable'
 
   const failed = /^(?:error|blocked|request failed|failed to load|extraction blocked)\b/i.test(content) || !!error
   if (failed) {
     if (status === 401 || /\b(?:401|unauthorized|login required|authentication required)\b/i.test(failureText)) return 'Access required'
-    if (status === 403 || /\b(?:403|forbidden)\b/i.test(failureText)) return 'Source needs browser rendering'
+    if (status === 403 || /\b(?:403|forbidden)\b/i.test(failureText)) return 'Source access blocked'
     if (status === 429 || /\b(?:429|rate limited|too many requests)\b/i.test(failureText)) return 'Temporarily rate limited'
-    return 'Source needs browser rendering'
+    return 'Source extraction unavailable'
   }
   if (genericTitle) return fallbackTitleForSource(url, 'Extracted page')
   return title
@@ -167,7 +167,7 @@ function transformPanelData(
     const internalRecovery = /^(?:INTERNAL_RECOVERY:|FINAL_STEP_REDIRECT:)/i.test(body)
     if (internalRecovery) {
       return {
-        title: status === 403 ? 'Source needs browser rendering' : 'Source extraction unavailable',
+        title: status === 403 ? 'Source access blocked' : 'Source extraction unavailable',
         content: '',
         url,
       } as BrowseResult

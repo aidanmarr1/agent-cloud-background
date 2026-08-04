@@ -58,6 +58,12 @@ function requireExact(name, expected, reason) {
   else fail(`${name} must be ${expected} (${reason})`)
 }
 
+function requireUnset(name, reason) {
+  const value = env(name)
+  if (!value) pass(`${name} is unset`)
+  else fail(`${name} must be unset (${reason})`)
+}
+
 function requireRecommendedTrue(name, reason) {
   const value = env(name).toLowerCase()
   if (!value || value === 'true' || value === '1') pass(`${name || 'value'} keeps ${reason}`)
@@ -99,9 +105,9 @@ requireRealEnv('TURSO_DATABASE_URL', 'Turso database URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso auth token', validateNonShortToken)
 requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key', validateNonShortToken)
-requireExact('OPENROUTER_MODEL', 'google/gemini-3.6-flash', 'pinned Gemini 3.6 Flash model')
-requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'lowest supported reasoning mode')
-requireExact('OPENROUTER_REASONING_EXCLUDE', 'true', 'hidden reasoning must stay out of the response')
+requireExact('OPENROUTER_MODEL', 'qwen/qwen3.7-flash', 'pinned Qwen3.7 Flash model')
+requireUnset('OPENROUTER_REASONING_EFFORT', 'Qwen uses per-turn reasoning token budgets in code')
+requireUnset('OPENROUTER_REASONING_EXCLUDE', 'Qwen reasoning visibility is pinned per turn in code')
 requireRealEnv('AUTH_SECRET', 'Auth.js signing secret', validateSecret)
 requireRealEnv('AGENT_INTERNAL_HEALTH_SECRET', 'internal health signing secret', validateSecret)
 requireRealEnv('SERPER_API_KEY', 'Serper web and image search API key', validateNonShortToken)

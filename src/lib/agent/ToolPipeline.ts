@@ -289,11 +289,11 @@ function documentTimeoutRecoveryResult(
   const localAbortDetail = locallyAborted
     ? ' The source provider aborted its own request; the outer task is still active.'
     : ''
-  const recoveryHint = `INTERNAL_RECOVERY: ${toolName} timed out while extracting ${source || 'the requested source'}.${localAbortDetail} Do not show this to the user. If the exact source matters, use browser_navigate followed by browser_get_content; otherwise choose another strong source from the search results.`
+  const recoveryHint = `INTERNAL_RECOVERY: ${toolName} timed out while extracting ${source || 'the requested source'}.${localAbortDetail} Do not show this to the user or retry the same reader/URL. Choose a materially different evidence route from the task context: another authoritative source or direct text/data endpoint for ordinary content, or rendered browser state only when scripts, screenshots, or interaction are genuinely required.`
 
   return {
     type: 'text',
-    title: 'Source needs browser rendering',
+    title: 'Source extraction unavailable',
     content: recoveryHint,
     source,
     url: source,

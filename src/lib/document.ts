@@ -1,7 +1,7 @@
 import { constants } from 'fs'
 import { open } from 'fs/promises'
 import { join } from 'path'
-import { browsePage, parseReadableHtml } from './browse'
+import { parseReadableHtml } from './browse'
 import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 
@@ -21,7 +21,7 @@ export interface DocumentResult {
 const MAX_CONTENT_CHARS = 40_000
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50MB
 const MAX_REDIRECTS = 5
-const URL_FETCH_TIMEOUT_MS = 2_500
+const URL_FETCH_TIMEOUT_MS = 10_000
 
 function detectType(pathOrUrl: string, contentType?: string): 'pdf' | 'docx' | 'text' {
   if (contentType) {
@@ -58,11 +58,11 @@ function extractionBlockedResult(input: {
   const statusLabel = input.status
     ? `HTTP ${input.status}${input.statusText ? ` ${input.statusText}` : ''}`
     : (input.error || 'request failed')
-  const recoveryHint = 'INTERNAL_RECOVERY: direct text extraction was blocked for this URL. Do not show this to the user. If this exact source matters, use browser_navigate followed by browser_get_content; otherwise choose a different strong source from the search results.'
-  const content = `INTERNAL_RECOVERY: source extraction blocked (${statusLabel}). Use a rendered browser read or a different strong source; do not report this internal extraction failure to the user.`
+  const recoveryHint = 'INTERNAL_RECOVERY: direct text extraction did not return readable evidence for this URL. Do not show this message to the user or retry the same reader/URL. Choose the next route intelligently from the task context: another authoritative source or direct text/data endpoint for ordinary content, or a rendered browser only when scripts, page state, screenshots, or interaction are genuinely required.'
+  const content = `INTERNAL_RECOVERY: source extraction unavailable (${statusLabel}). Choose a materially different evidence route; do not report this internal extraction failure to the user.`
   return {
     type: input.type || 'text',
-    title: input.title || 'Source needs browser rendering',
+    title: input.title || 'Source extraction unavailable',
     content,
     wordCount: wordCount(content),
     source: input.source,
@@ -71,13 +71,6 @@ function extractionBlockedResult(input: {
     statusText: input.statusText,
     recoveryHint,
   }
-}
-
-function browseResultIsBlocked(page: { title?: string; content?: string }): boolean {
-  const title = page.title || ''
-  const content = page.content || ''
-  return /^(?:page blocked|blocked|error loading page)$/i.test(title.trim()) ||
-    /\b(?:blocks automated access|request failed with status|returned\s+(?:401|403|429|451|503)|timed out loading|failed to load)\b/i.test(content)
 }
 
 async function parsePdf(buffer: Buffer): Promise<{ text: string; pages: number }> {
@@ -148,27 +141,9 @@ export async function readDocument(source: string, conversationId?: string, sign
           contentType = res.headers.get('content-type') || ''
           const failedDocType = detectType(resolvedSource, contentType)
           clearTimeout(timeout)
-          const canTryReadablePage =
-            failedDocType === 'text' &&
-            (res.status === 401 || res.status === 403 || res.status === 429 || res.status === 451 || res.status === 503)
-
-          if (canTryReadablePage) {
-            const page = await browsePage(resolvedSource)
-            if (!browseResultIsBlocked(page) && page.content.trim()) {
-              const content = truncateContent(page.content)
-              return {
-                type: 'text',
-                title: page.title || title,
-                content,
-                wordCount: wordCount(content),
-                source: page.url || resolvedSource,
-              }
-            }
-          }
-
           return extractionBlockedResult({
             source: resolvedSource,
-            title: 'Source needs browser rendering',
+            title: 'Source extraction unavailable',
             type: failedDocType,
             status: res.status,
             statusText: res.statusText,
@@ -258,6 +233,17 @@ export async function readDocument(source: string, conversationId?: string, sign
     content = truncateContent(content)
 
     const words = wordCount(content)
+
+    if (isUrl(resolvedSource) && docType === 'text' && words < 8) {
+      return extractionBlockedResult({
+        source: resolvedSource,
+        title: 'Source extraction unavailable',
+        type: 'text',
+        status: 200,
+        statusText: 'No readable page text',
+        error: 'HTML response contained no substantive readable text',
+      })
+    }
 
     return { type: docType, title, content, pageCount, wordCount: words, source: resolvedSource }
   } catch (err) {

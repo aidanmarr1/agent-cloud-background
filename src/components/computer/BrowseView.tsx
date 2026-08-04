@@ -25,7 +25,7 @@ export function BrowseView({ result, streaming }: BrowseViewProps) {
       }
     : { title: 'Page Content', content: '', url: '' }
   const resolvingEmptyResult = useDeferredEmptyState(!safeResult.content.trim(), streaming)
-  const displayContent = safeResult.content.trim() || 'No extracted text was returned for this source.'
+  const displayContent = safeResult.content.trim() || 'This source did not return readable text.'
   const paragraphs = splitIntoParagraphs(displayContent)
 
   let hostname = ''

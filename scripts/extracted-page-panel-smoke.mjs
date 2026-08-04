@@ -25,10 +25,16 @@ assert.match(
   'read_document must convert text/html pages into readable extracted source content',
 )
 
-assert.match(
+assert.doesNotMatch(
   documentReader,
   /browsePage\(resolvedSource\)/,
-  'blocked webpage extraction must try the stronger readable-page path before failing',
+  'blocked webpage extraction must return structured evidence to the model instead of forcing a hidden browser route',
+)
+
+assert.match(
+  documentReader,
+  /URL_FETCH_TIMEOUT_MS = 10_000/,
+  'ordinary webpage extraction must have enough time to return readable text',
 )
 
 assert.match(
@@ -57,8 +63,14 @@ assert.match(
 
 assert.match(
   panelMapper,
+  /Source extraction unavailable/,
+  'blocked extracted pages must use a neutral Computer panel title instead of a raw extraction error or forced browser claim',
+)
+
+assert.doesNotMatch(
+  panelMapper,
   /Source needs browser rendering/,
-  'blocked extracted pages must use a neutral Computer panel title instead of a raw extraction error',
+  'the Computer panel must not claim that browser rendering is the only recovery route',
 )
 
 assert.doesNotMatch(

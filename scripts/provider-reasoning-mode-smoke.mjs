@@ -19,7 +19,7 @@ assert.match(
 assert.doesNotMatch(
   llmSource,
   /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
-  'Gemini should retain resilient OpenRouter balanced provider routing',
+  'Qwen should retain resilient OpenRouter balanced provider routing',
 )
 assert.doesNotMatch(
   llmSource,
@@ -76,19 +76,12 @@ await llm.createCompletion({
     },
   }],
   tool_choice: 'required',
-  max_tokens: 256,
+  max_tokens: 512,
+  reasoning: { max_tokens: 192, exclude: true },
 })
 const multimodalParts = [
-  { type: 'text', text: 'Review every attached modality.' },
+  { type: 'text', text: 'Review every natively supported attached modality.' },
   { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
-  {
-    type: 'file',
-    file: {
-      filename: 'brief.pdf',
-      file_data: 'data:application/pdf;base64,cGRm',
-    },
-  },
-  { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'mp3' } },
   { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
 ]
 await llm.createCompletion({
@@ -96,12 +89,27 @@ await llm.createCompletion({
   messages: [{ role: 'user', content: multimodalParts }],
   max_tokens: 256,
 })
+await llm.createCompletion({
+  ...common,
+  messages: [{ role: 'user', content: 'Choose the probe when useful.' }],
+  tools: [{
+    type: 'function',
+    function: {
+      name: 'probe',
+      description: 'Probe automatic tool compatibility.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  }],
+  tool_choice: 'auto',
+  max_tokens: 512,
+  reasoning: { max_tokens: 192, exclude: true },
+})
 const stream = await llm.createStreamingCompletion({
   ...common,
   model: 'another/stale-model',
   messages: [{ role: 'user', content: 'Take the next action.' }],
   max_tokens: 384,
-  reasoning: { effort: 'xhigh', exclude: false },
+  reasoning: { max_tokens: 2_048, exclude: false },
 })
 for await (const _chunk of stream) {}
 await llm.createCompletion({
@@ -139,36 +147,32 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   const jsonStart = stdout.lastIndexOf(marker)
   assert.ok(jsonStart >= 0, 'probe must emit captured request JSON')
   const requests = JSON.parse(stdout.slice(jsonStart + marker.length))
-  assert.equal(requests.length, 4)
+  assert.equal(requests.length, 5)
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.6-flash')
+    assert.equal(request.body.model, 'qwen/qwen3.7-flash')
     assert.equal('models' in request.body, false)
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[0].body.reasoning, { enabled: false, exclude: true })
   assert.equal(requests[0].body.tool_choice, 'required')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
-    { type: 'text', text: 'Review every attached modality.' },
+    { type: 'text', text: 'Review every natively supported attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
-    {
-      type: 'file',
-      file: {
-        filename: 'brief.pdf',
-        file_data: 'data:application/pdf;base64,cGRm',
-      },
-    },
-    { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'mp3' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
-  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[1].body.reasoning, { enabled: false, exclude: true })
+  assert.deepEqual(requests[2].body.reasoning, { max_tokens: 192, exclude: true })
+  assert.equal(requests[2].body.tool_choice, 'auto')
+  assert.deepEqual(requests[3].body.reasoning, { max_tokens: 256, exclude: true })
+  assert.deepEqual(requests[4].body.reasoning, { enabled: false, exclude: true })
   assert.deepEqual(
-    requests[3].body.messages.slice(-3),
+    requests[4].body.messages.slice(-3),
     [
       { role: 'assistant', content: 'I have gathered the first result.' },
       { role: 'system', content: 'Continue with the next concrete action.' },
@@ -177,17 +181,17 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'Gemini histories must preserve the exact task context and end with a valid input turn',
+    'Qwen histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
-    requests[3].body.messages.some(message =>
+    requests[4].body.messages.some(message =>
       message.role === 'assistant' && message.content === 'I have gathered the first result.'
     ),
     true,
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Gemini 3.6 Flash balanced provider and lowest reasoning smoke test passed')
+  console.log('Qwen3.7 Flash balanced provider and adaptive reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

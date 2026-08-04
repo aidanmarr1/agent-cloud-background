@@ -58,6 +58,12 @@ function requireExact(name, expected, reason) {
   else fail(`${name} must be ${expected} (${reason})`)
 }
 
+function requireUnset(name, reason) {
+  const value = env(name)
+  if (!value) pass(`${name} is unset`)
+  else fail(`${name} must be unset (${reason})`)
+}
+
 function requireExactBool(name, expected, reason) {
   const value = env(name).toLowerCase()
   const normalized = value || (expected ? 'true' : 'false')
@@ -99,9 +105,9 @@ requireRealEnv('TURSO_DATABASE_URL', 'Turso task queue URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso task queue token', validateNonShortToken)
 requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key for task execution', validateNonShortToken)
-requireExact('OPENROUTER_MODEL', 'google/gemini-3.6-flash', 'pinned Gemini 3.6 Flash model')
-requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'lowest supported reasoning mode')
-requireExact('OPENROUTER_REASONING_EXCLUDE', 'true', 'hidden reasoning must stay out of the response')
+requireExact('OPENROUTER_MODEL', 'qwen/qwen3.7-flash', 'pinned Qwen3.7 Flash model')
+requireUnset('OPENROUTER_REASONING_EFFORT', 'Qwen uses per-turn reasoning token budgets in code')
+requireUnset('OPENROUTER_REASONING_EXCLUDE', 'Qwen reasoning visibility is pinned per turn in code')
 requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
 requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'production requires the hosted Render worker')
 requireRealEnv('E2B_API_KEY', 'E2B hosted sandbox API key', validateNonShortToken)

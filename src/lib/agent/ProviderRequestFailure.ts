@@ -97,8 +97,10 @@ export function classifyDeterministicProviderRequestFailure(
 }
 
 /**
- * Gemini-compatible chat requests may contain trailing system instructions,
- * but their conversational history cannot end on an assistant/model turn.
+ * Some OpenRouter provider routes accept trailing system instructions but
+ * reject a conversational history whose latest non-system input is a model
+ * turn. Normalize that envelope before routing so provider changes do not
+ * surface as task failures.
  * Preserve the complete history and add a real input turn only for that exact
  * shape. This is request-envelope normalisation; all visible output and action
  * selection remain authored by the model.

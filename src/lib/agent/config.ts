@@ -10,13 +10,13 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// Gemini 3.6 Flash exposes a 1,048,576-token context window. Reserve its
-// full 65,536-token completion allowance, leaving 983,040 prompt tokens.
+// Qwen3.7 Flash exposes a 1,000,000-token context window. Reserve its full
+// 65,536-token completion allowance, leaving 934,464 prompt tokens.
 // Keep the complete bounded agent run in model context instead of discarding
 // all but eight messages. ContextManager still removes redundant file bodies
 // and stale screenshots, which preserves usable evidence without repeatedly
 // paying for content that already exists in the sandbox.
-export const MODEL_MAX_PROMPT_TOKENS = 983_040
+export const MODEL_MAX_PROMPT_TOKENS = 934_464
 export const MODEL_MAX_COMPLETION_TOKENS = 65_536
 export const MAX_CONTEXT_MESSAGES = 4_096
 // A single slow/stalled model turn is ordinary provider jitter, not a reason to
@@ -59,7 +59,7 @@ export const LOOP_THRESHOLD = 3             // Same tool N times in window = loo
 // --- Content & narration ---
 export const NARRATION_THRESHOLD_DEFAULT = 3
 export const NARRATION_THRESHOLD_BROWSER = 3
-// The narration is carried by (and emitted after) the next successful action.
+// The narration is carried by (and emitted after) the next settled action.
 // Arm after two completed actions so the normal update lands on action 3; a
 // rejected/duplicate update then retries on action 4 instead of slipping to 5.
 export const NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS = 2
@@ -91,8 +91,8 @@ export const TIER_TIMEOUTS = {
 // --- Tool execution ---
 export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
 export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
-export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 1_800
-export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 4_000
+export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 8_000
+export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 15_000
 export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
 // Give an aborted handler a brief chance to settle, but never turn a tool
 // timeout into an unbounded wait for the same hung provider request.
