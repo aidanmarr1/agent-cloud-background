@@ -126,7 +126,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'AGENT_TRUST_PROXY_HEADERS', 'true')
   requireValue(service, 'LLM_PROVIDER', 'openrouter')
   requireValue(service, 'OPENROUTER_MODEL', 'qwen/qwen3.7-flash')
-  requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'minimal')
+  requireValue(service, 'OPENROUTER_REASONING_EFFORT', 'none')
   requireValue(service, 'OPENROUTER_REASONING_EXCLUDE', 'true')
   assert.equal(service.env.has('DEEPSEEK_API_KEY'), false, `${service.name} must not define a DeepSeek credential`)
   requireValue(service, 'AGENT_STORAGE_DRIVER', 'turso')

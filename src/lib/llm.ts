@@ -525,7 +525,7 @@ function providerReasoningPayload(
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
   return {
     reasoning: {
-      effort: 'minimal',
+      effort: 'none',
       exclude: true,
     },
   }

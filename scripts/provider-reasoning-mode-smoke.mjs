@@ -141,7 +141,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[0].body.reasoning, { effort: 'none', exclude: true })
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
@@ -155,7 +155,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'mp3' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
-  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[2].body.reasoning, { effort: 'none', exclude: true })
   assert.deepEqual(
     requests[3].body.messages.slice(-2),
     [

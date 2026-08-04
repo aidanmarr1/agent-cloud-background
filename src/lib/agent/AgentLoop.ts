@@ -326,8 +326,8 @@ const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 // capacity remains available for synthesis, reports, code, and deliverables.
 const FAST_ACTION_MAX_TOKENS = 1_024
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const MINIMAL_THINKING_REASONING = { effort: 'none' as const, exclude: true }
+const TASK_REASONING = { effort: 'none' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {

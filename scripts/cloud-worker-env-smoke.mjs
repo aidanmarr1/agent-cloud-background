@@ -100,7 +100,7 @@ requireRealEnv('TURSO_AUTH_TOKEN', 'Turso task queue token', validateNonShortTok
 requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
 requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key for task execution', validateNonShortToken)
 requireExact('OPENROUTER_MODEL', 'qwen/qwen3.7-flash', 'pinned Qwen3.7 Flash model')
-requireExact('OPENROUTER_REASONING_EFFORT', 'minimal', 'lowest supported reasoning mode')
+requireExact('OPENROUTER_REASONING_EFFORT', 'none', 'lowest supported reasoning mode')
 requireExact('OPENROUTER_REASONING_EXCLUDE', 'true', 'hidden reasoning must stay out of the response')
 requireExact('AGENT_SANDBOX_PROVIDER', 'e2b', 'hosted E2B task sandbox execution')
 requireExact('AGENT_REQUIRE_HOSTED_TASK_WORKER', 'true', 'production requires the hosted Render worker')
