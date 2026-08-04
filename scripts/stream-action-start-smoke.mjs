@@ -155,11 +155,11 @@ async function* internalProviderRecoveryChunks() {
 }
 
 async function* validCadenceToolChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_valid_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks."}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_valid_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay."}' } }] } }] }
 }
 
 async function* cadenceToolUpsertChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_cadence_upsert', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","count":5,"progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks."' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_cadence_upsert', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","count":5,"progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay."' } }] } }] }
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }
 }
 
@@ -185,11 +185,11 @@ async function* leakedBenchmarkCommandChunks() {
 
 async function* ordinaryAndSchemaCadenceChunks() {
   yield { choices: [{ delta: { content: 'The official benchmark reports a 2.1-second median agent startup.' } }] }
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_ordinary_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for agent startup latency benchmarks."}' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_ordinary_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"The official benchmark identifies cold initialization as the main source of startup delay."}' } }] } }] }
 }
 
 async function* schemaThenOrdinaryCadenceChunks() {
-  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_schema_first', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"Completed a targeted search of official sources for current agent startup performance benchmarks' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_schema_first', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay' } }] } }] }
   yield { choices: [{ delta: { content: 'A second provider narration must not be shown.' } }] }
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '."}' } }] } }] }
 }
@@ -636,7 +636,7 @@ export async function runSmoke() {
     'internal provider/API recovery prose must not count as user-visible model progress',
   )
 
-  const cadenceText = 'Completed a targeted search of official sources for current agent startup performance benchmarks.'
+  const cadenceText = 'The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay.'
   assert.equal(
     reviewProgressNarration(
       'The free Serper API blocked the Apple search query, so I navigated directly to the store page instead.',
@@ -772,7 +772,7 @@ export async function runSmoke() {
   const ordinaryCadenceResult = await new StreamProcessor(ordinaryCadenceEmitter as any, timeouts).processStream(ordinaryAndSchemaCadenceChunks() as any, ordinaryCadenceState, true)
   assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'structured narration must remain staged until execution succeeds')
   assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'cadence narration must use its explicit event lane')
-  assert.match(ordinaryCadenceResult.cadenceProgressUpdate || '', /startup latency benchmarks/, 'only the required schema lane may satisfy cadence')
+  assert.match(ordinaryCadenceResult.cadenceProgressUpdate || '', /cold initialization as the main source/, 'only the required evidence-bearing schema lane may satisfy cadence')
   assert.doesNotMatch(ordinaryCadenceResult.assistantContent, /2\.1-second median/, 'ordinary prose outside progress_update must be ignored on cadence turns')
   assert.doesNotMatch(ordinaryCadenceResult.toolCalls.get(0)?.arguments || '', /progress_update/, 'the accepted schema field must still be stripped before execution and history')
 
@@ -784,7 +784,7 @@ export async function runSmoke() {
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'accepted schema narration must remain staged until execution succeeds')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'accepted cadence updates must not reuse generic assistant text')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'tool_start').length, 1)
-  assert.match(schemaFirstResult.cadenceProgressUpdate || '', /current agent startup performance benchmarks/)
+  assert.match(schemaFirstResult.cadenceProgressUpdate || '', /cold initialization as the main delay/)
 
   const defaultParallelEmitter = makeEmitter()
   const defaultParallelState = createInitialState(false, timeouts)

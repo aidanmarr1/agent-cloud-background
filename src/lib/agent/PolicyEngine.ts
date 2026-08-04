@@ -114,7 +114,7 @@ function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
     type: 'inject_message',
     message: {
       role: 'system',
-      content: stepMsg(state, 'Write one natural, result-first progress update from the completed work in this phase, then put <next_step/> on its own final line. Do not call another tool in this response. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.'),
+      content: stepMsg(state, 'Write one natural, result-first progress update containing the most useful finding, comparison, completed change, verified state, or real blocker from this phase, then put <next_step/> on its own final line. Do not call another tool or merely repeat that pages were searched, opened, or read. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.'),
     },
     continueLoop: true,
   }

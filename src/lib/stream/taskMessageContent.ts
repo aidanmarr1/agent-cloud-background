@@ -1,5 +1,7 @@
 import { normalizeMarkdownForDisplay } from './cleaners'
 
+export const TASK_FINAL_CONTENT_BOUNDARY = '<!--agent-final-content-->'
+
 const FINAL_CONTENT_START_PATTERN =
   /^(?:Done\s*[-:]\s|Task completed\b|\*\*?\s*(?:Summary|Deliverables|Result|Final)\b|#{1,6}\s?|Here(?:'|\u2019)?s\b|Here (?:is|are)\b|Below\b|[-*]\s+|\d+[.)]\s+)/i
 
@@ -117,6 +119,19 @@ export function splitTaskMessageContent(content: string, hasTaskChrome: boolean)
   if (!hasTaskChrome) return { acknowledgment: '', finalContent: normalizeFinalContent(trimmed) }
   if (!trimmed) return { acknowledgment: '', finalContent: '' }
   const normalized = normalizeMarkdownForDisplay(trimmed.replace(/\r\n/g, '\n'))
+
+  // New task completions carry an explicit invisible boundary. Never infer
+  // where a personalized final handoff starts when the model may naturally
+  // begin it with prose such as "The report..." or "Successfully revised...".
+  const explicitBoundary = normalized.indexOf(TASK_FINAL_CONTENT_BOUNDARY)
+  if (explicitBoundary >= 0) {
+    return {
+      acknowledgment: normalized.slice(0, explicitBoundary).replace(/\s+/g, ' ').trim(),
+      finalContent: normalizeFinalContent(
+        normalized.slice(explicitBoundary + TASK_FINAL_CONTENT_BOUNDARY.length),
+      ),
+    }
+  }
 
   const finalStart = findFinalContentStart(normalized)
   if (finalStart === 0) {

@@ -590,8 +590,8 @@ function pauseForPhaseEndNarrationBeforeAutoAdvance(
   contextManager.push({
     role: 'system',
     content: [
-      `${reason}. Write one natural, result-first progress update from the completed work in this phase, then put <next_step/> on its own final line.`,
-      'Do not call another tool in this response. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.',
+      `${reason}. Write one natural, result-first progress update containing the most useful finding, comparison, completed change, verified state, or real blocker from this phase, then put <next_step/> on its own final line.`,
+      'Do not call another tool or merely repeat that pages were searched, opened, or read. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.',
     ].join(' '),
   } as ChatMessageParam)
   return true
@@ -2904,11 +2904,11 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   const alreadyShown = recentNarrationPromptExclusions(state, 8)
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
-    'Every available tool schema includes a required, non-empty progress_update. Write one natural completion update for the exact native tool action in this response; the runtime will display it only after that matching action succeeds.',
-    'Use completed tense, but claim only what successful execution of the supplied action itself proves. A successful navigation may say a named page was opened; a search may say the topic was searched. Never invent a finding, extraction, confirmation, statistic, or source content that the tool has not returned yet. You may mention a concrete finding only when it already appears in New work below.',
-    'Lead with completed work. When the immediate direction is already clear from the active task and mentioning it genuinely improves continuity, you may add one short forward-looking clause or sentence. Decide from context and use it sparingly; vary the phrasing instead of defaulting to a repeated "Next, I will..." template. Never output future-only narration, promise an uncertain result, claim unfinished work is complete, or substitute a broad later-phase plan for the new completed result. Never repeat or paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'progress_update is display-only and post-result. Still complete every normal required tool argument and make the tool call immediately without waiting for a separate narration turn.',
-    newWork.length ? `Previously completed work (the only allowed source of specific findings):\n- ${newWork.join('\n- ')}` : 'No prior finding is available to cite; describe only the successful completion of this exact action.',
+    'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
+    'The visible action pills already say what was searched, opened, read, inspected, or written. Do not repeat those operations or write vague purpose text such as "to expand the evidence base." State what the preceding results established and include a concrete anchor when available. The current tool has not returned yet, so never invent what it will find.',
+    'When the immediate direction genuinely improves continuity, you may add one short forward-looking clause or sentence. Use it sparingly; never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
+    'progress_update is display-only. The runtime will place it after this native action succeeds; still complete every normal required tool argument and make the tool call immediately.',
+    newWork.length ? `New completed work to synthesize (use its outcomes, not its action labels):\n- ${newWork.join('\n- ')}` : 'Use the concrete completed tool-result context already in the conversation. If evidence access failed, state that user-relevant blocker and the alternate evidence route—not that a search or page-open happened.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
 }
@@ -2917,7 +2917,7 @@ function cadenceNarrationActionRetryMessage(reason: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
     'Retry the same active phase now in the ordinary action-selection turn.',
-    'Make exactly one concrete native tool call. Put a genuinely new, non-empty completion sentence for that exact action in progress_update; it will be shown only if the matching tool succeeds.',
+    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate the current tool operation. It will be shown only if the matching tool succeeds.',
     'Do not output ordinary prose, planning, speculation, a future-only action fragment, or narration without a tool call.',
   ].join(' ')
 }

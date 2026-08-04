@@ -77,12 +77,12 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*state\.forceTextNextIteration \|\| state\.exactExtractionGuardPending[\s\S]*!hardWindowOpen/, 'internal text/extraction guards may defer action 3 but must never suppress action-4 narration')
   assert.match(agentLoop, /const cadenceNarrationInMainTurn =[\s\S]*shouldUseNaturalCadenceNarration\(state, this\.options\.messages\)[\s\S]*beginNarrationCadenceAttempt\(state\)/, 'cadence must be armed on the next ordinary action request once three visible actions complete')
   assert.match(agentLoop, /withCadenceProgressUpdateSchemas\([\s\S]*effectiveCadenceNarrationInMainTurn/, 'cadence narration must share the native tool request instead of opening a competing provider call')
-  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*progress_update is display-only[\s\S]*make the tool call/, 'main-turn narration must remain display-only and never replace real work')
+  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*action pills already say what was searched, opened, read, inspected, or written[\s\S]*State what the preceding results established/, 'main-turn narration must synthesize outcomes instead of repeating visible action pills')
   assert.doesNotMatch(agentLoop, /launchNarrationSidecarIfDue|NARRATION_SIDECAR_REQUEST_TIMEOUT_MS|Emitted asynchronous LLM progress narration/, 'cadence must not use a rate-limit-prone narration sidecar')
   assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll[\s\S]*narratedResult\?\.acceptedForExecution === true && !narratedResult\.isError[\s\S]*acceptProgressNarration[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*afterToolId: narratedResult\.tc\.id/, 'model-authored progress must reset cadence and emit only after the matching billed action succeeds')
   assert.match(agentLoop, /retryNarrationCadenceAttemptWithoutNewAction\(state\)/, 'a failed cadence stream must stay due without blocking later work')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'narration must not be seeded with a broad next-plan-phase cue')
-  assert.match(narrationMemory, /runtime holds it until the matching action succeeds[\s\S]*never claim that it contained, confirmed, or yielded a specific finding unless that finding already appears in the completed-work context/, 'native cadence schema must prohibit pre-result claims and bind narration to successful completion')
+  assert.match(narrationMemory, /already-completed actions immediately above this call[\s\S]*never merely announce that something was searched, opened, read, reviewed, inspected/, 'native cadence schema must require findings from preceding completed work rather than action bookkeeping')
   assert.match(dispatcher, /case 'progress_update':[\s\S]*handleProgressUpdate\(event\)/, 'client must route the complete explicit progress event with placement metadata')
   assert.match(dispatcher, /handleProgressUpdate[\s\S]*requireSignal:\s*false[\s\S]*progressUpdateGroupIndex\(event\.stepIndex\)[\s\S]*afterToolId[\s\S]*addNarrationAt\(targetGroupIdx,\s*narrationText,\s*targetPosition\)[\s\S]*reconcileNarrationCadence\(remainingVisibleActions\)/, 'server-accepted progress must render at its captured plan-step and action frontier')
   assert.match(dispatcher, /const safePosition = Math\.max[\s\S]*addGroupNarration\(this\.conversationId,\s*groupIdx,\s*narrationText,\s*safePosition\)/, 'client narration insertion must clamp the captured position before storing it')
@@ -130,13 +130,13 @@ async function assertSourceContracts() {
   assert.match(prompts, /Phase-end narration is allowed and expected/, 'agent prompt must not wait for an extra tool call at phase end')
   assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
   assert.doesNotMatch(agentLoop, /NARRATION_STRUCTURAL_FORMS|Preferred structural form for this update/, 'compact narration must not force a rotating template')
-  assert.match(agentLoop, /Write one natural completion update for the exact native tool action in this response; the runtime will display it only after that matching action succeeds/, 'native narration must be explicitly bound to a successful action result')
-  assert.match(agentLoop, /When the immediate direction is already clear from the active task and mentioning it genuinely improves continuity, you may add one short forward-looking clause or sentence/, 'native narration must let the agent choose a useful immediate transition')
-  assert.match(agentLoop, /Decide from context and use it sparingly/, 'native narration must make a forward-looking clause contextual rather than mandatory')
+  assert.match(agentLoop, /Use it to synthesize the newest useful outcome from the completed actions immediately above this call/, 'native narration must summarize preceding tool outcomes')
+  assert.match(agentLoop, /When the immediate direction genuinely improves continuity, you may add one short forward-looking clause or sentence/, 'native narration must let the agent choose a useful immediate transition')
+  assert.match(agentLoop, /Use it sparingly/, 'native narration must make a forward-looking clause contextual rather than mandatory')
   assert.doesNotMatch(agentLoop, /Never write a future action, plan, promise, command, or a sentence beginning "Next"/, 'native narration must not impose a blanket ban on useful immediate transitions')
-  assert.match(narrationMemory, /You may then add one short forward-looking clause or sentence when the immediate direction is already clear from the active task/, 'tool-schema narration must allow an occasional contextual next direction')
-  assert.match(narrationMemory, /Never let that clause replace the completed result/, 'tool-schema narration must remain truthful and result-first')
-  assert.match(agentLoop, /Never repeat or paraphrase an already-shown update/, 'native narration must reject repetitive cumulative summaries')
+  assert.match(narrationMemory, /You may add one short forward-looking clause only when useful/, 'tool-schema narration must allow an occasional contextual next direction')
+  assert.match(narrationMemory, /never let it replace the concrete result/, 'tool-schema narration must remain truthful and result-first')
+  assert.match(agentLoop, /repeat\/paraphrase an already-shown update/, 'native narration must reject repetitive cumulative summaries')
   assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
   assert.match(taskGroupView, /task-thread-body/, 'task group view must render a subtle timeline body')
   assert.match(taskGroupView, /InlineThinkingIndicator/, 'task group view must show inline thinking while the model is deciding after visible actions')
@@ -303,6 +303,16 @@ export function runNarrationSmoke() {
     reviewProgressNarration(state, 'Read the Anthropic engineering blog; it likely contains implementation details about agent orchestration and tool dispatch.', { requireSignal: false }).status,
     'invalid',
     'a future action fragment must never count as completed-result narration',
+  )
+  assert.equal(
+    reviewProgressNarration(state, 'Searched ScienceDirect for botanical and nutritional details of peppermint to expand the evidence base.', { requireSignal: false }).status,
+    'invalid',
+    'progress narration must not repeat a search action already visible in its action pill',
+  )
+  assert.equal(
+    reviewProgressNarration(state, 'Opened the official peppermint review to gather more evidence.', { requireSignal: false }).status,
+    'invalid',
+    'progress narration must not repeat a page-open action without a finding',
   )
   assert.equal(
     reviewProgressNarration(state, 'The Anthropic engineering blog likely contains implementation details about agent orchestration and fast tool dispatch.', { requireSignal: false }).status,

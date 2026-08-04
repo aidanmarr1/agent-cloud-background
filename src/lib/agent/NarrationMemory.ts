@@ -92,7 +92,7 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
           properties: {
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Write one natural completion update for this exact tool action. The runtime holds it until the matching action succeeds, so use completed tense and claim only what successful execution of the supplied action itself proves. For example, say that a named report was opened or searched for; never claim that it contained, confirmed, or yielded a specific finding unless that finding already appears in the completed-work context. Size it naturally: one sentence for one clear action, two only when an already-established contrast, implication, or immediate direction genuinely helps continuity. Lead with completed work. You may then add one short forward-looking clause or sentence when the immediate direction is already clear from the active task; decide from context, use it sparingly, vary its phrasing, and omit it when the result stands alone. Never let that clause replace the completed result, promise an uncertain outcome, claim unfinished work is complete, or default to a repeated generic "Next, I will..." template. Choose the wording freely without repeating recent claims. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, tool accounting, empty strings, or cumulative-summary paraphrases. This field is display-only and is removed before tool execution.',
+              description: 'Required cadence field. Summarize the newest useful outcome from the already-completed actions immediately above this call: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. The action pills already show searches, page opens, reads, and file operations, so never merely announce that something was searched, opened, read, reviewed, inspected, or done "to expand the evidence base." The runtime places this update only after the matching current action succeeds, but that current action has not returned yet and is not the source of the update. Use only findings already present in the completed-work/tool-result context; never invent what the current action will find. Size it naturally: one sentence for one clear outcome, two when an established contrast or implication helps. You may add one short forward-looking clause only when useful, but never let it replace the concrete result or become a repeated "Next, I will..." template. Choose the wording freely without repeating recent claims. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, tool accounting, empty strings, or cumulative-summary paraphrases. This field is display-only and is removed before tool execution.',
               minLength: 1,
               maxLength: 220,
             },
@@ -287,6 +287,13 @@ function hasNovelNumber(candidate: string, previous: string): boolean {
   return [...candidateNumbers].some(token => !previousNumbers.has(token))
 }
 
+const SOURCE_ACTIVITY_ONLY_LEAD = /^(?:(?:i|the agent)\s+)?(?:searched|opened|read|reviewed|visited|accessed|consulted|checked|examined|inspected|queried|looked up|navigated to|ran (?:a|the) search|completed (?:a|the) (?:targeted )?search)\b/i
+const CONCRETE_OUTCOME_SIGNAL = /\b(?:found|finding|show(?:s|ed)?|report(?:s|ed)?|state(?:s|d)?|describ(?:e|es|ed)|indicat(?:e|es|ed)|reveal(?:s|ed)?|confirm(?:s|ed)?|list(?:s|ed)?|document(?:s|ed)?|identif(?:y|ies|ied)|measure(?:s|d)?|demonstrat(?:e|es|ed)|attribute(?:s|d)?|distinguish(?:es|ed)?|compare(?:s|d)?|verify|verified|blocked|unavailable|inaccessible|failed|returned\s+(?:an?\s+)?(?:error|\d{3})|according to|\$?\d[\d,.]*(?:%|[a-z]+)?)\b/i
+
+function isToolActivityOnlyNarration(text: string): boolean {
+  return SOURCE_ACTIVITY_ONLY_LEAD.test(text) && !CONCRETE_OUTCOME_SIGNAL.test(text)
+}
+
 export function reviewProgressNarration(
   state: Pick<AgentStateData, 'recentNarrations'>,
   content: string,
@@ -300,6 +307,7 @@ export function reviewProgressNarration(
   if (!sanitizedText) return { status: 'invalid', text: null }
   const text = normalizeSingularAgentVoice(sanitizedText)
   if (isFutureActionOnlyNarration(text)) return { status: 'invalid', text: null }
+  if (isToolActivityOnlyNarration(text)) return { status: 'invalid', text: null }
 
   const fingerprint = narrationFingerprint(text)
   for (const previous of state.recentNarrations.slice(-RECENT_NARRATION_LIMIT)) {

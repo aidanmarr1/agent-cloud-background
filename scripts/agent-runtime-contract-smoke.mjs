@@ -640,6 +640,8 @@ async function assertSourceContracts() {
   assert.match(agentMessage, /cleanThinkingTokens\(message\.content\)/, 'rendered assistant messages must clean already-persisted raw tool metadata leaks')
   assert.match(taskMessageContent, /shouldMergeAcknowledgmentParagraph/, 'acknowledgement splitting must merge provider-inserted paragraph breaks')
   assert.match(taskMessageContent, /FINAL_CONTENT_START_PATTERN/, 'acknowledgement splitting must keep final summaries out of the header acknowledgement')
+  assert.match(taskMessageContent, /TASK_FINAL_CONTENT_BOUNDARY/, 'new task completions must carry an explicit invisible acknowledgement/final-handoff boundary')
+  assert.match(eventDispatcher, /TASK_FINAL_CONTENT_BOUNDARY[\s\S]*postToolAnswer/, 'completion assembly must place the explicit boundary before the model handoff')
   assert.match(streamCleaners, /stripDisplayToolArgJsonLeaks/, 'stream cleaners must strip raw JSON display-argument leaks')
   assert.match(streamCleaners, /JSON_CHANNEL_MARKER_PATTERN/, 'stream cleaners must strip provider JSON-channel markers')
   assert.match(eventDispatcher, /purpose:\s*'deliverable'/, 'recovered artifacts must carry deliverable purpose')
@@ -1462,7 +1464,7 @@ async function assertSourceContracts() {
   assert.match(agentConfig, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
   assert.match(agentConfig, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*2/, 'runtime must request model narration on action 3, with action 4 as the retry')
   assert.match(agentConfig, /NARRATION_MAX_VISIBLE_ACTION_GAP\s*=\s*4/, 'accepted late narration must preserve overflow from the 3-4 action window')
-  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*runtime will display it only after that matching action succeeds[\s\S]*Never invent a finding, extraction, confirmation, statistic, or source content/, 'native action narration must be post-result and prohibit speculative findings')
+  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*action pills already say what was searched, opened, read, inspected, or written[\s\S]*The current tool has not returned yet/, 'native narration must summarize preceding results without speculating about the current action')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'native narration must not turn the next plan phase into a Next sentence')
   assert.match(agentLoop, /progress_update is display-only[\s\S]*make the tool call/, 'overdue narration must remain attached to real work instead of replacing it')
   assert.match(policyEngine, /!isLastStep && state\.browserTaskCompleted[\s\S]*?advanceStep\(state,\s*finding\)/, 'browser completion evidence must advance before no-tool browser blocking')
@@ -1879,6 +1881,20 @@ export async function runLedgerSmoke() {
   assert.equal(
     splitCompleteAck.finalContent,
     'ChatGPT in 2026 has a different product lineup and a broader enterprise footprint.',
+  )
+  const splitExplicitPeppermintHandoff = splitTaskMessageContent(
+    "I will research peppermint tea and compile a clear summary.\\n\\n<!--agent-final-content-->\\n\\nThe research report on peppermint tea has been successfully compiled and saved to **deliverables/peppermint_tea_research_report.md**.",
+    true,
+  )
+  assert.equal(
+    splitExplicitPeppermintHandoff.acknowledgment,
+    'I will research peppermint tea and compile a clear summary.',
+    'the opening acknowledgement must remain fixed even when the final handoff begins with ordinary prose',
+  )
+  assert.equal(
+    splitExplicitPeppermintHandoff.finalContent,
+    'The research report on peppermint tea has been successfully compiled and saved to **deliverables/peppermint_tea_research_report.md**.',
+    'the personalized final handoff must render below task history with its Markdown preserved',
   )
   const splitFragmentedAck = splitTaskMessageContent(
     "I will\\n\\nresearch Manus AI pricing strategy and explain the strategic rationale.\\n\\nTask completed.",

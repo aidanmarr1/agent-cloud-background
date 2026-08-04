@@ -29,7 +29,7 @@ import { NarrationBuffer } from './narrationBuffer'
 import { mapToolResultToPanel, isBrowserTool } from './panelMapper'
 import { WebIdeHandler } from './webIdeIntegration'
 import { BatchScheduler } from './batchScheduler'
-import { extractTaskAcknowledgment, splitTaskMessageContent } from '@/lib/stream/taskMessageContent'
+import { extractTaskAcknowledgment, splitTaskMessageContent, TASK_FINAL_CONTENT_BOUNDARY } from '@/lib/stream/taskMessageContent'
 import { userErrorMessage } from '@/lib/errorMessages'
 
 const MAX_TERMINAL_STDOUT = 50_000
@@ -1534,9 +1534,13 @@ export class EventDispatcher {
       // generated handoff only as a fallback for file-deliverable tasks.
       let finalContent = ack
       if (postToolAnswer && postToolAnswer !== ack && !suppressDuplicateReportText) {
-        finalContent = ack ? `${ack}\n\n${postToolAnswer}` : postToolAnswer
+        finalContent = ack
+          ? `${ack}\n\n${TASK_FINAL_CONTENT_BOUNDARY}\n\n${postToolAnswer}`
+          : postToolAnswer
       } else if (summary) {
-        finalContent = ack ? `${ack}\n\n${summary}` : summary
+        finalContent = ack
+          ? `${ack}\n\n${TASK_FINAL_CONTENT_BOUNDARY}\n\n${summary}`
+          : summary
       }
       const cleanedExistingContent = normalizeMarkdownForDisplay(cleanThinkingTags(currentContent)).trim()
       if (finalContent.trim()) {
