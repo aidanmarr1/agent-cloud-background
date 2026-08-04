@@ -697,14 +697,14 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /sentences\.length < 1 \|\| sentences\.length > \d+/, 'startup acknowledgements must not enforce a mechanical sentence count')
   assert.match(prompts, /one natural, very brief direct paragraph, roughly 8-48 words[\s\S]*do not enforce or mention a sentence count/, 'planner prompt must request a natural very brief acknowledgement without a sentence cap')
   assert.doesNotMatch(chatRoute, /words\.length < 10|sanitizeStartupAcknowledgement|startupAcknowledgementIsUsable/, 'route startup acknowledgement sanitizer must not return because worker-owned ack is the only startup ack path')
-  assert.match(planManager, /PLANNER_CONTROL_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'planner JSON control calls must use Qwen’s lowest configured reasoning')
-  assert.match(planManager, /PLANNER_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'startup acknowledgement must use Qwen’s lowest configured reasoning')
+  assert.match(planManager, /PLANNER_CONTROL_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'planner JSON control calls must use Gemini’s lowest supported reasoning')
+  assert.match(planManager, /PLANNER_ACK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'startup acknowledgement must use Gemini’s lowest supported reasoning')
   assert.match(planManager, /reasoning:\s*PLANNER_ACK_REASONING/, 'planner startup acknowledgement must use the acknowledgement-specific reasoning setting')
   assert.match(planManager, /suppressFurtherAcknowledgementDeltas = true[\s\S]*settleAcknowledgementDisplay\(false\)/, 'startup acknowledgement delays must not become fatal planner quality failures')
   assert.ok((planManager.match(/reasoning:\s*PLANNER_CONTROL_REASONING/g) || []).length >= 4, 'initial plan, repair, and replan calls should use planner control reasoning')
   assert.match(agentLoop, /const maxNormalOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'normal substantive turns must receive the provider\'s full completion budget')
   assert.match(agentLoop, /const maxBuildOutputTokens = MODEL_MAX_COMPLETION_TOKENS[\s\S]*const maxDeliverableOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'build, deliverable, and deadline turns must receive the provider\'s full completion budget')
-  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 868_928[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 131_072[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Qwen3.8 Max must use its published context and completion capacity instead of an eight-message cap')
+  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 983_040[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 65_536[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Gemini 3.5 Flash Lite must use its published context and completion capacity instead of an eight-message cap')
   const attemptPlanCallContract = planManager.match(/private async attemptPlanCall[\s\S]*?\n  \/\*\*/)?.[0] || ''
   assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must exhaust model repair before fallback')
   assert.match(planManager, /PLANNER_QUALITY_REPAIR_ATTEMPTS = 1/, 'planner repair must stay bounded so startup does not wait behind repeated repair loops')
@@ -842,8 +842,8 @@ async function assertSourceContracts() {
   assert.doesNotMatch(llm, /process\.env\.OPENROUTER_REASONING_EFFORT|process\.env\.OPENROUTER_REASONING_EXCLUDE/, 'stale environment variables must not raise reasoning above the pinned lowest mode')
   assert.match(llm, /getAssistantApiKey[\s\S]*trimmedEnv\(process\.env\.OPENROUTER_API_KEY\)/, 'provider credentials must be trimmed before request headers are built')
   assert.doesNotMatch(llm, /process\.env\.DEEPSEEK_API_KEY|api\.deepseek\.com/, 'active provider runtime must not retain a DeepSeek credential or endpoint')
-  assert.match(llm, /reasoning:\s*\{[\s\S]*effort:\s*'minimal'[\s\S]*exclude:\s*true/, 'every OpenRouter call must use Qwen’s lowest configured reasoning and exclude internal traces')
-  assert.match(llm, /providerCompatibleToolChoice[\s\S]*toolChoice === 'required'[\s\S]*return 'auto'/, 'Qwen3.8 Max must map unsupported forced tool choices to its supported automatic tool mode')
+  assert.match(llm, /reasoning:\s*\{[\s\S]*effort:\s*'minimal'[\s\S]*exclude:\s*true/, 'every OpenRouter call must use Gemini’s lowest supported reasoning and exclude internal traces')
+  assert.doesNotMatch(llm, /providerCompatibleToolChoice/, 'Gemini must preserve runtime-selected required or named tool choices')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
   assert.doesNotMatch(llm, /provider:\s*exactOpenRouterProviderRoute\(\)/, 'OpenRouter calls must not override balanced provider routing')
   assert.match(llm, /estimateUsageCost/, 'OpenRouter token usage must be normalized into billable provider cost')
@@ -905,7 +905,7 @@ async function assertSourceContracts() {
   assert.match(searchResults, /title\?: string/, 'search results must accept the active panel title for query context')
   assert.match(uiStore, /setComputerPanelActiveItemId/, 'UI store must expose active computer item focus')
   assert.match(policyEngine, /acceptProgressNarration/, 'backend policy must use centralized narration acceptance')
-  assert.match(policyEngine, /Narration is observational UI feedback, never a phase transition gate/, 'narration must not block useful agent work')
+  assert.match(policyEngine, /needsPhaseNarrationBeforeAdvance\(state\) && state\.stepToolCallCount > 0/, 'completed short phases must receive their one missing model-authored progress update')
   assert.doesNotMatch(policyEngine, /rewriteInvalidForcedNarrationAction|forcedNarrationBeforeToolAction/, 'invalid or duplicate narration must not enter repair loops')
   assert.match(eventDispatcher, /applyServerCreditEvent\(entry\)/, 'client store must apply server credit events for visible balance updates')
   assert.match(agentLoop, /`attempt:\$\{creditAttempt\}:tokens:\$\{state\.iterations\}`/, 'agent sessions must charge tokens per worker attempt and iteration for immediate credit cutoff')
@@ -1394,7 +1394,7 @@ async function assertSourceContracts() {
   assert.match(agentState, /state\.stepFailureCount = 0/, 'step advancement must reset per-phase failure counts so blocked sources do not poison later phases')
   assert.doesNotMatch(policyEngine, /state\.stepLoopDetections = 1/, 'research loop recovery must not reset the per-step loop escalation and spin indefinitely')
   assert.match(agentLoop, /loopRecoveryToolForState[\s\S]*suppressed === 'web_search'[\s\S]*read_document[\s\S]*browser_navigate[\s\S]*return narrowed/, 'research loop recovery must expose alternate source-opening routes instead of boxing the agent into the same slow pattern')
-  assert.match(policyEngine, /Narration is observational UI feedback, never a phase transition gate[\s\S]*return false/, 'progress narration must not become a blocking research-loop transition')
+  assert.match(policyEngine, /A short phase can complete before the ordinary action-three window opens[\s\S]*needsPhaseNarrationBeforeAdvance/, 'research phase transitions must close a short phase with one genuine model-authored update')
   assert.match(policyEngine, /repeatedIncompleteResearchNoTool[\s\S]*shouldAdvanceResearchAtBudgetBoundary\(state,\s*researchDepth\)[\s\S]*Advanced from repeated text-only research/, 'repeated text-only research must advance with recorded evidence gaps once the phase has enough evidence')
   assert.match(agentConfig, /MIN_RESEARCH_CALLS_BY_COMPLEXITY = \{ 1: 4, 2: 10, 3: 18 \}/, 'research evidence thresholds must stay above shallow three-action phases while keeping quick tasks light')
   assert.match(agentConfig, /MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = \{ 1: 2, 2: 6, 3: 8 \}/, 'substantive research phases must require source diversity without overcharging quick tasks')
@@ -1468,7 +1468,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /!isLastStep && state\.browserTaskCompleted[\s\S]*?advanceStep\(state,\s*finding\)/, 'browser completion evidence must advance before no-tool browser blocking')
   assert.match(policyEngine, /checkNarrationNudge[\s\S]*acceptProgressNarration[\s\S]*Policy never emits a narration-only recovery turn[\s\S]*return null/, 'valid narration must be accepted without turning into a text-only recovery loop')
   assert.match(agentState, /phaseEndNarrationPending/, 'state must remember when a forced narration turn is specifically a phase-end transition')
-  assert.match(agentLoop, /Narration is opportunistic cadence, never a phase transition gate[\s\S]*return false/, 'phase auto-advance must never wait on narration')
+  assert.match(agentLoop, /shouldPauseForPhaseEndNarrationBeforeAutoAdvance[\s\S]*needsPhaseNarrationBeforeAdvance\(state\) && state\.stepToolCallCount > 0/, 'phase auto-advance must request one compact update when the normal cadence did not fire')
   assert.match(agentLoop, /Skipped narration-only turn after model-start timeout; continuing task work/, 'narration model-start timeouts must not trap the task in another narration-only turn')
   assert.doesNotMatch(agentLoop, /if \(state\.phaseEndNarrationPending\) \{\s*markPhaseNarrationEmitted\(state\)/, 'phase-end narration timeouts must not fake an emitted narration')
   assert.match(agentLoop, /const cadenceNarrationInMainTurn =[\s\S]*shouldUseNaturalCadenceNarration\(state, this\.options\.messages\)[\s\S]*beginNarrationCadenceAttempt\(state\)/, 'cadence narration must arm on the next ordinary action request')
@@ -1504,8 +1504,8 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /A cache hit replays evidence already counted[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = tc\.name[\s\S]*state\.stepLoopDetections \+= 1/, 'a cached research replay must immediately suppress the repeated route so the next paid turn can select alternate evidence')
   assert.match(toolPipeline, /if \(isError\) \{[\s\S]*?state\.stepFailureCount\+\+[\s\S]*?releaseSearchAfterDistinctSourceFailures\([\s\S]*?trackFailure\(state, tc\.name/, 'real tool failures must feed distinct-target alternate-route recovery instead of leaving research source-locked')
   assert.match(toolPipeline, /tc\.name !== state\.suppressedResearchToolName[\s\S]*RESEARCH_TOOLS\.has\(tc\.name\)[\s\S]*state\.suppressedResearchToolName = null/, 'successful different research tools must clear temporary loop suppression')
-  assert.match(agentLoop, /MINIMAL_THINKING_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'agent control turns must use Qwen’s lowest configured reasoning mode')
-  assert.match(agentLoop, /TASK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'Qwen action turns must use the lowest configured reasoning so required tools remain compatible')
+  assert.match(agentLoop, /MINIMAL_THINKING_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'agent control turns must use Gemini’s lowest supported reasoning mode')
+  assert.match(agentLoop, /TASK_REASONING = \{ effort: 'minimal' as const, exclude: true \}/, 'Gemini action turns must use the lowest supported reasoning')
   assert.match(agentLoop, /shouldIncludeTemporalContextForTurn/, 'agent turns should gate temporal context by task type and temporal wording')
   assert.match(agentLoop, /if \(state\.forceTextNextIteration\) return false/, 'forced narration-only turns should not pay for temporal context')
   assert.match(agentLoop, /includeTemporalContext:\s*shouldIncludeTemporalContextForTurn\(state\)/, 'streaming model calls should not include temporal context by default')
@@ -2434,11 +2434,11 @@ export async function runLedgerSmoke() {
     true,
     30,
   )
-  assert.equal(phaseAdvanceWithoutNarrationState.currentStepIdx, 1, 'phase advancement must not wait for narration')
-  assert.equal(phaseAdvanceWithoutNarrationState.forceTextNextIteration, false, 'phase advancement must not enter a narration-only mode')
+  assert.equal(phaseAdvanceWithoutNarrationState.currentStepIdx, 0, 'a completed phase must wait for its missing model-authored narration')
+  assert.equal(phaseAdvanceWithoutNarrationState.forceTextNextIteration, true, 'a short completed phase must enter the compact narration lane')
   assert.ok(
-    phaseAdvanceWithoutNarrationActions.some((action) => action.type === 'step_advance'),
-    'phase advancement should continue while narration is handled asynchronously',
+    phaseAdvanceWithoutNarrationActions.some((action) => action.type === 'inject_message' && action.message?.content?.includes('result-first progress update')),
+    'phase completion should request its one missing progress update before advancing',
   )
 
   const stalledResearchLoopState = createInitialState(false, timeouts)

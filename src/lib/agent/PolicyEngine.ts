@@ -1,4 +1,4 @@
-import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, isCurrentSynthesisStep, stepOpenedSourceDomains } from './AgentState'
+import { AgentStateData, BROWSER_INTERACTION_TOOLS, detectToolCallLoop, detectClickOscillation, advanceStep, getFailureDiagnosis, isToolDisabled, currentStepText, isConcreteBuildStep, isResearchStepText, isCurrentSynthesisStep, stepOpenedSourceDomains, needsPhaseNarrationBeforeAdvance } from './AgentState'
 import { isAtomicStep } from './PlanManager'
 import { buildStepMessage } from './guards'
 import {
@@ -93,19 +93,30 @@ function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent 
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
 
   if (assistantContent.trim()) {
-    acceptProgressNarration(state, assistantContent, {
+    const accepted = acceptProgressNarration(state, assistantContent, {
       requireSignal: false,
       clearPhaseEndPending: true,
+      resetCadence: true,
     })
+    if (accepted.status === 'accepted') return false
   }
-  // Narration is observational UI feedback, never a phase transition gate.
-  return false
+  // A short phase can complete before the ordinary action-three window opens.
+  // Give it one compact model-authored result update before advancing so every
+  // phase is represented in the task stream. Empty phases do not fabricate one.
+  return needsPhaseNarrationBeforeAdvance(state) && state.stepToolCallCount > 0
 }
 
 function phaseEndNarrationAction(state: AgentStateData): PolicyAction {
-  deferNarrationCadenceAttempt(state)
+  state.phaseEndNarrationPending = true
+  state.forceTextNextIteration = true
+  state.forcedNarrationRepairAttempts = 0
   return {
-    type: 'continue_loop',
+    type: 'inject_message',
+    message: {
+      role: 'system',
+      content: stepMsg(state, 'Write one natural, result-first progress update from the completed work in this phase, then put <next_step/> on its own final line. Do not call another tool in this response. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.'),
+    },
+    continueLoop: true,
   }
 }
 

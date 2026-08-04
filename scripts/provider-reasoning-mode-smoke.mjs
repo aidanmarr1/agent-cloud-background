@@ -19,7 +19,7 @@ assert.match(
 assert.doesNotMatch(
   llmSource,
   /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
-  'Qwen should retain resilient OpenRouter balanced provider routing',
+  'Gemini should retain resilient OpenRouter balanced provider routing',
 )
 assert.doesNotMatch(
   llmSource,
@@ -143,7 +143,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'qwen/qwen3.8-max')
+    assert.equal(request.body.model, 'google/gemini-3.5-flash-lite')
     assert.equal('models' in request.body, false)
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
@@ -151,7 +151,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     assert.equal('reasoning_effort' in request.body, false)
   }
   assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
-  assert.equal(requests[0].body.tool_choice, 'auto')
+  assert.equal(requests[0].body.tool_choice, 'required')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every attached modality.' },
@@ -173,7 +173,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
       { role: 'assistant', content: 'I have gathered the first result.' },
       { role: 'system', content: 'Continue with the next concrete action.' },
     ],
-    'Qwen histories must preserve the exact task context without a synthetic provider workaround turn',
+    'Gemini histories must preserve the exact task context without a synthetic provider workaround turn',
   )
   assert.equal(
     requests[3].body.messages.some(message =>
@@ -183,7 +183,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Qwen3.8 Max balanced provider and lowest reasoning smoke test passed')
+  console.log('Gemini 3.5 Flash Lite balanced provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

@@ -1,14 +1,14 @@
-// The assistant is pinned to Qwen3.8 Max. The plain model slug keeps
+// The assistant is pinned to Gemini 3.5 Flash Lite. The plain model slug keeps
 // OpenRouter's balanced price-and-speed routing instead of forcing one host.
-export const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3.8-max'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.5-flash-lite'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 2.00,
-  cacheHitInputUsdPer1M: 0.25,
-  outputUsdPer1M: 6.00,
-  internalReasoningUsdPer1M: 6.00,
-  // The current Alibaba endpoint publishes one rate across the full context
+  inputUsdPer1M: 0.30,
+  cacheHitInputUsdPer1M: 0.03,
+  outputUsdPer1M: 2.50,
+  internalReasoningUsdPer1M: 2.50,
+  // The current Google endpoint publishes one rate across the full context
   // window, so there are no prompt-length price overrides to apply.
   contextPriceTiers: [] as Array<{
     minPromptTokens: number
@@ -17,12 +17,12 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 256_000,
-  longContextInputUsdPer1M: 2.00,
-  longContextCacheHitInputUsdPer1M: 0.25,
-  longContextOutputUsdPer1M: 6.00,
-  contextTokens: 1_000_000,
-  maxCompletionTokens: 131_072,
-  source: 'OpenRouter (Qwen)',
+  longContextInputUsdPer1M: 0.30,
+  longContextCacheHitInputUsdPer1M: 0.03,
+  longContextOutputUsdPer1M: 2.50,
+  contextTokens: 1_048_576,
+  maxCompletionTokens: 65_536,
+  source: 'OpenRouter (Google)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

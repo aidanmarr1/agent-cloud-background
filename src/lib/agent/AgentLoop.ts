@@ -34,6 +34,7 @@ import {
   isCurrentSynthesisStep,
   isResearchStepText,
   stepOpenedSourceDomains,
+  needsPhaseNarrationBeforeAdvance,
 } from './AgentState'
 import {
   acceptProgressNarration,
@@ -566,14 +567,14 @@ function shouldPauseForPhaseEndNarrationBeforeAutoAdvance(
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
 
   if (assistantContent.trim()) {
-    acceptProgressNarration(state, assistantContent, {
+    const accepted = acceptProgressNarration(state, assistantContent, {
       requireSignal: false,
       clearPhaseEndPending: true,
+      resetCadence: true,
     })
+    if (accepted.status === 'accepted') return false
   }
-  // Narration is opportunistic cadence, never a phase transition gate. A phase
-  // with enough evidence must advance even if narration is slow or unusable.
-  return false
+  return needsPhaseNarrationBeforeAdvance(state) && state.stepToolCallCount > 0
 }
 
 function pauseForPhaseEndNarrationBeforeAutoAdvance(
@@ -582,10 +583,18 @@ function pauseForPhaseEndNarrationBeforeAutoAdvance(
   reason: string,
   assistantContent = '',
 ): boolean {
-  void contextManager
-  void reason
-  shouldPauseForPhaseEndNarrationBeforeAutoAdvance(state, assistantContent)
-  return false
+  if (!shouldPauseForPhaseEndNarrationBeforeAutoAdvance(state, assistantContent)) return false
+  state.phaseEndNarrationPending = true
+  state.forceTextNextIteration = true
+  state.forcedNarrationRepairAttempts = 0
+  contextManager.push({
+    role: 'system',
+    content: [
+      `${reason}. Write one natural, result-first progress update from the completed work in this phase, then put <next_step/> on its own final line.`,
+      'Do not call another tool in this response. Let the evidence determine whether this is one sentence, two sentences, or a brief paragraph; do not use a stock template.',
+    ].join(' '),
+  } as ChatMessageParam)
+  return true
 }
 
 function liveDirectiveContextMessage(directives: LiveDirective[]): string {

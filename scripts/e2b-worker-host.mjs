@@ -64,7 +64,7 @@ function workerEnvs(workerId) {
     OPENROUTER_API_KEY: requireEnv('OPENROUTER_API_KEY', 'task LLM calls'),
     SERPER_API_KEY: requireEnv('SERPER_API_KEY', 'Serper web and image search'),
     SERPER_BASE_URL: envOrDefault('SERPER_BASE_URL', 'https://google.serper.dev'),
-    OPENROUTER_MODEL: 'qwen/qwen3.8-max',
+    OPENROUTER_MODEL: 'google/gemini-3.5-flash-lite',
     OPENROUTER_REASONING_EFFORT: 'minimal',
     OPENROUTER_REASONING_EXCLUDE: 'true',
     AGENT_STORAGE_DRIVER: 'turso',

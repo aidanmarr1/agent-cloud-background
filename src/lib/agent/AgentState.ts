@@ -714,6 +714,12 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.phaseNarrationEmittedThisStep = false
   state.phaseEndNarrationPending = false
   state.forcedNarrationRepairAttempts = 0
+  // Narration cadence belongs to the active phase. Never inherit a partly
+  // consumed 3-4 action window from the phase that just completed.
+  state.visibleToolActionsSinceLastNarration = 0
+  state.narrationNextAttemptAt = NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS
+  state.narrationCadenceInFlight = false
+  state.narrationWorkLogFrontier = state.workLog.at(-1) || state.narrationWorkLogFrontier
   state.stepToolTypeCounts = new Map()  // Rate limit counters reset per step
   state.iterationNewFactCounts = []     // Diminishing returns resets per step
   state.diminishingReturnsNudged = false

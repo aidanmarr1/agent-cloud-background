@@ -54,8 +54,8 @@ async function assertSourceContracts() {
   assert.match(computerPanel, /computerPanelActiveItemId/, 'computer panel must follow the explicit active item pointer')
   assert.match(uiStore, /setComputerPanelActiveItemId/, 'UI store must expose the active computer item pointer')
   assert.match(policyEngine, /acceptProgressNarration/, 'backend policy must use centralized narration acceptance')
-  assert.match(policyEngine, /Narration is observational UI feedback, never a phase transition gate/, 'phase transitions must fail open when narration is absent')
-  assert.doesNotMatch(policyEngine, /NARRATION CADENCE RECOVERY|NARRATION CADENCE MISSED|PHASE-END NARRATION REQUIRED/, 'policy must not create narration-only recovery turns')
+  assert.match(policyEngine, /needsPhaseNarrationBeforeAdvance\(state\) && state\.stepToolCallCount > 0/, 'every completed phase with real visible work must receive model-authored narration')
+  assert.match(policyEngine, /state\.phaseEndNarrationPending = true[\s\S]*state\.forceTextNextIteration = true/, 'short phases must schedule a compact phase-end narration turn')
   assert.doesNotMatch(policyEngine, /rewriteInvalidForcedNarrationAction|forcedNarrationBeforeToolAction/, 'invalid or duplicate narration must not enter repair loops')
   assert.match(narrationMemory, /reviewProgressNarration/, 'narration acceptance must validate novelty against recent updates')
   assert.match(narrationMemory, /narrationSimilarity/, 'narration acceptance must reject close paraphrases, not only exact strings')
@@ -69,6 +69,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /put <next_step\/> on its own final line/, 'compact phase-end narration must include the next_step marker instruction')
   assert.match(agentState, /phaseNarrationEmittedThisStep: boolean/, 'agent state must track whether the active phase has an accepted LLM narration')
   assert.match(agentState, /needsPhaseNarrationBeforeAdvance/, 'agent state must expose the per-phase narration invariant')
+  assert.match(agentState, /advanceStep[\s\S]*visibleToolActionsSinceLastNarration = 0[\s\S]*narrationNextAttemptAt = NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS[\s\S]*narrationCadenceInFlight = false/, 'each phase must begin with a fresh independent 3-4 action narration window')
   assert.match(policyEngine, /function hasStalledResearchEvidence/, 'research narration cadence must not turn same-source loops into endless status turns')
   assert.match(policyEngine, /advanceStalledResearchWithGap/, 'stalled research with real evidence must move on with a recorded gap')
   assert.doesNotMatch(agentState, /tool === 'browser_screenshot' \|\| tool === 'browser_get_content'/, 'browser_get_content must not be exempt from loop detection')
@@ -156,7 +157,7 @@ async function assertNarrationRuntime() {
 import assert from 'node:assert/strict'
 import { cleanThinkingTags, sanitizeNarrationText, stripNarrationArtifacts, stripToolActionNarration } from ${JSON.stringify(join(root, 'src/lib/stream/cleaners.ts'))}
 import { strictActionLabelFromArgs } from ${JSON.stringify(join(root, 'src/lib/stream/ActivityDescriber.ts'))}
-import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
+import { advanceStep, createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { acceptProgressNarration, beginNarrationCadenceAttempt, deferNarrationCadenceAttempt, extractCadenceProgressUpdate, finishNarrationCadenceAttempt, narrationStructureSignature, retryNarrationCadenceAfterNoProgress, retryNarrationCadenceAttemptWithoutNewAction, reviewProgressNarration, stripCadenceProgressUpdateFromArguments, visibleNarrationActionHeadroom, withCadenceProgressUpdateSchemas, workLogSinceAcceptedNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
 
 export function runNarrationSmoke() {
@@ -203,6 +204,22 @@ export function runNarrationSmoke() {
   state.currentPlanItems = ['Research', 'Deliver']
   state.workLog.push('[1] Confirmed DevRev funding')
   assert.equal(state.narrationNextAttemptAt, 2, 'fresh cadence must arm before action 3 is selected')
+
+  const phaseResetState = createInitialState(false, state.tierTimeouts)
+  phaseResetState.currentPlanItems = ['Research', 'Analyze', 'Deliver']
+  phaseResetState.currentPlanScopes = [null, null, null]
+  phaseResetState.stepToolCallCount = 3
+  phaseResetState.visibleToolActionsSinceLastNarration = 3
+  phaseResetState.narrationNextAttemptAt = 4
+  phaseResetState.narrationCadenceInFlight = true
+  phaseResetState.workLog.push('[1] Finished the research phase')
+  advanceStep(phaseResetState, 'Research evidence gathered')
+  assert.equal(phaseResetState.currentStepIdx, 1)
+  assert.equal(phaseResetState.visibleToolActionsSinceLastNarration, 0, 'a new phase must never inherit completed actions from the prior phase')
+  assert.equal(phaseResetState.narrationNextAttemptAt, 2, 'every phase must arm its own narration request before action 3')
+  assert.equal(phaseResetState.narrationCadenceInFlight, false, 'a new phase must not inherit an in-flight narration attempt')
+  assert.equal(phaseResetState.narrationWorkLogFrontier, phaseResetState.workLog.at(-1), 'new-phase narration must start from the new phase work-log frontier')
+
   state.visibleToolActionsSinceLastNarration = 3
   assert.equal(visibleNarrationActionHeadroom(state), 1)
   assert.equal(beginNarrationCadenceAttempt(state), true)

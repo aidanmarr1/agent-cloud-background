@@ -531,16 +531,6 @@ function providerReasoningPayload(
   }
 }
 
-function providerCompatibleToolChoice(toolChoice: unknown): unknown {
-  // Alibaba's Qwen3.8 Max endpoint requires reasoning and rejects forced
-  // `required`/named tool choices in thinking mode. It still supports native
-  // tools with `auto`, so keep the schemas and let the model select the
-  // instructed action instead of turning an otherwise valid task into a 400.
-  if (toolChoice === 'required') return 'auto'
-  if (toolChoice && typeof toolChoice === 'object') return 'auto'
-  return toolChoice
-}
-
 function withPinnedModel(
   params: ChatCompletionParams,
   stream: boolean,
@@ -566,14 +556,13 @@ function withPinnedModel(
   const contextualMessages = includeTemporalContext === false
     ? messages
     : withCurrentTemporalContext(messages)
-  const compatibleToolChoice = providerCompatibleToolChoice(_toolChoice)
   return {
     ...rest,
     messages: contextualMessages,
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
-    ...(compatibleToolChoice !== undefined ? { tool_choice: compatibleToolChoice } : {}),
+    ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning),
   }

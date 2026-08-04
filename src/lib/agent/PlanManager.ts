@@ -84,7 +84,7 @@ const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
 // Startup control turns should not spend thousands of hidden thinking tokens
-// before a short acknowledgement or plan becomes visible. Qwen3.8 Max
+// before a short acknowledgement or plan becomes visible. Gemini 3.5 Flash Lite
 // requires reasoning and accepts `minimal` as its lowest mode.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
