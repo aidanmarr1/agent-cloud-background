@@ -23,7 +23,7 @@ assert.match(
 )
 assert.match(
   promptsSource,
-  /planning model owns the visible plan's wording, step count, boundaries, and order/i,
+  /planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title/i,
   'planner prompts must explicitly grant model control over the visible plan',
 )
 assert.doesNotMatch(

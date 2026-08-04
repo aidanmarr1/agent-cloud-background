@@ -34,9 +34,9 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: qwen/qwen3.7-flash
+        value: qwen/qwen3.8-max
       - key: OPENROUTER_REASONING_EFFORT
-        value: none
+        value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER
@@ -127,9 +127,9 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: qwen/qwen3.7-flash
+        value: qwen/qwen3.8-max
       - key: OPENROUTER_REASONING_EFFORT
-        value: none
+        value: minimal
       - key: OPENROUTER_REASONING_EXCLUDE
         value: "true"
       - key: AGENT_STORAGE_DRIVER

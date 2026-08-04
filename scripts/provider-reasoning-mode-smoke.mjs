@@ -67,6 +67,15 @@ await llm.createCompletion({
   model: 'stale/client-selected-model',
   models: ['stale/fallback-model'],
   messages: [{ role: 'user', content: 'Acknowledge.' }],
+  tools: [{
+    type: 'function',
+    function: {
+      name: 'probe',
+      description: 'Probe tool compatibility.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+    },
+  }],
+  tool_choice: 'required',
   max_tokens: 256,
 })
 const multimodalParts = [
@@ -134,14 +143,16 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'qwen/qwen3.7-flash')
+    assert.equal(request.body.model, 'qwen/qwen3.8-max')
     assert.equal('models' in request.body, false)
     assert.equal('provider' in request.body, false)
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'none', exclude: true })
+  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.equal(requests[0].body.tool_choice, 'auto')
+  assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
@@ -155,7 +166,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'mp3' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
-  assert.deepEqual(requests[2].body.reasoning, { effort: 'none', exclude: true })
+  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
     requests[3].body.messages.slice(-2),
     [
@@ -172,7 +183,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Qwen3.7 Flash balanced provider and lowest reasoning smoke test passed')
+  console.log('Qwen3.8 Max balanced provider and lowest reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

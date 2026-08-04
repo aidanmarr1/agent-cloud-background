@@ -48,8 +48,8 @@ assert.match(
 )
 assert.match(
   loopSource,
-  /directNavigationRequired[\s\S]*web_search is temporarily unavailable\. Call browser_navigate with that exact URL now/,
-  'direct-navigation recovery must tell the model to open the exact user target',
+  /directNavigationRequired[\s\S]*web_search is temporarily unavailable\.[\s\S]*using read_document or HTTP\/text extraction[\s\S]*browser_navigate when rendered state or interaction matters/,
+  'direct-target recovery must let the model choose extraction or browser navigation',
 )
 assert.match(
   loopSource,

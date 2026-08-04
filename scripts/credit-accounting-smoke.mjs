@@ -30,15 +30,14 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*30/, 'credit policy must preserve margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'qwen\/qwen3\.7-flash'/, 'default model must be Qwen3.7 Flash')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.03/, 'Qwen3.7 Flash base input pricing must match OpenRouter')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.006/, 'Qwen3.7 Flash base cache-read pricing must match OpenRouter')
-  assert.match(modelPricing, /outputUsdPer1M:\s*0\.13/, 'Qwen3.7 Flash base output pricing must match OpenRouter')
-  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*0\.13/, 'Qwen3.7 Flash reasoning pricing must match output pricing')
-  assert.match(modelPricing, /minPromptTokens:\s*32_000[\s\S]*inputUsdPer1M:\s*0\.10[\s\S]*outputUsdPer1M:\s*0\.40/, 'Qwen3.7 Flash 32K pricing override must match OpenRouter')
-  assert.match(modelPricing, /minPromptTokens:\s*256_000[\s\S]*inputUsdPer1M:\s*0\.20[\s\S]*outputUsdPer1M:\s*0\.80/, 'Qwen3.7 Flash 256K pricing override must match OpenRouter')
-  assert.match(modelPricing, /contextTokens:\s*1_000_000/, 'Qwen3.7 Flash context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Qwen3.7 Flash output cap must match OpenRouter')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'qwen\/qwen3\.8-max'/, 'default model must be Qwen3.8 Max')
+  assert.match(modelPricing, /inputUsdPer1M:\s*2\.00/, 'Qwen3.8 Max base input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.25/, 'Qwen3.8 Max base cache-read pricing must match OpenRouter')
+  assert.match(modelPricing, /outputUsdPer1M:\s*6\.00/, 'Qwen3.8 Max base output pricing must match OpenRouter')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*6\.00/, 'Qwen3.8 Max reasoning pricing must match output pricing')
+  assert.match(modelPricing, /contextPriceTiers:\s*\[\]\s*as Array/, 'Qwen3.8 Max must not invent prompt-length price overrides')
+  assert.match(modelPricing, /contextTokens:\s*1_000_000/, 'Qwen3.8 Max context window must match OpenRouter')
+  assert.match(modelPricing, /maxCompletionTokens:\s*131_072/, 'Qwen3.8 Max output cap must match OpenRouter')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0\.30/, 'Serper search pricing must match provider public pricing')
@@ -197,14 +196,14 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.00016) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.1008) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.008) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 1.006) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
     prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
     prompt_cache_miss_tokens: 400_000,
-  }) || 0) - 0.0848) < 1e-12)
+  }) || 0) - 0.831) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

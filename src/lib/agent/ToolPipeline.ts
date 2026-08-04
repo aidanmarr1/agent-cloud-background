@@ -4432,13 +4432,13 @@ export class ToolPipeline {
     }
 
     // If the user supplied an explicit URL/domain, reject search scaffolding
-    // before it becomes visible and let the model author the correct direct
-    // navigation action. Never preserve a search label while executing a
+    // before it becomes visible and let the model choose the correct direct
+    // read or navigation action. Never preserve a search label while executing a
     // different tool behind it.
     const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
     if (directNavigationTarget) {
       const errorMessage = {
-        error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Call browser_navigate with that exact URL now and author a fresh action_label that describes the navigation purpose.`,
+        error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Act on that exact URL now: use read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters. Author a fresh action_label for the route you choose.`,
         // The streamed tool_start was only provisional. Marking this result as
         // superseded makes the client remove the rejected search pill/panel
         // instead of presenting a preflight correction as completed work.

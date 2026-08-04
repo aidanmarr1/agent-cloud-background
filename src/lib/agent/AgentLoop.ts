@@ -257,7 +257,7 @@ function preflightRejectionRecoveryMessage(
     'ACTION ROUTE RECOVERY: the previous model-selected action was rejected before execution, so it produced no new evidence and must not be selected again on this turn.',
     rejectedTools ? `Rejected route: ${rejectedTools}.` : '',
     directNavigationRequired
-      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Call browser_navigate with that exact URL now and use a fresh action label describing the navigation.`
+      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Act on that exact URL now using read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters. Choose the least cumbersome valid route and use a fresh action label.`
       : sourceBalanceRejected
       ? 'A search result set already exists but still needs a usable opened source. The rejected web_search route is temporarily unavailable. Open a different unfailed URL from the Remaining candidate URLs with an available source reader or browser navigation tool. After two distinct source-opening failures, one fresh search route may reopen.'
       : 'Choose one materially different available action that satisfies the active phase and current runtime constraints.',
@@ -326,8 +326,8 @@ const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 // capacity remains available for synthesis, reports, code, and deliverables.
 const FAST_ACTION_MAX_TOKENS = 1_024
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const MINIMAL_THINKING_REASONING = { effort: 'none' as const, exclude: true }
-const TASK_REASONING = { effort: 'none' as const, exclude: true }
+const MINIMAL_THINKING_REASONING = { effort: 'minimal' as const, exclude: true }
+const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {

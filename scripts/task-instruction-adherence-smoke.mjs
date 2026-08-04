@@ -173,7 +173,7 @@ assert.match(
 )
 assert.match(
   prompts,
-  /If the user explicitly requires terminal, HTTP extraction, or another named method, follow that method instead of opening the browser/,
+  /If the user explicitly requires terminal, HTTP extraction, browser use, or another named method, follow that method/,
   'the URL default must yield to the user’s explicit method',
 )
 assert.match(

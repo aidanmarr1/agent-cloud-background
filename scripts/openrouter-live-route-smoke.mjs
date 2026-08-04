@@ -54,7 +54,7 @@ try {
     max_tokens: 64,
   })
 
-  assert.match(String(response.model || ''), /^qwen\/qwen3\.7-flash(?:-\d+)?$/)
+  assert.match(String(response.model || ''), /^qwen\/qwen3\.8-max(?:-\d+)?$/)
   assert.ok(String(response.provider || '').trim(), 'OpenRouter must report the selected balanced-route provider')
   assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Qwen must return the required native tool call')
 
