@@ -85,6 +85,7 @@ export interface AgentStateData {
   phaseEndNarrationPending: boolean
   finalInlineAnswerDelivered: boolean
   finalInlineAnswerRecoveryAttempts: number
+  truncatedFinalResponseRepairAttempts: number
   finalSavedDeliverableRecoveryAttempts: number
   buildNoToolRecoveryAttempts: number
   autonomousRecoveryEscalations: number
@@ -432,6 +433,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     phaseEndNarrationPending: false,
     finalInlineAnswerDelivered: false,
     finalInlineAnswerRecoveryAttempts: 0,
+    truncatedFinalResponseRepairAttempts: 0,
     finalSavedDeliverableRecoveryAttempts: 0,
     buildNoToolRecoveryAttempts: 0,
     autonomousRecoveryEscalations: 0,

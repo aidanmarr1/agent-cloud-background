@@ -41,6 +41,7 @@ export interface StreamResult {
   assistantContent: string
   reasoningContent: string
   toolCalls: Map<number, ToolCallData>
+  finishReason?: string | null
   stepAdvancedThisIteration: boolean
   leakageDetected: boolean
   timedOut: boolean
@@ -72,6 +73,13 @@ export interface StreamToolCallPolicy {
     path: string
     started?: boolean
   }
+}
+
+type StreamingResponseChunk = {
+  choices: Array<{
+    delta?: Record<string, unknown>
+    finish_reason?: string | null
+  }>
 }
 
 // File previews are a live transparency surface, not a completion preview.
@@ -571,7 +579,7 @@ export class StreamProcessor {
   }
 
   async processStream(
-    response: AsyncIterable<{ choices: Array<{ delta?: Record<string, unknown> }> }>,
+    response: AsyncIterable<StreamingResponseChunk>,
     state: AgentStateData,
     cadenceProgressUpdateEnabled = false,
     estimateMissingUsage?: MissingStreamUsageEstimator,
@@ -605,6 +613,7 @@ export class StreamProcessor {
       : 1
     let usage: StreamUsage | null = null
     let usageEstimated = false
+    let finishReason: string | null = null
     let insideThinkBlock = false
     let insideTextModeToolCallBlock = false
     let reasoningPhaseEnded = false
@@ -844,8 +853,8 @@ export class StreamProcessor {
 
     const streamPollMs = Math.max(10, Math.min(this.tierTimeouts.checkIntervalMs, 100))
     const nextStreamChunk = async (
-      iterator: AsyncIterator<{ choices: Array<{ delta?: Record<string, unknown> }> }>,
-    ): Promise<IteratorResult<{ choices: Array<{ delta?: Record<string, unknown> }> }>> => {
+      iterator: AsyncIterator<StreamingResponseChunk>,
+    ): Promise<IteratorResult<StreamingResponseChunk>> => {
       const nextPromise = iterator.next()
       nextPromise.catch(() => {})
 
@@ -918,6 +927,11 @@ export class StreamProcessor {
         if (nextChunk.done) break
         const chunk = nextChunk.value
         lastChunkTime = Date.now()
+
+        const chunkFinishReason = chunk.choices[0]?.finish_reason
+        if (typeof chunkFinishReason === 'string' && chunkFinishReason) {
+          finishReason = chunkFinishReason
+        }
 
         // Capture usage data from final chunk (OpenRouter sends this)
         const chunkAny = chunk as Record<string, unknown>
@@ -1325,6 +1339,7 @@ export class StreamProcessor {
       assistantContent,
       reasoningContent,
       toolCalls,
+      finishReason,
       stepAdvancedThisIteration,
       leakageDetected: false,
       timedOut: streamTimedOut,

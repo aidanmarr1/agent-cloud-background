@@ -9,6 +9,10 @@ const policySource = await readFile(
   new URL('../src/lib/agent/PolicyEngine.ts', import.meta.url),
   'utf8',
 )
+const streamSource = await readFile(
+  new URL('../src/lib/agent/StreamProcessor.ts', import.meta.url),
+  'utf8',
+)
 
 function sourceBlock(start, end) {
   const startIndex = source.indexOf(start)
@@ -49,7 +53,7 @@ const modelEmissionBlock = sourceBlock(
 )
 assert.match(
   modelEmissionBlock,
-  /const rejectedModelEmission\s*=\s*rejectedCompactNarrationEmission\s*\|\|\s*rejectedHandoffEmission\s*\|\|\s*rejectedBuildTextOnlyEmission/,
+  /const rejectedModelEmission\s*=\s*truncatedFinalResponse\s*\|\|\s*rejectedCompactNarrationEmission\s*\|\|\s*rejectedHandoffEmission\s*\|\|\s*rejectedBuildTextOnlyEmission/,
   'narration, handoff, and build-text drift rejection must share one model-emission fence',
 )
 assert.match(
@@ -92,6 +96,32 @@ assert.match(
   timeoutHandoffBlock,
   /shouldAcceptFinalDeliverableHandoff[\s\S]*this\.emitter\.textDelta\(partialContent\)[\s\S]*return 'COMPLETE'/,
   'an accepted timeout partial must be emitted before task completion',
+)
+
+assert.match(
+  source,
+  /FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS/,
+  'final handoffs must use the full model output allowance instead of a legacy summary-sized cap',
+)
+assert.match(
+  source,
+  /truncatedFinalResponse[\s\S]*finishReason === 'length'[\s\S]*rejectedModelEmission[\s\S]*Retrying a provider-truncated final response/,
+  'provider length truncation must be withheld and retried instead of persisted as completion',
+)
+assert.match(
+  source,
+  /MAX_TRUNCATED_FINAL_RESPONSE_REPAIR_ATTEMPTS = 2[\s\S]*truncatedFinalResponseRepairAttempts >=[\s\S]*Exhausted truncated final-response repairs/,
+  'provider truncation repair must be bounded so a faulty provider cannot create an infinite task loop',
+)
+assert.ok(
+  source.includes("if (/^(?:#{1,6}\\s+|[-+*]|\\d+[.)]?)$/.test(lastLine)) return false") &&
+    source.includes("if ((text.match(/```/g) || []).length % 2 !== 0) return false"),
+  'bare list markers and unclosed Markdown must not qualify as a completed handoff',
+)
+assert.match(
+  streamSource,
+  /finish_reason\?: string \| null[\s\S]*finishReason: string \| null[\s\S]*chunkFinishReason[\s\S]*finishReason,/,
+  'the stream processor must retain the provider finish reason for completion validation',
 )
 
 console.log('final deliverable handoff smoke checks passed')

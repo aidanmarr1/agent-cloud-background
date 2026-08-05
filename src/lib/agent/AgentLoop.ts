@@ -1188,6 +1188,7 @@ function shouldCompleteFinalInlineAnswerTurn(
 
 const MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS = 2
 const MAX_FINAL_SAVED_DELIVERABLE_RECOVERY_ATTEMPTS = 2
+const MAX_TRUNCATED_FINAL_RESPONSE_REPAIR_ATTEMPTS = 2
 
 function scheduleFinalInlineAnswerRecovery(
   state: AgentStateData,
@@ -1488,6 +1489,12 @@ function finalDeliverableHandoffLooksUseful(
   const text = content.trim()
   if (text.length < 24) return false
   if (finalDeliverableHandoffHasInvalidForm(text, state)) return false
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const lastLine = lines.at(-1) || ''
+  if (/^(?:#{1,6}\s+|[-+*]|\d+[.)]?)$/.test(lastLine)) return false
+  if (/[,;:\-–—/]$/.test(lastLine)) return false
+  if (/\b(?:and|or|of|the|with|to|for|in|on|at|from|key)$/i.test(lastLine)) return false
+  if ((text.match(/```/g) || []).length % 2 !== 0) return false
   return true
 }
 
@@ -3752,7 +3759,11 @@ const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
 const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
-const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = 420
+// Final handoffs are model-authored task responses, not progress narration.
+// Give them the provider's full output allowance and let the task context and
+// handoff prompt determine their natural length. The former 420-token cap
+// persisted visibly clipped headings and list markers as completed messages.
+const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 6_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 6_000
@@ -5208,6 +5219,13 @@ export class AgentLoop {
               lastStreamResult.toolCalls.size === 0
                 ? lastStreamResult.assistantContent.trim()
                 : null
+            const truncatedFinalResponse =
+              lastStreamResult.finishReason === 'length' &&
+              lastStreamResult.toolCalls.size === 0 &&
+              (
+                !!state.finalDeliverableHandoffPending ||
+                finalInlineAnswerTurn(state, this.options.messages)
+              )
             const compactNarrationReview =
               processedCompactNarrationTurn &&
               lastStreamResult.toolCalls.size === 0
@@ -5222,10 +5240,13 @@ export class AgentLoop {
               compactNarrationReview.status !== 'accepted'
             const rejectedHandoffEmission =
               pendingHandoffText !== null &&
-              !shouldAcceptFinalDeliverableHandoff(
-                pendingHandoffText,
-                state.finalDeliverableHandoffAttempts + 1,
-                state,
+              (
+                truncatedFinalResponse ||
+                !shouldAcceptFinalDeliverableHandoff(
+                  pendingHandoffText,
+                  state.finalDeliverableHandoffAttempts + 1,
+                  state,
+                )
               )
             const rejectedBuildTextOnlyEmission = shouldRejectBuildTextOnlyEmission(
               state,
@@ -5241,6 +5262,7 @@ export class AgentLoop {
               isInitialStandaloneWebsiteCreateTurn(state) &&
               !hasCompleteInitialStandaloneWebsiteCreateCall(lastStreamResult)
             const rejectedModelEmission =
+              truncatedFinalResponse ||
               rejectedCompactNarrationEmission ||
               rejectedHandoffEmission ||
               rejectedBuildTextOnlyEmission ||
@@ -5302,6 +5324,7 @@ export class AgentLoop {
                     : Date.now() - lastStreamResult.contentStreamingStartTime,
                   cadenceProgressViolation: lastStreamResult.cadenceProgressViolation?.code || null,
                   rejectedHandoffEmission,
+                  truncatedFinalResponse,
                   rejectedCompactNarrationEmission,
                   rejectedBuildTextOnlyEmission,
                   rejectedUnsavedFinalDeliverableDraft,
@@ -5351,10 +5374,55 @@ export class AgentLoop {
               break
             }
 
+            if (truncatedFinalResponse) {
+              if (
+                state.truncatedFinalResponseRepairAttempts >=
+                MAX_TRUNCATED_FINAL_RESPONSE_REPAIR_ATTEMPTS
+              ) {
+                state.lastModelErrorForUser =
+                  'The final response repeatedly reached the provider output limit before it could finish.'
+                console.error('[AgentDiagnostics] Exhausted truncated final-response repairs', {
+                  iteration: state.iterations,
+                  step: state.currentStepIdx,
+                  finishReason: lastStreamResult.finishReason,
+                  repairs: state.truncatedFinalResponseRepairAttempts,
+                })
+                phase = 'ERROR'
+                break
+              }
+
+              contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
+              contextManager.push({
+                role: 'system',
+                content: [
+                  'The previous final response reached the provider output limit and was not shown to the user.',
+                  'Rewrite the complete final response from the beginning in a naturally concise form, preserving the important task-specific outcome and any useful attachment guidance.',
+                  'Finish every heading, sentence, list item, and Markdown structure cleanly. Do not call tools or mention this repair.',
+                ].join(' '),
+              } as ChatMessageParam)
+              state.truncatedFinalResponseRepairAttempts += 1
+              if (state.finalDeliverableHandoffPending) {
+                state.finalDeliverableHandoffAttempts += 1
+              } else {
+                state.finalInlineAnswerRecoveryAttempts += 1
+              }
+              state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 1)
+              state.lastIterationEnd = Date.now()
+              console.warn('[AgentDiagnostics] Retrying a provider-truncated final response', {
+                iteration: state.iterations,
+                step: state.currentStepIdx,
+                finishReason: lastStreamResult.finishReason,
+                repair: state.truncatedFinalResponseRepairAttempts,
+              })
+              phase = 'STREAMING'
+              break
+            }
+
             updatePhase(state)
 
             const naturalVerifiedHandoffPath =
               !processedCompactNarrationTurn &&
+              lastStreamResult.finishReason !== 'length' &&
               lastStreamResult.toolCalls.size === 0
                 ? verifiedFinalPhaseNaturalHandoffPath(
                     state,
@@ -5520,6 +5588,7 @@ export class AgentLoop {
 
             if (
               lastStreamResult.toolCalls.size === 0 &&
+              lastStreamResult.finishReason !== 'length' &&
               shouldCompleteFinalInlineAnswerTurn(state, this.options.messages, lastStreamResult.assistantContent)
             ) {
               const stepBeforeComplete = state.currentStepIdx
