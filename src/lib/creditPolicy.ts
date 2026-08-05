@@ -43,7 +43,7 @@ export const TASK_START_CREDITS = 0
 export const ACTIVE_CREDITS_PER_MINUTE = 0
 
 // Public provider rates used to keep in-app credits anchored to real spend.
-// Current default route: Qwen3.7 Flash through OpenRouter balanced routing.
+// Current default route: Gemini 3.6 Flash through OpenRouter balanced routing.
 export const MODEL_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.inputUsdPer1M
 export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens

@@ -19,8 +19,8 @@ function trimmedEnv(value: string | undefined): string | undefined {
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
-export const ASSISTANT_SUPPORTS_FILE_INPUT = false
-export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
+export const ASSISTANT_SUPPORTS_FILE_INPUT = true
+export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -527,39 +527,40 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 function providerReasoningPayload(
   _reasoning: ChatCompletionParams['reasoning'],
   maxOutputTokens: number | undefined,
-  toolChoice: unknown,
+  _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Alibaba's Qwen route rejects `tool_choice: required` and named tool-choice
-  // objects while thinking mode is enabled. Keep forced native actions reliable;
-  // the planner has already reasoned about the work and unconstrained/synthesis
-  // turns retain their adaptive thinking budgets.
-  const forcedToolChoice = toolChoice === 'required' || (
-    !!toolChoice &&
-    typeof toolChoice === 'object'
-  )
-  if (_reasoning?.enabled === false || forcedToolChoice) {
-    return { reasoning: { enabled: false, exclude: true } }
-  }
-
+  // Gemini 3.6 Flash requires reasoning to remain enabled. Use its native
+  // thinking levels so tiny narration/control turns stay fast while synthesis,
+  // report, and build turns retain enough reasoning quality.
+  const requestedEffort = _reasoning?.effort
+  const normalizedEffort: Exclude<ReasoningEffort, 'none' | 'xhigh'> = requestedEffort === 'xhigh'
+    ? 'high'
+    : requestedEffort === 'none'
+      ? 'minimal'
+      : requestedEffort || 'low'
   const requestedBudget = Number.isFinite(Number(_reasoning?.max_tokens))
-    ? Math.max(128, Math.floor(Number(_reasoning?.max_tokens)))
-    : 1_024
+    ? Math.max(1, Math.floor(Number(_reasoning?.max_tokens)))
+    : null
   const outputCeiling = Number.isFinite(Number(maxOutputTokens))
     ? Math.max(1, Math.floor(Number(maxOutputTokens)))
     : null
-  // Qwen's thinking budget shares the response allowance. Tiny control calls
-  // (for example, a 20-token title) should not spend their whole response on
-  // hidden reasoning. Larger calls retain enough visible room for strict JSON,
-  // tool arguments, reports, and code.
-  if (outputCeiling !== null && outputCeiling <= 256) {
-    return { reasoning: { enabled: false, exclude: true } }
-  }
-  const safeBudget = outputCeiling === null
-    ? requestedBudget
-    : Math.min(requestedBudget, Math.max(128, outputCeiling - 128))
+  const budgetEffort: Exclude<ReasoningEffort, 'none' | 'xhigh'> = requestedBudget === null
+    ? normalizedEffort
+    : requestedBudget <= 256
+      ? 'minimal'
+      : requestedBudget <= 1_024
+        ? 'low'
+        : requestedBudget <= 4_096
+          ? 'medium'
+          : 'high'
+  const effort = outputCeiling !== null && outputCeiling <= 256
+    ? 'minimal'
+    : _reasoning?.enabled === false
+      ? 'minimal'
+      : budgetEffort
   return {
     reasoning: {
-      max_tokens: safeBudget,
+      effort,
       exclude: true,
     },
   }

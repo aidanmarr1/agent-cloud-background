@@ -1,34 +1,26 @@
-// The assistant is pinned to Qwen3.7 Flash. The plain model slug keeps
+// The assistant is pinned to Gemini 3.6 Flash. The plain model slug keeps
 // OpenRouter's balanced price-and-speed routing instead of forcing one host.
-export const DEFAULT_OPENROUTER_MODEL = 'qwen/qwen3.7-flash'
+export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.6-flash'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.03,
-  cacheHitInputUsdPer1M: 0.006,
-  outputUsdPer1M: 0.13,
-  internalReasoningUsdPer1M: 0.13,
-  contextPriceTiers: [
-    {
-      minPromptTokens: 32_000,
-      inputUsdPer1M: 0.10,
-      cacheHitInputUsdPer1M: 0.02,
-      outputUsdPer1M: 0.40,
-    },
-    {
-      minPromptTokens: 256_000,
-      inputUsdPer1M: 0.20,
-      cacheHitInputUsdPer1M: 0.04,
-      outputUsdPer1M: 0.80,
-    },
-  ],
-  longContextThresholdTokens: 256_000,
-  longContextInputUsdPer1M: 0.20,
-  longContextCacheHitInputUsdPer1M: 0.04,
-  longContextOutputUsdPer1M: 0.80,
-  contextTokens: 1_000_000,
+  inputUsdPer1M: 1.50,
+  cacheHitInputUsdPer1M: 0.15,
+  outputUsdPer1M: 7.50,
+  internalReasoningUsdPer1M: 7.50,
+  contextPriceTiers: [] as Array<{
+    minPromptTokens: number
+    inputUsdPer1M: number
+    cacheHitInputUsdPer1M: number
+    outputUsdPer1M: number
+  }>,
+  longContextThresholdTokens: 1_048_576,
+  longContextInputUsdPer1M: 1.50,
+  longContextCacheHitInputUsdPer1M: 0.15,
+  longContextOutputUsdPer1M: 7.50,
+  contextTokens: 1_048_576,
   maxCompletionTokens: 65_536,
-  source: 'OpenRouter (Qwen)',
+  source: 'OpenRouter (Google)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

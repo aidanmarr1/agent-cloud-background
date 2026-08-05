@@ -40,7 +40,7 @@ const CLOUD_ENV = [
   { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
-  { name: 'OPENROUTER_MODEL', value: 'qwen/qwen3.7-flash' },
+  { name: 'OPENROUTER_MODEL', value: 'google/gemini-3.6-flash' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },
   { name: 'AGENT_TASK_WORKER_MODE', value: 'external' },
   { name: 'AGENT_TASK_QUEUE_NAME', value: 'production' },

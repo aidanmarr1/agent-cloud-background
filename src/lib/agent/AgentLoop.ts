@@ -328,7 +328,7 @@ const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
 const FAST_SOURCE_ACTION_MAX_TOKENS = 384
 // Ordinary action-selection turns only need enough output for a complete
 // native tool envelope. Reserving the model's full 65k report budget here made
-// Qwen provider scheduling slower without adding useful capability. Full output
+// provider scheduling slower without adding useful capability. Full output
 // capacity remains available for synthesis, reports, code, and deliverables.
 const FAST_ACTION_MAX_TOKENS = 1_024
 // A complete create_website envelope contains the page's full HTML, CSS, and
@@ -338,10 +338,10 @@ const FAST_ACTION_MAX_TOKENS = 1_024
 // while retaining a firm latency/cost boundary.
 const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const PRESENTATION_REASONING = { enabled: false, exclude: true }
-const FAST_ACTION_REASONING = { max_tokens: 192, exclude: true }
-const TASK_REASONING = { max_tokens: 1_024, exclude: true }
-const DEEP_TASK_REASONING = { max_tokens: 2_048, exclude: true }
+const PRESENTATION_REASONING = { effort: 'minimal' as const, exclude: true }
+const FAST_ACTION_REASONING = { effort: 'minimal' as const, exclude: true }
+const TASK_REASONING = { effort: 'low' as const, exclude: true }
+const DEEP_TASK_REASONING = { effort: 'medium' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -1902,7 +1902,7 @@ function tierTimeoutsForIteration(
       // A saved report streams its body inside the native file arguments. The
       // final-write window is therefore a minimum allowance, not a cap. Using
       // Math.min here silently reduced research reports to the generic 25s
-      // strategy timeout, clipping healthy Qwen streams into repeated partial
+      // strategy timeout, clipping healthy model streams into repeated partial
       // create/append recovery turns.
       iterationTimeoutMs: Math.max(state.tierTimeouts.iterationTimeoutMs, FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS),
       inactivityTimeoutMs: Math.max(state.tierTimeouts.inactivityTimeoutMs, FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS),

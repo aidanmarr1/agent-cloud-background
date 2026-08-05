@@ -78,7 +78,7 @@ export async function runSmoke() {
     state,
     false,
     output => estimateConservativeMissingStreamUsage({
-      model: 'qwen/qwen3.7-flash',
+      model: 'google/gemini-3.6-flash',
       requestMessages,
       requestTools,
       assistantContent: output.assistantContent,
