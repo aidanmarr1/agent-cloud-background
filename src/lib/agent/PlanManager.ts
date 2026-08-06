@@ -573,6 +573,7 @@ export class PlanManager {
   private acknowledgementFirstVisibleResolved = false
   private suppressFurtherAcknowledgementDeltas = false
   private acknowledgementUsageError: unknown = null
+  private lastAcknowledgementCandidate = ''
   private plannerDeadlineAtMs = 0
   private plannerAbortController: AbortController | null = null
   private externalSignal?: AbortSignal
@@ -931,6 +932,7 @@ Requirements:
     // greeting variants or a partial clause into the conversation. Planning is
     // already running concurrently, so this adds no extra model round trip.
     const sanitizedAck = sanitizePlannerAck(firstBuffer || ack)
+    this.lastAcknowledgementCandidate = sanitizedAck
     if (isUsablePlannerAck(sanitizedAck, request)) {
       await emitVisible(sanitizedAck)
       console.log('[AgentDiagnostics] Startup acknowledgement first visible text emitted', {
@@ -963,6 +965,44 @@ Requirements:
 
     this.settleAcknowledgementDisplay(false)
     throw new Error(PLANNER_QUALITY_ERROR)
+  }
+
+  private async repairAcknowledgementCandidate(plannerAck: string): Promise<string> {
+    const request = effectiveTaskRequest(this.messages).slice(0, 1200)
+    await this.assertCreditRunway('ack-repair')
+    const response = await createCompletion({
+      model: DEFAULT_MODEL,
+      messages: [
+        {
+          role: 'system' as const,
+          content: `Write one natural, very brief acknowledgement paragraph for Agent.
+Output only the acknowledgement, with standard sentence capitalization and clean punctuation.
+Cover the user's complete request and requested output, including every side of any comparison.
+Say what Agent will actually do, not merely the first phase. Do not end with "next".
+Use plain, specific language. No markdown, bullets, canned opener, refusal, or internal details.`,
+        },
+        {
+          role: 'user' as const,
+          content: [
+            `USER REQUEST:\n${request}`,
+            plannerAck ? `PLANNER DRAFT TO IMPROVE:\n${plannerAck}` : '',
+            this.lastAcknowledgementCandidate
+              ? `EARLY DRAFT TO IMPROVE:\n${this.lastAcknowledgementCandidate}`
+              : '',
+          ].filter(Boolean).join('\n\n'),
+        },
+      ],
+      temperature: 0.2,
+      max_tokens: PLANNER_ACK_MAX_TOKENS,
+      reasoning: PLANNER_ACK_REASONING,
+      includeTemporalContext: false,
+      requestTimeoutMs: PLANNER_ACK_STREAM_TIMEOUT_MS,
+      retryMaxAttempts: 0,
+      abortSignal: this.plannerAbortController?.signal,
+    })
+    await this.recordCompletionUsage(response.usage, 'ack-repair')
+    this.throwIfPlannerAborted()
+    return sanitizePlannerAck(response.choices[0]?.message?.content || '')
   }
 
   private async emitAcknowledgement(ack: string | undefined, taskShape: string): Promise<void> {
@@ -998,6 +1038,28 @@ Requirements:
         new Promise<boolean>(resolve => setTimeout(() => resolve(false), PLANNER_ACK_DISPLAY_WAIT_MS)),
       ])
       if (this.acknowledgementEmitted || emitted) return
+    }
+
+    try {
+      const repaired = await this.repairAcknowledgementCandidate(sanitized)
+      if (isUsablePlannerAck(repaired, effectiveTaskRequest(this.messages))) {
+        this.emitter.textDelta(repaired + '\n\n')
+        this.acknowledgementEmitted = true
+        this.settleAcknowledgementDisplay(true)
+        return
+      }
+      console.warn('[AgentDiagnostics] Model acknowledgement repair was still unusable', {
+        taskShape,
+        length: repaired.length,
+      })
+    } catch (error) {
+      if (error instanceof PlannerUsageRecordingError) throw error
+      if (isBillableUsageError(error)) throw error
+      if (this.plannerWasAborted()) throw error
+      console.warn('[AgentDiagnostics] Model acknowledgement repair failed without blocking task execution', {
+        taskShape,
+        error: sanitizePlannerError(error),
+      })
     }
 
     this.suppressFurtherAcknowledgementDeltas = true
