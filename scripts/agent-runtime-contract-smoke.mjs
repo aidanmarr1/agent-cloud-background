@@ -344,6 +344,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /Do not use a canned generic plan/, 'planner repair prompt must reject canned generic plans')
   assert.match(planManager, /Every title and scope must mention or clearly reflect the user's concrete topic/, 'planner repair prompt must require topic-specific steps')
   assert.match(planManager, /function containsPromptInstructionLeak/, 'planner must detect leaked prompt instruction text in visible acknowledgement and plan labels')
+  assert.match(planManager, /return normalized\.replace\(\/\^\(\\s\*\["'“‘\(\]\*\)\(\[a-z\]\)\/[\s\S]*letter\.toUpperCase\(\)/, 'model-written acknowledgements must retain their wording while normalizing a lowercase opening')
   assert.match(planManager, /accepting model-authored plan instead of blocking startup/, 'planner text quality warnings must not block model-authored plans')
   const enforceMinStepsContract = planManager.match(/private enforceMinSteps[\s\S]*?\n  \}/)?.[0] || ''
   assert.doesNotMatch(enforceMinStepsContract, /PLANNER_QUALITY_ERROR|throw new Error|steps\.length\s*[<>=!]/, 'planner must not veto model-authored step counts or phase shapes')

@@ -454,6 +454,15 @@ export async function POST(request: Request) {
   const useExternalWorker = shouldUseExternalTaskWorker()
   const safeRawMessages = stripPersistedAttachmentBodies(rawMessages)
   const scopedTaskMessages = scopeAgentTaskMessages(safeRawMessages)
+  const conversationStartInput = {
+    userId,
+    conversationId,
+    messages: safeRawMessages,
+    runId: creditRunId,
+    assistantMessageId: validation.data.assistantMessageId,
+    startedAt: postStartedAt,
+    customInstructions,
+  }
 
   // This preparation is read-only: it builds the conversation statement that
   // enqueue/start will later commit atomically with the task row. Begin it as
@@ -462,15 +471,7 @@ export async function POST(request: Request) {
   // them serially. A denied request can never commit the prepared statement.
   const conversationInsertPromise = timedRoutePromise(
     'conversationPreparedMs',
-    prepareConversationForTaskStartInsert({
-      userId,
-      conversationId,
-      messages: safeRawMessages,
-      runId: creditRunId,
-      assistantMessageId: validation.data.assistantMessageId,
-      startedAt: postStartedAt,
-      customInstructions,
-    }),
+    prepareConversationForTaskStartInsert(conversationStartInput),
   )
   // Access/idempotency may return before preparation settles; register a
   // rejection observer now so that read-only speculative work is never an
@@ -680,15 +681,29 @@ export async function POST(request: Request) {
           }, { status: 503 })
         }
       }
-      await enqueueTaskJob({
-        runId: creditRunId,
-        userId,
-        conversationId,
-        payload: queuedTaskPayload,
-        initialEvents,
-        conversationInsert,
-        coordinatorDispatch,
-      })
+      for (let conversationRebaseAttempt = 0; ; conversationRebaseAttempt++) {
+        try {
+          await enqueueTaskJob({
+            runId: creditRunId,
+            userId,
+            conversationId,
+            payload: queuedTaskPayload,
+            initialEvents,
+            conversationInsert,
+            coordinatorDispatch,
+          })
+          break
+        } catch (error) {
+          if (
+            !(error instanceof TaskConversationPersistenceConflictError) ||
+            conversationRebaseAttempt >= 1
+          ) throw error
+          // A history sync or another device may have advanced the row after
+          // speculative preparation. Re-read and merge that canonical body,
+          // then repeat the same atomic job reservation with the same run id.
+          conversationInsert = await prepareConversationForTaskStartInsert(conversationStartInput)
+        }
+      }
     } catch (error) {
       if (error instanceof TaskPreStartCancelledError) {
         return Response.json({
@@ -772,28 +787,39 @@ export async function POST(request: Request) {
     if (request.signal.aborted) {
       return Response.json({ error: 'Request cancelled.', code: 'REQUEST_ABORTED' }, { status: 499 })
     }
-    await startTaskJob({
-      runId: creditRunId,
-      userId,
-      conversationId,
-      acceptsLiveDirectives: !directChat,
-      conversationInsert,
-      runner: (emitter, signal, runContext) => runSharedChatTaskJob({
-        emitter,
-        signal,
-        messages,
-        model,
-        conversationId,
-        customInstructions,
-        startFreshSandbox,
-        startIsolatedTaskSandbox,
-        directChat,
-        userId,
-        creditRunId,
-        registerPreTerminalCleanup: runContext.registerPreTerminalCleanup,
-        registerInflightToolDrain: runContext.registerInflightToolDrain,
-      }),
-    })
+    for (let conversationRebaseAttempt = 0; ; conversationRebaseAttempt++) {
+      try {
+        await startTaskJob({
+          runId: creditRunId,
+          userId,
+          conversationId,
+          acceptsLiveDirectives: !directChat,
+          conversationInsert,
+          runner: (emitter, signal, runContext) => runSharedChatTaskJob({
+            emitter,
+            signal,
+            messages,
+            model,
+            conversationId,
+            customInstructions,
+            startFreshSandbox,
+            startIsolatedTaskSandbox,
+            directChat,
+            userId,
+            creditRunId,
+            registerPreTerminalCleanup: runContext.registerPreTerminalCleanup,
+            registerInflightToolDrain: runContext.registerInflightToolDrain,
+          }),
+        })
+        break
+      } catch (error) {
+        if (
+          !(error instanceof TaskConversationPersistenceConflictError) ||
+          conversationRebaseAttempt >= 1
+        ) throw error
+        conversationInsert = await prepareConversationForTaskStartInsert(conversationStartInput)
+      }
+    }
   } catch (error) {
     if (error instanceof TaskPreStartCancelledError) {
       return Response.json({

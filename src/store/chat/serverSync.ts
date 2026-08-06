@@ -381,6 +381,11 @@ function getChangedConversations(state: ChatStore): Conversation[] {
     .filter((conversation) => (
       !isServerSummaryConversation(conversation) &&
       conversation.serverBodyStale !== true &&
+      // The task-start route commits the optimistic user/assistant pair and
+      // job reservation atomically. A generic history save during that short
+      // window would otherwise rewrite the same row between the route's read
+      // and transaction, causing a harmless new task to fail its CAS check.
+      !conversation.messages.some((message) => !!message.pendingStartRunId) &&
       (
         !knownConversationIds.has(conversation.id) ||
         (lastSavedUpdatedAt.get(conversation.id) ?? -1) !== conversation.updatedAt

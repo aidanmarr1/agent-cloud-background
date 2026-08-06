@@ -89,6 +89,16 @@ assert.match(
   /messages: conversation\.messages\.filter\(\(message\) => !message\.pendingStartRunId\)/,
   'generic sync must omit optimistic task-start messages before acceptance',
 )
+assert.match(
+  serverSync,
+  /function getChangedConversations[\s\S]*!conversation\.messages\.some\(\(message\) => !!message\.pendingStartRunId\)/,
+  'generic history sync must defer the entire conversation while task-start persistence is pending',
+)
+assert.equal(
+  (chatRoute.match(/conversationRebaseAttempt >= 1/g) || []).length,
+  2,
+  'both queued and in-process task starts must transparently rebase one concurrent conversation update',
+)
 assert.doesNotMatch(
   conversations.match(/export function mergeConversationForRevisionConflict[\s\S]*?\n\}/)?.[0] || '',
   /messages\.push\(message\)/,
@@ -206,7 +216,7 @@ assert.match(
 )
 assert.match(
   postRoute,
-  /prepareConversationForTaskStartInsert\(\{[\s\S]*runId: creditRunId,[\s\S]*assistantMessageId: validation\.data\.assistantMessageId/,
+  /const conversationStartInput = \{[\s\S]*runId: creditRunId,[\s\S]*assistantMessageId: validation\.data\.assistantMessageId[\s\S]*prepareConversationForTaskStartInsert\(conversationStartInput\)/,
   'server persistence must preserve the assistant identity supplied with the stable run',
 )
 

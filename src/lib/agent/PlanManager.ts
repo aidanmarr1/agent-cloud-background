@@ -336,10 +336,13 @@ function isPreloadedReadStep(title: string): boolean {
 }
 
 function sanitizePlannerAck(ack: string): string {
-  return ack
+  const normalized = ack
     .replace(/^\s*(?:on it|sure|okay|ok|absolutely|certainly|got it)\s*(?:[-:,.]|—|–)?\s*/i, '')
     .replace(/\s+/g, ' ')
     .trim()
+  return normalized.replace(/^(\s*["'“‘(]*)([a-z])/, (_match, prefix: string, letter: string) => (
+    `${prefix}${letter.toUpperCase()}`
+  ))
 }
 
 function ackWordCount(text: string): number {
@@ -845,6 +848,7 @@ export class PlanManager {
           content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts a ${taskShape} task.
 Requirements:
 - One natural, very brief paragraph, roughly 8-48 words. Do not force or mention a sentence count.
+- Begin with standard sentence capitalization and finish the paragraph cleanly.
 - Use plain words. Avoid fancy, inflated or formal phrasing.
 - Specific to the user's concrete target/topic/artifact and requested output.
 - Say what Agent will actually do for this task and the final answer/artifact shape.

@@ -43,6 +43,11 @@ assert.match(
   /await enqueueTaskJob\(\{[\s\S]*conversationInsert,/,
   'the prepared conversation statement must remain inside the durable enqueue transaction',
 )
+assert.match(
+  post,
+  /conversationRebaseAttempt[\s\S]*TaskConversationPersistenceConflictError[\s\S]*prepareConversationForTaskStartInsert\(conversationStartInput\)/,
+  'a concurrent history update must be rebased without rejecting a harmless task start',
+)
 
 const schema = conversations.match(/export async function ensureConversationSchema\(\): Promise<void> \{[\s\S]*?\n\}/)?.[0] || ''
 assert.match(schema, /getTursoClient\(\)\.executeMultiple\(/, 'idempotent schema DDL must share one sequence round trip')
