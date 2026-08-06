@@ -11,7 +11,10 @@ import {
 } from '@/lib/conversationSerialization'
 
 const CONVERSATION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/
-const MAX_SYNC_CONVERSATIONS = 500
+// The index payload contains metadata only, while full task bodies remain lazy.
+// Keep enough account history for long-lived users to see the same complete
+// list on a new device instead of silently losing older tasks at 500 rows.
+const MAX_SYNC_CONVERSATIONS = 2_000
 const MAX_SYNC_FOLDERS = 100
 const MAX_FOLDER_CHARS = 80
 
@@ -900,6 +903,72 @@ export async function persistRejectedLiveDirectiveOutcomeInConversation(
       originalBody,
     ],
   })
+}
+
+/**
+ * Advances the account-level task record in the same transaction that makes a
+ * terminal task event visible. The originating browser will still persist the
+ * full rendered presentation, but another device can immediately observe that
+ * this task changed and replay its durable event stream without waiting for
+ * that browser to publish a local snapshot.
+ */
+export async function advanceUserConversationForTaskTerminal(
+  transaction: Transaction,
+  userId: string,
+  conversationId: string,
+  completedAt: number,
+): Promise<boolean> {
+  const selected = await transaction.execute({
+    sql: `
+      select body_json, revision, updated_at_ms
+      from conversations
+      where user_id = ? and id = ? and deleted_at_ms is null
+      limit 1
+    `,
+    args: [userId, conversationId],
+  })
+  const originalBody = selected.rows[0]?.body_json
+  if (typeof originalBody !== 'string') return false
+
+  let parsed: Record<string, unknown>
+  try {
+    const value = JSON.parse(originalBody) as unknown
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+    parsed = value as Record<string, unknown>
+  } catch {
+    return false
+  }
+
+  const currentRevision = normalizedServerRevision(selected.rows[0]?.revision)
+  const currentUpdatedAt = Number(selected.rows[0]?.updated_at_ms)
+  const nextUpdatedAt = Math.max(
+    Number.isFinite(currentUpdatedAt) ? currentUpdatedAt + 1 : 0,
+    Number.isFinite(Number(parsed.updatedAt)) ? Number(parsed.updatedAt) + 1 : 0,
+    Math.round(completedAt),
+  )
+  const nextRevision = currentRevision + 1
+  const bodyJson = JSON.stringify({
+    ...parsed,
+    updatedAt: nextUpdatedAt,
+    serverRevision: nextRevision,
+  })
+  const updated = await transaction.execute({
+    sql: `
+      update conversations
+      set body_json = ?, revision = ?, updated_at_ms = ?, updated_at = ?
+      where user_id = ? and id = ? and deleted_at_ms is null and revision = ?
+    `,
+    args: [
+      bodyJson,
+      nextRevision,
+      nextUpdatedAt,
+      new Date(nextUpdatedAt).toISOString(),
+      userId,
+      conversationId,
+      currentRevision,
+    ],
+  })
+  return updated.rowsAffected === 1
 }
 
 export async function prepareUserConversationForTaskStartInsert(

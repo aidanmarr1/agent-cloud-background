@@ -45,7 +45,7 @@ const SAVE_DEBOUNCE_MS = 250
 // Cross-tab history refresh remains immediate on focus/visibility. A slower
 // background safety poll avoids saturating the same remote database connection
 // used by active task leases and event persistence.
-const REFRESH_INTERVAL_MS = 30_000
+const REFRESH_INTERVAL_MS = 5_000
 const REFRESH_THROTTLE_MS = 1_500
 const SYNC_MANAGER_READY_WAIT_MS = 4_000
 const SYNC_MANAGER_READY_POLL_MS = 50
@@ -68,9 +68,11 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 let syncGeneration = 0
 let lastSavedFolders = '[]'
 let saveRetryAttempt = 0
+let serverBaselineEstablished = false
 
 const knownConversationIds = new Set<string>()
 const lastSavedUpdatedAt = new Map<string, number>()
+const pendingDeletedConversationIds = new Set<string>()
 
 function sortConversations(conversations: Conversation[]): Conversation[] {
   return [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)
@@ -301,7 +303,18 @@ function noteServerState(conversations: Conversation[], deletedIds: string[] = [
   for (const id of deletedIds) {
     knownConversationIds.delete(id)
     lastSavedUpdatedAt.delete(id)
+    pendingDeletedConversationIds.delete(id)
   }
+}
+
+export function explicitConversationRemovals(
+  previous: Pick<Conversation, 'id'>[],
+  current: Pick<Conversation, 'id'>[],
+): string[] {
+  const currentIds = new Set(current.map((conversation) => conversation.id))
+  return previous
+    .map((conversation) => conversation.id)
+    .filter((id) => !currentIds.has(id))
 }
 
 async function fetchServerState(): Promise<ServerConversationState> {
@@ -377,8 +390,7 @@ function getChangedConversations(state: ChatStore): Conversation[] {
 }
 
 function getDeletedIds(state: ChatStore): string[] {
-  const currentIds = new Set(state.conversations.map((conversation) => conversation.id))
-  return Array.from(knownConversationIds).filter((id) => !currentIds.has(id))
+  return Array.from(pendingDeletedConversationIds).filter((id) => knownConversationIds.has(id))
 }
 
 function localAssistantHasStrictlyNewerCursor(server: Conversation['messages'][number], local: Conversation['messages'][number]): boolean {
@@ -609,7 +621,7 @@ export function conversationPersistenceVersionsMatch(
 }
 
 async function postSyncNow(): Promise<void> {
-  if (!storeApi || !hydrated) return
+  if (!storeApi || !hydrated || !serverBaselineEstablished) return
   if (saveInFlightPromise) {
     saveQueued = true
     await saveInFlightPromise
@@ -672,6 +684,7 @@ async function postSyncNow(): Promise<void> {
       suppressStoreListener = false
     }
     noteServerState(reconciled, deletedIds)
+    for (const id of deletedIds) pendingDeletedConversationIds.delete(id)
     lastSavedFolders = nextFoldersFingerprint
     if (localAdvanced) scheduleSave(0)
     if (legacyImported) {
@@ -758,6 +771,8 @@ async function refreshFromServer(force = false): Promise<void> {
     const remoteFolders = serverState.folders || []
     if (!isCurrentSync(generation, userId)) return
 
+    const establishedBaselineNow = !serverBaselineEstablished
+    serverBaselineEstablished = true
     noteServerState(remoteConversations, deletedIds)
     lastSavedFolders = foldersFingerprint(remoteFolders)
 
@@ -779,6 +794,10 @@ async function refreshFromServer(force = false): Promise<void> {
     }
     if (foldersFingerprint(api.getState().folders) !== lastSavedFolders) {
       scheduleSave()
+    }
+    if (establishedBaselineNow) {
+      scheduleSave(0)
+      void importLegacyState(userId, generation)
     }
   } catch (error) {
     console.error('[ChatSync] Failed to refresh task history:', error)
@@ -851,6 +870,9 @@ function startListeners(): void {
   unsubscribe = storeApi.subscribe((state, previous) => {
     if (suppressStoreListener || !hydrated) return
     if (state.conversations === previous.conversations && state.folders === previous.folders) return
+    for (const id of explicitConversationRemovals(previous.conversations, state.conversations)) {
+      if (knownConversationIds.has(id)) pendingDeletedConversationIds.add(id)
+    }
     if (
       state.folders === previous.folders &&
       conversationPersistenceVersionsMatch(state.conversations, previous.conversations)
@@ -880,6 +902,7 @@ function stopSync(): void {
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   knownConversationIds.clear()
   lastSavedUpdatedAt.clear()
+  pendingDeletedConversationIds.clear()
   lastSavedFolders = '[]'
   hydrated = false
   suppressStoreListener = false
@@ -890,6 +913,7 @@ function stopSync(): void {
   refreshInFlight = null
   lastRefreshAt = 0
   saveRetryAttempt = 0
+  serverBaselineEstablished = false
 }
 
 export async function initializeChatStoreServerSync(userId: string, api: ChatStoreApi): Promise<void> {
@@ -904,6 +928,7 @@ export async function initializeChatStoreServerSync(userId: string, api: ChatSto
   if (hydrated) return
   const generation = ++syncGeneration
 
+  let hydratedFromServer = false
   try {
     const serverState = await fetchServerState()
     if (!isCurrentSync(generation, userId)) return
@@ -920,6 +945,8 @@ export async function initializeChatStoreServerSync(userId: string, api: ChatSto
     lastSavedUpdatedAt.clear()
     noteServerState(serverConversations, deletedIds)
     lastSavedFolders = foldersFingerprint(serverState.folders || [])
+    serverBaselineEstablished = true
+    hydratedFromServer = true
 
     try {
       suppressStoreListener = true
@@ -936,8 +963,10 @@ export async function initializeChatStoreServerSync(userId: string, api: ChatSto
     hydrated = true
     signalStoreHydrated()
     startListeners()
-    scheduleSave(0)
-    void importLegacyState(userId, generation)
+    if (hydratedFromServer) {
+      scheduleSave(0)
+      void importLegacyState(userId, generation)
+    }
   }
 }
 
@@ -1091,5 +1120,6 @@ export async function clearServerConversations(): Promise<void> {
   }
   knownConversationIds.clear()
   lastSavedUpdatedAt.clear()
+  pendingDeletedConversationIds.clear()
   lastSavedFolders = '[]'
 }

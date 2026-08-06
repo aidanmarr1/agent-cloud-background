@@ -30,14 +30,14 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'google\/gemini-3\.6-flash'/, 'default model must be Gemini 3.6 Flash')
-  assert.match(modelPricing, /inputUsdPer1M:\s*1\.50/, 'Gemini base input pricing must match OpenRouter')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.15/, 'Gemini base cache-read pricing must match OpenRouter')
-  assert.match(modelPricing, /outputUsdPer1M:\s*7\.50/, 'Gemini base output pricing must match OpenRouter')
-  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*7\.50/, 'Gemini reasoning pricing must match output pricing')
-  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'Gemini must not inherit Qwen long-context price tiers')
-  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Gemini context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Gemini output cap must match OpenRouter')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'meta\/muse-spark-1\.2'/, 'default model must be Muse Spark 1.2')
+  assert.match(modelPricing, /inputUsdPer1M:\s*1\.25/, 'Muse base input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.15/, 'Muse base cache-read pricing must match OpenRouter')
+  assert.match(modelPricing, /outputUsdPer1M:\s*4\.25/, 'Muse base output pricing must match OpenRouter')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*4\.25/, 'Muse reasoning pricing must match output pricing')
+  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'Muse must not inherit unrelated long-context price tiers')
+  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Muse context window must match OpenRouter')
+  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Muse output cap must preserve the full configured budget')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*0\.30/, 'Serper search pricing must match provider public pricing')
@@ -196,15 +196,15 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.009) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.0825) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.7575) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0055) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.06675) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.62925) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
     prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
     prompt_cache_miss_tokens: 400_000,
-  }) || 0) - 0.6225) < 1e-12)
+  }) || 0) - 0.51925) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

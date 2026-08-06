@@ -83,9 +83,9 @@ const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'low' as const, exclude: true }
-// Acknowledgement wording is a tiny presentation turn. Gemini reasoning is
-// mandatory, so use its minimum native level while the planner receives a
-// low reasoning level for the actual phase/checklist structure.
+// Acknowledgement wording is a tiny presentation turn. Use the model's minimum
+// reasoning level while the planner receives low reasoning for the actual
+// phase/checklist structure.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
 const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
@@ -103,7 +103,7 @@ class PlannerUsageRecordingError extends Error {
 function redactPlannerErrorText(text: string): string {
   return text
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
-    .replace(/\b(?:qwen|openai|anthropic|google|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\b(?:qwen|openai|anthropic|google|meta|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
     .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
     .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')

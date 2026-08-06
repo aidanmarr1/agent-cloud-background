@@ -546,7 +546,7 @@ function publicAgentErrorMessage(error: unknown): string {
 function redactAgentServiceText(text: string): string {
   return text
     .replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
-    .replace(/\b(?:qwen|openai|anthropic|google|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\b(?:qwen|openai|anthropic|google|meta|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
     .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
     .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')

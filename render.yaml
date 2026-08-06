@@ -34,7 +34,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.6-flash
+        value: meta/muse-spark-1.2
       - key: AGENT_STORAGE_DRIVER
         value: turso
       - key: AGENT_PUBLIC_SIGNUP
@@ -123,7 +123,7 @@ services:
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
       - key: OPENROUTER_MODEL
-        value: google/gemini-3.6-flash
+        value: meta/muse-spark-1.2
       - key: AGENT_STORAGE_DRIVER
         value: turso
       - key: AGENT_PUBLIC_SIGNUP

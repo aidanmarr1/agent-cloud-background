@@ -17,7 +17,10 @@ import { userErrorMessage } from '@/lib/errorMessages'
 import { releaseActiveTaskLease } from '@/lib/activeTasks'
 import { clearLiveDirectivesForRun } from '@/lib/liveDirectives'
 import { destroySandbox } from '@/lib/sandbox'
-import type { TaskStartConversationInsert } from '@/lib/conversations'
+import {
+  advanceUserConversationForTaskTerminal,
+  type TaskStartConversationInsert,
+} from '@/lib/conversations'
 import { ensureTaskWorkerHeartbeatSchema } from './taskWorkerHeartbeat'
 import {
   TASK_ORCHESTRATION_PROTOCOL_VERSION,
@@ -1465,6 +1468,12 @@ async function persistFinalJobState(job: TaskJob): Promise<boolean> {
               sql: 'delete from agent_task_live_frames where run_id = ?',
               args: [job.runId],
             })
+            await advanceUserConversationForTaskTerminal(
+              transaction,
+              job.userId,
+              job.conversationId,
+              job.completedAt || job.updatedAt,
+            )
             return true
           }
 
@@ -1524,6 +1533,12 @@ async function persistFinalJobState(job: TaskJob): Promise<boolean> {
           sql: 'delete from agent_task_live_frames where run_id = ?',
           args: [job.runId],
         })
+        await advanceUserConversationForTaskTerminal(
+          transaction,
+          job.userId,
+          job.conversationId,
+          job.completedAt || job.updatedAt,
+        )
         return true
       }))
     } catch (error) {

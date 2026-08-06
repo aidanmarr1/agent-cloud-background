@@ -22,6 +22,7 @@ export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
 export const ASSISTANT_SUPPORTS_FILE_INPUT = true
 export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
+export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -283,7 +284,7 @@ function redactSecrets(text: string): string {
     redacted = redacted.split(DEFAULT_MODEL).join('[assistant-route]')
   }
   redacted = redacted
-    .replace(/\b(?:qwen|openai|anthropic|google|gemini|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
+    .replace(/\b(?:qwen|openai|anthropic|google|gemini|meta|meta-llama|mistralai|deepseek|x-ai|cohere|perplexity)\/[A-Za-z0-9._:-]+/gi, '[assistant-route]')
     .replace(/\bdeepseek-v[0-9][A-Za-z0-9._:-]*/gi, '[assistant-route]')
     .replace(/deepseek/gi, 'assistant service')
     .replace(/openrouter/gi, 'assistant service')
@@ -529,9 +530,9 @@ function providerReasoningPayload(
   maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Gemini 3.6 Flash requires reasoning to remain enabled. Use its native
-  // thinking levels so tiny narration/control turns stay fast while synthesis,
-  // report, and build turns retain enough reasoning quality.
+  // Muse Spark supports OpenRouter's normalized reasoning effort. Preserve the
+  // runtime's adaptive effort selection so tiny narration/control turns stay
+  // fast while synthesis, report, and build turns retain enough quality.
   const requestedEffort = _reasoning?.effort
   const normalizedEffort: Exclude<ReasoningEffort, 'none' | 'xhigh'> = requestedEffort === 'xhigh'
     ? 'high'
@@ -563,6 +564,15 @@ function providerReasoningPayload(
       effort,
       exclude: true,
     },
+  }
+}
+
+export function exactOpenRouterProviderRoute(): NonNullable<ChatCompletionParams['provider']> {
+  return {
+    order: [PINNED_OPENROUTER_PROVIDER],
+    only: [PINNED_OPENROUTER_PROVIDER],
+    allow_fallbacks: false,
+    require_parameters: true,
   }
 }
 
@@ -598,6 +608,7 @@ function withPinnedModel(
     model: DEFAULT_MODEL,
     stream,
     usage: { include: true },
+    provider: exactOpenRouterProviderRoute(),
     ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
     ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
     ...providerReasoningPayload(_reasoning, params.max_tokens, _toolChoice),
