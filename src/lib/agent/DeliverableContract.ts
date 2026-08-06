@@ -53,6 +53,11 @@ export function taskRequiresSavedFinalArtifact(
   ) {
     return true
   }
+  // Explicit inline/brevity constraints describe the output contract and win
+  // over a planner's inferred strategy. A two-sentence comparison must not
+  // become an 800-word creative file merely because the planner called the
+  // turn "creative". Explicit website/file creation was already handled above.
+  if (userIntent.wantsInlineAnswer || userIntent.wantsQuick) return false
   if (state.taskStrategy === 'browse') return false
   if (
     state.buildTask ||
@@ -63,7 +68,6 @@ export function taskRequiresSavedFinalArtifact(
     return true
   }
 
-  if (userIntent.wantsInlineAnswer || userIntent.wantsQuick) return false
   if (userIntent.requiresSavedArtifact) return true
 
   return taskDefaultsToMarkdownDeliverable(userRequest)

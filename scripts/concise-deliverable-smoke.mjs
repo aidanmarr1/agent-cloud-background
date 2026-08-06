@@ -70,4 +70,19 @@ assert.equal(
   false,
   'brief final handoff wording must not weaken verification for the saved report itself',
 )
+
+const explicitTwoSentenceFile = new OutputVerifier().verify(
+  'Cats are generally independent companions, while dogs more often seek frequent social engagement. Both can be excellent pets when their care needs match the household.',
+  'comparison.txt',
+  'Create comparison.txt containing exactly two sentences comparing cats and dogs.',
+  'creative',
+  null,
+  1,
+)
+
+assert.equal(
+  explicitTwoSentenceFile.passed,
+  true,
+  `an explicitly short creative file must not be inflated to the generic 800-word floor: ${explicitTwoSentenceFile.failures.join('; ')}`,
+)
 console.log('concise deliverable smoke checks passed')

@@ -28,6 +28,12 @@ export interface VerificationResult {
 }
 
 export class OutputVerifier {
+  private explicitlyLimitsContentLength(originalRequest: string): boolean {
+    return /\b(?:one|two|three|four|five|\d+)[-\s]+sentences?\b/i.test(originalRequest) ||
+      /\b\d{1,5}\s*(?:\+?\s*)?words?\b/i.test(originalRequest) ||
+      /\b(?:brief|quick|short|concise|succinct)\b/i.test(originalRequest)
+  }
+
   private repeatedSubstantiveBlocks(content: string): string[] {
     const seen = new Map<string, string>()
     const duplicates: string[] = []
@@ -160,7 +166,8 @@ export class OutputVerifier {
     // --- Universal checks ---
 
     // Empty or near-empty content
-    if (!fileContent || fileContent.trim().length < 50) {
+    const userLimitedContentLength = this.explicitlyLimitsContentLength(originalRequest)
+    if (!fileContent || fileContent.trim().length < (userLimitedContentLength ? 8 : 50)) {
       failures.push('Deliverable is empty or nearly empty')
       return { passed: false, score: 0, failures, suggestions }
     }
@@ -265,7 +272,7 @@ export class OutputVerifier {
         this.checkBuildCode(fileContent, filePath, failures, suggestions)
         break
       case 'creative':
-        this.checkCreative(fileContent, failures, suggestions)
+        this.checkCreative(fileContent, originalRequest, failures, suggestions)
         break
       case 'browse':
         if (!conciseStructuredDeliverable) {
@@ -397,9 +404,15 @@ export class OutputVerifier {
 
   private checkCreative(
     content: string,
+    originalRequest: string,
     failures: string[],
     suggestions: string[],
   ): void {
+    // User-authored brevity beats the generic long-form creative floor. The
+    // universal checks still reject empty, clipped, placeholder, or duplicated
+    // output, so this does not weaken integrity verification.
+    if (this.explicitlyLimitsContentLength(originalRequest)) return
+
     const words = content.split(/\s+/).filter(w => w.length > 0).length
     if (words < CREATIVE_MIN_WORDS) {
       failures.push(`Word count ${words}, minimum ${CREATIVE_MIN_WORDS}`)

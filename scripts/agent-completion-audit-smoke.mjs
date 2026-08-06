@@ -250,6 +250,19 @@ export function runCompletionAuditSmoke() {
     'an explicit quick inline request must not become a file because of planner wording',
   )
 
+  const conciseCreativeContract = createInitialState(false, timeouts)
+  conciseCreativeContract.currentPlanItems = ['Compare cats and dogs']
+  conciseCreativeContract.currentPlanScopes = ['Answer in the requested two sentences']
+  conciseCreativeContract.currentStepIdx = 0
+  conciseCreativeContract.taskStrategy = 'creative'
+  conciseCreativeContract.originalUserRequest =
+    'Write a two-sentence comparison of cats vs dogs.'
+  assert.equal(
+    taskRequiresSavedFinalArtifact(conciseCreativeContract),
+    false,
+    'a concise answer must not become a long creative file because of inferred strategy',
+  )
+
   const browseWithExplicitFile = createInitialState(false, timeouts)
   browseWithExplicitFile.currentPlanItems = ['Open the exact page', 'Generate output file']
   browseWithExplicitFile.currentPlanScopes = [

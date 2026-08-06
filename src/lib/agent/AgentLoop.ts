@@ -1353,7 +1353,9 @@ function savedFinalDeliverableMinimumChars(
     /\b(?:keep|make)\s+(?:the\s+)?final\s+(?:response|reply|answer|message|handoff)\s+(?:very\s+)?(?:brief|quick|short|concise|succinct)\b/gi,
     ' ',
   )
-  const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(artifactRequest)
+  const requestLooksBrief = /\b(?:brief|briefly|quick|quickly|short|concise|succinct|simple)\b/i.test(artifactRequest) ||
+    /\b(?:one|two|three|four|five|\d+)[-\s]+sentences?\b/i.test(originalRequest) ||
+    /\b\d{1,5}\s*(?:\+?\s*)?words?\b/i.test(originalRequest)
   const compactNamedDataArtifact = !!requestedMarkdownDeliverablePath(state, messages) &&
     !/\b(?:report|research|analysis|assessment|essay|memo|briefing|white\s+paper)\b/i.test(originalRequest) &&
     [

@@ -8,15 +8,15 @@ const [chatRoute, prompts] = await Promise.all([
   readFile(join(root, 'src/lib/prompts.ts'), 'utf8'),
 ])
 
-assert.doesNotMatch(
+assert.match(
   chatRoute,
-  /shouldUseDirectChat/,
-  'new messages must not be diverted into a separate reduced chat mode',
+  /const directChat = shouldUseDirectChat\(safeRawMessages\)/,
+  'clearly conversational turns should use the lightweight Agent response path',
 )
 assert.match(
   chatRoute,
-  /const directChat = false/,
-  'the durable compatibility field must keep every new request on AgentLoop',
+  /const useExternalWorker = shouldUseExternalTaskWorker\(\) && !directChat/,
+  'lightweight conversational turns should not wait for the background task worker',
 )
 assert.match(
   prompts,

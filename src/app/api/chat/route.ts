@@ -23,6 +23,7 @@ import {
 import { OUT_OF_CREDITS_CODE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
 import type { AgentLoopOptions } from '@/lib/agent/AgentLoop'
 import { scopeAgentTaskMessages } from '@/lib/agent/messageScope'
+import { shouldUseDirectChat } from '@/lib/directChatRouting'
 import {
   cancelTaskJob,
   createTaskJobEventStream,
@@ -444,15 +445,16 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Authentication required' }, { status: 401 })
   }
   const rawMessages = validation.data.messages
-  // Every message is an Agent turn. The normal AgentLoop already classifies
-  // ordinary questions as general/complexity-1 work and answers them directly
-  // without tools, while retaining the full toolset when the request changes.
-  // Keep the legacy payload field false for durable-job compatibility rather
-  // than diverting some conversations into a reduced, tool-less chat mode.
-  const directChat = false
-  const creditRunId = validation.data.runId
-  const useExternalWorker = shouldUseExternalTaskWorker()
   const safeRawMessages = stripPersistedAttachmentBodies(rawMessages)
+  // This remains one Agent experience, not a user-facing chat/agent mode
+  // switch. Clearly conversational turns can answer through the lightweight
+  // model path; any request for research, current information, files, tools,
+  // browsing, code, or actions stays on the autonomous AgentLoop.
+  const directChat = shouldUseDirectChat(safeRawMessages)
+  const creditRunId = validation.data.runId
+  // A conversational model turn is short enough to stream in the request and
+  // does not need the paid background worker. Agent tasks remain durable.
+  const useExternalWorker = shouldUseExternalTaskWorker() && !directChat
   const scopedTaskMessages = scopeAgentTaskMessages(safeRawMessages)
   const conversationStartInput = {
     userId,
@@ -509,7 +511,7 @@ export async function POST(request: Request) {
     return Response.json({ error: message, code: 'TASK_START_STATUS_FAILED' }, { status: 500 })
   }
 
-  const intakeHold = await taskIntakeHoldResponse()
+  const intakeHold = directChat ? null : await taskIntakeHoldResponse()
   markRouteTiming('intakeHoldReadyMs')
   if (intakeHold) {
     const headers = new Headers(intakeHold.headers)
@@ -529,7 +531,9 @@ export async function POST(request: Request) {
     .finally(() => {
       routeTimings.creditsReadyMs = Date.now() - postStartedAt
     })
-  const workerAvailabilityPromise = timedRoutePromise('workerReadyMs', taskWorkerUnavailableResponse())
+  const workerAvailabilityPromise = directChat
+    ? Promise.resolve<Response | null>(null)
+    : timedRoutePromise('workerReadyMs', taskWorkerUnavailableResponse())
   const attachmentAccessPromise = timedRoutePromise(
     'attachmentsReadyMs',
     assertMessageAttachmentAccessForUser(safeRawMessages, userId),
