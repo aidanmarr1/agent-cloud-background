@@ -55,9 +55,9 @@ try {
     reasoning: { effort: 'minimal', exclude: true },
   })
 
-  assert.match(String(response.model || ''), /^google\/gemini-3\.6-flash(?:-\d+)?$/)
-  assert.ok(String(response.provider || '').trim(), 'OpenRouter must report the selected balanced-route provider')
-  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Gemini must return the required native tool call')
+  assert.match(String(response.model || ''), /^meta\/muse-spark-1\.2(?:-\d+)?$/)
+  assert.match(String(response.provider || ''), /^Meta$/i, 'OpenRouter must use the exact Meta provider')
+  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Muse Spark must return the required native tool call')
 
   const reasoningTokens = Number(response.usage?.completion_tokens_details?.reasoning_tokens || 0)
   assert.ok(reasoningTokens >= 0, 'reasoning usage must be a non-negative token count')

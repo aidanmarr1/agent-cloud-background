@@ -8227,36 +8227,6 @@ export class AgentLoop {
             continue
           }
 
-          if (
-            deterministicRequestFailure.category !== 'authentication' &&
-            providerRequestRepairAttempts < MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS
-          ) {
-            providerRequestRepairAttempts++
-            // Some compatible routes report forced-tool or tool-schema
-            // incompatibilities as a generic 400. Retry voluntarily with a
-            // normalized history and a minimal, explicit native-call contract
-            // instead of converting an internal request mismatch into a dead
-            // task. Active tools are recomputed on the next attempt.
-            relaxRequiredToolChoice = true
-            const normalized = sanitizeProviderRequestMessagesForRetry(requestMessages)
-            requestMessages = [
-              ...(normalized.messages as ChatMessageParam[]),
-              {
-                role: 'system',
-                content: toolJsonRecoveryMessage(state, this.options.messages),
-              } as ChatMessageParam,
-            ]
-            state.iterationDelayMs = MIN_ITERATION_DELAY_MS
-            console.warn('[AgentDiagnostics] Retrying rejected provider request with voluntary strict tool-call compatibility mode', {
-              category: deterministicRequestFailure.category,
-              repairAttempt: providerRequestRepairAttempts,
-              iteration: state.iterations,
-              step: state.currentStepIdx,
-              status,
-            })
-            continue
-          }
-
           this.options.diagnostics?.({
             type: 'stream_error',
             data: {

@@ -51,6 +51,21 @@ assert.match(
   /interface StopTaskResponse[\s\S]*terminalError\?: unknown[\s\S]*const terminalWarning =[\s\S]*Task stopped with a recovery warning[\s\S]*setStreamError\(terminalWarning\)/,
   'the stop UI must preserve a forced-recovery uncertainty warning returned by the durable terminal row',
 )
+assert.match(
+  client,
+  /function isFinishedLiveDirectiveTarget[\s\S]*NO_ACTIVE_TASK_FOR_DIRECTIVE/,
+  'the client must classify a terminal live-directive race separately from a genuine send failure',
+)
+assert.match(
+  client,
+  /code:\s*typeof body\?\.code === 'string' \? body\.code : undefined/,
+  'live directive failures must preserve the server code so terminal races can be distinguished from real send failures',
+)
+assert.match(
+  client,
+  /isFinishedLiveDirectiveTarget\(error\)[\s\S]*terminal-follow-up-handoff[\s\S]*resumeActiveTaskRef\.current\?\.\(\{ includeTerminalReplay: true \}\)[\s\S]*continueAsNewTurn = true[\s\S]*if \(!continueAsNewTurn\) return/,
+  'a follow-up that races task completion must replay terminal state and continue as a new Agent turn without asking the user to resend',
+)
 const conflictStartSections = client.split('const conflictRunId = errorBody.runId').slice(1)
 assert.equal(conflictStartSections.length, 2, 'both task-start paths must implement conflict replay')
 for (const [index, section] of conflictStartSections.entries()) {

@@ -4,7 +4,6 @@ import { validateRequest } from '@/lib/validation/validate'
 import { checkRateLimit } from '@/lib/rateLimit'
 import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody } from '@/lib/api'
 import { assertTaskAccess } from '@/lib/taskAccess'
-import { shouldUseDirectChat } from '@/lib/directChatRouting'
 import { isContextualTaskUpdate } from '@/lib/conversationContext'
 import {
   prepareUserConversationForTaskStartInsert,
@@ -445,7 +444,12 @@ export async function POST(request: Request) {
     return Response.json({ error: 'Authentication required' }, { status: 401 })
   }
   const rawMessages = validation.data.messages
-  const directChat = shouldUseDirectChat(rawMessages)
+  // Every message is an Agent turn. The normal AgentLoop already classifies
+  // ordinary questions as general/complexity-1 work and answers them directly
+  // without tools, while retaining the full toolset when the request changes.
+  // Keep the legacy payload field false for durable-job compatibility rather
+  // than diverting some conversations into a reduced, tool-less chat mode.
+  const directChat = false
   const creditRunId = validation.data.runId
   const useExternalWorker = shouldUseExternalTaskWorker()
   const safeRawMessages = stripPersistedAttachmentBodies(rawMessages)

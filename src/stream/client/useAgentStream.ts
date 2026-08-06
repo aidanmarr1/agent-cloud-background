@@ -63,6 +63,17 @@ interface LiveDirectiveResponse {
   content?: unknown
   status?: unknown
   error?: unknown
+  code?: unknown
+}
+
+type LiveDirectivePostError = Error & {
+  code?: string
+  status?: number
+}
+
+function isFinishedLiveDirectiveTarget(error: unknown): error is LiveDirectivePostError {
+  return error instanceof Error &&
+    (error as LiveDirectivePostError).code === 'NO_ACTIVE_TASK_FOR_DIRECTIVE'
 }
 
 async function postLiveDirectiveWithRetry(input: {
@@ -87,7 +98,13 @@ async function postLiveDirectiveWithRetry(input: {
       })
       const body = await response.json().catch(() => null) as LiveDirectiveResponse | null
       if (!response.ok) {
-        const error = new Error(userErrorMessage(body?.error ?? body, 'Could not send the live instruction.'))
+        const error = Object.assign(
+          new Error(userErrorMessage(body?.error ?? body, 'Could not send the live instruction.')),
+          {
+            code: typeof body?.code === 'string' ? body.code : undefined,
+            status: response.status,
+          },
+        ) as LiveDirectivePostError
         if (response.status < 500 && response.status !== 408) throw error
         lastError = error
         continue
@@ -1446,6 +1463,7 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
         }
 
         directiveSendingRef.current = true
+        let continueAsNewTurn = false
         try {
           const directiveResult = await postLiveDirectiveWithRetry({
             conversationId,
@@ -1493,14 +1511,33 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
             await resumeActiveTaskRef.current?.()
           }
         } catch (error) {
-          const msg = userErrorMessage(error, 'Could not send the live instruction.')
-          setStreamError(msg)
-          addToast(msg, 'error')
-          throw error
+          if (isFinishedLiveDirectiveTarget(error)) {
+            // The task can finish between the last streamed text and the
+            // composer's send click. Treat that normal terminal race as a new
+            // Agent turn instead of making the user resend or regenerate the
+            // previous prompt.
+            existingController?.abort('terminal-follow-up-handoff')
+            if (existingController && activeControllers.get(conversationId) === existingController) {
+              activeControllers.delete(conversationId)
+            }
+            if (abortRef.current === existingController) abortRef.current = null
+            clearStoredActiveRun(conversationId, storedActiveRun?.runId)
+            setConversationStreaming(conversationId, false)
+            existingController = null
+            storedActiveRun = null
+            await resumeActiveTaskRef.current?.({ includeTerminalReplay: true }).catch(() => false)
+            setStreamError(null)
+            continueAsNewTurn = true
+          } else {
+            const msg = userErrorMessage(error, 'Could not send the live instruction.')
+            setStreamError(msg)
+            addToast(msg, 'error')
+            throw error
+          }
         } finally {
           directiveSendingRef.current = false
         }
-        return
+        if (!continueAsNewTurn) return
       }
 
       if (storedActiveRun && isAutoSend) {

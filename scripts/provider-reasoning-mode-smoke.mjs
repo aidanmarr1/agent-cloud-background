@@ -164,9 +164,10 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     assert.deepEqual(request.body.usage, { include: true })
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
+    assert.equal('parallel_tool_calls' in request.body, false)
   }
   assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
-  assert.equal(requests[0].body.tool_choice, 'required')
+  assert.equal(requests[0].body.tool_choice, 'auto')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every natively supported attached modality.' },

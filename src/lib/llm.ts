@@ -602,6 +602,8 @@ function withPinnedModel(
     ? messages
     : withCurrentTemporalContext(messages)
   const compatibleMessages = ensureProviderRequestEndsWithInputTurn(contextualMessages)
+  const hasNativeTools = Array.isArray(rest.tools) && rest.tools.length > 0
+  void _parallelToolCalls
   return {
     ...rest,
     messages: compatibleMessages.messages as ChatMessageParam[],
@@ -609,8 +611,14 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    ...(_toolChoice !== undefined ? { tool_choice: _toolChoice } : {}),
-    ...(_parallelToolCalls !== undefined ? { parallel_tool_calls: _parallelToolCalls } : {}),
+    // Meta's Muse Spark 1.2 endpoint accepts native tools but currently accepts
+    // only the automatic tool-choice mode. Normalize required/named choices at
+    // this provider boundary; AgentLoop still narrows the exposed tool set and
+    // instructs the model which action is needed on constrained turns.
+    ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
+    // The same endpoint does not accept OpenAI's parallel_tool_calls request
+    // parameter. AgentLoop still controls whether it exposes one tool or a safe
+    // extraction batch, and ToolPipeline executes eligible batches in parallel.
     ...providerReasoningPayload(_reasoning, params.max_tokens, _toolChoice),
   }
 }
