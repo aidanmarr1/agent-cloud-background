@@ -87,9 +87,6 @@ const PLANNER_CONTROL_REASONING = { effort: 'low' as const, exclude: true }
 // reasoning level while the planner receives low reasoning for the actual
 // phase/checklist structure.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
-const PLANNER_ACK_FIRST_FLUSH_CHARS = 48
-const PLANNER_ACK_FIRST_FLUSH_WORDS = 9
-const PLANNER_ACK_FOLLOWUP_FLUSH_CHARS = 60
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 
@@ -349,7 +346,21 @@ function ackWordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length
 }
 
-function isUsablePlannerAck(ack: string): boolean {
+function comparisonTargets(request: string): string[] {
+  const comparison = request.split(/\b(?:vs\.?|versus)\b/i)
+  if (comparison.length !== 2) return []
+
+  const words = (value: string) => value.match(/[a-z][a-z0-9'-]*/gi) || []
+  const ignored = new Set([
+    'a', 'about', 'and', 'are', 'compare', 'comparison', 'do', 'for', 'good',
+    'how', 'in', 'is', 'of', 'on', 'research', 'the', 'to', 'with',
+  ])
+  const left = words(comparison[0]).filter(word => !ignored.has(word.toLowerCase()))
+  const right = words(comparison[1]).filter(word => !ignored.has(word.toLowerCase()))
+  return [left.at(-1), right[0]].filter((word): word is string => !!word)
+}
+
+function isUsablePlannerAck(ack: string, request = ''): boolean {
   const normalized = ack.trim().toLowerCase()
   if (!normalized) return false
   if (normalized.length < 45) return false
@@ -358,6 +369,11 @@ function isUsablePlannerAck(ack: string): boolean {
   const words = ackWordCount(normalized)
   if (words < 8 || words > 48) return false
   if (/^(?:next|now|then|after that|moving forward|from here)[,\s]+(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b/.test(normalized)) return false
+  if (/\bnext[.!?]?$/i.test(normalized)) return false
+  const requiredComparisonTargets = comparisonTargets(request)
+  if (requiredComparisonTargets.some(target => !new RegExp(`\\b${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ack))) {
+    return false
+  }
   if (!/\b(?:research|source|compare|check|verify|read|gather|analy[sz]e|assess|review|build|create|write|draft|fix|test|inspect|summari[sz]e|deliver|report|answer|find|produce)\b/.test(normalized)) return false
   if (!/\b(?:then|and|so|before|while|with|into|using|based on|against|across)\b/.test(normalized)) return false
   return !/\b(?:i(?:'|’)?ll|i will)\s+(?:open the site|work through this|start with the required|keep the task steps updated)\b/.test(normalized) &&
@@ -851,10 +867,11 @@ Requirements:
 - Begin with standard sentence capitalization and finish the paragraph cleanly.
 - Use plain words. Avoid fancy, inflated or formal phrasing.
 - Specific to the user's concrete target/topic/artifact and requested output.
+- Cover the whole request, including both sides of a comparison; do not acknowledge only the first planned phase.
 - Say what Agent will actually do for this task and the final answer/artifact shape.
 - Before writing, silently identify the real target, requested deliverable, likely work areas, and any important constraints. Output only the final paragraph.
 - Extract the real topic/artifact first. Do not echo command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", or "produce a concise report".
-- Direct first-person phrasing like "I'll..." is allowed when specific. Do not start with "Let me", "Next", or "Now".
+- Direct first-person phrasing like "I'll..." is allowed when specific. Do not start with "Let me", "Next", or "Now", and do not end with a promise to do something "next".
 - No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
 - No markdown, no bullets, no refusal, no mention of being an AI.`,
         },
@@ -882,8 +899,6 @@ Requirements:
 
     let ack = ''
     let firstBuffer = ''
-    let pendingVisibleAck = ''
-    let startedVisibleText = false
     let emittedAny = false
     let ownsVisibleAcknowledgement = false
     let usage: RawCompletionUsage
@@ -902,54 +917,26 @@ Requirements:
       emittedAny = true
     }
 
-    const flushPendingVisibleAck = async (force = false) => {
-      if (!pendingVisibleAck) return
-      const compact = pendingVisibleAck.replace(/\s+/g, ' ')
-      const trimmed = compact.trim()
-      if (!trimmed) {
-        pendingVisibleAck = ''
-        return
-      }
-      const endsCleanly = /[.!?]\s*$/.test(trimmed)
-      const hasUsefulClause = trimmed.length >= PLANNER_ACK_FOLLOWUP_FLUSH_CHARS && /\s$/.test(pendingVisibleAck)
-      if (!force && !endsCleanly && !hasUsefulClause) return
-      await emitVisible(compact)
-      pendingVisibleAck = ''
-    }
-
     for await (const chunk of stream) {
       if (chunk.usage) usage = chunk.usage
       const delta = streamingChunkText(chunk)
       if (!delta) continue
       ack += delta
-
-      if (startedVisibleText) {
-        pendingVisibleAck += delta
-        await flushPendingVisibleAck(false)
-        continue
-      }
-
       firstBuffer += delta
-      const cleanedFirst = sanitizePlannerAck(firstBuffer)
-      const hasCompleteSentence = cleanedFirst.length >= PLANNER_ACK_FIRST_FLUSH_CHARS &&
-        ackWordCount(cleanedFirst) >= PLANNER_ACK_FIRST_FLUSH_WORDS &&
-        /[.!?]\s*$/.test(cleanedFirst)
-      const readyToFlush = hasCompleteSentence
-      if (readyToFlush) {
-        startedVisibleText = true
-        await emitVisible(cleanedFirst)
-        console.log('[AgentDiagnostics] Startup acknowledgement first visible text emitted', {
-          elapsedMs: Date.now() - ackStartedAt,
-          chars: cleanedFirst.length,
-        })
-      }
     }
 
-    await flushPendingVisibleAck(true)
-
-    if (!startedVisibleText) {
-      const cleaned = sanitizePlannerAck(firstBuffer || ack)
-      if (cleaned) await emitVisible(cleaned)
+    // A provider response is one acknowledgement candidate, not a sequence of
+    // independently displayable messages. Validate the complete candidate
+    // before exposing it so provider repetition/degeneration cannot leak seven
+    // greeting variants or a partial clause into the conversation. Planning is
+    // already running concurrently, so this adds no extra model round trip.
+    const sanitizedAck = sanitizePlannerAck(firstBuffer || ack)
+    if (isUsablePlannerAck(sanitizedAck, request)) {
+      await emitVisible(sanitizedAck)
+      console.log('[AgentDiagnostics] Startup acknowledgement first visible text emitted', {
+        elapsedMs: Date.now() - ackStartedAt,
+        chars: sanitizedAck.length,
+      })
     }
 
     if (emittedAny && ownsVisibleAcknowledgement && !this.emitter.isClosed) {
@@ -957,12 +944,11 @@ Requirements:
       this.settleAcknowledgementDisplay(true)
     }
 
-    const sanitizedAck = sanitizePlannerAck(ack.trim())
     await this.recordCompletionUsage(usage, 'ack')
     this.throwIfPlannerAborted()
 
     if (emittedAny) {
-      if (!isUsablePlannerAck(sanitizedAck)) {
+      if (!isUsablePlannerAck(sanitizedAck, request)) {
         console.warn('[AgentDiagnostics] Startup acknowledgement streamed but failed post-hoc quality check', {
           length: sanitizedAck.length,
           taskShape,
@@ -1000,7 +986,7 @@ Requirements:
     }
 
     const sanitized = typeof ack === 'string' ? sanitizePlannerAck(ack) : ''
-    if (isUsablePlannerAck(sanitized)) {
+    if (isUsablePlannerAck(sanitized, effectiveTaskRequest(this.messages))) {
       this.emitter.textDelta(sanitized + '\n\n')
       this.acknowledgementEmitted = true
       return
@@ -1305,6 +1291,7 @@ Rules:
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, but do not enforce or mention a sentence count. Say what Agent will do for the exact task and what it will deliver.
+- The ack covers the whole request, including every side of a comparison, rather than describing only the first phase. It must not end by promising an action "next".
 - The planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title. Preserve explicit user order and real dependencies without forcing stock research, analysis, synthesis, or a literal "Deliver ..." phase. A non-empty plan must still culminate in the requested answer, outcome, confirmation, or artifact, but the last phase may naturally combine final work, verification, synthesis, and handoff. Do not force a separate delivery phase when it adds no useful work.
 - Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
 - Give every non-trivial phase a short internal checklist of concrete, task-specific outcomes. These are execution memory beneath the visible phase, not extra UI phases and not a universal workflow. Include the facts, entities, interactions, files, decisions, or verification that this phase must cover; adapt or replace them when later user direction changes.

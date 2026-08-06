@@ -739,12 +739,20 @@ export class StreamProcessor {
     const progressNarrationTextCap = shouldCapProgressNarrationText(state)
       ? PROGRESS_NARRATION_TEXT_STREAM_CAP
       : null
+    let visibleTextSegmentStarted = false
 
     const emitVisibleAssistantContent = (content: string): void => {
       if (!content) return
       lastVisibleActivityTime = Date.now()
       if (!textSavedDeliverable) {
-        this.emit(() => this.emitter.textDelta(content))
+        // Every model turn is a distinct prose segment. Without an explicit
+        // boundary, a phase update ending in "now." and a later final handoff
+        // beginning with "Your" are persisted as "now.Your". Prefix only the
+        // first visible chunk of each turn; subsequent streamed chunks retain
+        // their exact spacing and Markdown structure.
+        const segment = visibleTextSegmentStarted ? content : `\n\n${content}`
+        visibleTextSegmentStarted = true
+        this.emit(() => this.emitter.textDelta(segment))
         return
       }
 
