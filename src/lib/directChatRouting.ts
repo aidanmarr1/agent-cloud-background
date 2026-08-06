@@ -27,7 +27,7 @@ const AGENT_META_QUESTION_PATTERN =
   /\b(?:what|which)\s+(?:instructions|rules|guidelines|system instructions)\b|\b(?:what can you do|what are your capabilities|how do you work|who are you|what model are you|which model are you|what agent are you)\b/i
 
 const GENERAL_KNOWLEDGE_PATTERN =
-  /^(?:what|why|how|who|when|where|can you explain|could you explain|explain|tell me about|define|summarize|compare|what's|whats|is|are|do|does|can)\b/i
+  /^(?:what|why|how|who|when|where|can you explain|could you explain|explain|tell me about|define|summarize|compare|write|draft|compose|what's|whats|is|are|do|does|can)\b/i
 const PRIOR_ATTACHMENT_REFERENCE_PATTERN =
   /\b(?:attached|attachment|file|image|photo|picture|document|pdf)\b|\b(?:summari[sz]e|describe|read|analy[sz]e|explain|review|what(?:'s| is| does)?|tell me about).{0,80}\b(?:it|that|this|them|those|above)\b|\b(?:it|that|this|them|those|above)\b.{0,80}\b(?:summari[sz]e|describe|read|analy[sz]e|explain|review)\b/i
 
