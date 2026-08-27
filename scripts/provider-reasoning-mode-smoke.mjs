@@ -19,7 +19,7 @@ assert.match(
 assert.match(
   llmSource,
   /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
-  'Gemini must be pinned to the exact Google Vertex provider route',
+  'GLM must be pinned to the exact Z.ai provider route',
 )
 assert.doesNotMatch(
   llmSource,
@@ -82,8 +82,6 @@ await llm.createCompletion({
 const multimodalParts = [
   { type: 'text', text: 'Review every natively supported attached modality.' },
   { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
-  { type: 'file', file: { filename: 'brief.pdf', file_data: 'data:application/pdf;base64,cGRm' } },
-  { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'wav' } },
   { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
 ]
 await llm.createCompletion({
@@ -153,11 +151,11 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'google/gemini-3.7-flash')
+    assert.equal(request.body.model, 'z-ai/glm-5.3-flash')
     assert.equal('models' in request.body, false)
     assert.deepEqual(request.body.provider, {
-      order: ['google-vertex'],
-      only: ['google-vertex'],
+      order: ['z-ai'],
+      only: ['z-ai'],
       allow_fallbacks: false,
       require_parameters: true,
     })
@@ -165,7 +163,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
     assert.equal('parallel_tool_calls' in request.body, false)
-    assert.equal('temperature' in request.body, false)
+    assert.equal(request.body.temperature, 0.3)
   }
   assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[0].body.tool_choice, 'auto')
@@ -173,8 +171,6 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review every natively supported attached modality.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
-    { type: 'file', file: { filename: 'brief.pdf', file_data: 'data:application/pdf;base64,cGRm' } },
-    { type: 'input_audio', input_audio: { data: 'YXVkaW8=', format: 'wav' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
   assert.deepEqual(requests[1].body.reasoning, { effort: 'minimal', exclude: true })
@@ -192,7 +188,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'Gemini histories must preserve the exact task context and end with a valid input turn',
+    'GLM histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[4].body.messages.some(message =>
@@ -202,7 +198,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Gemini 3.7 Flash exact Google Vertex provider and minimal reasoning smoke test passed')
+  console.log('GLM 5.3 Flash exact Z.ai provider and minimal reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

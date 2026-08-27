@@ -19,10 +19,10 @@ function trimmedEnv(value: string | undefined): string | undefined {
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
-export const ASSISTANT_SUPPORTS_FILE_INPUT = true
-export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
+export const ASSISTANT_SUPPORTS_FILE_INPUT = false
+export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
-export const PINNED_OPENROUTER_PROVIDER = 'google-vertex' as const
+export const PINNED_OPENROUTER_PROVIDER = 'z-ai' as const
 export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -531,7 +531,7 @@ function providerReasoningPayload(
   _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Gemini 3.7 Flash supports OpenRouter's `minimal` reasoning effort. Clamp
+  // GLM 5.3 Flash supports OpenRouter's `minimal` reasoning effort. Clamp
   // at the provider boundary so stale callers, saved settings,
   // or max-token heuristics cannot silently raise reasoning cost. Keep traces
   // excluded from user-visible output while still preserving native tool use.
@@ -561,7 +561,6 @@ function withPinnedModel(
 ): ChatCompletionParams {
   const {
     parallel_tool_calls: _parallelToolCalls,
-    temperature: _temperature,
     thinking: _thinking,
     requestTimeoutMs: _requestTimeoutMs,
     abortSignal: _abortSignal,
@@ -584,7 +583,6 @@ function withPinnedModel(
   const compatibleMessages = ensureProviderRequestEndsWithInputTurn(contextualMessages)
   const hasNativeTools = Array.isArray(rest.tools) && rest.tools.length > 0
   void _parallelToolCalls
-  void _temperature
   return {
     ...rest,
     messages: compatibleMessages.messages as ChatMessageParam[],
@@ -592,11 +590,8 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    // The standard Google Vertex endpoint does not advertise temperature.
-    // Strip caller sampling preferences so strict require_parameters routing
-    // continues to select this exact endpoint instead of returning a 404.
-    // Gemini 3.7 Flash accepts native tools. Keep automatic tool choice at this
-    // provider boundary; AgentLoop
+    // GLM 5.3 Flash accepts native tools and temperature. Keep automatic tool
+    // choice at this provider boundary; AgentLoop
     // narrows the exposed tool set on constrained turns.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
     // OpenRouter does not advertise parallel_tool_calls for this endpoint.

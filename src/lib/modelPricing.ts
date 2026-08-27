@@ -1,14 +1,14 @@
-// The assistant is pinned to Gemini 3.7 Flash through OpenRouter's exact
-// Google Vertex endpoint. Provider routing is fenced separately at the request
+// The assistant is pinned to GLM 5.3 Flash through OpenRouter's exact Z.ai
+// endpoint. Provider routing is fenced separately at the request
 // boundary.
-export const DEFAULT_OPENROUTER_MODEL = 'google/gemini-3.7-flash'
+export const DEFAULT_OPENROUTER_MODEL = 'z-ai/glm-5.3-flash'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.375,
-  cacheHitInputUsdPer1M: 0.0375,
-  outputUsdPer1M: 1.875,
-  internalReasoningUsdPer1M: 1.875,
+  inputUsdPer1M: 0.075,
+  cacheHitInputUsdPer1M: 0.015,
+  outputUsdPer1M: 0.25,
+  internalReasoningUsdPer1M: 0.25,
   contextPriceTiers: [] as Array<{
     minPromptTokens: number
     inputUsdPer1M: number
@@ -16,12 +16,12 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.375,
-  longContextCacheHitInputUsdPer1M: 0.0375,
-  longContextOutputUsdPer1M: 1.875,
+  longContextInputUsdPer1M: 0.075,
+  longContextCacheHitInputUsdPer1M: 0.015,
+  longContextOutputUsdPer1M: 0.25,
   contextTokens: 1_048_576,
-  maxCompletionTokens: 65_536,
-  source: 'OpenRouter (Google Gemini 3.7 Flash)',
+  maxCompletionTokens: 131_072,
+  source: 'OpenRouter (Z.ai GLM 5.3 Flash)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

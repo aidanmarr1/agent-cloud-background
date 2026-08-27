@@ -64,7 +64,7 @@ function workerEnvs(workerId) {
     OPENROUTER_API_KEY: requireEnv('OPENROUTER_API_KEY', 'task LLM calls'),
     SERPER_API_KEY: requireEnv('SERPER_API_KEY', 'Serper web and image search'),
     SERPER_BASE_URL: envOrDefault('SERPER_BASE_URL', 'https://google.serper.dev'),
-    OPENROUTER_MODEL: 'google/gemini-3.7-flash',
+    OPENROUTER_MODEL: 'z-ai/glm-5.3-flash',
     AGENT_STORAGE_DRIVER: 'turso',
     AGENT_TASK_WORKER_MODE: 'external',
     AGENT_TASK_QUEUE_NAME: envOrDefault('AGENT_TASK_QUEUE_NAME', 'production'),
