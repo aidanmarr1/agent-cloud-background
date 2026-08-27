@@ -1,6 +1,7 @@
 import { executeTool, ToolContext } from '@/lib/tools'
 import { appendFileInSandbox, createFileInSandbox, listFilesInSandbox, getOrCreateSandboxDir, readFileInSandbox } from '@/lib/sandbox'
 import { chargeServerTool } from '@/lib/serverCredits'
+import { assertWebSearchRequestReady } from '@/lib/search'
 import { markTaskFileDeleted, persistSandboxTaskFile } from '@/lib/taskFiles'
 import type { ChatMessageParam } from '@/lib/llm'
 import type { AgentEventEmitter } from './SSEEmitter'
@@ -4500,6 +4501,28 @@ export class ToolPipeline {
           repeatReason: activityRepeatReason,
         })
         return { tc, result: replay, isError: cachedIsError, acceptedForExecution: true, cached: true, durationMs: Date.now() - startTime }
+      }
+    }
+
+    // Validate billable search configuration and the normalized query before
+    // prepayment. This keeps malformed/configuration failures from debiting a
+    // user when no Serper request can be made. Cache hits have already returned.
+    if (tc.name === 'web_search') {
+      try {
+        assertWebSearchRequestReady(args.query, this.signal ?? undefined)
+      } catch (error) {
+        if (shouldUnwindToolExecution(error, this.signal)) throw error
+        const message = error instanceof Error ? error.message : String(error)
+        const errorResult = { error: `Tool execution failed: ${message}` }
+        recordWorkLedgerFailure(state, {
+          tool: tc.name,
+          target: toolTargetFromArgs(args),
+          error: errorResult.error,
+        })
+        trackToolCall(state, tc.name, JSON.stringify(args))
+        state.stepToolCallCount++
+        state.stepFailureCount++
+        return preflightResult(errorResult, true, 'billable_search_not_ready')
       }
     }
 

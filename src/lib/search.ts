@@ -1,5 +1,5 @@
 import { SearchResult } from '@/types'
-import { normalizeSearchQuery, simplifiedSearchQuery } from './searchQuery'
+import { normalizeSearchQuery } from './searchQuery'
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
@@ -229,10 +229,6 @@ async function serperPost<T>(
   }
 }
 
-function shouldRetryWithSimplifiedQuery(error: unknown): boolean {
-  return error instanceof SerperHttpError && error.status === 400
-}
-
 async function serperSearchPage(query: string, page = 1, signal?: AbortSignal): Promise<SerperSearchResponse> {
   return serperPost<SerperSearchResponse>('search', {
     q: query,
@@ -241,16 +237,12 @@ async function serperSearchPage(query: string, page = 1, signal?: AbortSignal): 
   }, WEB_SEARCH_REQUEST_TIMEOUT_MS, signal)
 }
 
-async function firstSerperSearchPage(query: string, signal?: AbortSignal): Promise<SerperSearchResponse> {
-  try {
-    return await serperSearchPage(query, 1, signal)
-  } catch (error) {
-    const simplified = simplifiedSearchQuery(query)
-    if (!shouldRetryWithSimplifiedQuery(error) || !simplified || simplified === query) {
-      throw error
-    }
-    return serperSearchPage(simplified, 1, signal)
-  }
+export function assertWebSearchRequestReady(rawQuery: unknown, signal?: AbortSignal): string {
+  const query = normalizeSearchQuery(rawQuery)
+  if (!query) throw new Error('Search query is empty after cleanup')
+  if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
+  serperApiKey()
+  return query
 }
 
 function resultFromOrganic(item: SerperOrganicResult, source: string): SearchResult | null {
@@ -305,10 +297,11 @@ function searchResultsFromResponse(data: SerperSearchResponse): SearchResult[] {
 }
 
 export async function webSearch(rawQuery: unknown, signal?: AbortSignal): Promise<SearchResult[]> {
-  const query = normalizeSearchQuery(rawQuery)
-  if (!query) throw new Error('Search query is empty after cleanup')
+  const query = assertWebSearchRequestReady(rawQuery, signal)
 
-  const firstPage = await firstSerperSearchPage(query, signal)
+  // One accepted web_search maps to exactly one paid Serper request. Do not
+  // hide provider retries here: billing is intentionally request-based.
+  const firstPage = await serperSearchPage(query, 1, signal)
   const rawResults = searchResultsFromResponse(firstPage)
 
   return dedupeResults(rawResults, query)

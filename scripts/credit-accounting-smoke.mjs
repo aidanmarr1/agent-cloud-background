@@ -7,7 +7,7 @@ import { build } from 'esbuild'
 const root = process.cwd()
 
 async function assertSourceContracts() {
-  const [creditStore, creditPolicy, modelPricing, serverCredits, usageTab, globalsCss, dispatcher, chatRoute, chatTaskRunner, agentLoop, planManager, llm, toolPipeline, emitter, events, useAgentStream, streamProcessor] = await Promise.all([
+  const [creditStore, creditPolicy, modelPricing, serverCredits, usageTab, globalsCss, dispatcher, chatRoute, chatTaskRunner, agentLoop, planManager, llm, toolPipeline, search, emitter, events, useAgentStream, streamProcessor] = await Promise.all([
     readFile(join(root, 'src/store/credits.ts'), 'utf8'),
     readFile(join(root, 'src/lib/creditPolicy.ts'), 'utf8'),
     readFile(join(root, 'src/lib/modelPricing.ts'), 'utf8'),
@@ -21,6 +21,7 @@ async function assertSourceContracts() {
     readFile(join(root, 'src/lib/agent/PlanManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/llm.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/search.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/SSEEmitter.ts'), 'utf8'),
     readFile(join(root, 'src/types/events.ts'), 'utf8'),
     readFile(join(root, 'src/stream/client/useAgentStream.ts'), 'utf8'),
@@ -92,7 +93,10 @@ async function assertSourceContracts() {
   assert.match(useAgentStream, /chargeStart:\s*false/, 'stream start must not locally charge task start under server accounting')
   assert.doesNotMatch(useAgentStream, /setInterval\(\(\) => \{\s*useCreditStore\.getState\(\)\.heartbeat/, 'client heartbeat must not be the authority for active processing credits')
   assert.match(toolPipeline, /emitServerToolCharge\(tc\.id,\s*tc\.name\)/, 'actual tool execution must emit a server charge after preflight/cache checks')
+  assert.match(toolPipeline, /assertWebSearchRequestReady\(args\.query,[\s\S]*emitServerToolCharge\(tc\.id,\s*tc\.name\)/, 'web search must validate the normalized query and provider configuration before user prepayment')
   assert.match(toolPipeline, /chargeServerTool\(\s*this\.userId,\s*this\.conversationId,\s*toolName,\s*`attempt:\$\{this\.creditAttempt\}:\$\{toolCallId\}`,\s*this\.creditRunId,?\s*\)/, 'tool pipeline must call the server credit ledger with an attempt-scoped idempotency key')
+  assert.match(search, /assertWebSearchRequestReady\(rawQuery,\s*signal\)/, 'web search execution must reuse the same readiness validation as billing')
+  assert.doesNotMatch(search, /simplifiedSearchQuery|firstSerperSearchPage|shouldRetryWithSimplifiedQuery/, 'one billed web search must not hide a second Serper request behind a provider fallback')
   assert.match(chatTaskRunner, /chargeServerTaskStart/, 'the shared task runner must charge task start on the server')
   assert.match(chatTaskRunner, /activateServerE2BRuntimeBilling[\s\S]*checkpointServerE2BRuntimeBilling/, 'the shared task runner must durably meter external E2B sandbox runtime')
   assert.match(chatTaskRunner, /ACTIVE_CREDITS_PER_MINUTE > 0/, 'the shared task runner must guard passive active-time billing behind the disabled rate')
