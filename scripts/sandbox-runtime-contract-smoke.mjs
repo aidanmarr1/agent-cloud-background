@@ -70,6 +70,12 @@ assert.match(dockerfile, /\bsocat\b/)
 assert.match(dockerfile, /\brclone\b/)
 assert.match(dockerfile, /@googleworkspace\/cli@0\.22\.3/)
 assert.match(dockerfile, /pnpm@11\.17\.0/)
+assert.match(dockerfile, /&& pnpm --version \\/, 'template build must validate pnpm on the final runtime PATH')
+assert.match(
+  dockerfile,
+  /curl -fsSLo "\/tmp\/node-v\$\{NODE_VERSION\}-linux-x64\.tar\.xz"[\s\S]*sha256sum --check node\.sha256[\s\S]*tar -xJf "node-v\$\{NODE_VERSION\}-linux-x64\.tar\.xz"/,
+  'Node archive filename must match the upstream checksum manifest entry',
+)
 assert.match(dockerfile, /yarn@1\.22\.22/)
 assert.match(dockerfile, /typst-x86_64-unknown-linux-musl/)
 assert.match(dockerfile, /d2-v\$\{D2_VERSION\}-linux-amd64/)

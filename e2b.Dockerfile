@@ -82,13 +82,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/*
 
 RUN set -eux; \
-    curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
+    curl -fsSLo "/tmp/node-v${NODE_VERSION}-linux-x64.tar.xz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
     curl -fsSLo /tmp/SHASUMS256.txt "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"; \
     grep " node-v${NODE_VERSION}-linux-x64.tar.xz\$" /tmp/SHASUMS256.txt > /tmp/node.sha256; \
     cd /tmp; \
     sha256sum --check node.sha256; \
-    tar -xJf node.tar.xz -C /usr/local --strip-components=1; \
-    rm -f /tmp/node.tar.xz /tmp/node.sha256 /tmp/SHASUMS256.txt; \
+    tar -xJf "node-v${NODE_VERSION}-linux-x64.tar.xz" -C /usr/local --strip-components=1; \
+    rm -f "/tmp/node-v${NODE_VERSION}-linux-x64.tar.xz" /tmp/node.sha256 /tmp/SHASUMS256.txt; \
     node --version; \
     npm --version
 
@@ -164,6 +164,9 @@ RUN mkdir -p \
   && chown -R user:user /home/user /tmp/agent-supervisor \
   && chromium --version \
   && node --version \
+  && npm --version \
+  && pnpm --version \
+  && yarn --version \
   && python3 --version \
   && java -version \
   && agent-sandbox-info >/dev/null
