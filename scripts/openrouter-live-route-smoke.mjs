@@ -51,6 +51,7 @@ try {
     }],
     tool_choice: { type: 'function', function: { name: 'route_probe' } },
     parallel_tool_calls: false,
+    temperature: 0.3,
     max_tokens: 512,
     reasoning: { effort: 'minimal', exclude: true },
   })

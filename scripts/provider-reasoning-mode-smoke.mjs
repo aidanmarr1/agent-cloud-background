@@ -61,7 +61,7 @@ globalThis.fetch = async (url, init) => {
 }
 
 const llm = await import(${JSON.stringify(pathToFileURL(bundlePath).href)})
-const common = { retryMaxAttempts: 0, includeTemporalContext: false }
+const common = { retryMaxAttempts: 0, includeTemporalContext: false, temperature: 0.3 }
 await llm.createCompletion({
   ...common,
   model: 'stale/client-selected-model',
@@ -165,6 +165,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     assert.equal('thinking' in request.body, false)
     assert.equal('reasoning_effort' in request.body, false)
     assert.equal('parallel_tool_calls' in request.body, false)
+    assert.equal('temperature' in request.body, false)
   }
   assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[0].body.tool_choice, 'auto')

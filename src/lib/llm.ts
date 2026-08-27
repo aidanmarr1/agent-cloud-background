@@ -561,6 +561,7 @@ function withPinnedModel(
 ): ChatCompletionParams {
   const {
     parallel_tool_calls: _parallelToolCalls,
+    temperature: _temperature,
     thinking: _thinking,
     requestTimeoutMs: _requestTimeoutMs,
     abortSignal: _abortSignal,
@@ -583,6 +584,7 @@ function withPinnedModel(
   const compatibleMessages = ensureProviderRequestEndsWithInputTurn(contextualMessages)
   const hasNativeTools = Array.isArray(rest.tools) && rest.tools.length > 0
   void _parallelToolCalls
+  void _temperature
   return {
     ...rest,
     messages: compatibleMessages.messages as ChatMessageParam[],
@@ -590,6 +592,9 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
+    // The standard Google Vertex endpoint does not advertise temperature.
+    // Strip caller sampling preferences so strict require_parameters routing
+    // continues to select this exact endpoint instead of returning a 404.
     // Gemini 3.7 Flash accepts native tools. Keep automatic tool choice at this
     // provider boundary; AgentLoop
     // narrows the exposed tool set on constrained turns.

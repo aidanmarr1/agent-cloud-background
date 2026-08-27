@@ -857,6 +857,7 @@ async function assertSourceContracts() {
   assert.match(llm, /const hasNativeTools = Array\.isArray\(rest\.tools\)[\s\S]*hasNativeTools \? \{ tool_choice: 'auto' as const \} : \{\}/, 'Gemini tool turns must use the proven automatic tool-choice boundary')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
   assert.match(llm, /provider:\s*exactOpenRouterProviderRoute\(\)/, 'OpenRouter calls must use only the exact Google Vertex provider route')
+  assert.match(llm, /temperature:\s*_temperature[\s\S]*void _temperature/, 'Gemini requests must strip unsupported temperature sampling before strict provider routing')
   assert.match(llm, /estimateUsageCost/, 'OpenRouter token usage must be normalized into billable provider cost')
   assert.match(streamProcessor, /reasoningContent \+= String\(delta\.reasoning_content\)/, 'thinking-mode tool calls must preserve reasoning content internally for provider history')
   assert.match(llm, /ASSISTANT_LOG_LABEL\s*=\s*'Agent'/, 'provider/runtime internals must be redacted from logs')
