@@ -1,13 +1,14 @@
-// The assistant is pinned to Muse Spark 1.2 through OpenRouter's exact Meta
-// endpoint. Provider routing is fenced separately in the request boundary.
-export const DEFAULT_OPENROUTER_MODEL = 'meta/muse-spark-1.2'
+// The assistant is pinned to Muse Spark 1.2 Contributor through OpenRouter's
+// exact Meta endpoint. Provider routing is fenced separately at the request
+// boundary.
+export const DEFAULT_OPENROUTER_MODEL = 'meta/muse-spark-1.2-contributor'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 1.25,
-  cacheHitInputUsdPer1M: 0.15,
-  outputUsdPer1M: 4.25,
-  internalReasoningUsdPer1M: 4.25,
+  inputUsdPer1M: 0.10,
+  cacheHitInputUsdPer1M: 0.002,
+  outputUsdPer1M: 0.20,
+  internalReasoningUsdPer1M: 0.20,
   contextPriceTiers: [] as Array<{
     minPromptTokens: number
     inputUsdPer1M: number
@@ -15,12 +16,12 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 1.25,
-  longContextCacheHitInputUsdPer1M: 0.15,
-  longContextOutputUsdPer1M: 4.25,
+  longContextInputUsdPer1M: 0.10,
+  longContextCacheHitInputUsdPer1M: 0.002,
+  longContextOutputUsdPer1M: 0.20,
   contextTokens: 1_048_576,
   maxCompletionTokens: 65_536,
-  source: 'OpenRouter (Meta)',
+  source: 'OpenRouter (Meta Contributor)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

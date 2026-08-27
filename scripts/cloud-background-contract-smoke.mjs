@@ -227,7 +227,7 @@ assert.match(taskFiles, /listTaskFilesForUser/, 'sandbox restore must enumerate 
 assert.match(taskFiles, /readTaskFileBody/, 'sandbox restore must read durable task-file bytes')
 assert.match(taskFiles, /writeSandboxFileBytes/, 'sandbox restore must write durable files into the active sandbox provider')
 
-const guardCallIndex = chatRoute.indexOf('const workerAvailabilityPromise = timedRoutePromise')
+const guardCallIndex = chatRoute.indexOf('const workerAvailabilityPromise = directChat')
 const leaseIndex = chatRoute.indexOf('const creditRunId = validation.data.runId')
 const accessGateIndex = chatRoute.indexOf('if (access && !access.ok)')
 const workerGateIndex = chatRoute.indexOf('if (unavailableWorker)')
@@ -387,15 +387,16 @@ assert.ok(
   'cloud finish setup must finish the Render worker rollout before activating Vercel on-demand dispatch',
 )
 assert.match(cloudFinishSetupScript, /waitForWorkerReadiness/, 'cloud finish setup must wait for deployed task executor readiness before final proof')
+const deployedWorkerProofIndex = cloudFinishSetupScript.indexOf("'scripts/prod-background-worker-smoke.mjs'")
 assert.ok(
   cloudFinishSetupScript.indexOf('await waitForWorkerReadiness()') <
-    cloudFinishSetupScript.indexOf("runStep('Prove deployed one-off worker execution before reopening intake'"),
+    deployedWorkerProofIndex,
   'cloud finish setup must run the paid deployed worker proof only after signed readiness',
 )
 assert.ok(
-  cloudFinishSetupScript.indexOf("runStep('Prove deployed one-off worker execution before reopening intake'") <
+  deployedWorkerProofIndex <
     cloudFinishSetupScript.indexOf("runStep('Release verified rollout intake hold'"),
-  'cloud finish setup must not reopen intake until the new web deployment passes the one-off worker smoke',
+  'cloud finish setup must not reopen intake until the new deployment passes the worker smoke',
 )
 assert.match(
   cloudFinishSetupScript,

@@ -23,6 +23,7 @@ export const ASSISTANT_SUPPORTS_FILE_INPUT = true
 export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
+export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -527,41 +528,19 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 
 function providerReasoningPayload(
   _reasoning: ChatCompletionParams['reasoning'],
-  maxOutputTokens: number | undefined,
+  _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Muse Spark supports OpenRouter's normalized reasoning effort. Preserve the
-  // runtime's adaptive effort selection so tiny narration/control turns stay
-  // fast while synthesis, report, and build turns retain enough quality.
-  const requestedEffort = _reasoning?.effort
-  const normalizedEffort: Exclude<ReasoningEffort, 'none' | 'xhigh'> = requestedEffort === 'xhigh'
-    ? 'high'
-    : requestedEffort === 'none'
-      ? 'minimal'
-      : requestedEffort || 'low'
-  const requestedBudget = Number.isFinite(Number(_reasoning?.max_tokens))
-    ? Math.max(1, Math.floor(Number(_reasoning?.max_tokens)))
-    : null
-  const outputCeiling = Number.isFinite(Number(maxOutputTokens))
-    ? Math.max(1, Math.floor(Number(maxOutputTokens)))
-    : null
-  const budgetEffort: Exclude<ReasoningEffort, 'none' | 'xhigh'> = requestedBudget === null
-    ? normalizedEffort
-    : requestedBudget <= 256
-      ? 'minimal'
-      : requestedBudget <= 1_024
-        ? 'low'
-        : requestedBudget <= 4_096
-          ? 'medium'
-          : 'high'
-  const effort = outputCeiling !== null && outputCeiling <= 256
-    ? 'minimal'
-    : _reasoning?.enabled === false
-      ? 'minimal'
-      : budgetEffort
+  // Contributor reasoning is mandatory and supports OpenRouter's `minimal`
+  // effort. Clamp at the provider boundary so stale callers, saved settings,
+  // or max-token heuristics cannot silently raise reasoning cost. Keep traces
+  // excluded from user-visible output while still preserving native tool use.
+  void _reasoning
+  void _maxOutputTokens
+  void _toolChoice
   return {
     reasoning: {
-      effort,
+      effort: ASSISTANT_REASONING_EFFORT,
       exclude: true,
     },
   }
@@ -611,10 +590,9 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    // Meta's Muse Spark 1.2 endpoint accepts native tools but currently accepts
-    // only the automatic tool-choice mode. Normalize required/named choices at
-    // this provider boundary; AgentLoop still narrows the exposed tool set and
-    // instructs the model which action is needed on constrained turns.
+    // Meta's Muse Spark 1.2 Contributor endpoint accepts native tools. Keep the
+    // proven automatic tool-choice mode at this provider boundary; AgentLoop
+    // narrows the exposed tool set on constrained turns.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
     // The same endpoint does not accept OpenAI's parallel_tool_calls request
     // parameter. AgentLoop still controls whether it exposes one tool or a safe

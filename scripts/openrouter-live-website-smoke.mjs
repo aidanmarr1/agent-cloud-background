@@ -60,7 +60,7 @@ try {
     tool_choice: { type: 'function', function: { name: 'create_website' } },
     parallel_tool_calls: false,
     max_tokens: 12_288,
-    reasoning: { max_tokens: 2_048, exclude: true },
+    reasoning: { effort: 'minimal', exclude: true },
   })
 
   const call = response.choices?.[0]?.message?.tool_calls?.[0]

@@ -1057,6 +1057,8 @@ const waitForDeployAfterTrigger = hasFlag('--wait-for-deploy')
 const safeSuspendedDeploy = hasFlag('--safe-suspended-deploy') ||
   hasFlag('--guarded-suspended-deploy')
 const releaseIntakeOnly = hasFlag('--release-intake-hold')
+const resumePersistentOnly = hasFlag('--resume-persistent') ||
+  hasFlag('--resume-persistent-worker')
 const keepIntakeHeld = hasFlag('--keep-intake-held')
 const disableAutoDeployOnly = hasFlag('--disable-auto-deploy') ||
   hasFlag('--disable-auto-deploy-only')
@@ -1128,6 +1130,91 @@ async function runDisableAutoDeployOnly(serviceId) {
       `Render service ${serviceId} changed suspension state while disabling auto-deploy.`,
     )
   }
+}
+
+async function runResumePersistentWorker(input) {
+  if (!apply) throw new Error('--resume-persistent requires --apply.')
+  if (env('AGENT_TASK_DISPATCH_MODE') === 'render_job') {
+    throw new Error('--resume-persistent cannot be used while AGENT_TASK_DISPATCH_MODE=render_job.')
+  }
+  const drift = input.rows.filter((row) => row.action !== 'keep')
+  if (drift.length > 0) {
+    throw new Error(
+      `Refusing to resume a worker with environment drift (${drift.map((row) => row.key).join(', ')}). ` +
+      'Run the guarded suspended deploy first.',
+    )
+  }
+
+  const holdId = validateHoldId(readArg('--intake-hold-id') || env('AGENT_INTAKE_HOLD_ID'))
+  const baseUrl = intakeBaseUrl()
+  const baseName = queueBaseName()
+  const deployedQueueName = await resolveDeployedQueueName(baseUrl, baseName)
+  await proveDeployedIntakeHold(baseUrl, deployedQueueName, holdId)
+
+  const service = await getService(input.serviceId)
+  if (serviceType(service) !== 'background_worker') {
+    throw new Error(
+      `Render service ${input.serviceId} is ${serviceType(service) || 'an unknown type'}, not background_worker.`,
+    )
+  }
+  if (!['suspended', 'not_suspended'].includes(serviceSuspendedState(service))) {
+    throw new Error(
+      `Render service ${input.serviceId} has unsupported suspension state ` +
+      `${serviceSuspendedState(service) || 'unknown'}.`,
+    )
+  }
+  if (serviceAutoDeployState(service) !== 'no') {
+    throw new Error('Persistent worker resume requires autoDeploy=no so releases remain explicit.')
+  }
+
+  const commitId = exactCommitId()
+  const exactDeploy = await reconcileExactDeploy(input.serviceId, commitId, { required: true })
+  const deployId = renderDeployId(exactDeploy)
+  const liveDeploy = SUCCESSFUL_DEPLOY_STATUSES.has(renderDeployStatus(exactDeploy))
+    ? exactDeploy
+    : await waitForDeploy(input.serviceId, deployId)
+  verifyDeployCommit(liveDeploy, commitId, deployId)
+
+  let resumeAttempted = false
+  try {
+    if (serviceSuspendedState(service) === 'suspended') {
+      resumeAttempted = true
+      await resumeService(input.serviceId)
+    }
+    const resumed = await getService(input.serviceId)
+    if (serviceSuspendedState(resumed) !== 'not_suspended') {
+      throw new Error(
+        `Render worker ${input.serviceId} did not remain resumed; state is ` +
+        `${serviceSuspendedState(resumed) || 'unknown'}.`,
+      )
+    }
+    if (serviceAutoDeployState(resumed) !== 'no') {
+      throw new Error(`Render worker ${input.serviceId} changed autoDeploy state while resuming.`)
+    }
+  } catch (error) {
+    if (resumeAttempted) {
+      try {
+        await suspendAndVerifyForCleanup(input.serviceId)
+      } catch (suspendError) {
+        throw new Error(
+          `Persistent worker resume failed and cleanup could not prove suspension. ` +
+          `Intake hold ${holdId} remains active. Resume error: ${
+            error instanceof Error ? error.message : String(error)
+          }. Suspension error: ${
+            suspendError instanceof Error ? suspendError.message : String(suspendError)
+          }`,
+        )
+      }
+    }
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)} Intake hold ${holdId} remains active.`,
+    )
+  }
+
+  console.log(
+    `Persistently resumed Render worker ${input.serviceId} on exact commit ${commitId} ` +
+    `with intake hold ${holdId} still active.`,
+  )
 }
 
 async function runGuardedSuspendedDeploy(input) {
@@ -1319,6 +1406,9 @@ async function main() {
     await releaseHeldIntake()
     return
   }
+  if (resumePersistentOnly && (safeSuspendedDeploy || disableAutoDeployOnly || triggerDeployAfterApply)) {
+    throw new Error('--resume-persistent cannot be combined with deploy or auto-deploy mutation modes.')
+  }
 
   const templateText = await readFile(`${root}/render.worker.env.example`, 'utf8')
   const templateEntries = parseEnvTemplate(templateText)
@@ -1337,6 +1427,11 @@ async function main() {
   printReport({ serviceId, apply, triggerDeploy: triggerDeployAfterApply, rows, missingLocal })
 
   if (missingLocal.length > 0) process.exitCode = 1
+  if (resumePersistentOnly) {
+    if (missingLocal.length > 0) process.exit()
+    await runResumePersistentWorker({ serviceId, rows })
+    return
+  }
   if (!apply || missingLocal.length > 0) process.exit()
 
   if (waitForDeployAfterTrigger && !triggerDeployAfterApply) {

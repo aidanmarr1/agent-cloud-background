@@ -231,7 +231,7 @@ assert.match(
 )
 
 const idempotencyIndex = chatRoute.indexOf('const acceptedRun = await findTaskJobForRun')
-const holdIndex = chatRoute.indexOf('const intakeHold = await taskIntakeHoldResponse()')
+const holdIndex = chatRoute.indexOf('const intakeHold = directChat')
 const creditIndex = chatRoute.indexOf('const creditsPromise = assertServerCreditsAvailable')
 const enqueueIndex = chatRoute.indexOf('await enqueueTaskJob({')
 assert(idempotencyIndex >= 0 && holdIndex > idempotencyIndex, 'idempotent reconnect recovery must remain available while intake is held')
@@ -266,6 +266,16 @@ assert.match(
   finishSetup,
   /--safe-suspended-deploy[\s\S]*--keep-intake-held[\s\S]*waitForWorkerReadiness[\s\S]*--release-intake-hold/,
   'the full rollout must retain intake hold through Vercel deployment and readiness',
+)
+assert.match(
+  renderHelper,
+  /runResumePersistentWorker[\s\S]*proveDeployedIntakeHold[\s\S]*reconcileExactDeploy[\s\S]*resumeService[\s\S]*not_suspended/,
+  'persistent recovery must prove the exact hold and deploy before leaving the worker resumed',
+)
+assert.match(
+  finishSetup,
+  /renderIntakeHoldActive && !onDemandDispatch[\s\S]*--resume-persistent[\s\S]*waitForWorkerReadiness/,
+  'persistent rollouts must resume the verified worker before waiting for its heartbeat',
 )
 assert.ok(
   finishSetup.indexOf("runStep('Apply and deploy Render worker env") <

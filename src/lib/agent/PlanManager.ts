@@ -82,10 +82,9 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'low' as const, exclude: true }
-// Acknowledgement wording is a tiny presentation turn. Use the model's minimum
-// reasoning level while the planner receives low reasoning for the actual
-// phase/checklist structure.
+const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
+// Contributor reasoning is mandatory. Keep both planning and acknowledgement
+// turns at its minimum supported effort.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'

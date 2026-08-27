@@ -153,7 +153,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'meta/muse-spark-1.2')
+    assert.equal(request.body.model, 'meta/muse-spark-1.2-contributor')
     assert.equal('models' in request.body, false)
     assert.deepEqual(request.body.provider, {
       order: ['meta'],
@@ -179,7 +179,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   assert.deepEqual(requests[1].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[2].body.tool_choice, 'auto')
-  assert.deepEqual(requests[3].body.reasoning, { effort: 'medium', exclude: true })
+  assert.deepEqual(requests[3].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(requests[4].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
     requests[4].body.messages.slice(-3),
@@ -201,7 +201,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Muse Spark 1.2 exact Meta provider and adaptive reasoning smoke test passed')
+  console.log('Muse Spark 1.2 Contributor exact Meta provider and minimal reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

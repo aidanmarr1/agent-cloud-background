@@ -282,6 +282,9 @@ try {
   let renderWorkerDeployTriggered = false
   let renderIntakeHoldActive = false
   let deployedWorkerSmokeProven = false
+  const renderServiceId = readArg('--render-service-id')
+  const renderServiceName = readArg('--render-service-name')
+  const renderCommitId = readArg('--render-commit-id')
   if (workerEnvPath) await writeWorkerEnvFile(workerEnvPath)
 
   await runStep('Production cloud env smoke (cloud:env-smoke)', nodeBin, ['scripts/cloud-env-smoke.mjs'])
@@ -305,9 +308,9 @@ try {
     console.log('\nSKIP Live E2B template smoke. Pass --e2b-smoke to run the paid sandbox probe.')
   }
 
-  // Render must finish first. Once Vercel activates render_job, every accepted
-  // task can immediately launch `worker:drain`; activating the web deployment
-  // against an older worker image would create paid jobs that cannot claim.
+  // Prepare the exact worker artifact while intake is held. The guarded deploy
+  // returns the base to suspended state; persistent mode resumes it only after
+  // the matching web deployment is active, while render_job leaves it suspended.
   if (!skipRenderEnv && env('RENDER_API_KEY')) {
     const renderArgs = [
       'scripts/render-worker-env.mjs',
@@ -321,8 +324,6 @@ try {
       '--intake-hold-url',
       deployedUrl,
     ]
-    const renderServiceId = readArg('--render-service-id')
-    const renderServiceName = readArg('--render-service-name')
     const renderDeployWaitMs = readArg('--render-deploy-wait-ms')
     const renderDeployPollMs = readArg('--render-deploy-poll-ms')
     if (renderServiceId) renderArgs.push('--service-id', renderServiceId)
@@ -343,7 +344,6 @@ try {
       if (value) renderArgs.push(renderArg, value)
     }
     if (hasFlag('--render-clear-cache')) renderArgs.push('--clear-cache')
-    const renderCommitId = readArg('--render-commit-id')
     if (renderCommitId) renderArgs.push('--commit-id', renderCommitId)
     renderRolloutAttempted = true
     await runStep('Apply and deploy Render worker env (cloud:render-worker-env)', nodeBin, renderArgs)
@@ -378,6 +378,21 @@ try {
       '--yes',
     ])
   }
+  if (renderIntakeHoldActive && !onDemandDispatch) {
+    const resumeArgs = [
+      'scripts/render-worker-env.mjs',
+      '--apply',
+      '--resume-persistent',
+      '--intake-hold-id',
+      intakeHoldId,
+      '--intake-hold-url',
+      deployedUrl,
+    ]
+    if (renderServiceId) resumeArgs.push('--service-id', renderServiceId)
+    if (renderServiceName) resumeArgs.push('--service-name', renderServiceName)
+    if (renderCommitId) resumeArgs.push('--commit-id', renderCommitId)
+    await runStep('Resume verified persistent Render worker', nodeBin, resumeArgs)
+  }
   if (renderIntakeHoldActive && skipWorkerReadyWait) {
     throw new Error(
       'Cannot release the rollout intake hold while --skip-worker-ready-wait is set. ' +
@@ -390,7 +405,7 @@ try {
     console.log('\nSKIP task executor readiness wait. Pass --wait-for-worker-ready to verify an already-prepared manual executor before final status/preflight.')
   }
   if (renderIntakeHoldActive) {
-    await runStep('Prove deployed one-off worker execution before reopening intake', nodeBin, [
+    await runStep(`Prove deployed ${onDemandDispatch ? 'one-off' : 'persistent'} worker execution before reopening intake`, nodeBin, [
       'scripts/prod-background-worker-smoke.mjs',
       '--url',
       deployedUrl,
