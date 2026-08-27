@@ -49,7 +49,10 @@ export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens
 export const MODEL_LONG_CONTEXT_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.longContextInputUsdPer1M
 export const MODEL_LONG_CONTEXT_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.longContextOutputUsdPer1M
-export const SERPER_SEARCH_USD_PER_1K_REQUESTS = 0.30
+// Billing is explicitly pinned to Serper's Starter purchase rate: $50 for
+// 50,000 requests. A tier change must update this constant and its contract
+// tests together; there is intentionally no fallback price.
+export const SERPER_SEARCH_USD_PER_1K_REQUESTS = 1.00
 export const LOCAL_BROWSER_USD_PER_STEP = 0
 export const E2B_DEFAULT_VCPU_COUNT = 2
 // Verified against the production agent-cloud-browser template. Keep the
