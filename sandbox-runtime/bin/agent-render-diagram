@@ -84,10 +84,18 @@ def render_mermaid(source: Path, partial: Path, timeout: int) -> None:
 
 
 def render_d2(source: Path, partial: Path, timeout: int) -> None:
-    run_checked(
-        [command_path("d2"), "--layout", "dagre", source, partial],
-        timeout=timeout,
-    )
+    d2 = command_path("d2")
+    if partial.suffix.lower() == ".svg":
+        run_checked([d2, "--layout", "dagre", source, partial], timeout=timeout)
+        return
+
+    svg_partial = partial.with_suffix(".svg")
+    try:
+        run_checked([d2, "--layout", "dagre", source, svg_partial], timeout=timeout)
+        converter = command_path("magick", "convert")
+        run_checked([converter, svg_partial, partial], timeout=timeout)
+    finally:
+        svg_partial.unlink(missing_ok=True)
 
 
 def render_plantuml(source: Path, partial: Path, timeout: int) -> None:
@@ -162,4 +170,3 @@ if __name__ == "__main__":
         main()
     except BaseException as error:
         fail_cleanly(error)
-

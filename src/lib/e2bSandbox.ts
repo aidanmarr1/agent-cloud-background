@@ -135,6 +135,31 @@ function envBool(name: string, fallback: boolean): boolean {
   return value === '1' || value === 'true' || value === 'yes'
 }
 
+function e2bSandboxRuntimeEnvs(): Record<string, string> {
+  return {
+    AGENT_E2B_WORKSPACE_ROOT: envString('AGENT_E2B_WORKSPACE_ROOT') || '/home/user/agent-workspaces',
+    AGENT_LOCALE: envString('AGENT_LOCALE') || 'en',
+    AGENT_SANDBOX_PROFILE: envString('AGENT_SANDBOX_PROFILE') || 'agent-parity-v1',
+    AGENT_TIMEZONE: envString('AGENT_TIMEZONE') || 'Australia/Sydney',
+    AGENT_WHISPER_MODEL: envString('AGENT_WHISPER_MODEL') || '/opt/agent/models/ggml-base.en.bin',
+    APP_DOMAIN: envString('APP_DOMAIN') || 'agent1-0.vercel.app',
+    DISPLAY: envString('AGENT_E2B_DISPLAY') || ':0',
+    HOME: '/home/user',
+    JAVA_HOME: '/usr/lib/jvm/msopenjdk-21-amd64',
+    LANG: 'C.UTF-8',
+    LC_ALL: 'C.UTF-8',
+    PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
+    PUPPETEER_SKIP_DOWNLOAD: '1',
+    PYTHONDONTWRITEBYTECODE: '1',
+    PYTHONUNBUFFERED: '1',
+    RUNTIME_CRASH_STATE_DIR: '/home/user/.local/state/agent',
+    SHELL: '/bin/bash',
+    TZ: envString('AGENT_TIMEZONE') || 'Australia/Sydney',
+    USER: 'user',
+    WEBDEV_TEMPLATES_PATH: '/opt/agent/webdev/templates',
+  }
+}
+
 class E2BSandboxKillError extends Error {
   constructor(readonly sandboxId: string, readonly cause: unknown) {
     super(`Could not confirm E2B sandbox ${sandboxId} was stopped.`)
@@ -747,6 +772,7 @@ async function createSandbox(conversationId: string): Promise<E2BSandboxInstance
   const sandbox = await Sandbox.create({
     template: envString('E2B_TEMPLATE_ID') || undefined,
     apiKey: envString('E2B_API_KEY'),
+    envs: e2bSandboxRuntimeEnvs(),
     timeoutMs: envPositiveInt('AGENT_E2B_SANDBOX_TIMEOUT_MS', DEFAULT_E2B_TIMEOUT_MS),
     allowInternetAccess: envBool('AGENT_E2B_ALLOW_INTERNET', true),
     secure: true,
@@ -1491,6 +1517,7 @@ export async function executeCommandInE2B(
     const commandHandle = await sandbox.commands.run(command, {
       background: true,
       cwd: workspaceRoot(conversationId),
+      envs: e2bSandboxRuntimeEnvs(),
       timeoutMs,
       signal,
       onStdout: (data) => onOutput?.('stdout', data),
@@ -1766,6 +1793,7 @@ rm -f ${shellQuote(tempPath)}
 wc -c < ${shellQuote(target.absolutePath)}
 `
   const result = await sandbox.commands.run(script, {
+    envs: e2bSandboxRuntimeEnvs(),
     timeoutMs: envPositiveInt('AGENT_E2B_COMMAND_TIMEOUT_MS', DEFAULT_E2B_COMMAND_TIMEOUT_MS),
     requestTimeoutMs: envPositiveInt('AGENT_E2B_FILE_REQUEST_TIMEOUT_MS', DEFAULT_E2B_FILE_REQUEST_TIMEOUT_MS),
     signal,
@@ -1919,6 +1947,7 @@ exit 1
 `
     const result = await sandbox.commands.run(script, {
       cwd: rootDir,
+      envs: e2bSandboxRuntimeEnvs(),
       timeoutMs: 15_000,
     })
     if (result.exitCode !== 0) {
@@ -1996,6 +2025,7 @@ nohup "$CHROME" \
   try {
     await sandbox.commands.run(script, {
       cwd: root,
+      envs: e2bSandboxRuntimeEnvs(),
       timeoutMs: envPositiveInt('AGENT_E2B_BROWSER_LAUNCH_TIMEOUT_MS', 30_000),
     })
   } catch (error) {

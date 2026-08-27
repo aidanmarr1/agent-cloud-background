@@ -34,6 +34,7 @@ const [
   templatePackage,
   templateCss,
   rootTsconfigBody,
+  e2bSandboxSource,
 ] = await Promise.all([
   readFile(join(root, 'e2b.Dockerfile'), 'utf8'),
   readFile(join(root, 'scripts/e2b-template-build-v2.mjs'), 'utf8'),
@@ -50,6 +51,7 @@ const [
   readFile(join(runtimeRoot, 'templates/web-static/package.json'), 'utf8'),
   readFile(join(runtimeRoot, 'templates/web-static/src/styles.css'), 'utf8'),
   readFile(join(root, 'tsconfig.json'), 'utf8'),
+  readFile(join(root, 'src/lib/e2bSandbox.ts'), 'utf8'),
 ])
 
 const manifest = JSON.parse(manifestBody)
@@ -72,6 +74,8 @@ assert.match(dockerfile, /\bpkg-config\b/, 'Whisper BLAS build must include pkg-
 assert.match(dockerfile, /@googleworkspace\/cli@0\.22\.3/)
 assert.match(dockerfile, /pnpm@11\.17\.0/)
 assert.match(dockerfile, /&& pnpm --version \\/, 'template build must validate pnpm on the final runtime PATH')
+assert.match(dockerfile, /visudo -cf \/etc\/sudoers\.d\/agent-user/, 'template build must validate the generated sudoers rule')
+assert.match(dockerfile, /agent-diagram-build-smoke\.png/, 'template build must render a real D2 PNG before publication')
 assert.match(
   dockerfile,
   /curl -fsSLo "\/tmp\/node-v\$\{NODE_VERSION\}-linux-x64\.tar\.xz"[\s\S]*sha256sum --check node\.sha256[\s\S]*tar -xJf "node-v\$\{NODE_VERSION\}-linux-x64\.tar\.xz"/,
@@ -101,6 +105,14 @@ assert.match(buildScript, /application source,[\s\S]*not part of the third-party
 assert.match(buildScript, /waitForFile\('\/tmp\/agent-sandbox-ready'\)/)
 assert.match(buildScript, /E2B_TEMPLATE_BUILD_CPU'\) \|\| '6'/)
 assert.match(buildScript, /E2B_TEMPLATE_BUILD_MEMORY_MB'\) \|\| '4096'/)
+assert.match(e2bSandboxSource, /function e2bSandboxRuntimeEnvs\(\)/)
+assert.match(e2bSandboxSource, /DISPLAY: envString\('AGENT_E2B_DISPLAY'\) \|\| ':0'/)
+assert.match(e2bSandboxSource, /WEBDEV_TEMPLATES_PATH: '\/opt\/agent\/webdev\/templates'/)
+assert.equal(
+  e2bSandboxSource.match(/envs: e2bSandboxRuntimeEnvs\(\)/g)?.length,
+  5,
+  'sandbox creation and every command path must restore the checked-in runtime environment',
+)
 
 assert.match(uploadCommand, /AGENT_UPLOAD_ENDPOINT/)
 assert.match(uploadCommand, /parsed_endpoint\.scheme != "https"/)
@@ -110,6 +122,8 @@ assert.doesNotMatch(uploadCommand, /args\.endpoint/)
 assert.match(uploadCommand, /configured first-party upload endpoint rejected the file/)
 assert.match(diagramCommand, /command_path\("mmdc"\)/)
 assert.match(diagramCommand, /command_path\("d2"\)/)
+assert.match(diagramCommand, /command_path\("magick", "convert"\)/)
+assert.match(diagramCommand, /svg_partial = partial\.with_suffix\("\.svg"\)/)
 assert.match(diagramCommand, /command_path\("plantuml"\)/)
 assert.match(pdfCommand, /default-src 'none'/)
 assert.match(pdfCommand, /scriptEnabled=false/)

@@ -90,7 +90,7 @@ try {
   sandboxId = sandbox.sandboxId
 
   const command = [
-    'set -e',
+    'set -eux',
     'echo "workspace=$PWD"',
     'test -d "$PWD"',
     'node --version',
@@ -154,7 +154,11 @@ try {
 
   const commandResult = await executeCommandInE2B(conversationId, command)
   if (commandResult.exitCode !== 0) {
-    throw new Error(`E2B template command smoke failed: ${commandResult.stderr || commandResult.stdout || `exit ${commandResult.exitCode}`}`)
+    throw new Error([
+      `E2B template command smoke failed with exit ${commandResult.exitCode}.`,
+      `stdout:\n${commandResult.stdout || '(empty)'}`,
+      `stderr:\n${commandResult.stderr || '(empty)'}`,
+    ].join('\n'))
   }
 
   let cancellationInfo = null

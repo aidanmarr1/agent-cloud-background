@@ -160,8 +160,9 @@ RUN mkdir -p \
       /home/user/agent-workspaces \
       /home/user/.local/state/agent \
       /tmp/agent-supervisor \
-  && printf 'user ALL=(ALL) NOPASSWD:ALL\n' > /etc/sudoers.d/agent-user \
+  && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent-user \
   && chmod 0440 /etc/sudoers.d/agent-user \
+  && visudo -cf /etc/sudoers.d/agent-user \
   && chown -R user:user /home/user /tmp/agent-supervisor \
   && chromium --version \
   && node --version \
@@ -170,6 +171,10 @@ RUN mkdir -p \
   && yarn --version \
   && python3 --version \
   && java -version \
+  && echo 'left -> right' > /tmp/agent-diagram-build-smoke.d2 \
+  && agent-render-diagram /tmp/agent-diagram-build-smoke.d2 /tmp/agent-diagram-build-smoke.png \
+  && test -s /tmp/agent-diagram-build-smoke.png \
+  && rm -f /tmp/agent-diagram-build-smoke.d2 /tmp/agent-diagram-build-smoke.png \
   && agent-sandbox-info >/dev/null
 
 ENV HOME=/home/user
