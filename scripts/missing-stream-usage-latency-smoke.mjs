@@ -78,7 +78,7 @@ export async function runSmoke() {
     state,
     false,
     output => estimateConservativeMissingStreamUsage({
-      model: 'z-ai/glm-5.3-flash',
+      model: 'meta/muse-spark-1.2-contributor',
       requestMessages,
       requestTools,
       assistantContent: output.assistantContent,

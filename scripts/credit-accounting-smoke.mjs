@@ -31,14 +31,14 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'z-ai\/glm-5\.3-flash'/, 'default model must be GLM 5.3 Flash')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.075/, 'GLM input pricing must match the exact Z.ai endpoint')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.015/, 'GLM cache-read pricing must match the exact Z.ai endpoint')
-  assert.match(modelPricing, /outputUsdPer1M:\s*0\.25/, 'GLM output pricing must match the exact Z.ai endpoint')
-  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*0\.25/, 'GLM reasoning pricing must match output pricing')
-  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'GLM must not inherit unrelated long-context price tiers')
-  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'GLM Z.ai context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*131_072/, 'GLM output cap must match the exact Z.ai endpoint')
+  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'meta\/muse-spark-1\.2-contributor'/, 'default model must be Muse Spark 1.2 Contributor')
+  assert.match(modelPricing, /inputUsdPer1M:\s*0\.10/, 'Muse Contributor input pricing must match OpenRouter')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.002/, 'Muse Contributor cache-read pricing must match OpenRouter')
+  assert.match(modelPricing, /outputUsdPer1M:\s*0\.20/, 'Muse Contributor output pricing must match OpenRouter')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*0\.20/, 'Muse Contributor reasoning pricing must match output pricing')
+  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'Muse must not inherit unrelated long-context price tiers')
+  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Muse context window must match OpenRouter')
+  assert.match(modelPricing, /maxCompletionTokens:\s*65_536/, 'Muse output cap must preserve the application-selected budget')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*1\.00/, 'Serper search pricing must match the live Starter purchase rate')
@@ -200,15 +200,15 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.000325) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.004) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.03775) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0003) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.0052) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.0502) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
     prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
     prompt_cache_miss_tokens: 400_000,
-  }) || 0) - 0.03175) < 1e-12)
+  }) || 0) - 0.0404) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return
