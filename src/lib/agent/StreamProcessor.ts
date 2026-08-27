@@ -787,20 +787,15 @@ export class StreamProcessor {
     const progressNarrationTextCap = shouldCapProgressNarrationText(state)
       ? PROGRESS_NARRATION_TEXT_STREAM_CAP
       : null
-    let visibleTextSegmentStarted = false
-
-    const emitVisibleAssistantContent = (content: string): void => {
+    const stageVisibleAssistantContent = (content: string): void => {
       if (!content) return
       lastVisibleActivityTime = Date.now()
       if (!textSavedDeliverable) {
-        // Every model turn is a distinct prose segment. Without an explicit
-        // boundary, a phase update ending in "now." and a later final handoff
-        // beginning with "Your" are persisted as "now.Your". Prefix only the
-        // first visible chunk of each turn; subsequent streamed chunks retain
-        // their exact spacing and Markdown structure.
-        const segment = visibleTextSegmentStarted ? content : `\n\n${content}`
-        visibleTextSegmentStarted = true
-        this.emit(() => this.emitter.textDelta(segment))
+        // Native-tool providers may stream short status prose before revealing
+        // the tool envelope. Hold ordinary chat text until the turn closes so
+        // a later tool call can suppress that ancillary narration atomically.
+        // Text-only final answers, phase narration and genuine blockers are
+        // released below once the completed turn proves there is no tool call.
         return
       }
 
@@ -1165,7 +1160,7 @@ export class StreamProcessor {
 
               // Only emit to user AFTER leakage check passes
               if (cleaned) {
-                emitVisibleAssistantContent(cleaned)
+                stageVisibleAssistantContent(cleaned)
               }
                 contentBuffer = contentBuffer.slice(safeContent.length)
               }
@@ -1314,7 +1309,7 @@ export class StreamProcessor {
           }
         }
         assistantContent += flushed
-        emitVisibleAssistantContent(flushed)
+        stageVisibleAssistantContent(flushed)
       }
     }
 
@@ -1393,6 +1388,30 @@ export class StreamProcessor {
     // action and asks the model to repair the same action envelope.
     if (cadenceProgressViolation && (toolCalls.size === 0 || hardCadenceBoundary)) toolCalls.clear()
 
+    // Preserve all generated output in a missing-provider-usage estimate even
+    // when ancillary tool-turn prose is intentionally hidden below.
+    const completedTurnUsage = resolvedUsage()
+
+    if (!textSavedDeliverable) {
+      if (toolCalls.size > 0 && !cadenceProgressUpdate) {
+        // Ordinary native-tool turns have one visible communication surface:
+        // the specific action pill. Discard any provider-authored micro-status
+        // text both from the event stream and assistant history. Cadence turns
+        // retain their accepted structured update for the explicit progress
+        // lane and subsequent model context.
+        assistantContent = ''
+      } else if (
+        toolCalls.size === 0 &&
+        !cadenceProgressViolation &&
+        assistantContent
+      ) {
+        // Every accepted text-only model turn is a distinct prose segment.
+        // Prefix a boundary so a phase update ending in "now." and a later
+        // final handoff beginning with "Your" cannot persist as "now.Your".
+        this.emit(() => this.emitter.textDelta(`\n\n${assistantContent}`))
+      }
+    }
+
     return {
       assistantContent,
       reasoningContent,
@@ -1402,7 +1421,7 @@ export class StreamProcessor {
       leakageDetected: false,
       timedOut: streamTimedOut,
       contentStreamingStartTime,
-      usage: resolvedUsage(),
+      usage: completedTurnUsage,
       usageEstimated,
       cadenceProgressUpdate: cadenceProgressUpdate || undefined,
       cadenceProgressToolCallId: cadenceProgressToolCallId || undefined,

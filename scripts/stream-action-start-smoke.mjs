@@ -149,6 +149,20 @@ async function* completedSourceResultChunks() {
   yield { choices: [{ delta: { content: 'blog reports that its agent runtime uses parallel tool dispatch to reduce user-visible latency.' } }] }
 }
 
+async function* ordinaryMicroNarrationThenToolChunks() {
+  yield { choices: [{ delta: { content: 'Gathering current evidence from primary sources.' } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_after_micro_narration', function: { name: 'web_search', arguments: '{"action_label":"Locate current primary agent-runtime evidence","plan_step_index":1,"query":"current primary agent runtime evidence"}' } }] } }] }
+  yield { choices: [{ delta: { content: 'Cross-checking the latest documentation.' } }] }
+}
+
+async function* phaseEndNarrationChunks() {
+  yield { choices: [{ delta: { content: 'The three primary sources now establish the launch timing and architecture. Next, I’ll compare the documented capabilities. <next_step/>' } }] }
+}
+
+async function* realBlockerNarrationChunks() {
+  yield { choices: [{ delta: { content: 'The requested private repository returned an authorization error, so its contents cannot be verified until access is restored.' } }] }
+}
+
 async function* internalProviderRecoveryChunks() {
   yield { choices: [{ delta: { content: 'The free Serper API ' } }] }
   yield { choices: [{ delta: { content: "blocked the Apple search query, so I navigated directly to Apple's iPhone store page instead." } }] }
@@ -637,6 +651,41 @@ export async function runSmoke() {
   const completedResult = await completedResultProcessor.processStream(completedSourceResultChunks() as any, completedResultState)
   assert.match(completedResult.assistantContent, /blog reports that its agent runtime uses parallel tool dispatch/)
   assert.equal(completedResultEmitter.events.filter(e => e.type === 'text_delta').length, 1, 'a concrete completed-source result must remain visible')
+
+  const ordinaryMicroEmitter = makeEmitter()
+  const ordinaryMicroState = createInitialState(false, timeouts)
+  ordinaryMicroState.currentPlanItems = ['Gather current agent-runtime evidence']
+  ordinaryMicroState.currentStepIdx = 0
+  const ordinaryMicroResult = await new StreamProcessor(ordinaryMicroEmitter as any, timeouts)
+    .processStream(ordinaryMicroNarrationThenToolChunks() as any, ordinaryMicroState)
+  assert.equal(ordinaryMicroResult.toolCalls.size, 1, 'the native tool call after ancillary prose must still execute')
+  assert.equal(ordinaryMicroEmitter.events.filter(e => e.type === 'tool_start').length, 1, 'the specific native action pill must remain visible')
+  assert.equal(
+    ordinaryMicroEmitter.events.filter(e => e.type === 'text_delta').length,
+    0,
+    'ordinary pre-tool and post-tool micro-narrations must never leak into the chat stream',
+  )
+  assert.equal(
+    ordinaryMicroResult.assistantContent,
+    '',
+    'suppressed tool-turn prose must not survive in provider history as hidden narration',
+  )
+
+  const phaseEndEmitter = makeEmitter()
+  const phaseEndState = createInitialState(false, timeouts)
+  const phaseEndResult = await new StreamProcessor(phaseEndEmitter as any, timeouts)
+    .processStream(phaseEndNarrationChunks() as any, phaseEndState)
+  assert.equal(phaseEndResult.toolCalls.size, 0)
+  assert.equal(phaseEndResult.stepAdvancedThisIteration, true, 'phase-end narration must preserve its step marker semantics')
+  assert.match(phaseEndResult.assistantContent, /three primary sources now establish/)
+  assert.equal(phaseEndEmitter.events.filter(e => e.type === 'text_delta').length, 1, 'accepted phase-end narration must remain visible')
+
+  const realBlockerEmitter = makeEmitter()
+  const realBlockerState = createInitialState(false, timeouts)
+  const realBlockerResult = await new StreamProcessor(realBlockerEmitter as any, timeouts)
+    .processStream(realBlockerNarrationChunks() as any, realBlockerState)
+  assert.match(realBlockerResult.assistantContent, /authorization error/)
+  assert.equal(realBlockerEmitter.events.filter(e => e.type === 'text_delta').length, 1, 'a genuine text-only blocker must remain visible')
 
   const providerRecoveryEmitter = makeEmitter()
   const providerRecoveryState = createInitialState(false, timeouts)
