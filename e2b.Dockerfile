@@ -62,6 +62,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     pandoc \
     plantuml \
+    pkg-config \
     poppler-utils \
     procps \
     rclone \
