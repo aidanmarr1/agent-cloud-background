@@ -18,6 +18,7 @@ export interface ToolCallData {
   name: string
   arguments: string
   provisionalStartEmitted?: boolean
+  provisionalStartExposed?: boolean
 }
 
 export interface StreamUsage {
@@ -51,6 +52,22 @@ export interface StreamResult {
   cadenceProgressUpdate?: string
   cadenceProgressToolCallId?: string
   cadenceProgressViolation?: CadenceProgressViolation
+}
+
+/**
+ * A cadence update is released before its bound action. Some native actions
+ * already created a buffered provisional start while their arguments streamed;
+ * deferred tools are first counted later, after execution preflight. Preserve
+ * exactly the former here so both paths begin the new cadence window at one.
+ */
+export function carriedCadenceActionCount(
+  result: Pick<StreamResult, 'toolCalls' | 'cadenceProgressToolCallId'>,
+): 0 | 1 {
+  if (!result.cadenceProgressToolCallId) return 0
+  const boundToolCall = [...result.toolCalls.values()].find(
+    (toolCall) => toolCall.id === result.cadenceProgressToolCallId,
+  )
+  return boundToolCall?.provisionalStartEmitted ? 1 : 0
 }
 
 export type CadenceProgressViolationCode =
@@ -530,7 +547,12 @@ export class StreamProcessor {
   private tierTimeouts: TierTimeouts
   private signal?: AbortSignal
   private bufferedEmissions: Array<() => void> | null = null
-  private exposedBufferedFileTools = new Map<string, string>()
+  private bufferedProvisionalToolStarts = new Map<string, {
+    name: string
+    state: AgentStateData
+    counted: boolean
+    exposed: boolean
+  }>()
 
   constructor(emitter: AgentEventEmitter, tierTimeouts: TierTimeouts, signal?: AbortSignal) {
     this.emitter = emitter
@@ -550,7 +572,7 @@ export class StreamProcessor {
   commitBufferedEmission(): void {
     const emissions = this.bufferedEmissions
     this.bufferedEmissions = null
-    this.exposedBufferedFileTools.clear()
+    this.bufferedProvisionalToolStarts.clear()
     for (const emit of emissions || []) emit()
   }
 
@@ -560,13 +582,21 @@ export class StreamProcessor {
     // enclosing turn is rejected (provider failure, debit failure, or cadence
     // rejection), explicitly settle every exposed action so the client cannot
     // retain a stuck blue pill or LIVE editor.
-    const exposedFileTools = [...this.exposedBufferedFileTools]
-    this.exposedBufferedFileTools.clear()
-    for (const [id, name] of exposedFileTools) {
-      this.emitter.toolResult(id, name, {
-        error: 'INTERNAL_RECOVERY: The streamed file action was discarded before execution. Retry the current write.',
-        discarded: true,
-      } as never)
+    const provisionalStarts = [...this.bufferedProvisionalToolStarts]
+    this.bufferedProvisionalToolStarts.clear()
+    for (const [id, provisional] of provisionalStarts) {
+      if (provisional.counted && provisional.state.visibleNarrationToolStartIds.delete(id)) {
+        provisional.state.visibleToolActionsSinceLastNarration = Math.max(
+          0,
+          provisional.state.visibleToolActionsSinceLastNarration - 1,
+        )
+      }
+      if (provisional.exposed) {
+        this.emitter.toolResult(id, provisional.name, {
+          error: 'INTERNAL_RECOVERY: The streamed file action was discarded before execution. Retry the current write.',
+          discarded: true,
+        } as never)
+      }
     }
   }
 
@@ -584,6 +614,7 @@ export class StreamProcessor {
     cadenceProgressUpdateEnabled = false,
     estimateMissingUsage?: MissingStreamUsageEstimator,
     toolCallPolicy?: StreamToolCallPolicy,
+    onCadenceProgressReady?: (text: string, toolCallId: string) => void,
   ): Promise<StreamResult> {
     if (this.signal?.aborted) {
       throw new DOMException('The operation was aborted.', 'AbortError')
@@ -625,9 +656,9 @@ export class StreamProcessor {
     let cadenceProgressToolCallId: string | null = null
     let cadenceProgressViolation: CadenceProgressViolation | null = null
     const rejectedCadenceProgressToolCalls = new Set<number>()
-    // Action three is the preferred cadence point. Once three visible actions
-    // already exist, action four is a hard boundary: it cannot execute unless
-    // the model supplied a valid post-result progress update for that action.
+    // Once three visible actions exist, the next action is a hard cadence
+    // boundary. Its model-authored update is released before that action so
+    // result -> next direction -> action remains temporally truthful.
     const hardCadenceBoundary = cadenceProgressUpdateEnabled &&
       state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
 
@@ -638,12 +669,16 @@ export class StreamProcessor {
       if (!cadenceProgressViolation) cadenceProgressViolation = { code, reason }
     }
 
-    const stageCadenceProgressUpdate = (text: string, toolCallId: string): void => {
+    const stageCadenceProgressUpdate = (text: string, toolCall: ToolCallData): void => {
       cadenceProgressUpdate = text
-      cadenceProgressToolCallId = toolCallId
+      cadenceProgressToolCallId = toolCall.id
       assistantContent = assistantContent.trim()
         ? `${assistantContent.trim()}\n\n${text}`
         : text
+      // Buffered actions are released after their model-usage debit commits.
+      // An eligible live file preview releases this staged update later inside
+      // emitProvisionalToolStart, after the same preview guards have passed and
+      // immediately before the first live file event.
     }
 
     const prepareCadenceProgressUpdate = (
@@ -658,15 +693,14 @@ export class StreamProcessor {
       const rawUpdate = extractCadenceProgressUpdate(toolCall.arguments)
       if (rawUpdate === undefined) {
         // Keep holding the action while the required field is still streaming.
-        // At end-of-stream, fail open for the concrete action. Narration is a
-        // display lane and must never make the runtime discard useful work or
-        // buy a second model turn merely to repair prose.
+        // At the active cadence boundary, reject a missing display contract
+        // before execution so the model can repair the same action envelope.
         if (allowMissing) {
           rejectedCadenceProgressToolCalls.add(index)
           if (hardCadenceBoundary) {
             markCadenceProgressViolation(
               'missing_progress_update',
-              'the fourth-action cadence boundary requires a non-empty progress_update on the native tool call',
+              'the next-action cadence boundary requires a non-empty progress_update on the native tool call',
             )
             return false
           }
@@ -681,17 +715,17 @@ export class StreamProcessor {
           markCadenceProgressViolation(
             review.status === 'duplicate' ? 'duplicate_progress_update' : 'invalid_progress_update',
             review.status === 'duplicate'
-              ? 'the fourth-action cadence boundary requires a genuinely new progress_update'
-              : 'the fourth-action cadence boundary requires a valid completed-work progress_update',
+              ? 'the next-action cadence boundary requires a genuinely new progress_update'
+              : 'the next-action cadence boundary requires a valid completed-work progress_update',
           )
           return false
         }
-        // Action three may still fail open so useful work is not lost; action
-        // four then becomes the mandatory retry boundary.
+        // Non-boundary callers may still fail open, though normal cadence is
+        // armed only once the hard frontier has been reached.
         return allowMissing
       }
 
-      stageCadenceProgressUpdate(review.text, toolCall.id)
+      stageCadenceProgressUpdate(review.text, toolCall)
       return true
     }
 
@@ -708,15 +742,29 @@ export class StreamProcessor {
       const signature = provisionalToolStartSignature(toolCall, earlyArgs)
       if (emittedToolStarts.get(index) === signature) return
       emittedToolStarts.set(index, signature)
-      recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
+      const streamFileWriteImmediately = STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)
+      if (
+        streamFileWriteImmediately &&
+        cadenceProgressUpdate &&
+        cadenceProgressToolCallId === toolCall.id
+      ) {
+        onCadenceProgressReady?.(cadenceProgressUpdate, toolCall.id)
+      }
+      const countedForNarration = recordVisibleToolStartForNarration(toolCall, earlyArgs, state)
       toolCall.provisionalStartEmitted = true
       // Current-step file writes need to become visible while the model is
       // still generating their arguments. Their provisional start args are
       // already sanitized and the preview is reconciled with the eventual
       // tool result, so these events may safely bypass the model-turn billing
       // buffer. Keep prose and all other actions buffered.
-      if (this.bufferedEmissions && STREAMED_FILE_WRITE_TOOLS.has(toolCall.name)) {
-        this.exposedBufferedFileTools.set(toolCall.id, toolCall.name)
+      if (this.bufferedEmissions) {
+        this.bufferedProvisionalToolStarts.set(toolCall.id, {
+          name: toolCall.name,
+          state,
+          counted: countedForNarration,
+          exposed: streamFileWriteImmediately,
+        })
+        if (streamFileWriteImmediately) toolCall.provisionalStartExposed = true
       }
       this.emit(
         () => this.emitter.toolStart(
@@ -725,7 +773,7 @@ export class StreamProcessor {
           earlyArgs,
           { provisional: true },
         ),
-        { immediate: STREAMED_FILE_WRITE_TOOLS.has(toolCall.name) },
+        { immediate: streamFileWriteImmediately },
       )
       lastVisibleActivityTime = Date.now()
     }
@@ -758,7 +806,12 @@ export class StreamProcessor {
 
       if (!textSavedDeliverable.started) {
         textSavedDeliverable.started = true
-        this.exposedBufferedFileTools.set(textSavedDeliverable.id, 'create_file')
+        this.bufferedProvisionalToolStarts.set(textSavedDeliverable.id, {
+          name: 'create_file',
+          state,
+          counted: false,
+          exposed: true,
+        })
         this.emit(
           () => this.emitter.toolStart(
             textSavedDeliverable.id,
@@ -1185,7 +1238,7 @@ export class StreamProcessor {
                     preview.emittedChars = 0
                     this.emit(
                       () => this.emitter.fileContentStart(toolCall.id, path, toolCall.name),
-                      { immediate: true },
+                      { immediate: toolCall.provisionalStartExposed === true },
                     )
                     lastVisibleActivityTime = Date.now()
                   }
@@ -1195,7 +1248,7 @@ export class StreamProcessor {
                       const deltaContent = content.slice(preview.emittedChars)
                       this.emit(
                         () => this.emitter.fileContentDelta(toolCall.id, deltaContent),
-                        { immediate: true },
+                        { immediate: toolCall.provisionalStartExposed === true },
                       )
                       lastVisibleActivityTime = Date.now()
                       preview.emittedChars = content.length
@@ -1304,11 +1357,9 @@ export class StreamProcessor {
       )
     }
 
-    // Stage valid narration for post-result release. The action itself remains
-    // genuinely live and must not wait for display prose to finish streaming.
-    // Action three may retry naturally after unusable narration. At the hard
-    // fourth-action boundary, reject the turn before execution and ask the LLM
-    // to repair the same action contract; no fifth silent action can slip past.
+    // Stage valid narration for release immediately before the buffered next
+    // action. At the cadence boundary, reject an invalid turn before execution
+    // so another silent action cannot slip past.
     for (const [index, toolCall] of toolCalls) {
       const cadenceReady = prepareCadenceProgressUpdate(index, toolCall, true)
       if (!hardCadenceBoundary || cadenceReady) emitProvisionalToolStart(index, toolCall)
@@ -1327,7 +1378,7 @@ export class StreamProcessor {
         const deltaContent = content.slice(preview.emittedChars)
         this.emit(
           () => this.emitter.fileContentDelta(toolCall.id, deltaContent),
-          { immediate: true },
+          { immediate: toolCall.provisionalStartExposed === true },
         )
         preview.emittedChars = content.length
       }
@@ -1339,8 +1390,7 @@ export class StreamProcessor {
       toolCall.arguments = stripCadenceProgressUpdateFromArguments(toolCall.arguments)
     }
     // At the hard boundary an invalid display contract rejects the unexecuted
-    // action. At the preferred action-three boundary, valid work still fails
-    // open and the cadence field is retried with action four.
+    // action and asks the model to repair the same action envelope.
     if (cadenceProgressViolation && (toolCalls.size === 0 || hardCadenceBoundary)) toolCalls.clear()
 
     return {

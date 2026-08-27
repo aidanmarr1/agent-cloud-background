@@ -3,23 +3,24 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const [prompts, tools, toolRegistry, toolPipeline, planManager, legacyActionPill] = await Promise.all([
+const [prompts, tools, toolRegistry, toolPipeline, planManager, legacyActionPill, taskGroupView] = await Promise.all([
   readFile(`${root}/src/lib/prompts.ts`, 'utf8'),
   readFile(`${root}/src/lib/tools.ts`, 'utf8'),
   readFile(`${root}/src/lib/toolRegistry.ts`, 'utf8'),
   readFile(`${root}/src/lib/agent/ToolPipeline.ts`, 'utf8'),
   readFile(`${root}/src/lib/agent/PlanManager.ts`, 'utf8'),
   readFile(`${root}/src/components/chat/ActionPill.tsx`, 'utf8'),
+  readFile(`${root}/src/components/chat/TaskGroupView.tsx`, 'utf8'),
 ])
 
 assert.match(
   prompts,
-  /Use a clear active verb-led phrase[\s\S]*verb \+ concrete object or purpose[\s\S]*one shared house style[\s\S]*silently compare each new label with the recent visible labels[\s\S]*reuse the same lead verb, syntax, and level of specificity for actions that serve the same semantic purpose[\s\S]*Do not rotate among synonyms merely for variety[\s\S]*without reserving or forcing one keyword for a tool[\s\S]*The model authors every label from context; no tool-to-label mapping or deterministic fallback supplies its wording/,
-  'the model prompt must preserve natural action-label wording within a coherent house style',
+  /Use a clear active verb-led phrase that names the concrete subject plus the evidence, state, or artifact sought[\s\S]*Discovery labels identify the evidence gap[\s\S]*one shared house style[\s\S]*silently compare each new label with the recent visible labels[\s\S]*reuse the same lead verb, syntax, and level of specificity for actions that serve the same semantic purpose[\s\S]*Do not rotate among synonyms merely for variety[\s\S]*without reserving or forcing one keyword for a tool[\s\S]*The model authors every label from context; no tool-to-label mapping or deterministic fallback supplies its wording/,
+  'the model prompt must preserve specific natural mini-objectives within a coherent house style',
 )
 assert.match(
   tools,
-  /Model-authored visible action pill text[\s\S]*match the wording pattern and specificity of recent labels that serve the same purpose[\s\S]*Do not use a fixed tool mapping/,
+  /Model-authored visible action pill text, usually 3-24 words[\s\S]*Name the concrete subject plus the evidence, state, artifact, or verification sought[\s\S]*include the fact being extracted rather than merely saying to open\/read a page[\s\S]*Match the wording pattern and specificity of recent labels serving the same purpose[\s\S]*Do not use a fixed tool mapping/,
   'every model-visible tool schema must reinforce the shared model-authored label style',
 )
 assert.doesNotMatch(
@@ -76,6 +77,16 @@ assert.match(
   legacyActionPill,
   /const label = action\.label[\s\S]*if \(!label\) return null/,
   'legacy task actions must render only a historically persisted model label',
+)
+assert.match(
+  legacyActionPill,
+  /title=\{label\}/,
+  'legacy action pills must expose the complete model-authored label when the single-line row truncates it',
+)
+assert.match(
+  taskGroupView,
+  /title=\{label\}/,
+  'current action pills must expose the complete model-authored label when the single-line row truncates it',
 )
 assert.doesNotMatch(
   legacyActionPill,

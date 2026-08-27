@@ -478,7 +478,7 @@ const executionToolDefinitions: ChatCompletionTool[] = shouldExposeExecutionTool
 
 const TOOL_ACTION_LABEL_PARAMETER = {
   type: 'string',
-  description: 'Model-authored visible action pill text, 2-12 words. Start with a capital letter and do not end with a period. Describe the action purpose from task context; match the wording pattern and specificity of recent labels that serve the same purpose. Do not use a fixed tool mapping, local template, tool name, raw query/source/path, or generic verb plus literal target.',
+  description: 'Model-authored visible action pill text, usually 3-24 words. Start with a capital letter and do not end with a period. Name the concrete subject plus the evidence, state, artifact, or verification sought; for a known source, include the fact being extracted rather than merely saying to open/read a page. Match the wording pattern and specificity of recent labels serving the same purpose. Do not use a fixed tool mapping, local template, tool name, raw query/source/path, or generic wording such as Open article or Find details on page.',
 }
 
 const TOOL_PLAN_STEP_INDEX_PARAMETER = {

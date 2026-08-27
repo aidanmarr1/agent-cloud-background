@@ -85,6 +85,7 @@ const ActionPill = memo(function ActionPill({ subtask }: { subtask: Subtask }) {
       type="button"
       onClick={() => { if (canOpen) setComputerPanelOpen(true, { source: 'user' }) }}
       aria-label={canOpen ? `Open ${label}` : label}
+      title={label}
       className={`group/action flex min-h-7 max-w-full items-center gap-1 py-1 text-left transition-colors duration-150 ${
         isError
           ? 'cursor-default text-danger-text'

@@ -59,10 +59,10 @@ export const LOOP_THRESHOLD = 3             // Same tool N times in window = loo
 // --- Content & narration ---
 export const NARRATION_THRESHOLD_DEFAULT = 3
 export const NARRATION_THRESHOLD_BROWSER = 3
-// The narration is carried by (and emitted after) the next settled action.
-// Arm after two completed actions so the normal update lands on action 3; a
-// rejected/duplicate update then retries on action 4 instead of slipping to 5.
-export const NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS = 2
+// After three settled actions, the next native action turn carries a progress
+// update that is released immediately before that action. This gives the UI a
+// truthful result -> "Next, I'll..." -> action sequence without a sidecar call.
+export const NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS = 3
 export const NARRATION_MAX_VISIBLE_ACTION_GAP = 4
 export const POST_COMPLETION_MAX_ITERATIONS = IS_OLLAMA ? 3 : 1
 export const NO_PLAN_RUNAWAY_LIMIT = 80

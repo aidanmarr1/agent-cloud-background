@@ -21,6 +21,7 @@ export function ActionPill({ action }: ActionPillProps) {
 
   return (
     <button
+      title={label}
       onClick={() => {
         if (hasResult) setComputerPanelOpen(true, { source: 'user' })
       }}

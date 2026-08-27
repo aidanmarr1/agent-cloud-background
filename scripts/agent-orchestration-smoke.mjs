@@ -32,6 +32,7 @@ const {
 } = await jiti.import(fileURLToPath(new URL('../src/lib/liveDirectives.ts', import.meta.url)))
 const {
   clearTaskJobsForTest,
+  compactProgressUpdateForPersistence,
   createTaskJobEventStream,
   startTaskJob,
 } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/taskJobs.ts', import.meta.url)))
@@ -59,6 +60,14 @@ async function readAllEvents(stream) {
 }
 
 await clearLiveDirectivesForTest()
+
+const reconnectNarration = 'The evidence indicates consistent behavior across the verified sources. '.repeat(6).slice(0, 340)
+assert.equal(reconnectNarration.length > 300, true)
+assert.equal(
+  compactProgressUpdateForPersistence(reconnectNarration),
+  reconnectNarration,
+  'a valid 301-360 character narration must replay verbatim without an internal truncation marker',
+)
 
 const conversationId = 'orchestration-smoke-task'
 const userId = 'orchestration-smoke-user'

@@ -61,7 +61,7 @@ async function assertSourceContracts() {
   assert.match(narrationMemory, /narrationSimilarity/, 'narration acceptance must reject close paraphrases, not only exact strings')
   assert.doesNotMatch(narrationMemory, /deterministicCadenceFallback|completedWorkLogNarration/, 'cadence narration must never be synthesized by a local fallback')
   assert.match(narrationMemory, /minLength:\s*1/, 'the cadence schema must require non-empty model-authored text')
-  assert.match(narrationMemory, /visibleToolActionsSinceLastNarration \+ 1/, 'a missed cadence attempt at action 3 must retry at action 4')
+  assert.match(narrationMemory, /visibleToolActionsSinceLastNarration \+ 1/, 'cadence attempt bookkeeping must advance provisionally until failure recovery restores the same frontier')
   assert.match(narrationMemory, /retryNarrationCadenceAttemptWithoutNewAction/, 'a failed cadence stream must keep narration due at the same completed-action frontier')
   assert.match(narrationMemory, /retryNarrationCadenceAfterNoProgress[\s\S]*acceptedNarration[\s\S]*acceptedVisibleAction/, 'a successful cadence stream must only consume cadence after accepted narration or an accepted visible action')
   assert.match(agentLoop, /phaseEndNarrationPending/, 'agent loop must track phase-end narration separately from ordinary progress narration')
@@ -77,30 +77,34 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /advanceStalledResearchWithGap/, 'stalled research with real evidence must move on with a recorded gap')
   assert.doesNotMatch(agentState, /tool === 'browser_screenshot' \|\| tool === 'browser_get_content'/, 'browser_get_content must not be exempt from loop detection')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt[\s\S]*return true/, 'runtime must open the deterministic cadence window')
-  assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*state\.forceTextNextIteration \|\| state\.exactExtractionGuardPending[\s\S]*!hardWindowOpen/, 'internal text/extraction guards may defer action 3 but must never suppress action-4 narration')
+  assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*state\.forceTextNextIteration \|\| state\.exactExtractionGuardPending[\s\S]*!hardWindowOpen/, 'internal text/extraction guards must never suppress narration once three actions have settled')
   assert.match(agentLoop, /const cadenceNarrationInMainTurn =[\s\S]*shouldUseNaturalCadenceNarration\(state, this\.options\.messages\)[\s\S]*beginNarrationCadenceAttempt\(state\)/, 'cadence must be armed on the next ordinary action request once three visible actions complete')
   assert.match(agentLoop, /withCadenceProgressUpdateSchemas\([\s\S]*effectiveCadenceNarrationInMainTurn/, 'cadence narration must share the native tool request instead of opening a competing provider call')
   assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*action pills already say what was searched, opened, read, inspected, or written[\s\S]*State what the preceding results established/, 'main-turn narration must synthesize outcomes instead of repeating visible action pills')
   assert.doesNotMatch(agentLoop, /launchNarrationSidecarIfDue|NARRATION_SIDECAR_REQUEST_TIMEOUT_MS|Emitted asynchronous LLM progress narration/, 'cadence must not use a rate-limit-prone narration sidecar')
-  assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll[\s\S]*if \(narratedResult\)[\s\S]*acceptProgressNarration[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*afterToolId: narratedResult\.tc\.id/, 'model-authored progress must reset cadence after the matching visible action settles, including when that newest action fails')
+  assert.match(agentLoop, /if \(lastStreamResult\.cadenceProgressUpdate\)[\s\S]*carriedCadenceActionCount\(lastStreamResult\)[\s\S]*acceptProgressNarration[\s\S]*remainingVisibleActions: carriedVisibleActions[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*beforeToolId: lastStreamResult\.cadenceProgressToolCallId[\s\S]*remainingVisibleActions: 0[\s\S]*streamProcessor\.commitBufferedEmission\(\)[\s\S]*lastToolResults = await toolPipeline\.executeAll/, 'model-authored progress must release at the exact pre-action position while staged, exposed-file, and deferred paths each count that action once')
+  assert.match(streamProcessor, /function carriedCadenceActionCount[\s\S]*cadenceProgressToolCallId[\s\S]*provisionalStartEmitted \? 1 : 0/, 'server cadence reset must carry only the exact action that was provisionally staged')
   assert.match(agentLoop, /retryNarrationCadenceAttemptWithoutNewAction\(state\)/, 'a failed cadence stream must stay due without blocking later work')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'narration must not be seeded with a broad next-plan-phase cue')
-  assert.match(narrationMemory, /already-completed actions immediately above this call[\s\S]*never merely announce that something was searched, opened, read, reviewed, inspected/, 'native cadence schema must require findings from preceding completed work rather than action bookkeeping')
+  assert.match(narrationMemory, /already-completed actions[\s\S]*do not announce operations[\s\S]*Be neutral and evidence-led/, 'native cadence schema must require neutral findings from preceding completed work rather than action bookkeeping')
   assert.match(dispatcher, /case 'progress_update':[\s\S]*handleProgressUpdate\(event\)/, 'client must route the complete explicit progress event with placement metadata')
-  assert.match(dispatcher, /handleProgressUpdate[\s\S]*requireSignal:\s*false[\s\S]*progressUpdateGroupIndex\(event\.stepIndex\)[\s\S]*afterToolId[\s\S]*addNarrationAt\(targetGroupIdx,\s*narrationText,\s*targetPosition\)[\s\S]*reconcileNarrationCadence\(remainingVisibleActions\)/, 'server-accepted progress must render at its captured plan-step and action frontier')
+  assert.match(dispatcher, /handleProgressUpdate[\s\S]*requireSignal:\s*false[\s\S]*progressUpdateGroupIndex\(event\.stepIndex\)[\s\S]*afterToolId[\s\S]*beforeToolId[\s\S]*addNarrationAt\(targetGroupIdx,\s*narrationText,\s*targetPosition\)[\s\S]*reconcileNarrationCadence\(remainingVisibleActions\)/, 'server-accepted progress must render at its captured plan-step and exact before/after action frontier')
   assert.match(dispatcher, /const safePosition = Math\.max[\s\S]*addGroupNarration\(this\.conversationId,\s*groupIdx,\s*narrationText,\s*safePosition\)/, 'client narration insertion must clamp the captured position before storing it')
-  assert.doesNotMatch(streamProcessor, /this\.emitter\.progressUpdate/, 'stream parsing must stage completion narration without exposing it before execution')
-  assert.match(agentLoop, /this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*afterToolId: narratedResult\.tc\.id/, 'successful post-result narration must use explicit placement after the matching action')
+  assert.doesNotMatch(streamProcessor, /this\.emitter\.progressUpdate/, 'stream parsing must delegate accepted narration without inventing display text')
+  assert.match(streamProcessor, /const emitProvisionalToolStart[\s\S]*!currentStepPreview \|\| !revisionPreviewAllowed[\s\S]*STREAMED_FILE_WRITE_TOOLS\.has\(toolCall\.name\)[\s\S]*onCadenceProgressReady\?\.\(cadenceProgressUpdate, toolCall\.id\)[\s\S]*this\.emitter\.toolStart/, 'live file narration must release only after preview guards pass and before any immediate file action')
+  assert.match(agentLoop, /cadenceProgressReleasedDuringStream[\s\S]*acceptProgressNarration\(state, text,[\s\S]*beforeToolId: toolCallId[\s\S]*if \(!cadenceProgressReleasedDuringStream\)[\s\S]*beforeToolId: lastStreamResult\.cadenceProgressToolCallId[\s\S]*streamProcessor\.commitBufferedEmission\(\)/, 'live file narration must release during streaming while buffered and deferred actions retain the charge-first pre-action release')
+  assert.match(agentLoop, /this\.handleStreamError\([\s\S]*cadenceNarrationForOpenedStream && !cadenceProgressReleasedDuringStream,[\s\S]*\)/, 'a failed live file must not request another structured progress field after its narration already rendered')
+  assert.doesNotMatch(agentLoop, /afterToolId: narratedResult\.tc\.id/, 'cadence narration must not retain a stale post-result emission path')
   assert.doesNotMatch(policyEngine, /visibleToolActionsSinceLastNarration >= NARRATION_THRESHOLD_DEFAULT/, 'ordinary assistant prose must not be remembered when the client may discard it')
   assert.doesNotMatch(agentLoop, /Retry one concise completed-result progress paragraph now/, 'stream recovery must never retry narration instead of work')
   assert.doesNotMatch(toolPipeline, /acceptProgressNarration/, 'ordinary assistant prose beside a tool must not reset or postpone structured narration cadence')
-  assert.match(toolPipeline, /only the structured progress_update accepted after the billed stream[\s\S]*return null/, 'tool execution must leave cadence accounting to the committed structured progress lane')
+  assert.match(toolPipeline, /only the structured progress_update accepted in the stream release lane[\s\S]*return null/, 'tool execution must leave cadence accounting to the structured progress lane')
   assert.doesNotMatch(toolPipeline, /visibleToolActionsSinceLastNarration\+\+[\s\S]{0,160}state\.forceTextNextIteration = true/, 'visible actions must schedule cadence without disabling tools')
   assert.match(config, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(config, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
-  assert.match(config, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*2/, 'the model request must arm after action 2 so narration lands on successful action 3')
+  assert.match(config, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*3/, 'the model request must arm after three settled actions so narration precedes action four')
   assert.match(streamProcessor, /recordVisibleToolStartForNarration/, 'provisional file/code tool starts must count toward the same visible narration cadence as executed tools')
-  assert.match(streamProcessor, /Action three may still fail open[\s\S]*return allowMissing/, 'an action-three narration miss may preserve useful work while keeping cadence due')
+  assert.match(streamProcessor, /normal cadence is[\s\S]*armed only once the hard frontier has been reached/, 'ordinary cadence must open directly at the hard pre-action frontier')
   assert.match(streamProcessor, /hardCadenceBoundary[\s\S]*missing_progress_update[\s\S]*return false/, 'the fourth-action boundary must reject an action whose model-authored update is missing')
   assert.match(streamProcessor, /cadenceProgressViolation && \(toolCalls\.size === 0 \|\| hardCadenceBoundary\)/, 'a hard-boundary display violation must reject the unexecuted action before a fifth silent action')
   assert.doesNotMatch(streamProcessor, /toolCall\.name === 'browser_screenshot' \|\| toolCall\.name === 'browser_resize'/, 'every visible browser action must advance the global narration cadence')
@@ -117,16 +121,15 @@ async function assertSourceContracts() {
   assert.match(config, /checkIntervalMs:\s*150/, 'stream inactivity checks should run quickly enough to keep thinking state honest')
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'agent prompt must enforce the exact 3-4 action narration window')
   assert.doesNotMatch(prompts, /never fewer than 15 words|exactly \d+(?:-\d+)? words/, 'agent prompt must not impose a rigid narration length template')
-  assert.match(prompts, /one sentence can carry a clear finding, two can resolve a contrast or explain an implication, and a short paragraph can summarize a genuinely dense milestone/, 'agent prompt must let evidence determine narration length')
-  assert.match(prompts, /optional, never required, and never a template/, 'agent prompt must make Next natural and optional without a frequency quota')
+  assert.match(prompts, /default to a clean, slightly fuller two-sentence paragraph/, 'agent prompt must default continuing narration to a clean Manus-style result and direction pair')
+  assert.match(prompts, /Use one sentence when the result is genuinely simple or work is ending/, 'agent prompt must keep short and terminal updates proportionate')
   assert.match(prompts, /result-first/, 'agent prompt must request result-first evidence narration')
   assert.match(prompts, /progressive evidence trace/, 'agent prompt must advance the newest evidence instead of paraphrasing a running summary')
   assert.match(prompts, /newest factual delta since the preceding update/, 'agent prompt must anchor each update in genuinely new evidence')
-  assert.match(prompts, /Vary subject, voice, rhythm, and sentence count/, 'agent prompt must vary structure rather than only swapping opening verbs')
+  assert.match(prompts, /Synthesize what the evidence establishes instead of making a vendor, publication, or webpage the speaking subject/, 'agent prompt must keep narration neutral and evidence-led')
   assert.doesNotMatch(prompts, /minority case|uncommon/, 'agent prompt must not impose a frequency quota on natural Next transitions')
-  assert.match(prompts, /same response immediately begins the exact concrete action it names/, 'agent prompt must give Next its immediate-in-the-moment meaning')
-  assert.match(prompts, /Never use it for a broader phase, a general shift in analysis, planned later work/, 'agent prompt must reject broad phase-transition Next narration')
-  assert.match(prompts, /When 2 new visible actions are already complete, the next native action is action 3/, 'agent prompt must attach narration to action 3 instead of waiting until action 4')
+  assert.match(prompts, /normally end with a short "Next, I'll\.\.\." sentence/, 'agent prompt must use a brief immediate direction for continuing work')
+  assert.match(prompts, /After 3 visible actions are complete, the next native action turn must carry the update/, 'agent prompt must carry narration on the action-four request and display it before that action')
   assert.match(prompts, /standing cadence for every phase/, 'agent prompt must frame narration as a per-phase cadence, not only research narration')
   assert.match(prompts, /narration is the default first visible text/, 'agent prompt must make narration the preferred first visible text at the 3-action window')
   assert.match(prompts, /before <next_step\/> if the current phase is complete/, 'agent prompt must allow narration at the end of a phase before next_step')
@@ -134,11 +137,11 @@ async function assertSourceContracts() {
   assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
   assert.doesNotMatch(agentLoop, /NARRATION_STRUCTURAL_FORMS|Preferred structural form for this update/, 'compact narration must not force a rotating template')
   assert.match(agentLoop, /Use it to synthesize the newest useful outcome from the completed actions immediately above this call/, 'native narration must summarize preceding tool outcomes')
-  assert.match(agentLoop, /When the immediate direction genuinely improves continuity, you may add one short forward-looking clause or sentence/, 'native narration must let the agent choose a useful immediate transition')
-  assert.match(agentLoop, /Use it sparingly/, 'native narration must make a forward-looking clause contextual rather than mandatory')
+  assert.match(agentLoop, /default to two clean sentences[\s\S]*Next, I\\'ll/, 'native narration must default to a concrete result followed by the immediate next direction')
+  assert.match(agentLoop, /Synthesize neutrally instead of making a vendor, publication, or webpage the speaking subject/, 'native narration must not sound like vendor-authored commentary')
   assert.doesNotMatch(agentLoop, /Never write a future action, plan, promise, command, or a sentence beginning "Next"/, 'native narration must not impose a blanket ban on useful immediate transitions')
-  assert.match(narrationMemory, /You may add one short forward-looking clause only when useful/, 'tool-schema narration must allow an occasional contextual next direction')
-  assert.match(narrationMemory, /never let it replace the concrete result/, 'tool-schema narration must remain truthful and result-first')
+  assert.match(narrationMemory, /normally use two clean sentences[\s\S]*Next, I\\'ll/, 'tool-schema narration must request the clean result-then-direction structure')
+  assert.match(narrationMemory, /rather than making a vendor, publication, or webpage the speaking subject/, 'tool-schema narration must remain neutral and evidence-led')
   assert.match(agentLoop, /repeat\/paraphrase an already-shown update/, 'native narration must reject repetitive cumulative summaries')
   assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
   assert.match(taskGroupView, /task-thread-body/, 'task group view must render a subtle timeline body')
@@ -206,7 +209,7 @@ export function runNarrationSmoke() {
   })
   state.currentPlanItems = ['Research', 'Deliver']
   state.workLog.push('[1] Confirmed DevRev funding')
-  assert.equal(state.narrationNextAttemptAt, 2, 'fresh cadence must arm before action 3 is selected')
+  assert.equal(state.narrationNextAttemptAt, 3, 'fresh cadence must arm after three actions settle')
 
   const phaseResetState = createInitialState(false, state.tierTimeouts)
   phaseResetState.currentPlanItems = ['Research', 'Analyze', 'Deliver']
@@ -219,7 +222,7 @@ export function runNarrationSmoke() {
   advanceStep(phaseResetState, 'Research evidence gathered')
   assert.equal(phaseResetState.currentStepIdx, 1)
   assert.equal(phaseResetState.visibleToolActionsSinceLastNarration, 0, 'a new phase must never inherit completed actions from the prior phase')
-  assert.equal(phaseResetState.narrationNextAttemptAt, 2, 'every phase must arm its own narration request before action 3')
+  assert.equal(phaseResetState.narrationNextAttemptAt, 3, 'every phase must arm its own narration request after three actions')
   assert.equal(phaseResetState.narrationCadenceInFlight, false, 'a new phase must not inherit an in-flight narration attempt')
   assert.equal(phaseResetState.narrationWorkLogFrontier, phaseResetState.workLog.at(-1), 'new-phase narration must start from the new phase work-log frontier')
 
@@ -228,7 +231,7 @@ export function runNarrationSmoke() {
   assert.equal(beginNarrationCadenceAttempt(state), true)
   assert.equal(beginNarrationCadenceAttempt(state), false, 'only one cadence attempt may be in flight')
   finishNarrationCadenceAttempt(state)
-  assert.equal(state.narrationNextAttemptAt, 4, 'a missed action-3 update retries at action 4')
+  assert.equal(state.narrationNextAttemptAt, 4, 'an opened cadence attempt provisionally records the following frontier')
   assert.equal(beginNarrationCadenceAttempt(state), false)
   state.visibleToolActionsSinceLastNarration = 4
   assert.equal(beginNarrationCadenceAttempt(state), true)
@@ -399,6 +402,24 @@ export function runNarrationSmoke() {
   assert.equal(cleanThinkingTags('**FINAL ANSWER REQUIRED:** Do not write another progress update.\\n\\n# DevRev AI Report').trim(), '# DevRev AI Report')
   assert.equal(stripToolActionNarration('Deliverable step: write the report in chat\\n\\nDevRev unifies product and support data.').trim(), 'DevRev unifies product and support data.')
   assert.equal(strictActionLabelFromArgs({ action_label: 'Researching AI tools for essay planning' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Open the article' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '... Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '- Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '> Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '# Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '- ... Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: '1. - Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: ':: Open article.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Open article!' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Find details on page?' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Find launch details on page' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Find details on page.' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Read Warmwind OS official building page' }), null)
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Inspect checkout error state and retry guidance on the payment page' }), 'Inspect checkout error state and retry guidance on the payment page')
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Review current accessibility violations documented on the audit site' }), 'Review current accessibility violations documented on the audit site')
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Inspect checkout failures and recovery options on the payment page' }), 'Inspect checkout failures and recovery options on the payment page')
+  assert.equal(strictActionLabelFromArgs({ action_label: 'Read API deprecation notice and migration deadline on the documentation website' }), 'Read API deprecation notice and migration deadline on the documentation website')
   assert.equal(strictActionLabelFromArgs({ action_label: 'search expert predictions 2025 agentic ai shift.' }), 'Search expert predictions 2025 agentic ai shift')
   assert.equal(strictActionLabelFromArgs({ action_label: 'Compare student AI writing tools' }), 'Compare student AI writing tools')
   assert.equal(
@@ -408,6 +429,17 @@ export function runNarrationSmoke() {
     }),
     'Track latest technical breakthroughs in AI',
   )
+  const specificLongLabel = 'Locate authoritative United States climate assessment sources covering temperature, precipitation, drought, wildfire and coastal flooding'
+  assert.ok(specificLongLabel.length > 88, 'fixture must prove the old permanent title cap would have truncated the model wording')
+  assert.equal(
+    strictActionLabelFromArgs({ action_label: specificLongLabel }),
+    specificLongLabel,
+    'specific model-authored mini-objectives must survive intact beyond the former 88-character cap',
+  )
+  assert.equal(
+    strictActionLabelFromArgs({ action_label: 'Extract the official NOAA 2050 sea-level projection as a quantified coastal risk indicator for the United States' }),
+    'Extract the official NOAA 2050 sea-level projection as a quantified coastal risk indicator for the United States',
+  )
   assert.equal(
     stripToolActionNarration("Australia is handling AI copyright issues federally. 2. Navigate to official government publications or reputable legal analysis sites detailing these amendments. 3. Synthesize all gathered information to provide a comprehensive answer on Australia’s response to AI copyright issues, including national vs. state actions and the status of legal reviews. 4. Compile findings into a comprehensive report. The Australian federal government is actively addressing copyright issues related to generative AI."),
     "Australia is handling AI copyright issues federally. The Australian federal government is actively addressing copyright issues related to generative AI.",
@@ -415,6 +447,11 @@ export function runNarrationSmoke() {
   assert.equal(
     sanitizeNarrationText("DevRev's funding confirms a late-2025 $100M Series A and a $1.2B valuation. Next, I'll compare culture signals.", { requireSignal: true }),
     "DevRev's funding confirms a late-2025 $100M Series A and a $1.2B valuation. Next, I'll compare culture signals.",
+  )
+  assert.equal(
+    sanitizeNarrationText("The available evidence indicates that shorter action loops reduce user-visible latency across the tested agents. Next, I'll compare the implementation trade-offs.", { requireSignal: true }),
+    "The available evidence indicates that shorter action loops reduce user-visible latency across the tested agents. Next, I'll compare the implementation trade-offs.",
+    'neutral evidence-led narration with a concrete next direction must remain intact',
   )
   assert.equal(
     sanitizeNarrationText('Generated and verified eight visualizations for the report, including market growth and adoption gap charts.', { requireSignal: true }),

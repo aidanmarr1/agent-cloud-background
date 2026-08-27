@@ -100,7 +100,7 @@ function shouldRequestPhaseEndNarration(state: AgentStateData, assistantContent 
     })
     if (accepted.status === 'accepted') return false
   }
-  // A short phase can complete before the ordinary action-three window opens.
+  // A short phase can complete before the ordinary three-action window opens.
   // Give it one compact model-authored result update before advancing so every
   // phase is represented in the task stream. Empty phases do not fabricate one.
   return needsPhaseNarrationBeforeAdvance(state) && state.stepToolCallCount > 0

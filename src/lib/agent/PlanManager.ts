@@ -336,7 +336,9 @@ function sanitizePlannerAck(ack: string): string {
     .replace(/^\s*(?:on it|sure|okay|ok|absolutely|certainly|got it)\s*(?:[-:,.]|—|–)?\s*/i, '')
     .replace(/\s+/g, ' ')
     .trim()
-  return normalized.replace(/^(\s*["'“‘(]*)([a-z])/, (_match, prefix: string, letter: string) => (
+    .replace(/^["'“”‘’(]+\s*/, '')
+    .replace(/\s*["'“”‘’)]$/, '')
+  return normalized.replace(/^(\s*)([a-z])/, (_match, prefix: string, letter: string) => (
     `${prefix}${letter.toUpperCase()}`
   ))
 }
@@ -359,23 +361,72 @@ function comparisonTargets(request: string): string[] {
   return [left.at(-1), right[0]].filter((word): word is string => !!word)
 }
 
-function isUsablePlannerAck(ack: string, request = ''): boolean {
-  const normalized = ack.trim().toLowerCase()
+const GENERIC_ACK_REQUEST_WORDS = new Set([
+  'a', 'about', 'all', 'an', 'analyse', 'analyze', 'and', 'answer', 'asked',
+  'assess', 'audit', 'build', 'can', 'check', 'compare', 'complete', 'create',
+  'debug', 'deliver', 'deploy', 'design', 'develop', 'do', 'draft', 'evaluate',
+  'examine', 'explore', 'find', 'fix', 'for', 'from', 'give', 'help', 'i',
+  'implement', 'improve', 'in', 'inspect', 'into', 'investigate', 'it', 'locate',
+  'make', 'me', 'migrate', 'modify', 'my', 'of', 'on', 'optimise', 'optimize',
+  'please', 'prepare', 'produce', 'provide', 'rebuild', 'redesign', 'refactor',
+  'remove', 'replace', 'report', 'request', 'requested', 'research', 'resolve',
+  'respond', 'review', 'summarise', 'summarize', 'task', 'test', 'that', 'the',
+  'this', 'to', 'update', 'verify', 'want', 'what', 'with', 'write', 'you', 'your',
+])
+
+function acknowledgementReferencesRequest(ack: string, request: string): boolean {
+  const requestWords = [...new Set(normalizedPlanPhrase(request).split(' ').filter((word) =>
+    word.length >= 2 && !GENERIC_ACK_REQUEST_WORDS.has(word),
+  ))]
+  if (requestWords.length === 0) return true
+  const ackWords = normalizedPlanPhrase(ack).split(' ')
+  const requestWordSet = new Set(requestWords)
+  const rawRequestWords = request.match(/\b[A-Za-z][A-Za-z0-9'-]*\b/g) || []
+  const namedCandidates = rawRequestWords
+    .map((word, index) => ({ word: word.toLowerCase(), index, capitalized: /^[A-Z]/.test(word) }))
+    .filter(({ word, capitalized }) => capitalized && word.length >= 4 && requestWordSet.has(word))
+  // A sentence-initial imperative is capitalised too. When a later capitalised
+  // target exists ("Explain Warmwind..."), treat that later term as the named
+  // subject instead of allowing the command verb itself to satisfy specificity.
+  const namedTargetCandidates = namedCandidates[0]?.index === 0 && namedCandidates.length > 1
+    ? namedCandidates.slice(1)
+    : namedCandidates
+  const namedRequestWords = [...new Set(namedTargetCandidates.map(({ word }) => word))]
+  const distinctiveWords = requestWords.filter((word) => word.length >= 4)
+  const wordsToMatch = namedRequestWords.length > 0
+    ? namedRequestWords
+    : distinctiveWords.length > 0
+      ? distinctiveWords
+      : requestWords
+  return wordsToMatch.some((requestWord) => ackWords.some((ackWord) => {
+    if (requestWord === ackWord) return true
+    if (requestWord.length < 4 || ackWord.length < 4) return false
+    return requestWord.startsWith(ackWord) || ackWord.startsWith(requestWord)
+  }))
+}
+
+export function isUsablePlannerAck(ack: string, request = ''): boolean {
+  const candidate = sanitizePlannerAck(ack)
+  const normalized = candidate.toLowerCase()
   if (!normalized) return false
   if (normalized.length < 45) return false
   if (normalized.length > 320) return false
   if (containsPromptInstructionLeak(normalized)) return false
   const words = ackWordCount(normalized)
   if (words < 8 || words > 48) return false
+  if (!/^i(?:'|’)?ll\b|^i will\b/.test(normalized)) return false
+  if (!/[.!?]["')\]]?$/.test(candidate)) return false
+  if (/^(?:clarifying|mapping|researching|investigating|reviewing|checking|preparing|building|creating|fixing|analy[sz]ing|gathering|locating|examining|comparing)\b/.test(normalized)) return false
   if (/^(?:next|now|then|after that|moving forward|from here)[,\s]+(?:i(?:'|’)?ll|i will|let me|i(?:'|’)?m going to|i am going to)\b/.test(normalized)) return false
   if (/\bnext[.!?]?$/i.test(normalized)) return false
   const requiredComparisonTargets = comparisonTargets(request)
-  if (requiredComparisonTargets.some(target => !new RegExp(`\\b${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(ack))) {
+  if (requiredComparisonTargets.some(target => !new RegExp(`\\b${target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(candidate))) {
     return false
   }
-  if (!/\b(?:research|source|compare|check|verify|read|gather|analy[sz]e|assess|review|build|create|write|draft|fix|test|inspect|summari[sz]e|deliver|report|answer|find|produce)\b/.test(normalized)) return false
-  if (!/\b(?:then|and|so|before|while|with|into|using|based on|against|across)\b/.test(normalized)) return false
+  if (!acknowledgementReferencesRequest(normalized, request)) return false
   return !/\b(?:i(?:'|’)?ll|i will)\s+(?:open the site|work through this|start with the required|keep the task steps updated)\b/.test(normalized) &&
+    !/\b(?:handle|take care of|work on|do|complete)\s+(?:this|it|the task|the request)\b/.test(normalized) &&
+    !/\b(?:every aspect|what you asked|respond fully|complete response|your request)\b/.test(normalized) &&
     !/\b(?:the requested task|the request|the site|the topic)\b.{0,80}\b(?:steps updated|visible steps)\b/.test(normalized)
 }
 
@@ -391,10 +442,63 @@ function containsPromptInstructionLeak(text: string): boolean {
     /\bproduce\s+a\s+concise,\s+visually\s+rich\s+markdown\b/i.test(text)
 }
 
-function assertPlannerVisibleTextQuality(ack: string | undefined, titles: string[], scopes: Array<string | null>): void {
+function normalizedPlanPhrase(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+}
+
+export function isPlannerInventedMetaProcessTitle(title: string, request = ''): boolean {
+  const normalizedTitle = normalizedPlanPhrase(title)
+  if (!normalizedTitle) return false
+
+  const rawTitle = title.trim()
+  const rawTitleWords = rawTitle.split(/\s+/).filter(Boolean)
+  const bareScopeTopic = /^scope\b/i.test(rawTitle) &&
+    rawTitleWords.length >= 2 &&
+    rawTitleWords.length <= 6 &&
+    !/\b(?:across|by|for|in|on|to|using|within)\b/i.test(rawTitle)
+  const looksLikeMetaProcess =
+    /^clarify\b.{0,120}\b(?:scope and (?:search|research) strategy|(?:search|research) strategy and scope|scope and coverage)\b/i.test(rawTitle) ||
+    /^frame\s+(?:the\s+)?key questions\b/i.test(rawTitle) ||
+    /^define\s+(?:the\s+)?(?:research|task|request)\s+(?:scope|strategy|approach|key questions|requirements?)\b/i.test(rawTitle) ||
+    /^scope\s+(?:the\s+)?(?:task|request|research|project|topic)\b/i.test(rawTitle) ||
+    bareScopeTopic
+  if (!looksLikeMetaProcess) return false
+
+  // A user may explicitly request a clarification/research-design phase. The
+  // quality gate only repairs planner-invented process work, never their step.
+  // Accept direct wording and paraphrases introduced as an explicit ordered
+  // meta-process instruction (for example, "Start by clarifying...").
+  const normalizedRequest = normalizedPlanPhrase(request)
+  const negatedMetaDirective = /\b(?:do not|don t|avoid|skip|without)\b.{0,100}\b(?:clarif\w*|scop\w*|fram\w*|defin\w*|determin\w*|establish\w*|work out)\b/.test(normalizedRequest)
+  if (!negatedMetaDirective && normalizedRequest.includes(normalizedTitle)) return false
+  const explicitMetaDirective =
+    !negatedMetaDirective &&
+    /\b(?:clarif\w*|scop\w*|fram\w*|defin\w*|determin\w*|establish\w*|work out)\b/.test(normalizedRequest) &&
+    /\b(?:scope|coverage|cover|key questions?|search strategy|research strategy)\b/.test(normalizedRequest) &&
+    /\b(?:start|begin|first|please|must|should|need|want|then|before|after|by|prior|initially)\b/.test(normalizedRequest)
+  if (!explicitMetaDirective) return true
+
+  const titleTopicWords = normalizedTitle.split(' ').filter((word) =>
+    word.length >= 3 && !/^(?:clarify|scope|define|frame|the|our)$/.test(word),
+  )
+  if (titleTopicWords.length === 0) return true
+  return !titleTopicWords.some((word) => normalizedRequest.split(' ').includes(word))
+}
+
+function assertPlannerVisibleTextQuality(
+  ack: string | undefined,
+  titles: string[],
+  scopes: Array<string | null>,
+  request = '',
+): void {
   const visibleText = [ack || '', ...titles, ...scopes.map((scope) => scope || '')]
   if (visibleText.some((text) => containsPromptInstructionLeak(text))) {
     console.warn('[Plan] Planner visible text may contain copied prompt wording; accepting model-authored plan instead of blocking startup.')
+  }
+  const metaProcessTitle = titles.find((title) => isPlannerInventedMetaProcessTitle(title, request))
+  if (metaProcessTitle) {
+    console.warn('[Plan] Planner produced a meta-process phase instead of task work', { title: metaProcessTitle })
+    throw new Error(PLANNER_QUALITY_ERROR)
   }
 }
 
@@ -768,8 +872,10 @@ export class PlanManager {
     const acknowledgement = `I’ll work through ${target}, adapt around blocked routes or unavailable tools, verify the result, and deliver it in the requested form.`
 
     this.suppressFurtherAcknowledgementDeltas = true
-    this.emitter.textDelta(acknowledgement)
-    this.acknowledgementEmitted = true
+    if (!this.acknowledgementEmitted) {
+      this.emitter.textDelta(acknowledgement)
+      this.acknowledgementEmitted = true
+    }
     this.settleAcknowledgementFirstVisible(true)
     this.settleAcknowledgementDisplay(true)
 
@@ -864,6 +970,7 @@ export class PlanManager {
           content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts a ${taskShape} task.
 Requirements:
 - One natural, very brief paragraph, roughly 8-48 words. Do not force or mention a sentence count.
+- Begin with "I'll" or "I will" and state a concrete commitment across the complete request. Never output a gerund status headline such as "Clarifying...", "Mapping...", or "Researching...".
 - Begin with standard sentence capitalization and finish the paragraph cleanly.
 - Use plain words. Avoid fancy, inflated or formal phrasing.
 - Specific to the user's concrete target/topic/artifact and requested output.
@@ -871,8 +978,9 @@ Requirements:
 - Say what Agent will actually do for this task and the final answer/artifact shape.
 - Before writing, silently identify the real target, requested deliverable, likely work areas, and any important constraints. Output only the final paragraph.
 - Extract the real topic/artifact first. Do not echo command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", or "produce a concise report".
-- Direct first-person phrasing like "I'll..." is allowed when specific. Do not start with "Let me", "Next", or "Now", and do not end with a promise to do something "next".
+- Use direct first-person future phrasing. Do not start with "Let me", "Next", or "Now", and do not end with a promise to do something "next".
 - No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
+- Example shape: "I'll compare the GPT-5 lineup with Claude, Gemini and other frontier models using benchmarks, developer reports and technical evidence, then deliver a sourced explanation of the frontend-design gap."
 - No markdown, no bullets, no refusal, no mention of being an AI.`,
         },
         ...plannerTaskMessages(
@@ -976,9 +1084,10 @@ Requirements:
           role: 'system' as const,
           content: `Write one natural, very brief acknowledgement paragraph for Agent.
 Output only the acknowledgement, with standard sentence capitalization and clean punctuation.
+Begin with "I'll" or "I will". Never return a status headline such as "Clarifying...", "Mapping...", or "Researching...".
 Cover the user's complete request and requested output, including every side of any comparison.
 Say what Agent will actually do, not merely the first phase. Do not end with "next".
-Use plain, specific language. No markdown, bullets, canned opener, refusal, or internal details.`,
+Use plain, specific language. Example shape: "I'll inspect the current checkout flow, correct the payment-state bug, test the affected paths and deliver the verified fix." No markdown, bullets, canned opener, refusal, or internal details.`,
         },
         {
           role: 'user' as const,
@@ -1350,8 +1459,9 @@ Rules:
 - First extract the user's actual target/topic/artifact and requested output. Treat command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", "produce a concise report", and "answer whether" as instructions, not as the topic.
 - Preserve explicit user-authored steps in their stated order. Carry required, exclusive, and forbidden named-tool instructions into every relevant scope and do not insert substitute phases that violate them.
 - Do not use a canned generic plan. Every title and scope must mention or clearly reflect the user's concrete topic, site, artifact, fields, or deliverable.
+- Start with the actual work, not a visible phase for clarifying, mapping, framing, or scoping the topic/search strategy. Only ask the user a question when a real missing decision prevents progress; otherwise research or act on the concrete target immediately.
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
-- The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, but do not enforce or mention a sentence count. Say what Agent will do for the exact task and what it will deliver.
+- The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, begin with "I'll" or "I will", and say what Agent will do across the exact task and what it will deliver. Reject status headlines such as "Clarifying...", "Mapping...", or "Researching...".
 - The ack covers the whole request, including every side of a comparison, rather than describing only the first phase. It must not end by promising an action "next".
 - The planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title. Preserve explicit user order and real dependencies without forcing stock research, analysis, synthesis, or a literal "Deliver ..." phase. A non-empty plan must still culminate in the requested answer, outcome, confirmation, or artifact, but the last phase may naturally combine final work, verification, synthesis, and handoff. Do not force a separate delivery phase when it adds no useful work.
 - Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
@@ -1441,11 +1551,17 @@ Rules:
       ? arrays.scopes
       : enforcedTitles.map((_, index) => arrays.scopes[index] ?? null)
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
+    // Inspect only the planner-authored phases. Attachment/skill/custom phases
+    // are explicit requirements and must never be rejected by this repair gate.
+    assertPlannerVisibleTextQuality(
+      obj.ack,
+      enforcedTitles,
+      alignedScopes,
+      effectiveTaskRequest(this.messages),
+    )
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     const modelPlan = withRequired
-    assertPlannerVisibleTextQuality(obj.ack, modelPlan.titles, modelPlan.scopes)
-
     await this.emitAcknowledgement(obj.ack, mappedTaskType)
     this.throwIfPlannerAborted()
     this.emitter.plan(modelPlan.titles)

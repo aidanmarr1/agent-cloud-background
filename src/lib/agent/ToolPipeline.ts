@@ -830,7 +830,7 @@ function planStepIndexBlockReason(args: Record<string, unknown>, state: AgentSta
 function actionLabelBlockReason(args: Record<string, unknown>, state: AgentStateData): string | null {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (strictActionLabelFromArgs(args)) return null
-  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh 2-12 word purpose label from the task context. Start with a capital letter and do not end with a period. The label must say what the action is for, not expose raw JSON or tool syntax. No first person, no tool names, no raw URL, and no past-tense summary.'
+  return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh, usually 3-24 word purpose label from the task context. Start with a capital letter and do not end with a period. Name the concrete subject plus the evidence, artifact, state, or verification sought; do not use generic wording such as Open article or Find details on page. No first person, tool names, raw URL, raw JSON, or past-tense summary.'
 }
 
 function repairFileActionLabel(toolName: string, args: Record<string, unknown>): boolean {
@@ -852,7 +852,7 @@ function narrationCadenceBlockReason(
   if (!strictActionLabelFromArgs(args)) return null
   // Cadence is display-only and never blocks execution. Crucially, ordinary
   // assistant prose carried beside a tool does not reset the action clock:
-  // only the structured progress_update accepted after the billed stream may
+  // only the structured progress_update accepted in the stream release lane may
   // do that. Otherwise early prose after one or two actions can postpone the
   // real update until five or more visible actions have elapsed.
   return null

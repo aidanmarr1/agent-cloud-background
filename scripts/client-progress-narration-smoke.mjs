@@ -76,13 +76,13 @@ const progressText = 'The three verified benchmarks now agree that short action 
 
   assert.equal(groups.length, 0, 'pre-plan status must not fabricate a visible plan group')
 
-  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
+  dispatcher.dispatch({ type: 'plan', items: ['Inspect supplied page navigation and requested content', 'Save the requested result'] })
   dispatcher.dispatch({
     type: 'tool_start',
     id: 'startup-race',
     name: 'browser_navigate',
     args: {
-      action_label: 'Open the supplied page',
+      action_label: 'Inspect supplied page navigation and requested content',
       plan_step_index: 1,
       url: 'https://example.test',
     },
@@ -91,7 +91,7 @@ const progressText = 'The three verified benchmarks now agree that short action 
 
   assert.deepEqual(
     groups.map(group => group.title),
-    ['Open the supplied page', 'Save the requested result'],
+    ['Inspect supplied page navigation and requested content', 'Save the requested result'],
     'the complete plan must appear only after the plan event',
   )
   assert.equal(
@@ -133,12 +133,12 @@ const progressText = 'The three verified benchmarks now agree that short action 
     initialMessage,
   )
 
-  dispatcher.dispatch({ type: 'plan', items: ['Open the supplied page', 'Save the requested result'] })
+  dispatcher.dispatch({ type: 'plan', items: ['Inspect supplied page navigation and requested content', 'Save the requested result'] })
   dispatcher.flushPendingUpdates()
 
   assert.deepEqual(
     groups.map(group => group.title),
-    ['Open the supplied page', 'Save the requested result'],
+    ['Inspect supplied page navigation and requested content', 'Save the requested result'],
     'a reconnect during cold start must still accept and render the durable plan',
   )
   assert.equal(groups[0].startedAt, acceptedAt, 'reconnect must preserve the original acceptance time')
@@ -245,6 +245,86 @@ const doneSubtask = (id: string, label: string): Subtask => ({
     position: 3,
   }], 'hydrated late narration must use persisted placement metadata instead of the active group')
   assert.equal((dispatcher as any).toolsSinceLastNarration, 1, 'hydrated placement must preserve the server-reported cadence remainder')
+}
+
+{
+  const narrations: CapturedNarration[] = []
+  const groups: unknown[] = []
+  const dispatcher = new EventDispatcher(
+    'pre-action-frontier-progress-update',
+    makeActions(narrations, groups),
+    () => {},
+  )
+
+  dispatcher.dispatch({ type: 'plan', items: ['Gather current evidence'] })
+  completeSearch(dispatcher, 'pre-a1', 'Locate first primary benchmark', 1)
+  completeSearch(dispatcher, 'pre-a2', 'Locate second primary benchmark', 1)
+  completeSearch(dispatcher, 'pre-a3', 'Locate third primary benchmark', 1)
+  dispatcher.dispatch({
+    type: 'progress_update',
+    content: progressText,
+    stepIndex: 0,
+    remainingVisibleActions: 0,
+  })
+  assert.equal((dispatcher as any).toolsSinceLastNarration, 0, 'pre-action narration must reset the client before the buffered action arrives')
+
+  completeSearch(dispatcher, 'pre-a4', 'Verify benchmark methodology and comparability', 1)
+  dispatcher.flushPendingUpdates()
+
+  assert.deepEqual(narrations, [{
+    group: 0,
+    text: progressText,
+    position: 3,
+  }], 'pre-action narration must render between the third settled action and the buffered fourth action')
+  assert.equal((dispatcher as any).toolsSinceLastNarration, 1, 'the buffered fourth action must be counted exactly once when its result arrives')
+  assert.equal((dispatcher as any).pendingNarrationTools.length, 1, 'the new cadence window must contain only the buffered fourth action')
+}
+
+{
+  const narrations: CapturedNarration[] = []
+  const groups: unknown[] = []
+  const dispatcher = new EventDispatcher(
+    'live-file-pre-action-progress-update',
+    makeActions(narrations, groups),
+    () => {},
+  )
+
+  dispatcher.dispatch({ type: 'plan', items: ['Write the verified benchmark report'] })
+  completeSearch(dispatcher, 'file-a1', 'Locate first benchmark source', 1)
+  completeSearch(dispatcher, 'file-a2', 'Locate second benchmark source', 1)
+  completeSearch(dispatcher, 'file-a3', 'Verify benchmark methodology', 1)
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'file-a4',
+    name: 'create_file',
+    args: {
+      action_label: 'Write the source-backed benchmark report',
+      plan_step_index: 1,
+      path: 'deliverables/benchmark.md',
+    },
+  })
+  dispatcher.dispatch({
+    type: 'progress_update',
+    content: progressText,
+    stepIndex: 0,
+    beforeToolId: 'file-a4',
+    remainingVisibleActions: 0,
+  })
+  assert.equal((dispatcher as any).toolsSinceLastNarration, 0, 'an exposed provisional file start must not count until its result settles')
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'file-a4',
+    name: 'create_file',
+    result: { action: 'create', path: 'deliverables/benchmark.md', size: 256 },
+  })
+  dispatcher.flushPendingUpdates()
+
+  assert.deepEqual(narrations, [{
+    group: 0,
+    text: progressText,
+    position: 3,
+  }], 'late billed narration must be inserted before an already-live file action')
+  assert.equal((dispatcher as any).toolsSinceLastNarration, 1, 'the exposed file action must enter the new cadence window exactly once when it settles')
 }
 
 {

@@ -46,6 +46,7 @@ type ProgressUpdateEvent = {
   content: string
   stepIndex?: number
   afterToolId?: string
+  beforeToolId?: string
   remainingVisibleActions?: number
 }
 
@@ -78,6 +79,13 @@ function hasSentenceEnd(text: string): boolean {
   return /[.!?]["')\]]?$/.test(text.trim())
 }
 
+function isBareStartupStatus(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed) return false
+  return /^(?:clarifying|mapping|researching|investigating|reviewing|checking|preparing|building|creating|fixing|analy[sz]ing|gathering|locating|examining|comparing)\b/i.test(trimmed) &&
+    wordCount(trimmed) <= 18
+}
+
 function isIncompleteStartupAcknowledgment(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
@@ -88,8 +96,9 @@ function isIncompleteStartupAcknowledgment(text: string): boolean {
 
 function acknowledgmentQuality(text: string): number {
   const trimmed = text.trim()
-  if (!trimmed || isStaleFutureWorkAck(trimmed) || isIncompleteStartupAcknowledgment(trimmed)) return -1
-  return trimmed.length + (hasSentenceEnd(trimmed) ? 500 : 0)
+  if (!trimmed || isStaleFutureWorkAck(trimmed) || isIncompleteStartupAcknowledgment(trimmed) || isBareStartupStatus(trimmed)) return -1
+  const commitmentBonus = /^(?:i(?:'|’)?ll|i will)\b/i.test(trimmed) ? 1_000 : 0
+  return trimmed.length + (hasSentenceEnd(trimmed) ? 500 : 0) + commitmentBonus
 }
 
 function selectBestStartupAcknowledgment(cached: string, current: string): string {
@@ -631,7 +640,7 @@ export class EventDispatcher {
 
     const narrationText = sanitizeNarrationText(event.content, {
       maxSentences: 2,
-      maxLength: 300,
+      maxLength: 360,
       requireSignal: false,
     })
     if (!narrationText) return
@@ -644,7 +653,14 @@ export class EventDispatcher {
     const afterToolIndex = event.afterToolId
       ? targetSubtasks.findIndex((subtask) => subtask.id === event.afterToolId)
       : -1
-    const targetPosition = afterToolIndex >= 0 ? afterToolIndex + 1 : targetSubtasks.length
+    const beforeToolIndex = event.beforeToolId
+      ? targetSubtasks.findIndex((subtask) => subtask.id === event.beforeToolId)
+      : -1
+    const targetPosition = afterToolIndex >= 0
+      ? afterToolIndex + 1
+      : beforeToolIndex >= 0
+        ? beforeToolIndex
+        : targetSubtasks.length
     const remainingVisibleActions = Number.isFinite(event.remainingVisibleActions)
       ? Math.max(0, Math.floor(event.remainingVisibleActions as number))
       : this.visibleActionsAfter(targetGroupIdx, targetPosition)

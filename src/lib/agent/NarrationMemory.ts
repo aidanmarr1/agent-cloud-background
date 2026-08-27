@@ -92,9 +92,9 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
           properties: {
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Summarize the newest useful outcome from the already-completed actions immediately above this call: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. The action pills already show searches, page opens, reads, and file operations, so never merely announce that something was searched, opened, read, reviewed, inspected, or done "to expand the evidence base." The runtime places this update only after the matching current action settles, whether it succeeds or fails; that current action has not returned yet and is not the source of the update. Use only findings already present in the completed-work/tool-result context; never invent what the current action will find or imply that it succeeded. Size it naturally: one sentence for one clear outcome, two when an established contrast or implication helps. You may add one short forward-looking clause only when useful, but never let it replace the concrete result or become a repeated "Next, I will..." template. Choose the wording freely without repeating recent claims. Never expose providers, APIs, service names, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, tool accounting, empty strings, or cumulative-summary paraphrases. This field is display-only and is removed before tool execution.',
+              description: 'Required cadence field. Summarize the newest useful outcome from already-completed actions: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. Action pills already show searches, page opens, reads, and file operations, so do not announce operations. Be neutral and evidence-led: synthesize what the evidence establishes rather than making a vendor, publication, or webpage the speaking subject; name a source only when provenance, disagreement, or access failure matters. Avoid hype and unsupported judgement. For continuing work, normally use two clean sentences: concrete result first, then a short "Next, I\'ll..." sentence naming the immediate useful direction. Omit that sentence at phase completion or without a concrete direction. The current action has not returned and is not evidence; never invent its result. Do not repeat recent claims or expose providers, APIs, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, or tool accounting. This field is display-only and removed before execution.',
               minLength: 1,
-              maxLength: 220,
+              maxLength: 360,
             },
             ...(schema.properties || {}),
           },
@@ -302,7 +302,7 @@ export function reviewProgressNarration(
   const sanitizedText = sanitizeNarrationText(content, {
     requireSignal: options.requireSignal ?? true,
     maxSentences: 2,
-    maxLength: 300,
+    maxLength: 360,
   })
   if (!sanitizedText) return { status: 'invalid', text: null }
   const text = normalizeSingularAgentVoice(sanitizedText)

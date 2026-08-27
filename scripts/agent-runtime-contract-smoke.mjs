@@ -344,7 +344,9 @@ async function assertSourceContracts() {
   assert.match(planManager, /Do not use a canned generic plan/, 'planner repair prompt must reject canned generic plans')
   assert.match(planManager, /Every title and scope must mention or clearly reflect the user's concrete topic/, 'planner repair prompt must require topic-specific steps')
   assert.match(planManager, /function containsPromptInstructionLeak/, 'planner must detect leaked prompt instruction text in visible acknowledgement and plan labels')
-  assert.match(planManager, /return normalized\.replace\(\/\^\(\\s\*\["'“‘\(\]\*\)\(\[a-z\]\)\/[\s\S]*letter\.toUpperCase\(\)/, 'model-written acknowledgements must retain their wording while normalizing a lowercase opening')
+  assert.match(planManager, /function sanitizePlannerAck[\s\S]*replace\(\/\^\[[^\n]+\\s\*\/, ''\)[\s\S]*letter\.toUpperCase\(\)/, 'model-written acknowledgements must strip harmless enclosing punctuation while retaining their wording and normalizing a lowercase opening')
+  assert.ok(planManager.includes("if (!/^i(?:'|’)?ll\\b|^i will\\b/.test(normalized)) return false"), 'startup acknowledgement validation must require a first-person commitment')
+  assert.match(planManager, /isPlannerInventedMetaProcessTitle[\s\S]*looksLikeMetaProcess[\s\S]*PLANNER_QUALITY_ERROR/, 'planner quality repair must reject unmistakable planner-invented meta-phases while preserving explicit user-authored process steps')
   assert.match(planManager, /accepting model-authored plan instead of blocking startup/, 'planner text quality warnings must not block model-authored plans')
   const enforceMinStepsContract = planManager.match(/private enforceMinSteps[\s\S]*?\n  \}/)?.[0] || ''
   assert.doesNotMatch(enforceMinStepsContract, /PLANNER_QUALITY_ERROR|throw new Error|steps\.length\s*[<>=!]/, 'planner must not veto model-authored step counts or phase shapes')
@@ -369,6 +371,8 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /handlePlan[\s\S]*setStreamingStatus\('thinking'\)/, 'planned task threads must show thinking after setup completes')
   assert.match(eventDispatcher, /handleToolResult[\s\S]*setStreamingStatus\('thinking'\)/, 'tool results must return the visible state to thinking while the model decides the next action')
   assert.match(eventDispatcher, /isIncompleteStartupAcknowledgment/, 'startup acknowledgement capture must reject partial fragments like "I’ll"')
+  assert.match(eventDispatcher, /isBareStartupStatus[\s\S]*clarifying\|mapping\|researching/, 'startup acknowledgement capture must reject terse gerund status headlines')
+  assert.match(eventDispatcher, /commitmentBonus[\s\S]*1_000/, 'a complete first-person commitment must outrank a later status fragment')
   assert.match(eventDispatcher, /selectBestStartupAcknowledgment/, 'completion rewrite must choose the best current acknowledgement instead of blindly using an early cached fragment')
   assert.doesNotMatch(eventDispatcher, /if \(this\.startupAcknowledgment\) return/, 'startup acknowledgement capture must not permanently lock onto the first partial fragment')
   assert.match(eventDispatcher, /const currentAck = this\.cleanAcknowledgmentCandidate\(currentContent\)/, 'completion must compare against the current full message acknowledgement')
@@ -1272,9 +1276,9 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /TOOLS_BETWEEN_NARRATION_FLUSHES = MIN_TOOLS_BETWEEN_NARRATION_FLUSHES/, 'client narration threshold must derive from the minimum exact cadence')
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'runtime prompt must enforce the exact 3-4 action narration window')
   assert.doesNotMatch(prompts, /never fewer than 15 words|<=34 words and <=240 characters/, 'runtime prompt must not force a rigid narration length template')
-  assert.match(prompts, /one sentence can carry a clear finding, two can resolve a contrast or explain an implication, and a short paragraph can summarize a genuinely dense milestone/, 'runtime prompt must keep progress proportionate to the evidence')
-  assert.match(prompts, /Vary subject, voice, rhythm, and sentence count/, 'runtime prompt must require structural progress narration variation')
-  assert.match(prompts, /When 2 new visible actions are already complete, the next native action is action 3/, 'runtime prompt must make narration land on the third completed action')
+  assert.match(prompts, /default to a clean, slightly fuller two-sentence paragraph/, 'runtime prompt must default continuing narration to a clean result and direction pair')
+  assert.match(prompts, /Synthesize what the evidence establishes instead of making a vendor, publication, or webpage the speaking subject/, 'runtime prompt must require neutral evidence-led narration')
+  assert.match(prompts, /After 3 visible actions are complete, the next native action turn must carry the update/, 'runtime prompt must place narration between the third settled action and the next action')
   assert.match(prompts, /standing cadence for every phase/, 'runtime prompt must keep narration active across every phase')
   assert.match(prompts, /narration is the default first visible text/, 'runtime prompt must make narration the preferred first visible text when cadence is open')
   assert.match(prompts, /result-first/, 'runtime prompt must request result-first evidence narration')
@@ -1290,9 +1294,15 @@ async function assertSourceContracts() {
   assert.match(agentState, /visibleToolActionsSinceLastNarration/, 'agent state must track visible action-pill count for narration cadence')
   assert.match(toolPipeline, /countVisibleToolActionForNarration/, 'tool execution must increment narration cadence from accepted visible tool starts')
   assert.match(agentLoop, /state\.visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt/, 'forced narration must be based on visible action pills, not raw iterations')
-  assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll[\s\S]*if \(narratedResult\)[\s\S]*acceptProgressNarration[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*afterToolId: narratedResult\.tc\.id/, 'completion narration must emit only after its matching action settles, while describing preceding completed work')
+  assert.match(agentLoop, /if \(lastStreamResult\.cadenceProgressUpdate\)[\s\S]*acceptProgressNarration[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*streamProcessor\.commitBufferedEmission\(\)[\s\S]*lastToolResults = await toolPipeline\.executeAll/, 'cadence narration must be validated and emitted before the buffered next action starts')
+  assert.match(streamProcessor, /const emitProvisionalToolStart[\s\S]*!currentStepPreview \|\| !revisionPreviewAllowed[\s\S]*onCadenceProgressReady\?\.\(cadenceProgressUpdate, toolCall\.id\)[\s\S]*this\.emitter\.toolStart/, 'live file cadence narration must pass preview guards before it is released ahead of its optimistic file action')
+  assert.match(agentLoop, /cadenceProgressReleasedDuringStream[\s\S]*beforeToolId: toolCallId[\s\S]*if \(!cadenceProgressReleasedDuringStream\)/, 'the agent must distinguish a live file narration release from the charge-first buffered release')
+  assert.match(agentLoop, /this\.handleStreamError\([\s\S]*cadenceNarrationForOpenedStream && !cadenceProgressReleasedDuringStream/, 'stream recovery must not demand another progress_update after a failed live file already rendered one')
   assert.match(activityDescriber, /searching\|researching\|reviewing\|reading\|navigating\|scrolling\|clicking/, 'strict action labels must reject generic gerund tool wrappers')
   assert.match(activityDescriber, /reviewed\|completed\|found\|gathered\|confirmed/, 'strict action labels must reject past-tense progress narration as action pill text')
+  assert.match(activityDescriber, /Find details on page|details\?\|information\|content\|data/, 'strict action labels must reject generic page and details wording')
+  assert.match(activityDescriber, /ellipsize\(cleaned, 160\)/, 'specific model-authored action titles must retain substantially more detail than the former short cap')
+  assert.match(agentLoop, /Specific mini-objective: verb \+ named target \+ intended evidence\/output/, 'compact model tool schemas must retain the action-title specificity contract')
   assert.doesNotMatch(activityDescriber, /isTemplateShapedActionLabel|rawActionTarget/, 'strict action labels must not over-block safe model-authored labels just because they overlap the target')
   assert.doesNotMatch(toolPipeline, /args\.action_label\s*=\s*runtimeDisplayActionLabel|runtimeVisibleActionLabel\(\s*'browser_navigate'/, 'runtime execution must not replace model-authored action labels with deterministic labels')
   assert.doesNotMatch(activityDescriber, /Search for information on/, 'search pills must not use the old repeated generic wording')
@@ -1305,7 +1315,7 @@ async function assertSourceContracts() {
   assert.match(streamProcessor, /delete stableArgs\.new_stringCharCount[\s\S]*delete stableArgs\.new_stringLineCount/, 'edit_file metric changes must not recreate the live action pill while replacement text streams')
   assert.match(streamProcessor, /addProvisionalRuntimeDisplayContract\(earlyArgs,\s*state\)/, 'live tool previews may align runtime-owned plan metadata before deciding whether to show the action pill')
   assert.match(streamProcessor, /this\.emitter\.fileContentStart\(toolCall\.id,\s*path,\s*toolCall\.name\)/, 'file write previews must initialize during tool argument streaming')
-  assert.match(streamProcessor, /const deltaContent = content\.slice\(preview\.emittedChars\)[\s\S]*this\.emitter\.fileContentDelta\(toolCall\.id, deltaContent\)[\s\S]*\{ immediate: true \}/, 'file write previews must emit incremental content deltas immediately while the paid turn is still streaming')
+  assert.match(streamProcessor, /const streamFileWriteImmediately = STREAMED_FILE_WRITE_TOOLS\.has\(toolCall\.name\)[\s\S]*toolCall\.provisionalStartExposed = true[\s\S]*fileContentDelta\(toolCall\.id, deltaContent\)[\s\S]*immediate: toolCall\.provisionalStartExposed === true/, 'file previews must remain live at cadence boundaries while the billed narration is later placed before the exact action ID')
   assert.match(streamProcessor, /FILE_PREVIEW_MIN_DELTA_CHARS/, 'file write previews must batch tiny streamed deltas for cloud event persistence')
   assert.match(streamProcessor, /for \(const \[index, preview\] of filePreviewState\)/, 'file write preview batching must flush the final pending content before tool execution')
   assert.doesNotMatch(sandbox, /content:\s*'Error: old_string not found in file'/, 'edit_file old_string misses must not render raw errors as file contents')
@@ -1405,7 +1415,7 @@ async function assertSourceContracts() {
   assert.match(agentState, /state\.stepFailureCount = 0/, 'step advancement must reset per-phase failure counts so blocked sources do not poison later phases')
   assert.doesNotMatch(policyEngine, /state\.stepLoopDetections = 1/, 'research loop recovery must not reset the per-step loop escalation and spin indefinitely')
   assert.match(agentLoop, /loopRecoveryToolForState[\s\S]*suppressed === 'web_search'[\s\S]*read_document[\s\S]*browser_navigate[\s\S]*return narrowed/, 'research loop recovery must expose alternate source-opening routes instead of boxing the agent into the same slow pattern')
-  assert.match(policyEngine, /A short phase can complete before the ordinary action-three window opens[\s\S]*needsPhaseNarrationBeforeAdvance/, 'research phase transitions must close a short phase with one genuine model-authored update')
+  assert.match(policyEngine, /A short phase can complete before the ordinary three-action window opens[\s\S]*needsPhaseNarrationBeforeAdvance/, 'research phase transitions must close a short phase with one genuine model-authored update')
   assert.match(policyEngine, /repeatedIncompleteResearchNoTool[\s\S]*shouldAdvanceResearchAtBudgetBoundary\(state,\s*researchDepth\)[\s\S]*Advanced from repeated text-only research/, 'repeated text-only research must advance with recorded evidence gaps once the phase has enough evidence')
   assert.match(agentConfig, /MIN_RESEARCH_CALLS_BY_COMPLEXITY = \{ 1: 4, 2: 10, 3: 18 \}/, 'research evidence thresholds must stay above shallow three-action phases while keeping quick tasks light')
   assert.match(agentConfig, /MIN_OPENED_SOURCE_BREADTH_BY_COMPLEXITY = \{ 1: 2, 2: 6, 3: 8 \}/, 'substantive research phases must require source diversity without overcharging quick tasks')
@@ -1471,7 +1481,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*!hardWindowOpen/, 'internal guard turns must not extend model narration beyond the fourth visible action')
   assert.match(agentConfig, /NARRATION_THRESHOLD_DEFAULT\s*=\s*3/, 'default narration threshold must open the 3-4 action narration window')
   assert.match(agentConfig, /NARRATION_THRESHOLD_BROWSER\s*=\s*3/, 'browser-heavy tasks must enter the 3-4 narration window after 3 visible actions')
-  assert.match(agentConfig, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*2/, 'runtime must request model narration on action 3, with action 4 as the retry')
+  assert.match(agentConfig, /NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS\s*=\s*3/, 'runtime must request narration after three settled actions and before the next action')
   assert.match(agentConfig, /NARRATION_MAX_VISIBLE_ACTION_GAP\s*=\s*4/, 'accepted late narration must preserve overflow from the 3-4 action window')
   assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*action pills already say what was searched, opened, read, inspected, or written[\s\S]*The current tool has not returned yet/, 'native narration must summarize preceding results without speculating about the current action')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'native narration must not turn the next plan phase into a Next sentence')
@@ -1524,7 +1534,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /includeTemporalContext:\s*shouldIncludeTemporalContextForTurn\(state\)/, 'streaming model calls should not include temporal context by default')
   assert.doesNotMatch(agentLoop, /if \(state\.forceTextNextIteration\) return 96/, 'forced narration turns must not truncate status or direct-answer recovery with a tiny output cap')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*visibleToolActionsSinceLastNarration < state\.narrationNextAttemptAt[\s\S]*finalInlineAnswerTurn[\s\S]*return true/, '3-action cadence narration should open immediately after the visible action frontier, including saved deliverable work')
-  assert.match(agentLoop, /lastToolResults = await toolPipeline\.executeAll[\s\S]*if \(narratedResult\)[\s\S]*acceptProgressNarration[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*afterToolId: narratedResult\.tc\.id/, 'native narration must be validated and emitted after the matching action settles even if that newest action fails')
+  assert.match(agentLoop, /carriedCadenceActionCount\(lastStreamResult\)[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*beforeToolId: lastStreamResult\.cadenceProgressToolCallId[\s\S]*remainingVisibleActions: 0[\s\S]*streamProcessor\.commitBufferedEmission\(\)/, 'native narration must render before the exact next action while client cadence waits for that pending action to settle')
+  assert.doesNotMatch(agentLoop, /afterToolId: narratedResult\.tc\.id/, 'native narration must not retain the old post-result placement path')
   assert.doesNotMatch(agentLoop, /firstReadableSearchResultUrl|source_read_document[\s\S]*IMMEDIATE SOURCE SEARCH COMPLETE/, 'research source gathering must not be driven by local immediate-search shortcuts')
   assert.match(agentLoop, /MODEL START RECOVERY:[\s\S]*Continue the active phase immediately with one concrete native tool call[\s\S]*Do not detour into progress narration[\s\S]*Continuing with a concrete action after empty stream/, 'a timed-out model start must recover with a concrete action instead of blocking on narration or repeating the same heavy turn')
   assert.match(agentLoop, /Compact research evidence complete; advanced immediately after text-only turn[\s\S]*Compact research no-tool response reissued model-selected tool requirement/, 'compact research prose loops must auto-advance or require a model-selected tool without local source actions')
@@ -1716,6 +1727,9 @@ import {
 } from ${JSON.stringify(join(root, 'src/agent/guards/sanitization.ts'))}
 import {
   isAtomicStep,
+  isPlannerInventedMetaProcessTitle,
+  isUsablePlannerAck,
+  PlanManager,
 } from ${JSON.stringify(join(root, 'src/lib/agent/PlanManager.ts'))}
 import {
   researchDepthProfileForState,
@@ -2370,6 +2384,61 @@ export async function runLedgerSmoke() {
   assert.equal(isAtomicStep('Confirm conservation status and major evidence sources'), false)
   assert.equal(isAtomicStep('Check the current page loaded'), true)
   assert.equal(isAtomicStep('Confirm the final confirmation state'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Clarify Warmwind OS AI scope and search strategy'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Map Australian 5G coverage'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Define API coverage'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Define payment API requirements', 'Create a payment API specification.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope CSS changes to the checkout component', 'Fix the checkout CSS.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Frame key questions'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope Warmwind OS AI'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope authentication flow', 'Fix the authentication callback bug.'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope checkout redesign', 'Redesign the checkout flow.'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope CSS changes', 'Update the CSS.'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope React app', 'Build a React app.'), true)
+  assert.equal(isPlannerInventedMetaProcessTitle('Frame key questions', 'Start by clarifying the key questions before research.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Clarify checkout scope and coverage', 'First, clarify checkout scope and coverage.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope authentication flow', 'Determine the scope of the authentication flow before implementation.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope research coverage', 'Establish the research coverage before gathering sources.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Frame key questions', 'Work out the key questions before research.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Define research scope', 'Determine what the research should cover before searching.'), false)
+  assert.equal(isPlannerInventedMetaProcessTitle('Scope authentication flow', 'Do not scope the authentication flow before implementation.'), true)
+  assert.equal(
+    isPlannerInventedMetaProcessTitle(
+      'Clarify Warmwind OS AI scope and research strategy',
+      'Start by clarifying our research strategy and the scope for Warmwind OS AI.',
+    ),
+    false,
+  )
+  assert.equal(isUsablePlannerAck('I’ll update the README with the requested installation instructions.'), true)
+  assert.equal(isUsablePlannerAck('I’ll refactor the parser and add regression coverage.'), true)
+  assert.equal(isUsablePlannerAck('I’ll work through this and keep the task steps updated.'), false)
+  assert.equal(isUsablePlannerAck('I’ll carefully consider every aspect of your request and respond fully.', 'Research Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll work carefully through what you asked and provide a complete response.', 'Research Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll research AI systems and deliver a sourced overview of their architecture.', 'Research Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll investigate AI systems and deliver a sourced overview of their architecture.', 'Investigate Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll explain AI systems and deliver a sourced overview of their architecture.', 'Explain Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll profile AI systems and deliver a sourced overview of their architecture.', 'Profile Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll document AI systems and deliver a sourced overview of their architecture.', 'Document Warmwind OS AI.'), false)
+  assert.equal(isUsablePlannerAck('I’ll analyse the available evidence and deliver a concise assessment of the findings.', 'Analyse payment failures.'), false)
+  assert.equal(isUsablePlannerAck('I’ll inspect the available material, verify the details and deliver a clear summary.', 'Inspect checkout accessibility.'), false)
+  assert.equal(isUsablePlannerAck('I’ll research Warmwind OS AI architecture and deliver a sourced assessment.', 'Research Warmwind OS AI.'), true)
+  assert.equal(isUsablePlannerAck('I’ll develop Warmwind’s visual identity and deliver polished brand artwork.', 'Create a logo for Warmwind.'), true)
+  assert.equal(isUsablePlannerAck('I’ll create Acme’s landing page, verify responsive behaviour and deliver the finished site.', 'Design a homepage for Acme.'), true)
+  assert.equal(isUsablePlannerAck('I’ll investigate the parrotlet habitat, care needs and behaviour, then deliver a sourced overview.', 'Research parrotlets.'), true)
+  assert.equal(isUsablePlannerAck('I’ll inspect the auth flow, correct the broken callback and verify sign-in.', 'Fix authentication.'), true)
+  assert.equal(isUsablePlannerAck('“I’ll inspect the auth flow, correct the broken callback and verify sign-in.”', 'Fix authentication.'), true)
+  const recoveredAckEvents: string[] = []
+  const recoveredPlans: string[][] = []
+  const recoveryManager = new PlanManager({
+    isClosed: false,
+    textDelta(content: string) { recoveredAckEvents.push(content) },
+    plan(items: string[]) { recoveredPlans.push(items) },
+  } as any, [{ role: 'user', content: 'Research Warmwind OS AI' }], 2)
+  ;(recoveryManager as any).acknowledgementEmitted = true
+  const recoveryState = createInitialState(false, timeouts)
+  assert.equal(recoveryManager.recoverFromPlannerFailure(recoveryState), true)
+  assert.equal(recoveredAckEvents.length, 0, 'planner failure recovery must not duplicate an acknowledgement that already rendered')
+  assert.equal(recoveredPlans.length, 1, 'planner failure recovery must still emit its minimal execution plan')
   const longGoalTracker = new GoalTracker()
   longGoalTracker.initializeFromPlan(Array.from({ length: 12 }, (_, idx) => \`Step \${idx + 1} with a fairly specific objective\`))
   longGoalTracker.advanceToStep(6)

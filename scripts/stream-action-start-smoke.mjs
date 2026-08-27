@@ -11,7 +11,7 @@ const bundlePath = join(workDir, 'runner.mjs')
 try {
   await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
-import { StreamProcessor } from ${JSON.stringify(join(root, 'src/lib/agent/StreamProcessor.ts'))}
+import { carriedCadenceActionCount, StreamProcessor } from ${JSON.stringify(join(root, 'src/lib/agent/StreamProcessor.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { acceptProgressNarration, beginNarrationCadenceAttempt, reviewProgressNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
 import { sanitizeAgentEventEmitter } from ${JSON.stringify(join(root, 'src/lib/agent/SSEEmitter.ts'))}
@@ -29,7 +29,7 @@ function makeEmitter() {
   return {
     events,
     textDelta(content: string) { events.push({ type: 'text_delta', content }) },
-    progressUpdate(content: string) { events.push({ type: 'progress_update', content }) },
+    progressUpdate(content: string, placement?: Record<string, unknown>) { events.push({ type: 'progress_update', content, placement }) },
     reasoningDelta(content: string) { events.push({ type: 'reasoning_delta', content }) },
     reasoningDone() { events.push({ type: 'reasoning_done' }) },
     toolStart(id: string, name: string, args: Record<string, unknown>) { events.push({ type: 'tool_start', id, name, args }) },
@@ -156,6 +156,25 @@ async function* internalProviderRecoveryChunks() {
 
 async function* validCadenceToolChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_valid_cadence', function: { name: 'web_search', arguments: '{"action_label":"Verify agent startup benchmarks","plan_step_index":1,"query":"official agent startup benchmark","progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay."}' } }] } }] }
+}
+
+async function* bufferedSearchThenThrowChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_buffered_search_failure', function: { name: 'web_search', arguments: '{"action_label":"Verify buffered search rollback behavior","plan_step_index":1,"query":"buffered search rollback behavior"}' } }] } }] }
+  throw new Error('simulated provider stream failure after provisional search start')
+}
+
+async function* deferredCadenceToolChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_deferred_cadence', function: { name: 'read_document', arguments: '{"action_label":"Extract official benchmark latency and initialization evidence","plan_step_index":1,"url":"https://benchmarks.example/startup","progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay."}' } }] } }] }
+}
+
+async function* liveFileCadenceToolChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_live_file_cadence', function: { name: 'create_file', arguments: '{"progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay.","action_label":"Write the source-backed benchmark report","plan_step_index":1,"path":"deliverables/benchmark.md","content":"# Benchmark\\n\\n' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'The verified median is 2.1 seconds."}' } }] } }] }
+}
+
+async function* liveFileCadenceThenThrowChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_live_file_cadence_failure', function: { name: 'create_file', arguments: '{"progress_update":"The official benchmark reports a 2.1-second median startup and identifies cold initialization as the main delay.","action_label":"Write the interrupted benchmark report","plan_step_index":1,"path":"deliverables/interrupted-benchmark.md","content":"# Interrupted benchmark\\n\\nThis preview begins before the simulated provider failure."}' } }] } }] }
+  throw new Error('simulated provider stream failure after live cadence file start')
 }
 
 async function* cadenceToolUpsertChunks() {
@@ -645,6 +664,25 @@ export async function runSmoke() {
     'invalid',
     'provider/API recovery details must never become visible narration',
   )
+  const bufferedFailureEmitter = makeEmitter()
+  const bufferedFailureState = createInitialState(false, timeouts)
+  bufferedFailureState.currentPlanItems = ['Verify buffered search rollback behavior']
+  bufferedFailureState.currentStepIdx = 0
+  bufferedFailureState.visibleToolActionsSinceLastNarration = 2
+  const bufferedFailureProcessor = new StreamProcessor(bufferedFailureEmitter as any, timeouts)
+  bufferedFailureProcessor.beginBufferedEmission()
+  await assert.rejects(
+    () => bufferedFailureProcessor.processStream(bufferedSearchThenThrowChunks() as any, bufferedFailureState),
+    /simulated provider stream failure/,
+  )
+  assert.equal(bufferedFailureState.visibleToolActionsSinceLastNarration, 3, 'a queued provisional search is counted on the server while the stream remains viable')
+  assert.equal(bufferedFailureState.visibleNarrationToolStartIds.has('call_buffered_search_failure'), true)
+  assert.equal(bufferedFailureEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'a buffered provisional search must not reach the client before commit')
+  bufferedFailureProcessor.discardBufferedEmission()
+  assert.equal(bufferedFailureState.visibleToolActionsSinceLastNarration, 2, 'discarding a never-exposed provisional search must restore the server cadence frontier')
+  assert.equal(bufferedFailureState.visibleNarrationToolStartIds.has('call_buffered_search_failure'), false)
+  assert.equal(bufferedFailureEmitter.events.filter(event => event.type === 'tool_result').length, 0, 'a never-exposed provisional search needs no client settlement event')
+
   const validCadenceEmitter = makeEmitter()
   const validCadenceState = createInitialState(false, timeouts)
   validCadenceState.currentPlanItems = ['Verify current latency evidence']
@@ -652,17 +690,155 @@ export async function runSmoke() {
   validCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(validCadenceState), true)
   const validCadenceProcessor = new StreamProcessor(validCadenceEmitter as any, timeouts)
-  const validCadenceResult = await validCadenceProcessor.processStream(validCadenceToolChunks() as any, validCadenceState, true)
-  const cadenceToolIndex = validCadenceEmitter.events.findIndex(event => event.type === 'tool_start')
-  assert.equal(validCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'completion narration must remain staged until the matching action succeeds')
-  assert.ok(cadenceToolIndex >= 0, 'the provisional action must appear without waiting for post-result narration')
+  validCadenceProcessor.beginBufferedEmission()
+  let bufferedEarlyReleases = 0
+  const validCadenceResult = await validCadenceProcessor.processStream(
+    validCadenceToolChunks() as any,
+    validCadenceState,
+    true,
+    undefined,
+    undefined,
+    () => { bufferedEarlyReleases++ },
+  )
+  assert.equal(bufferedEarlyReleases, 0, 'ordinary actions must keep cadence narration in the charge-first release lane')
+  assert.equal(validCadenceEmitter.events.length, 0, 'ordinary narration and action events must remain buffered before the usage debit')
   assert.equal(validCadenceResult.cadenceProgressUpdate, cadenceText)
   assert.equal(validCadenceResult.cadenceProgressToolCallId, 'call_valid_cadence')
   assert.doesNotMatch(validCadenceResult.toolCalls.get(0)?.arguments || '', /progress_update/, 'display-only narration must never reach execution arguments')
-  assert.equal((validCadenceEmitter.events[cadenceToolIndex].args as any).progress_update, undefined, 'display-only narration must never leak into persisted tool_start args')
   assert.equal(validCadenceState.recentNarrations.length, 0, 'speculative stream parsing must not reset cadence before billing commits')
-  assert.equal(acceptProgressNarration(validCadenceState, validCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: 0, resetCadence: true }).status, 'accepted')
-  assert.equal(validCadenceState.visibleToolActionsSinceLastNarration, 0)
+  assert.equal(carriedCadenceActionCount(validCadenceResult), 1, 'a provisionally staged search must carry exactly one action through the narration reset')
+  const billedCadenceNarration = acceptProgressNarration(validCadenceState, validCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: carriedCadenceActionCount(validCadenceResult), resetCadence: true })
+  assert.equal(billedCadenceNarration.status, 'accepted')
+  if (billedCadenceNarration.status === 'accepted') {
+    validCadenceEmitter.progressUpdate(billedCadenceNarration.text, {
+      beforeToolId: validCadenceResult.cadenceProgressToolCallId,
+      remainingVisibleActions: 0,
+    })
+  }
+  validCadenceProcessor.commitBufferedEmission()
+  const cadenceNarrationIndex = validCadenceEmitter.events.findIndex(event => event.type === 'progress_update')
+  const cadenceToolIndex = validCadenceEmitter.events.findIndex(event => event.type === 'tool_start')
+  assert.ok(cadenceNarrationIndex >= 0 && cadenceNarrationIndex < cadenceToolIndex, 'after charging, ordinary narration must render immediately before its buffered next action')
+  assert.equal((validCadenceEmitter.events[cadenceToolIndex].args as any).progress_update, undefined, 'display-only narration must never leak into persisted tool_start args')
+  assert.equal(validCadenceState.visibleToolActionsSinceLastNarration, 1, 'the buffered next action becomes action one of the new cadence window')
+
+  const deferredCadenceEmitter = makeEmitter()
+  const deferredCadenceState = createInitialState(false, timeouts)
+  deferredCadenceState.currentPlanItems = ['Verify current latency evidence']
+  deferredCadenceState.currentStepIdx = 0
+  deferredCadenceState.visibleToolActionsSinceLastNarration = 3
+  assert.equal(beginNarrationCadenceAttempt(deferredCadenceState), true)
+  const deferredCadenceResult = await new StreamProcessor(deferredCadenceEmitter as any, timeouts).processStream(deferredCadenceToolChunks() as any, deferredCadenceState, true)
+  assert.equal(deferredCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'read_document must remain deferred until execution preflight')
+  assert.equal(deferredCadenceResult.cadenceProgressToolCallId, 'call_deferred_cadence')
+  assert.equal(carriedCadenceActionCount(deferredCadenceResult), 0, 'a deferred tool must not be ghost-counted before ToolPipeline admits it')
+  assert.equal(acceptProgressNarration(deferredCadenceState, deferredCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: carriedCadenceActionCount(deferredCadenceResult), resetCadence: true }).status, 'accepted')
+  assert.equal(deferredCadenceState.visibleToolActionsSinceLastNarration, 0, 'the deferred action is counted later only if execution preflight succeeds')
+
+  const liveFileCadenceEmitter = makeEmitter()
+  const liveFileCadenceState = createInitialState(false, timeouts)
+  liveFileCadenceState.currentPlanItems = ['Write the source-backed benchmark report']
+  liveFileCadenceState.currentStepIdx = 0
+  liveFileCadenceState.visibleToolActionsSinceLastNarration = 3
+  assert.equal(beginNarrationCadenceAttempt(liveFileCadenceState), true)
+  const liveFileCadenceProcessor = new StreamProcessor(liveFileCadenceEmitter as any, timeouts)
+  liveFileCadenceProcessor.beginBufferedEmission()
+  const liveFileCadenceResult = await liveFileCadenceProcessor.processStream(
+    liveFileCadenceToolChunks() as any,
+    liveFileCadenceState,
+    true,
+    undefined,
+    undefined,
+    (text, toolCallId) => {
+      const acceptedNarration = acceptProgressNarration(liveFileCadenceState, text, {
+        requireSignal: false,
+        remainingVisibleActions: 0,
+        resetCadence: true,
+      })
+      assert.equal(acceptedNarration.status, 'accepted')
+      if (acceptedNarration.status !== 'accepted') return
+      liveFileCadenceEmitter.progressUpdate(acceptedNarration.text, {
+        stepIndex: liveFileCadenceState.currentStepIdx,
+        beforeToolId: toolCallId,
+        remainingVisibleActions: 0,
+      })
+    },
+  )
+  const liveFileNarrationIndex = liveFileCadenceEmitter.events.findIndex(event => event.type === 'progress_update')
+  const liveFileToolIndex = liveFileCadenceEmitter.events.findIndex(event => event.type === 'tool_start')
+  const liveFileDeltaIndex = liveFileCadenceEmitter.events.findIndex(event => event.type === 'file_content_delta')
+  assert.ok(liveFileNarrationIndex >= 0, 'validated cadence narration must be visible before a live file begins')
+  assert.ok(liveFileNarrationIndex < liveFileToolIndex, 'live file narration must precede its action pill')
+  assert.ok(liveFileToolIndex < liveFileDeltaIndex, 'the live action pill must precede its streamed file content')
+  assert.equal((liveFileCadenceEmitter.events[liveFileNarrationIndex].placement as any)?.beforeToolId, 'call_live_file_cadence')
+  assert.equal(liveFileCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'cadence file action must remain visible while its content streams')
+  assert.ok(liveFileCadenceEmitter.events.some(event => event.type === 'file_content_delta'), 'cadence file content must stream before the billed model-turn buffer commits')
+  assert.equal(carriedCadenceActionCount(liveFileCadenceResult), 1, 'the exposed cadence file remains one carried server action')
+  assert.equal(liveFileCadenceResult.toolCalls.get(0)?.provisionalStartExposed, true, 'the live file action must be marked as already exposed for discard recovery')
+  assert.equal(liveFileCadenceState.visibleToolActionsSinceLastNarration, 1, 'the provisional live file becomes action one after its preceding narration')
+  assert.equal(liveFileCadenceState.visibleNarrationToolStartIds.has('call_live_file_cadence'), true)
+  liveFileCadenceProcessor.discardBufferedEmission()
+  assert.equal(liveFileCadenceState.visibleToolActionsSinceLastNarration, 0, 'discarding an exposed live file must restore the post-narration server frontier')
+  assert.equal(liveFileCadenceState.visibleNarrationToolStartIds.has('call_live_file_cadence'), false, 'discarding an exposed live file must clear its narration action ID')
+  assert.ok(liveFileCadenceEmitter.events.some(event => event.type === 'tool_result' && (event.result as any)?.discarded === true), 'discard must visibly settle the optimistic live file action')
+
+  const wrongStepCadenceEmitter = makeEmitter()
+  const wrongStepCadenceState = createInitialState(false, timeouts)
+  wrongStepCadenceState.currentPlanItems = ['Gather benchmark evidence', 'Write the source-backed benchmark report']
+  wrongStepCadenceState.currentStepIdx = 1
+  wrongStepCadenceState.visibleToolActionsSinceLastNarration = 3
+  assert.equal(beginNarrationCadenceAttempt(wrongStepCadenceState), true)
+  let wrongStepEarlyReleases = 0
+  const wrongStepCadenceResult = await new StreamProcessor(wrongStepCadenceEmitter as any, timeouts).processStream(
+    liveFileCadenceToolChunks() as any,
+    wrongStepCadenceState,
+    true,
+    undefined,
+    undefined,
+    () => { wrongStepEarlyReleases++ },
+  )
+  assert.equal(wrongStepEarlyReleases, 0, 'a wrong-step file call must not release narration through the live-preview exception')
+  assert.equal(wrongStepCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'a wrong-step file call must not expose an optimistic action')
+  assert.equal(wrongStepCadenceState.visibleToolActionsSinceLastNarration, 3, 'a non-previewable file call must retain the charge-first cadence frontier')
+  assert.equal(wrongStepCadenceResult.cadenceProgressUpdate, cadenceText, 'the staged update remains available for the normal charge-first release')
+
+  const failedLiveCadenceEmitter = makeEmitter()
+  const failedLiveCadenceState = createInitialState(false, timeouts)
+  failedLiveCadenceState.currentPlanItems = ['Write the interrupted benchmark report']
+  failedLiveCadenceState.currentStepIdx = 0
+  failedLiveCadenceState.visibleToolActionsSinceLastNarration = 3
+  assert.equal(beginNarrationCadenceAttempt(failedLiveCadenceState), true)
+  const failedLiveCadenceProcessor = new StreamProcessor(failedLiveCadenceEmitter as any, timeouts)
+  failedLiveCadenceProcessor.beginBufferedEmission()
+  await assert.rejects(
+    () => failedLiveCadenceProcessor.processStream(
+      liveFileCadenceThenThrowChunks() as any,
+      failedLiveCadenceState,
+      true,
+      undefined,
+      undefined,
+      (text, toolCallId) => {
+        const acceptedNarration = acceptProgressNarration(failedLiveCadenceState, text, {
+          requireSignal: false,
+          remainingVisibleActions: 0,
+          resetCadence: true,
+        })
+        assert.equal(acceptedNarration.status, 'accepted')
+        if (acceptedNarration.status !== 'accepted') return
+        failedLiveCadenceEmitter.progressUpdate(acceptedNarration.text, {
+          beforeToolId: toolCallId,
+          remainingVisibleActions: 0,
+        })
+      },
+    ),
+    /simulated provider stream failure after live cadence file start/,
+  )
+  assert.equal(failedLiveCadenceState.visibleToolActionsSinceLastNarration, 1, 'the failed live file is action one until optimistic rollback')
+  assert.equal(failedLiveCadenceEmitter.events[0]?.type, 'progress_update', 'the truthful prior-work update remains visible even when the pending file stream fails')
+  assert.equal(failedLiveCadenceEmitter.events[1]?.type, 'tool_start', 'the failed live file starts only after its narration')
+  failedLiveCadenceProcessor.discardBufferedEmission()
+  assert.equal(failedLiveCadenceState.visibleToolActionsSinceLastNarration, 0, 'failed live file rollback must keep the already-rendered narration reset')
+  assert.equal(failedLiveCadenceState.narrationCadenceInFlight, false, 'a rendered update must not leave cadence armed for a retry field the next schema will not expose')
 
   const upsertCadenceEmitter = makeEmitter()
   const upsertCadenceState = createInitialState(false, timeouts)
@@ -673,47 +849,47 @@ export async function runSmoke() {
   const upsertCadenceResult = await new StreamProcessor(upsertCadenceEmitter as any, timeouts).processStream(cadenceToolUpsertChunks() as any, upsertCadenceState, true)
   assert.equal(upsertCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'one streamed tool-call ID must create exactly one visible action')
   assert.equal(upsertCadenceResult.cadenceProgressToolCallId, 'call_cadence_upsert', 'the staged narration must stay bound to one exact action ID')
-  assert.equal(acceptProgressNarration(upsertCadenceState, upsertCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: 0, resetCadence: true }).status, 'accepted')
-  assert.equal(upsertCadenceState.visibleToolActionsSinceLastNarration, 0, 'a completed narrated action resets cadence at its post-result boundary')
+  assert.equal(acceptProgressNarration(upsertCadenceState, upsertCadenceResult.cadenceProgressUpdate || '', { requireSignal: false, remainingVisibleActions: carriedCadenceActionCount(upsertCadenceResult), resetCadence: true }).status, 'accepted')
+  assert.equal(upsertCadenceState.visibleToolActionsSinceLastNarration, 1, 'pre-action narration must carry the buffered next action into the new cadence window')
 
   const invalidCadenceEmitter = makeEmitter()
   const invalidCadenceState = createInitialState(false, timeouts)
   invalidCadenceState.currentPlanItems = ['Verify current latency evidence']
   invalidCadenceState.currentStepIdx = 0
-  invalidCadenceState.visibleToolActionsSinceLastNarration = 2
+  invalidCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(invalidCadenceState), true)
   const invalidCadenceResult = await new StreamProcessor(invalidCadenceEmitter as any, timeouts).processStream(invalidCadenceToolChunks() as any, invalidCadenceState, true)
   assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'future-only schema text must not emit')
-  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'invalid display text must never delay the genuine action pill')
+  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'invalid display text must hold the fourth action at the hard pre-action boundary')
   assert.equal(invalidCadenceResult.cadenceProgressUpdate, undefined)
-  assert.equal(invalidCadenceResult.toolCalls.size, 1, 'invalid display narration must never discard a valid native action')
-  assert.equal(invalidCadenceResult.cadenceProgressViolation, undefined)
-  assert.equal(invalidCadenceState.narrationNextAttemptAt, 3, 'invalid action-three schema text must keep cadence due at the next action frontier')
+  assert.equal(invalidCadenceResult.toolCalls.size, 0, 'invalid display narration must repair before the next action executes')
+  assert.equal(invalidCadenceResult.cadenceProgressViolation?.code, 'invalid_progress_update')
+  assert.equal(invalidCadenceState.narrationNextAttemptAt, 4, 'failed attempt bookkeeping remains provisional until the agent retry restores the same frontier')
 
   const missingCadenceEmitter = makeEmitter()
   const missingCadenceState = createInitialState(false, timeouts)
   missingCadenceState.currentPlanItems = ['Verify current latency evidence']
   missingCadenceState.currentStepIdx = 0
-  missingCadenceState.visibleToolActionsSinceLastNarration = 2
+  missingCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(missingCadenceState), true)
   const missingCadenceResult = await new StreamProcessor(missingCadenceEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, missingCadenceState, true)
   assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0)
-  assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'a missing display field must still reveal the valid action')
-  assert.equal(missingCadenceResult.toolCalls.size, 1, 'a missing display field must not block execution')
-  assert.equal(missingCadenceResult.cadenceProgressViolation, undefined)
-  assert.equal(missingCadenceState.narrationNextAttemptAt, 3)
+  assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'a missing display field must hold the fourth action')
+  assert.equal(missingCadenceResult.toolCalls.size, 0, 'a missing display field must be repaired before execution')
+  assert.equal(missingCadenceResult.cadenceProgressViolation?.code, 'missing_progress_update')
+  assert.equal(missingCadenceState.narrationNextAttemptAt, 4)
 
   const emptyCadenceEmitter = makeEmitter()
   const emptyCadenceState = createInitialState(false, timeouts)
   emptyCadenceState.currentPlanItems = ['Verify current latency evidence']
   emptyCadenceState.currentStepIdx = 0
-  emptyCadenceState.visibleToolActionsSinceLastNarration = 2
+  emptyCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(emptyCadenceState), true)
   const emptyCadenceResult = await new StreamProcessor(emptyCadenceEmitter as any, timeouts).processStream(emptyCadenceToolChunks() as any, emptyCadenceState, true)
   assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'an empty required cadence field must remain invisible')
-  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'an empty display field must never delay the genuine action pill')
-  assert.equal(emptyCadenceResult.toolCalls.size, 1, 'an empty display field must not discard useful work')
-  assert.equal(emptyCadenceResult.cadenceProgressViolation, undefined)
+  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'an empty display field must hold the fourth action')
+  assert.equal(emptyCadenceResult.toolCalls.size, 0, 'an empty display field must be repaired before execution')
+  assert.equal(emptyCadenceResult.cadenceProgressViolation?.code, 'invalid_progress_update')
 
   const proseOnlyCadenceEmitter = makeEmitter()
   const proseOnlyCadenceState = createInitialState(false, timeouts)
@@ -747,16 +923,16 @@ export async function runSmoke() {
   duplicateCadenceState.iterations = 1
   assert.equal(acceptProgressNarration(duplicateCadenceState, cadenceText, { requireSignal: false, remainingVisibleActions: 0 }).status, 'accepted')
   duplicateCadenceState.iterations = 2
-  duplicateCadenceState.visibleToolActionsSinceLastNarration = 2
+  duplicateCadenceState.visibleToolActionsSinceLastNarration = 3
   assert.equal(beginNarrationCadenceAttempt(duplicateCadenceState), true)
   const duplicateResult = await new StreamProcessor(duplicateCadenceEmitter as any, timeouts).processStream(validCadenceToolChunks() as any, duplicateCadenceState, true)
   assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'duplicate schema text must not emit')
-  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'duplicate display text must never delay the genuine action pill')
+  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'duplicate display text must hold the fourth action until the update is new')
   assert.equal(duplicateResult.cadenceProgressUpdate, undefined)
-  assert.equal(duplicateResult.toolCalls.size, 1, 'duplicate narration must not suppress the native action')
-  assert.equal(duplicateResult.cadenceProgressViolation, undefined)
+  assert.equal(duplicateResult.toolCalls.size, 0, 'duplicate narration must be repaired before the native action executes')
+  assert.equal(duplicateResult.cadenceProgressViolation?.code, 'duplicate_progress_update')
   assert.equal(duplicateCadenceState.recentNarrations.length, 1, 'duplicate schema text must not reset or extend accepted narration memory')
-  assert.equal(duplicateCadenceState.narrationNextAttemptAt, 3, 'duplicate schema text must keep cadence due')
+  assert.equal(duplicateCadenceState.narrationNextAttemptAt, 4, 'duplicate attempt bookkeeping remains provisional until retry recovery')
 
   const leakedCommandEmitter = makeEmitter()
   const leakedCommandState = createInitialState(false, timeouts)
@@ -770,7 +946,7 @@ export async function runSmoke() {
   ordinaryCadenceState.currentStepIdx = 0
   ordinaryCadenceState.visibleToolActionsSinceLastNarration = 3
   const ordinaryCadenceResult = await new StreamProcessor(ordinaryCadenceEmitter as any, timeouts).processStream(ordinaryAndSchemaCadenceChunks() as any, ordinaryCadenceState, true)
-  assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'structured narration must remain staged until execution succeeds')
+  assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'structured narration must remain staged for pre-action release')
   assert.equal(ordinaryCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'cadence narration must use its explicit event lane')
   assert.match(ordinaryCadenceResult.cadenceProgressUpdate || '', /cold initialization as the main source/, 'only the required evidence-bearing schema lane may satisfy cadence')
   assert.doesNotMatch(ordinaryCadenceResult.assistantContent, /2\.1-second median/, 'ordinary prose outside progress_update must be ignored on cadence turns')
@@ -781,7 +957,7 @@ export async function runSmoke() {
   schemaFirstState.currentPlanItems = ['Verify current latency evidence']
   schemaFirstState.currentStepIdx = 0
   const schemaFirstResult = await new StreamProcessor(schemaFirstEmitter as any, timeouts).processStream(schemaThenOrdinaryCadenceChunks() as any, schemaFirstState, true)
-  assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'accepted schema narration must remain staged until execution succeeds')
+  assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'accepted schema narration must remain staged for pre-action release')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'accepted cadence updates must not reuse generic assistant text')
   assert.equal(schemaFirstEmitter.events.filter(event => event.type === 'tool_start').length, 1)
   assert.match(schemaFirstResult.cadenceProgressUpdate || '', /cold initialization as the main delay/)

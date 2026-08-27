@@ -29,7 +29,10 @@ assert.equal(onTime.ok, true, onTime.failures.join('\n'))
 assert.equal(onTime.acceptedNarrations[0]?.gap, 3, 'normal narration must be accepted at action 3')
 assert.equal(onTime.acceptedNarrations[0]?.continuesWithTool, true, 'narration must share the normal tool action turn')
 
-const retryAtFour = auditPersistedNarrationCadence(persisted([
+// The production runtime now blocks this ordering before persistence. Keep one
+// legacy fixture so the durable-event auditor can still diagnose older runs
+// whose fourth action was already stored before narration.
+const legacyGapFour = auditPersistedNarrationCadence(persisted([
   { type: 'plan', items: ['Research sources'] },
   ...action('b1', 'Search first benchmark'),
   ...action('b2', 'Search second benchmark'),
@@ -38,11 +41,11 @@ const retryAtFour = auditPersistedNarrationCadence(persisted([
   { type: 'text_delta', content: 'Four independent benchmarks now show that tool handoff overhead dominates short agent tasks.' },
   ...action('b5', 'Verify benchmark methodology'),
 ]))
-assert.equal(retryAtFour.ok, true, retryAtFour.failures.join('\n'))
-assert.equal(retryAtFour.acceptedNarrations[0]?.gap, 4, 'a missed action-3 update must get exactly one action-4 retry')
+assert.equal(legacyGapFour.ok, true, legacyGapFour.failures.join('\n'))
+assert.equal(legacyGapFour.acceptedNarrations[0]?.gap, 4, 'the durable audit must classify a legacy gap-four update without redefining the live pre-action contract')
 assert.ok(
-  retryAtFour.acceptedActions[3]?.startSeq < retryAtFour.acceptedNarrations[0]?.startSeq,
-  'missing action-3 narration must not gate the fourth tool start',
+  legacyGapFour.acceptedActions[3]?.startSeq < legacyGapFour.acceptedNarrations[0]?.startSeq,
+  'the legacy fixture must actually contain the obsolete silent fourth action',
 )
 
 const asynchronousProgressUpdate = auditPersistedNarrationCadence(persisted([
@@ -84,10 +87,10 @@ const duplicateThenRetry = auditPersistedNarrationCadence(persisted([
 ]))
 assert.equal(duplicateThenRetry.uniqueOk, false, 'persisted duplicate narration must be detected')
 assert.equal(duplicateThenRetry.duplicateAttemptCount, 1)
-assert.equal(duplicateThenRetry.narrationAttempts.at(-1)?.gap, 4, 'duplicate action-3 narration must leave the action-4 retry open')
+assert.equal(duplicateThenRetry.narrationAttempts.at(-1)?.gap, 4, 'the durable auditor must identify the frontier of a persisted legacy duplicate')
 assert.ok(
   duplicateThenRetry.acceptedActions[6]?.startSeq < duplicateThenRetry.narrationAttempts.at(-1)?.startSeq,
-  'duplicate narration must not gate the retry action',
+  'the legacy duplicate fixture must retain its original persisted ordering for diagnosis',
 )
 
 const narrationOnly = auditPersistedNarrationCadence(persisted([

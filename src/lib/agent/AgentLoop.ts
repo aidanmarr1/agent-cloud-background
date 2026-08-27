@@ -65,6 +65,7 @@ import {
   NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
 } from './config'
 import {
+  carriedCadenceActionCount,
   StreamProcessor,
   type StreamResult,
   type StreamToolCallPolicy,
@@ -2004,11 +2005,17 @@ function compactToolDefinitionsForModel(tools: ToolDefinitionLike[]): ToolDefini
     if (!schema.properties?.action_label && !schema.properties?.plan_step_index) return tool
 
     const compactProperties = { ...schema.properties }
-    for (const key of ['action_label', 'plan_step_index'] as const) {
-      const prop = compactProperties[key]
-      if (!prop || typeof prop !== 'object' || Array.isArray(prop)) continue
-      const { description: _description, ...rest } = prop as Record<string, unknown>
-      compactProperties[key] = rest
+    const actionLabelProperty = compactProperties.action_label
+    if (actionLabelProperty && typeof actionLabelProperty === 'object' && !Array.isArray(actionLabelProperty)) {
+      compactProperties.action_label = {
+        ...(actionLabelProperty as Record<string, unknown>),
+        description: 'Specific mini-objective: verb + named target + intended evidence/output; never only page, article, source, query, or details.',
+      }
+    }
+    const planStepProperty = compactProperties.plan_step_index
+    if (planStepProperty && typeof planStepProperty === 'object' && !Array.isArray(planStepProperty)) {
+      const { description: _description, ...rest } = planStepProperty as Record<string, unknown>
+      compactProperties.plan_step_index = rest
     }
 
     return {
@@ -3092,9 +3099,9 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
     'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
-    'The visible action pills already say what was searched, opened, read, inspected, or written. Do not repeat those operations or write vague purpose text such as "to expand the evidence base." State what the preceding results established and include a concrete anchor when available. The current tool has not returned yet, so never invent what it will find.',
-    'When the immediate direction genuinely improves continuity, you may add one short forward-looking clause or sentence. Use it sparingly; never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'progress_update is display-only. The runtime will place it after this native action settles, whether it succeeds or fails. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
+    'The visible action pills already say what was searched, opened, read, inspected, or written. Do not repeat those operations or write vague purpose text such as "to expand the evidence base." State what the preceding results established. Synthesize neutrally instead of making a vendor, publication, or webpage the speaking subject; name a source only when its authority, disagreement, or access failure is itself important. Avoid hype, praise, criticism, and unsupported evaluative adjectives. The current tool has not returned yet, so never invent what it will find.',
+    'For continuing work, default to two clean sentences: the concrete evidence or verified state first, then one short "Next, I\'ll..." sentence naming the immediate useful direction. Omit the second sentence at phase completion or when there is no concrete direction. Never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
+    'progress_update is display-only. The runtime will place it immediately before this native action starts. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
     newWork.length ? `New completed work to synthesize (use its outcomes, not its action labels):\n- ${newWork.join('\n- ')}` : 'Use the concrete completed tool-result context already in the conversation. If evidence access failed, state that user-relevant blocker and the alternate evidence route—not that a search or page-open happened.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
@@ -3104,7 +3111,7 @@ function cadenceNarrationActionRetryMessage(reason: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
     'Retry the same active phase now in the ordinary action-selection turn.',
-    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown after that action settles.',
+    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown immediately before that action starts.',
     'Do not output ordinary prose, planning, speculation, a future-only action fragment, or narration without a tool call.',
   ].join(' ')
 }
@@ -3732,7 +3739,7 @@ function displayContractRepairInstruction(state: AgentStateData, results: ToolEx
     `Retry the same ${latest.tc.name} action now for "${step}".`,
     argHint,
     `Set plan_step_index to ${state.currentStepIdx + 1}.`,
-    'Replace only action_label with a fresh model-authored purpose label, 2-12 words, starts with a capital letter, does not end with a period, no first person, no tool names, no raw URL/path, and no past-tense summary.',
+    'Replace only action_label with a fresh model-authored mini-objective, usually 3-24 words. Start with a capital letter and do not end with a period. Name the concrete subject plus the intended evidence, output, state, or verification; never only a page, article, source, query, or details. No first person, tool names, raw URL/path, or past-tense summary.',
     'Make the native tool call now with no prose.',
   ].join(' ')
 }
@@ -4806,10 +4813,9 @@ export class AgentLoop {
             contextManager.trimIfNeeded(state)
 
             const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
-            // Arm after two completed visible actions so the third native tool
-            // call carries the LLM-authored update. It summarizes preceding
-            // settled work and appears only after this action also settles; a
-            // missed update retries on action four.
+            // Arm after three completed visible actions so the next native
+            // tool call carries the LLM-authored update. It summarizes the
+            // settled work and is released immediately before that action.
             // Keeping it in the work request avoids a competing provider call.
             const cadenceNarrationInMainTurn =
               shouldUseNaturalCadenceNarration(state, this.options.messages) &&
@@ -5135,6 +5141,7 @@ export class AgentLoop {
 
             // Process stream
             let processedCompactNarrationTurn = false
+            let cadenceProgressReleasedDuringStream = false
             streamProcessor.beginBufferedEmission()
             try {
               lastStreamWasCompactNarration = false
@@ -5152,9 +5159,25 @@ export class AgentLoop {
                   modelRequestToolsForUsage,
                 ),
                 streamToolCallPolicy,
+                cadenceNarrationForOpenedStream
+                  ? (text, toolCallId) => {
+                      const acceptedNarration = acceptProgressNarration(state, text, {
+                        requireSignal: false,
+                        remainingVisibleActions: 0,
+                        resetCadence: true,
+                      })
+                      if (acceptedNarration.status !== 'accepted') return
+                      cadenceProgressReleasedDuringStream = true
+                      this.emitter.progressUpdate(acceptedNarration.text, {
+                        stepIndex: state.currentStepIdx,
+                        beforeToolId: toolCallId,
+                        remainingVisibleActions: 0,
+                      })
+                    }
+                  : undefined,
               )
             } catch (streamError) {
-              if (cadenceNarrationForOpenedStream) {
+              if (cadenceNarrationForOpenedStream && !cadenceProgressReleasedDuringStream) {
                 retryNarrationCadenceAttemptWithoutNewAction(state)
               }
               streamProcessor.discardBufferedEmission()
@@ -5164,7 +5187,7 @@ export class AgentLoop {
                 state,
                 contextManager,
                 state.buildTask,
-                cadenceNarrationForOpenedStream,
+                cadenceNarrationForOpenedStream && !cadenceProgressReleasedDuringStream,
               )
               break
             }
@@ -5294,11 +5317,15 @@ export class AgentLoop {
                 )
                 if (recorded?.created) this.emitter.creditEvent(recorded.entry)
               }
-              // Model text and ordinary provisional actions become
-              // durable/visible only after the corresponding debit commits.
+              // Ordinary model text and provisional actions become visible
+              // only after the corresponding debit commits. The structured
+              // cadence update and validated file preview are live exceptions.
               // Validated current-step file writes stream their action and LIVE
-              // preview immediately; discardBufferedEmission settles those
-              // optimistic actions if this turn cannot commit.
+              // preview immediately. Their structured cadence update is released
+              // first; buffered actions receive the same update after the debit
+              // commits and immediately before their exact action ID.
+              // discardBufferedEmission settles any optimistic file action if
+              // the turn cannot commit.
               // Validate personalized handoff prose before releasing the
               // buffered text. A rejected attempt remains model context for the
               // retry, but never reaches the client and cannot concatenate with
@@ -5306,6 +5333,33 @@ export class AgentLoop {
               if (lastStreamResult.cadenceProgressViolation || rejectedModelEmission) {
                 streamProcessor.discardBufferedEmission()
               } else {
+                if (lastStreamResult.cadenceProgressUpdate) {
+                  if (!cadenceProgressReleasedDuringStream) {
+                    const carriedVisibleActions = carriedCadenceActionCount(lastStreamResult)
+                    const acceptedNarration = acceptProgressNarration(
+                      state,
+                      lastStreamResult.cadenceProgressUpdate,
+                      {
+                        requireSignal: false,
+                        // Provisionally staged actions are already counted and
+                        // become action one after this reset. Deferred tools are
+                        // counted by ToolPipeline only after preflight succeeds.
+                        remainingVisibleActions: carriedVisibleActions,
+                        resetCadence: true,
+                      },
+                    )
+                    if (acceptedNarration.status === 'accepted') {
+                      this.emitter.progressUpdate(acceptedNarration.text, {
+                        stepIndex: state.currentStepIdx,
+                        beforeToolId: lastStreamResult.cadenceProgressToolCallId,
+                        remainingVisibleActions: 0,
+                      })
+                    }
+                  }
+                  // Cadence narration has one release point: before the
+                  // buffered action. Never retain it for a post-result path.
+                  lastStreamResult.cadenceProgressUpdate = undefined
+                }
                 streamProcessor.commitBufferedEmission()
               }
               console.log(
@@ -5773,38 +5827,6 @@ export class AgentLoop {
               lastStreamResult.assistantContent,
             )
             if (signal?.aborted) { phase = 'ERROR'; break }
-            if (lastStreamResult.cadenceProgressUpdate) {
-              const narratedResult = lastToolResults.find(
-                result => result.tc.id === lastStreamResult?.cadenceProgressToolCallId,
-              )
-              if (narratedResult) {
-                const acceptedNarration = acceptProgressNarration(
-                  state,
-                  lastStreamResult.cadenceProgressUpdate,
-                  {
-                    requireSignal: false,
-                    remainingVisibleActions: 0,
-                    resetCadence: true,
-                  },
-                )
-                if (acceptedNarration.status === 'accepted') {
-                  // ToolPipeline has already emitted the matching tool_result.
-                  // This update describes preceding settled work, so a failure
-                  // in the newest action must not suppress the 3–4-action
-                  // cadence or buy repeated narration turns.
-                  this.emitter.progressUpdate(acceptedNarration.text, {
-                    stepIndex: state.currentStepIdx,
-                    afterToolId: narratedResult.tc.id,
-                    remainingVisibleActions: 0,
-                  })
-                }
-              } else {
-                console.log('[AgentDiagnostics] Cadence narration had no matching settled action result', {
-                  iteration: state.iterations,
-                  toolCallId: lastStreamResult.cadenceProgressToolCallId || null,
-                })
-              }
-            }
             const currentPaidTurnProgress = paidTurnProgressForIteration(
               pendingPaidTurnProgress,
               state.iterations,

@@ -11,6 +11,7 @@ export type StepAdvanceStatus = 'done' | 'incomplete'
 export interface ProgressUpdatePlacement {
   stepIndex?: number
   afterToolId?: string
+  beforeToolId?: string
   remainingVisibleActions?: number
 }
 

@@ -319,6 +319,7 @@ const TASK_JOB_EVENT_PERSIST_LIMIT_BYTES = 256 * 1024
 const TASK_JOB_BROWSER_FRAME_PERSIST_LIMIT_BYTES = 2 * 1024 * 1024
 const TASK_JOB_TEXT_FIELD_PERSIST_LIMIT_CHARS = 64 * 1024
 const TASK_JOB_INLINE_IMAGE_PLACEHOLDER = '[inline image omitted from persisted task replay]'
+const PERSISTED_PROGRESS_UPDATE_MAX_CHARS = 360
 const TASK_JOB_TRUNCATED_OBJECT_PLACEHOLDER = '[nested value omitted from persisted task replay]'
 const TASK_JOB_OBJECT_FIELD_LIMIT = 160
 const TASK_JOB_ARRAY_ITEM_LIMIT = 80
@@ -1016,6 +1017,10 @@ function compactStringForPersistence(value: string, maxChars = TASK_JOB_TEXT_FIE
   return `${value.slice(0, keep)}${suffix}`
 }
 
+export function compactProgressUpdateForPersistence(content: string): string {
+  return compactStringForPersistence(content, PERSISTED_PROGRESS_UPDATE_MAX_CHARS)
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -1090,7 +1095,7 @@ function compactEventForPersistence(event: SSEEvent): SSEEvent {
     case 'text_delta':
       return { ...event, content: compactStringForPersistence(event.content) }
     case 'progress_update':
-      return { ...event, content: compactStringForPersistence(event.content, 300) }
+      return { ...event, content: compactProgressUpdateForPersistence(event.content) }
     case 'reasoning_delta':
       return { ...event, content: compactStringForPersistence(event.content) }
     case 'tool_start':
@@ -1225,9 +1230,10 @@ function minimalEventForPersistence(event: SSEEvent): SSEEvent {
     case 'progress_update':
       return {
         type: 'progress_update',
-        content: compactStringForPersistence(event.content, 300),
+        content: compactProgressUpdateForPersistence(event.content),
         stepIndex: event.stepIndex,
         afterToolId: event.afterToolId,
+        beforeToolId: event.beforeToolId,
         remainingVisibleActions: event.remainingVisibleActions,
         seq: event.seq,
         runId: event.runId,
@@ -2132,6 +2138,9 @@ class TaskJobEmitter implements AgentEventEmitter {
       ...placement,
       afterToolId: placement.afterToolId
         ? this.scopedId(placement.afterToolId)
+        : undefined,
+      beforeToolId: placement.beforeToolId
+        ? this.scopedId(placement.beforeToolId)
         : undefined,
     })
   }
