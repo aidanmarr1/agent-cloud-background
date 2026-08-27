@@ -19,7 +19,7 @@ assert.match(
 assert.match(
   llmSource,
   /PINNED_OPENROUTER_PROVIDER|exactOpenRouterProviderRoute/,
-  'Muse must be pinned to the exact Meta provider route',
+  'Gemini must be pinned to the exact Google Vertex provider route',
 )
 assert.doesNotMatch(
   llmSource,
@@ -153,11 +153,11 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 
   for (const request of requests) {
     assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'meta/muse-spark-1.2-contributor')
+    assert.equal(request.body.model, 'google/gemini-3.7-flash')
     assert.equal('models' in request.body, false)
     assert.deepEqual(request.body.provider, {
-      order: ['meta'],
-      only: ['meta'],
+      order: ['google-vertex'],
+      only: ['google-vertex'],
       allow_fallbacks: false,
       require_parameters: true,
     })
@@ -191,7 +191,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'Muse histories must preserve the exact task context and end with a valid input turn',
+    'Gemini histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[4].body.messages.some(message =>
@@ -201,7 +201,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Muse Spark 1.2 Contributor exact Meta provider and minimal reasoning smoke test passed')
+  console.log('Gemini 3.7 Flash exact Google Vertex provider and minimal reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }
