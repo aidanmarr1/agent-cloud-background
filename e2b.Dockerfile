@@ -53,6 +53,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgtk-3-0 \
     libnss3 \
     libopenblas-dev \
+    librsvg2-bin \
     libx11-xcb1 \
     libxcomposite1 \
     libxdamage1 \

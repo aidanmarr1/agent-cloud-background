@@ -92,8 +92,11 @@ def render_d2(source: Path, partial: Path, timeout: int) -> None:
     svg_partial = partial.with_suffix(".svg")
     try:
         run_checked([d2, "--layout", "dagre", source, svg_partial], timeout=timeout)
-        converter = command_path("magick", "convert")
-        run_checked([converter, svg_partial, partial], timeout=timeout)
+        converter = command_path("rsvg-convert")
+        run_checked(
+            [converter, "--format", "png", "--output", partial, svg_partial],
+            timeout=timeout,
+        )
     finally:
         svg_partial.unlink(missing_ok=True)
 
