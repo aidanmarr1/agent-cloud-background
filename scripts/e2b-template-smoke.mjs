@@ -138,7 +138,7 @@ try {
     '"$CHROME" --version',
     'echo smoke-ok > e2b-smoke.txt',
     'test -f e2b-smoke.txt',
-    'printf "left -> right\\n" > e2b-smoke.d2',
+    'printf "alpha -> beta\\n" > e2b-smoke.d2',
     'agent-render-diagram e2b-smoke.d2 e2b-smoke.png',
     'test -s e2b-smoke.png',
     'printf "# E2B smoke\\n\\nPDF conversion is ready.\\n" > e2b-smoke.md',

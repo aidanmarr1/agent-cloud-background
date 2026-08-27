@@ -171,7 +171,7 @@ RUN mkdir -p \
   && yarn --version \
   && python3 --version \
   && java -version \
-  && echo 'left -> right' > /tmp/agent-diagram-build-smoke.d2 \
+  && echo 'alpha -> beta' > /tmp/agent-diagram-build-smoke.d2 \
   && agent-render-diagram /tmp/agent-diagram-build-smoke.d2 /tmp/agent-diagram-build-smoke.png \
   && test -s /tmp/agent-diagram-build-smoke.png \
   && rm -f /tmp/agent-diagram-build-smoke.d2 /tmp/agent-diagram-build-smoke.png \
