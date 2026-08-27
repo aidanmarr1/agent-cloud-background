@@ -207,7 +207,18 @@ Never activate a Vercel deployment that can dispatch `render_job` tasks until th
 2. Generate `AUTH_SECRET` and `AGENT_INTERNAL_HEALTH_SECRET` with `npm run cloud:secrets`. Keep the internal health secret locally so the signed readiness and smoke commands can authenticate without exposing an endpoint publicly.
 3. Build `agent-cloud-browser` with `npm run e2b:template:build`. Non-interactive builds require `E2B_ACCESS_TOKEN`. Optionally run the paid `npm run cloud:e2b-smoke` before production.
 4. Make sure the deployed web code exposes the signed `taskIntake` readiness contract before the first suspended-base rollout. During the one-time bootstrap, deploy this hold-aware code while retaining the existing fail-closed persistent-worker environment; do **not** activate `AGENT_TASK_DISPATCH_MODE=render_job` yet. The guarded helper refuses to resume Render if the deployed app cannot acknowledge its exact durable hold ID.
-5. **Before pushing any new commit**, disable and independently verify repository-triggered deploys on the already-suspended Render base:
+5. If this is the first guarded rollout and the existing persistent Render worker is still running, convert it into a safe suspended base before pushing the rollout commit. Use the same explicit hold owner that the full finisher will use:
+
+   ```bash
+   npm run cloud:render-worker-env -- \
+     --apply --suspend-persistent-for-rollout \
+     --service-id srv-... \
+     --intake-hold-id rollout-2026-07-27 \
+     --intake-hold-url https://your-deployed-app.example
+   ```
+
+   This one-time path refuses a different hold owner and verifies that the deployed signed endpoint acknowledges the exact hold. While the persistent poller is still running, it takes two stable snapshots that reject queued/running jobs, live one-off dispatches, active leases, and every non-idle worker heartbeat. It then checks that the Render service is a `background_worker`, disables and re-reads `autoDeploy`, suspends and verifies the service, and repeats the signed hold proof. Because Render may report suspension before its bounded process-shutdown grace and stale heartbeat window have both elapsed, the helper waits through both before running the existing two-snapshot drain proof that rejects even fresh idle workers. The same exact owner ID remains active for the guarded rollout. The transition does not change worker environment values or create a deploy. On interruption after the queue becomes quiescent, it still attempts to disable auto-deploy, suspend, and re-read both states; never release the hold until Render is proven safe.
+6. **Before pushing any new commit**, disable and independently verify repository-triggered deploys on an already-suspended Render base that did not need step 5:
 
    ```bash
    npm run cloud:render-worker-env -- \
@@ -216,11 +227,11 @@ Never activate a Vercel deployment that can dispatch `render_job` tasks until th
    ```
 
    This path refuses a running service, patches `autoDeploy: no`, re-reads the service, verifies both `autoDeploy=no` and `suspended`, and exits without changing environment values, deploying, or resuming. This pre-push step matters for an existing service that was originally created with auto-deploy enabled; otherwise the Git push itself could expose an unguarded worker build. The guarded deploy repeats the same auto-deploy check.
-6. Commit and push the exact worker source, then run the guarded suspended-base deployment. It acquires its owner-fenced hold on the stable queue base (for example, `production`) so the same hold survives a protocol change from one `:orchestration-vN` suffix to the next. The signed deployed endpoint must still report and acknowledge the exact currently active queue. The helper then requires two stable empty snapshots across jobs, live `render-one-off` dispatches, active-task leases, and fresh worker heartbeats for the base queue plus every versioned orchestration namespace. Historical `vercel-workflow` coordinator rows do not represent active Render compute and are deliberately excluded from this drain count.
-7. The helper applies `render.worker.env.example`, temporarily resumes only a base that was already suspended, requests a deploy pinned to the full Git commit, waits for `live`, and always attempts to suspend and verify the base in `finally`. Cleanup retries the bounded suspend-and-verify sequence up to three times before reporting failure. It then re-reads the service and deploy, proving suspension, `autoDeploy=no`, and exact commit identity. Every Render API/readiness fetch has one bounded deadline covering both response headers and body. `SIGINT` or `SIGTERM` aborts the active request, then flows through the same suspend-and-verify cleanup; interruption never releases the intake hold. Any failed or ambiguous rollout also keeps intake held and never reports success based only on a trigger response.
-8. Apply the primary Vercel values, including `AGENT_TASK_DISPATCH_MODE=render_job`, `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false`, the Render API/service/plan IDs, and the matching Turso queue. Then deploy Vercel.
-9. Run the signed readiness check. It must validate the Workflow coordinator, Turso, E2B configuration, Render API access, `background_worker` service type, and suspended base.
-10. Run the deployed smoke. It must start a real Vercel Workflow and Render one-off diagnostic job, survive a viewer disconnect/reconnect, replay sequenced events, complete, and clean up its diagnostic rows.
+7. Commit and push the exact worker source, then run the guarded suspended-base deployment. It acquires its owner-fenced hold on the stable queue base (for example, `production`) so the same hold survives a protocol change from one `:orchestration-vN` suffix to the next. The signed deployed endpoint must still report and acknowledge the exact currently active queue. The helper then requires two stable empty snapshots across jobs, live `render-one-off` dispatches, active-task leases, and fresh worker heartbeats for the base queue plus every versioned orchestration namespace. Historical `vercel-workflow` coordinator rows do not represent active Render compute and are deliberately excluded from this drain count.
+8. The helper applies `render.worker.env.example`, temporarily resumes only a base that was already suspended, requests a deploy pinned to the full Git commit, waits for `live`, and always attempts to suspend and verify the base in `finally`. Cleanup retries the bounded suspend-and-verify sequence up to three times before reporting failure. It then re-reads the service and deploy, proving suspension, `autoDeploy=no`, and exact commit identity. Every Render API/readiness fetch has one bounded deadline covering both response headers and body. `SIGINT` or `SIGTERM` aborts the active request, then flows through the same suspend-and-verify cleanup; interruption never releases the intake hold. Any failed or ambiguous rollout also keeps intake held and never reports success based only on a trigger response.
+9. Apply the primary Vercel values, including `AGENT_TASK_DISPATCH_MODE=render_job`, `AGENT_REQUIRE_TASK_WORKER_HEARTBEAT=false`, the Render API/service/plan IDs, and the matching Turso queue. Then deploy Vercel.
+10. Run the signed readiness check. It must validate the Workflow coordinator, Turso, E2B configuration, Render API access, `background_worker` service type, and suspended base.
+11. Run the deployed smoke. It must start a real Vercel Workflow and Render one-off diagnostic job, survive a viewer disconnect/reconnect, replay sequenced events, complete, and clean up its diagnostic rows.
 
 The recommended orchestrator is:
 
@@ -325,7 +336,7 @@ RENDER_REPO_URL=https://github.com/your-org/your-repo \
 npm run cloud:render-worker-env -- --apply --create-if-missing --trigger-deploy
 ```
 
-This creates a Render `background_worker` named `agent-worker` on the Starter plan in Singapore, with `autoDeploy=no`, build command `npm ci && npm run build`, fallback start command `npm run worker:cloud`, Node runtime, one instance, and a 300-second shutdown delay. Override those defaults only deliberately. Because creation is a billable infrastructure change, dry runs never create the worker; `--apply --create-if-missing` is required. A newly created running service is intentionally not adopted by `--safe-suspended-deploy`; suspend and verify it first.
+This creates a Render `background_worker` named `agent-worker` on the Starter plan in Singapore, with `autoDeploy=no`, build command `npm ci && npm run build`, fallback start command `npm run worker:cloud`, Node runtime, one instance, and a 300-second shutdown delay. Override those defaults only deliberately. Because creation is a billable infrastructure change, dry runs never create the worker; `--apply --create-if-missing` is required. A newly created running service is intentionally not adopted by `--safe-suspended-deploy`; convert it with the owner-fenced `--suspend-persistent-for-rollout` path first.
 
 For Vercel-hosted web deployments, check production environment drift with:
 

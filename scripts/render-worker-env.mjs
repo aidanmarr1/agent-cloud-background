@@ -529,7 +529,7 @@ async function countScoped(client, table, condition, args) {
   return Math.max(0, Number(result.rows[0]?.count || 0))
 }
 
-async function readActiveQueueCounts(client, baseName) {
+async function readActiveQueueCounts(client, baseName, options = {}) {
   const requiredTables = [
     'agent_task_jobs',
     'agent_task_dispatches',
@@ -548,6 +548,7 @@ async function readActiveQueueCounts(client, baseName) {
   const now = Date.now()
   const staleMs = positiveIntArg('--worker-stale-ms', DEFAULT_WORKER_STALE_MS)
   const scopeArgs = [baseName, prefix]
+  const allowIdleWorkers = options.allowIdleWorkers === true
   const [jobs, dispatches, leases, workers] = await Promise.all([
     countScoped(
       client,
@@ -570,7 +571,9 @@ async function readActiveQueueCounts(client, baseName) {
     countScoped(
       client,
       'agent_task_workers',
-      "status in ('starting', 'idle', 'running', 'stopping') and last_seen_at_ms >= ?",
+      allowIdleWorkers
+        ? "status in ('starting', 'running', 'stopping') and last_seen_at_ms >= ?"
+        : "status in ('starting', 'idle', 'running', 'stopping') and last_seen_at_ms >= ?",
       [...scopeArgs, now - staleMs],
     ),
   ])
@@ -579,6 +582,33 @@ async function readActiveQueueCounts(client, baseName) {
 
 function activeQueueCountTotal(counts) {
   return counts.jobs + counts.dispatches + counts.leases + counts.workers
+}
+
+async function provePersistentQueueQuiescent(client, baseName, deployedQueueName) {
+  if (!queueMatchesBase(deployedQueueName, baseName)) {
+    throw new Error(
+      `Cannot prove deployed queue ${deployedQueueName}; it is outside stable queue base ${baseName}.`,
+    )
+  }
+  const stabilityMs = positiveIntArg('--queue-stability-ms', DEFAULT_QUEUE_STABILITY_MS)
+  const first = await readActiveQueueCounts(client, baseName, { allowIdleWorkers: true })
+  if (activeQueueCountTotal(first) > 0) {
+    throw new Error(
+      `Persistent production queue is not quiescent: ${JSON.stringify(first)}. ` +
+      'Only fresh idle worker heartbeats are allowed before suspension.',
+    )
+  }
+  await sleep(stabilityMs)
+  const second = await readActiveQueueCounts(client, baseName, { allowIdleWorkers: true })
+  if (activeQueueCountTotal(second) > 0) {
+    throw new Error(
+      `Persistent production queue changed during the quiescence proof: ${JSON.stringify(second)}.`,
+    )
+  }
+  console.log(
+    `Deployed queue ${deployedQueueName}, stable base ${baseName}, and all protocol namespaces ` +
+    `remained free of queued or running work for ${stabilityMs}ms; only idle worker heartbeats were allowed.`,
+  )
 }
 
 async function proveQueueDrained(client, baseName, deployedQueueName) {
@@ -600,6 +630,39 @@ async function proveQueueDrained(client, baseName, deployedQueueName) {
   console.log(
     `Deployed queue ${deployedQueueName}, stable base ${baseName}, and all protocol namespaces ` +
     `remained drained for ${stabilityMs}ms.`,
+  )
+}
+
+async function waitForStrictQueueDrain(client, baseName, deployedQueueName) {
+  if (!queueMatchesBase(deployedQueueName, baseName)) {
+    throw new Error(
+      `Cannot prove deployed queue ${deployedQueueName}; it is outside stable queue base ${baseName}.`,
+    )
+  }
+  const workerStaleMs = positiveIntArg('--worker-stale-ms', DEFAULT_WORKER_STALE_MS)
+  // Render may report a service suspended before its bounded process shutdown
+  // grace has fully elapsed. Cover that grace plus a complete stale-heartbeat
+  // window before treating the already-suspended queue as ambiguous.
+  const defaultWaitMs = DEFAULT_SERVICE_WAIT_MS + workerStaleMs + 30_000
+  const waitMs = positiveIntArg('--queue-drain-wait-ms', defaultWaitMs)
+  const pollMs = positiveIntArg('--queue-drain-poll-ms', DEFAULT_SERVICE_POLL_MS)
+  const startedAt = Date.now()
+  let lastCounts = null
+
+  while (Date.now() - startedAt < waitMs) {
+    lastCounts = await readActiveQueueCounts(client, baseName)
+    if (activeQueueCountTotal(lastCounts) === 0) {
+      // The zero observation is only a readiness condition. The existing
+      // two-snapshot proof remains the authority for stable strict drainage.
+      await proveQueueDrained(client, baseName, deployedQueueName)
+      return
+    }
+    await sleep(Math.min(pollMs, Math.max(1, waitMs - (Date.now() - startedAt))))
+  }
+
+  throw new Error(
+    `Timed out after ${waitMs}ms waiting for the suspended queue to become strictly drained; ` +
+    `last active counts were ${JSON.stringify(lastCounts)}.`,
   )
 }
 
@@ -882,6 +945,49 @@ async function disableAndVerifyAutoDeploy(serviceId, options = {}) {
   return service
 }
 
+async function proveSafeSuspendedWorker(serviceId, options = {}) {
+  const service = await getService(serviceId, options)
+  if (serviceType(service) !== 'background_worker') {
+    throw new Error(`Render service ${serviceId} changed type during suspension.`)
+  }
+  if (serviceSuspendedState(service) !== 'suspended') {
+    throw new Error(
+      `Render service ${serviceId} did not remain suspended; state is ` +
+      `${serviceSuspendedState(service) || 'unknown'}.`,
+    )
+  }
+  if (serviceAutoDeployState(service) !== 'no') {
+    throw new Error(`Render service ${serviceId} changed autoDeploy state during suspension.`)
+  }
+  console.log(`Render worker ${serviceId} remains suspended with auto-deploy disabled.`)
+  return service
+}
+
+async function convergeSafeSuspendedWorker(serviceId) {
+  const errors = []
+  try {
+    await disableAndVerifyAutoDeploy(serviceId, { allowAfterInterrupt: true })
+  } catch (error) {
+    errors.push(`auto-deploy: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    // Suspension is attempted independently even if the auto-deploy patch was
+    // ambiguous. The active intake hold still makes stopping the idle base the
+    // safest failure state, while success remains gated on both proofs.
+    await suspendAndVerifyForCleanup(serviceId)
+  } catch (error) {
+    errors.push(`suspension: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  try {
+    await proveSafeSuspendedWorker(serviceId, { allowAfterInterrupt: true })
+  } catch (error) {
+    errors.push(`final state: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (errors.length > 0) {
+    throw new Error(errors.join(' | '))
+  }
+}
+
 function deployCommitId(body) {
   return renderDeployCommitId(body)
 }
@@ -1059,6 +1165,7 @@ const safeSuspendedDeploy = hasFlag('--safe-suspended-deploy') ||
 const releaseIntakeOnly = hasFlag('--release-intake-hold')
 const resumePersistentOnly = hasFlag('--resume-persistent') ||
   hasFlag('--resume-persistent-worker')
+const suspendPersistentForRollout = hasFlag('--suspend-persistent-for-rollout')
 const keepIntakeHeld = hasFlag('--keep-intake-held')
 const disableAutoDeployOnly = hasFlag('--disable-auto-deploy') ||
   hasFlag('--disable-auto-deploy-only')
@@ -1130,6 +1237,110 @@ async function runDisableAutoDeployOnly(serviceId) {
       `Render service ${serviceId} changed suspension state while disabling auto-deploy.`,
     )
   }
+}
+
+async function runSuspendPersistentForRollout(serviceId) {
+  if (!apply) {
+    throw new Error('--suspend-persistent-for-rollout requires --apply.')
+  }
+  if (env('AGENT_TASK_DISPATCH_MODE') === 'render_job') {
+    throw new Error(
+      '--suspend-persistent-for-rollout is only for the persistent-worker topology, not render_job.',
+    )
+  }
+
+  const configuredHoldId = readArg('--intake-hold-id') || env('AGENT_INTAKE_HOLD_ID')
+  if (!configuredHoldId) {
+    throw new Error(
+      '--suspend-persistent-for-rollout requires an explicit --intake-hold-id so recovery keeps the same owner.',
+    )
+  }
+  const holdId = validateHoldId(configuredHoldId)
+  const service = await getService(serviceId)
+  if (serviceType(service) !== 'background_worker') {
+    throw new Error(
+      `Render service ${serviceId} is ${serviceType(service) || 'an unknown type'}, not background_worker.`,
+    )
+  }
+  if (!['suspended', 'not_suspended'].includes(serviceSuspendedState(service))) {
+    throw new Error(
+      `Render service ${serviceId} has unsupported suspension state ` +
+      `${serviceSuspendedState(service) || 'unknown'}.`,
+    )
+  }
+
+  const baseUrl = intakeBaseUrl()
+  const baseName = queueBaseName()
+  const deployedQueueName = await resolveDeployedQueueName(baseUrl, baseName)
+  const client = createQueueClient()
+  let acquisitionAttempted = false
+  let holdAcquired = false
+  let quiescenceProven = false
+  let operationError = null
+
+  try {
+    acquisitionAttempted = true
+    await acquireIntakeHold(client, baseName, holdId)
+    holdAcquired = true
+    await proveDeployedIntakeHold(baseUrl, deployedQueueName, holdId)
+
+    // A live persistent poller is expected to publish an idle heartbeat until
+    // Render sends its shutdown signal. Before suspension, prove that no job,
+    // dispatch, lease, or non-idle worker exists across the stable queue base.
+    await provePersistentQueueQuiescent(client, baseName, deployedQueueName)
+    quiescenceProven = true
+
+    await disableAndVerifyAutoDeploy(serviceId)
+    await suspendAndVerifyService(serviceId)
+
+    // Once the service is suspended, use the stricter proof that also rejects
+    // every fresh idle heartbeat. This proves the base cannot still claim work.
+    await proveDeployedIntakeHold(baseUrl, deployedQueueName, holdId)
+    await waitForStrictQueueDrain(client, baseName, deployedQueueName)
+    await proveSafeSuspendedWorker(serviceId)
+  } catch (error) {
+    operationError = error
+  }
+
+  if (interruptedSignal && !operationError) operationError = interruptionError()
+
+  let cleanupError = null
+  if (operationError && holdAcquired && quiescenceProven) {
+    try {
+      // After the stable pre-suspension proof, interruption or an ambiguous
+      // API response must still converge on a non-deploying suspended base.
+      await convergeSafeSuspendedWorker(serviceId)
+    } catch (error) {
+      cleanupError = error
+    }
+  }
+  client.close()
+
+  if (operationError) {
+    const holdState = holdAcquired
+      ? `Intake hold ${holdId} remains active.`
+      : acquisitionAttempted
+        ? `Intake hold ${holdId} may be active; verify its owner before retrying.`
+        : `Intake hold ${holdId} was not acquired.`
+    if (cleanupError) {
+      throw new Error(
+        `Persistent-worker suspension failed and cleanup could not prove a safe suspended base. ` +
+        `${holdState} Operation error: ${
+          operationError instanceof Error ? operationError.message : String(operationError)
+        } Cleanup error: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`,
+      )
+    }
+    throw new Error(
+      `${operationError instanceof Error ? operationError.message : String(operationError)} ${holdState}`,
+    )
+  }
+
+  console.log(
+    `Render worker ${serviceId} is a verified suspended base with auto-deploy disabled. ` +
+    `Intake hold ${holdId} remains active for the guarded rollout.`,
+  )
 }
 
 async function runResumePersistentWorker(input) {
@@ -1402,9 +1613,23 @@ async function runGuardedSuspendedDeploy(input) {
 }
 
 async function main() {
+  if (releaseIntakeOnly && suspendPersistentForRollout) {
+    throw new Error(
+      '--release-intake-hold cannot be combined with --suspend-persistent-for-rollout.',
+    )
+  }
   if (releaseIntakeOnly) {
     await releaseHeldIntake()
     return
+  }
+  if (
+    suspendPersistentForRollout &&
+    (resumePersistentOnly || safeSuspendedDeploy || disableAutoDeployOnly ||
+      triggerDeployAfterApply || waitForDeployAfterTrigger)
+  ) {
+    throw new Error(
+      '--suspend-persistent-for-rollout cannot be combined with deploy, resume, or other auto-deploy modes.',
+    )
   }
   if (resumePersistentOnly && (safeSuspendedDeploy || disableAutoDeployOnly || triggerDeployAfterApply)) {
     throw new Error('--resume-persistent cannot be combined with deploy or auto-deploy mutation modes.')
@@ -1416,7 +1641,14 @@ async function main() {
   if (disableAutoDeployOnly && hasFlag('--create-if-missing')) {
     throw new Error('--disable-auto-deploy-only only operates on an existing Render service.')
   }
+  if (suspendPersistentForRollout && hasFlag('--create-if-missing')) {
+    throw new Error('--suspend-persistent-for-rollout only operates on an existing Render service.')
+  }
   const serviceId = await resolveServiceId(expected, missingLocal)
+  if (suspendPersistentForRollout) {
+    await runSuspendPersistentForRollout(serviceId)
+    return
+  }
   if (disableAutoDeployOnly) {
     await runDisableAutoDeployOnly(serviceId)
     return

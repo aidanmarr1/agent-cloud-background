@@ -48,6 +48,11 @@ const queueCount = sourceSection(
   'async function readActiveQueueCounts',
   'function activeQueueCountTotal',
 )
+const persistentTransition = sourceSection(
+  renderHelper,
+  'async function runSuspendPersistentForRollout',
+  'async function runResumePersistentWorker',
+)
 const autoDeployGuard = sourceSection(
   renderHelper,
   'async function disableAndVerifyAutoDeploy',
@@ -170,6 +175,56 @@ assert.match(
   'drain proof must count only live Render one-off launches, not permanent Workflow history rows',
 )
 assert.match(
+  renderHelper,
+  /async function provePersistentQueueQuiescent[\s\S]*allowIdleWorkers: true[\s\S]*await sleep\(stabilityMs\)[\s\S]*allowIdleWorkers: true/,
+  'a running persistent worker transition must prove two stable work-free snapshots while allowing only idle pollers',
+)
+assert.match(
+  renderHelper,
+  /async function waitForStrictQueueDrain[\s\S]*readActiveQueueCounts\(client, baseName\)[\s\S]*activeQueueCountTotal\(lastCounts\) === 0[\s\S]*proveQueueDrained\(client, baseName, deployedQueueName\)[\s\S]*Timed out after \$\{waitMs\}ms/,
+  'post-suspension verification must wait boundedly for stale idle heartbeats, then run the strict two-snapshot drain proof',
+)
+assert.match(
+  renderHelper,
+  /defaultWaitMs = DEFAULT_SERVICE_WAIT_MS \+ workerStaleMs \+ 30_000[\s\S]*--queue-drain-wait-ms/,
+  'the default drain wait must cover Render process shutdown grace plus heartbeat staleness',
+)
+assert.match(
+  queueCount,
+  /allowIdleWorkers[\s\S]*status in \('starting', 'running', 'stopping'\)[\s\S]*status in \('starting', 'idle', 'running', 'stopping'\)/,
+  'pre-suspension quiescence may ignore idle heartbeats while the final strict drain must reject them',
+)
+assert.match(
+  persistentTransition,
+  /requires --apply[\s\S]*requires an explicit --intake-hold-id[\s\S]*serviceType\(service\) !== 'background_worker'/,
+  'the one-time transition must require an explicit owner and a real Render background worker',
+)
+assert.match(
+  persistentTransition,
+  /acquireIntakeHold\(client, baseName, holdId\)[\s\S]*proveDeployedIntakeHold\(baseUrl, deployedQueueName, holdId\)[\s\S]*provePersistentQueueQuiescent[\s\S]*disableAndVerifyAutoDeploy\(serviceId\)[\s\S]*suspendAndVerifyService\(serviceId\)[\s\S]*proveDeployedIntakeHold\(baseUrl, deployedQueueName, holdId\)[\s\S]*waitForStrictQueueDrain/,
+  'the transition must fence intake, prove quiescence, disable auto-deploy, suspend, and re-prove the exact hold and strict drain',
+)
+assert.match(
+  renderHelper,
+  /async function convergeSafeSuspendedWorker[\s\S]*try \{[\s\S]*disableAndVerifyAutoDeploy\(serviceId, \{ allowAfterInterrupt: true \}\)[\s\S]*catch \(error\)[\s\S]*try \{[\s\S]*suspendAndVerifyForCleanup\(serviceId\)[\s\S]*catch \(error\)[\s\S]*proveSafeSuspendedWorker\(serviceId, \{ allowAfterInterrupt: true \}\)/,
+  'cleanup must attempt suspension independently of auto-deploy errors and re-read both final states',
+)
+assert.match(
+  persistentTransition,
+  /convergeSafeSuspendedWorker\(serviceId\)[\s\S]*Intake hold \$\{holdId\} remains active for the guarded rollout/,
+  'post-quiescence failures must converge on suspension and always leave the exact hold active',
+)
+assert.doesNotMatch(
+  persistentTransition,
+  /applyEnvVars|triggerDeploy|resumeService|releaseIntakeHold/,
+  'the one-time transition must not mutate worker env, create a deploy, resume, or release intake',
+)
+assert.match(
+  renderHelper,
+  /if \(suspendPersistentForRollout\) \{[\s\S]*runSuspendPersistentForRollout\(serviceId\)[\s\S]*return[\s\S]*const current = await listEnvVars/,
+  'transition mode must exit before reading or applying Render environment values',
+)
+assert.match(
   boundedFetch,
   /setTimeout\(\(\) => \{[\s\S]*controller\.abort[\s\S]*await fetch\([\s\S]*await response\.text\(\)[\s\S]*finally \{[\s\S]*clearTimeout\(timeout\)/,
   'one bounded deadline must cover both response headers and body for every guarded fetch',
@@ -218,6 +273,11 @@ assert.match(
   backgroundDocs,
   /before pushing any new commit[\s\S]*--disable-auto-deploy/i,
   'operator docs must disable and verify auto-deploy before a commit is pushed',
+)
+assert.match(
+  backgroundDocs,
+  /--suspend-persistent-for-rollout[\s\S]*same exact owner ID[\s\S]*does not change worker environment values or create a deploy/i,
+  'operator docs must explain the owner-fenced one-time persistent-to-suspended transition',
 )
 assert.match(
   guardedRollout,
