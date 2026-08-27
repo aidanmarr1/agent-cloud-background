@@ -11,6 +11,7 @@ import {
   selectNewestExactRenderDeploy,
   unwrapRenderDeploy,
 } from './render-deploy-response.mjs'
+import { RolloutActiveRequestState } from './render-rollout-signal.mjs'
 
 const root = process.cwd()
 const [
@@ -70,6 +71,32 @@ const triggerDeploy = sourceSection(
 )
 
 const exactCommit = 'a'.repeat(40)
+
+const requestState = new RolloutActiveRequestState()
+const normalController = new AbortController()
+const restoreNormal = requestState.enter(normalController)
+assert.equal(
+  requestState.abortUnlessProtected(new Error('first signal')),
+  true,
+  'a normal in-flight rollout request must abort on termination',
+)
+assert.equal(normalController.signal.aborted, true)
+restoreNormal()
+
+const cleanupController = new AbortController()
+const restoreCleanup = requestState.enter(cleanupController, { allowAfterInterrupt: true })
+assert.equal(
+  requestState.abortUnlessProtected(new Error('first cleanup signal')),
+  false,
+  'the first signal must preserve an allowAfterInterrupt cleanup request',
+)
+assert.equal(
+  requestState.abortUnlessProtected(new Error('repeated cleanup signal')),
+  false,
+  'a repeated signal must also preserve an allowAfterInterrupt cleanup request',
+)
+assert.equal(cleanupController.signal.aborted, false)
+restoreCleanup()
 const olderExactDeploy = {
   id: 'dep-older',
   commit: { id: exactCommit },
@@ -231,8 +258,8 @@ assert.match(
 )
 assert.match(
   renderHelper,
-  /activeRequestController\?\.abort\(interruptionError\(\)\)[\s\S]*process\.on\('SIGINT'[\s\S]*process\.on\('SIGTERM'[\s\S]*const maxAttempts = 3[\s\S]*suspendAndVerifyService\(serviceId, \{ allowAfterInterrupt: true \}\)[\s\S]*sleep\(DEFAULT_SERVICE_POLL_MS, \{ allowAfterInterrupt: true \}\)[\s\S]*finally \{[\s\S]*suspendAndVerifyForCleanup/,
-  'termination signals must abort active work and retain the guaranteed suspension path',
+  /activeRequestState\.abortUnlessProtected\(interruptionError\(\)\)[\s\S]*process\.on\('SIGINT'[\s\S]*process\.on\('SIGTERM'[\s\S]*const maxAttempts = 3[\s\S]*suspendAndVerifyService\(serviceId, \{ allowAfterInterrupt: true \}\)[\s\S]*sleep\(DEFAULT_SERVICE_POLL_MS, \{ allowAfterInterrupt: true \}\)[\s\S]*finally \{[\s\S]*suspendAndVerifyForCleanup/,
+  'termination signals must abort normal work while preserving the guaranteed suspension path',
 )
 assert.match(
   guardedRollout,

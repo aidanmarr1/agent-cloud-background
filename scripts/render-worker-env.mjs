@@ -14,6 +14,7 @@ import {
   selectNewestExactRenderDeploy,
   unwrapRenderDeploy,
 } from './render-deploy-response.mjs'
+import { RolloutActiveRequestState } from './render-rollout-signal.mjs'
 
 const rootUrl = new URL('../', import.meta.url)
 const root = fileURLToPath(rootUrl)
@@ -53,7 +54,7 @@ const REQUIRED_LOCAL_KEYS = new Set([
 loadLocalEnvFiles(rootUrl)
 
 let interruptedSignal = ''
-let activeRequestController = null
+const activeRequestState = new RolloutActiveRequestState()
 let activeSleepReject = null
 
 function readArg(name) {
@@ -113,11 +114,13 @@ function handleTerminationSignal(signal) {
   if (!interruptedSignal) {
     interruptedSignal = signal
     console.error(
-      `Received ${signal}; aborting the active request and preserving the intake hold ` +
+      `Received ${signal}; stopping normal rollout work and preserving the intake hold ` +
       'while the guarded rollout suspends and verifies the Render base.',
     )
   }
-  activeRequestController?.abort(interruptionError())
+  // Cleanup requests opt into allowAfterInterrupt. Preserve them on both the
+  // first and any repeated signal so termination cannot defeat suspension.
+  activeRequestState.abortUnlessProtected(interruptionError())
   activeSleepReject?.()
 }
 
@@ -264,8 +267,7 @@ async function fetchTextWithTimeout(url, options = {}, requestOptions = {}) {
   throwIfInterrupted(requestOptions)
   const timeoutMs = positiveIntArg('--request-timeout-ms', DEFAULT_REQUEST_TIMEOUT_MS)
   const controller = new AbortController()
-  const previousController = activeRequestController
-  activeRequestController = controller
+  const restoreActiveRequest = activeRequestState.enter(controller, requestOptions)
   const timeout = setTimeout(() => {
     controller.abort(new Error(`Request timed out after ${timeoutMs}ms while reading headers or body.`))
   }, timeoutMs)
@@ -292,9 +294,7 @@ async function fetchTextWithTimeout(url, options = {}, requestOptions = {}) {
     throw error
   } finally {
     clearTimeout(timeout)
-    if (activeRequestController === controller) {
-      activeRequestController = previousController
-    }
+    restoreActiveRequest()
   }
 }
 
