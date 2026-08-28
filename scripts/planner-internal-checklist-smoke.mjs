@@ -20,8 +20,8 @@ assert.match(
 )
 assert.match(
   agentLoop,
-  /A final phase is an outcome boundary, not a file-only tool lane[\s\S]*activeTools = toolRegistry\.getActiveDefinitions\(state\)/,
-  'ordinary final phases must keep the full relevant tool menu',
+  /Phase, strategy, urgency, and recovery state guide ordering and[\s\S]*activeTools = toolRegistry\.getActiveDefinitions\(state\)/,
+  'ordinary phases must keep the full healthy tool menu and use phase state as guidance',
 )
 assert.match(
   agentLoop,

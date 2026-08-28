@@ -8,6 +8,7 @@ const root = process.cwd()
 const workDir = await mkdtemp(join(root, 'scripts/.tool-local-abort-recovery-smoke-'))
 const runnerPath = join(workDir, 'runner.ts')
 const toolsStubPath = join(workDir, 'tools-stub.ts')
+const searchStubPath = join(workDir, 'search-stub.ts')
 const bundlePath = join(workDir, 'runner.mjs')
 
 try {
@@ -25,6 +26,10 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
   }
   return { ok: true, name }
 }
+`, 'utf8')
+
+  await writeFile(searchStubPath, `
+export function assertWebSearchRequestReady() {}
 `, 'utf8')
 
   await writeFile(runnerPath, `
@@ -103,6 +108,7 @@ console.log('tool-local abort recovery smoke checks passed')
       name: 'tool-local-abort-stub',
       setup(buildApi) {
         buildApi.onResolve({ filter: /^@\/lib\/tools$/ }, () => ({ path: toolsStubPath }))
+        buildApi.onResolve({ filter: /^@\/lib\/search$/ }, () => ({ path: searchStubPath }))
       },
     }],
     logLevel: 'silent',

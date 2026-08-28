@@ -106,8 +106,18 @@ assert.match(
 )
 assert.match(
   agentLoopSource,
-  /hasDirectSourceTool[\s\S]*activeTools = activeTools\.filter\(tool => tool\.function\?\.name !== 'web_search'\)/,
-  'the model must lose discovery search only when an exact-target tool is available',
+  /Phase, strategy, urgency, and recovery state guide ordering and[\s\S]*they never hide a healthy tool from the model[\s\S]*activeTools = toolRegistry\.getActiveDefinitions\(state\)/,
+  'normal action turns must expose every healthy configured tool instead of applying phase/source allowlists',
+)
+assert.match(
+  agentLoopSource,
+  /DIRECT USER TARGET:[\s\S]*Use the exact target directly when it is the best route[\s\S]*The full healthy tool set remains available/,
+  'an exact user URL should guide the model toward the direct route without removing discovery or other healthy tools',
+)
+assert.doesNotMatch(
+  agentLoopSource,
+  /hasDirectSourceTool[\s\S]{0,1200}activeTools = activeTools\.filter\(tool => tool\.function\?\.name !== 'web_search'\)/,
+  'an exact user URL must not hard-remove web_search from the healthy tool menu',
 )
 assert.match(
   agentStateSource,
@@ -116,8 +126,8 @@ assert.match(
 )
 assert.match(
   agentLoopSource,
-  /Narrowed tools during exact-path file repair/,
-  'a duplicate or stale file write must narrow the repair turn to the exact recovery action',
+  /FILE REVISION REQUIRED:[\s\S]*prefer one targeted edit[\s\S]*Use another available tool only when it is genuinely the better recovery/,
+  'a file conflict should strongly guide the repair while preserving unrelated healthy tools',
 )
 assert.match(
   toolPipelineSource,

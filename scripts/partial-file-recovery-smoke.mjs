@@ -281,6 +281,7 @@ export async function runSmoke() {
     platform: 'node',
     format: 'esm',
     target: ['node20'],
+    packages: 'external',
     external: ['@sparticuz/chromium', 'playwright'],
     logLevel: 'silent',
   })

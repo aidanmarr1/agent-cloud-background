@@ -6,6 +6,7 @@ import { PanelHeader } from './PanelHeader'
 import { SearchResults } from './SearchResults'
 import { ImageSearchResults } from './ImageSearchResults'
 import { isSearchResultPending } from './searchLoadingState'
+import { isBrowseResultPending } from './browseLoadingState'
 import { BrowseView } from './BrowseView'
 import { BrowserView } from './BrowserView'
 import { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, BrowserResult } from '@/types'
@@ -214,6 +215,17 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
   const activeSearchPending = isSearchResultPending({
     itemStreaming: activeItem?.streaming,
     itemEmpty: Array.isArray(activeItem?.data) && activeItem.data.length === 0,
+    taskStreaming,
+    activeItemId: activeItem?.id,
+    latestItemId: lastItem?.id,
+  })
+  const activeBrowseData = activeItem?.type === 'browse'
+    ? activeItem.data as BrowseResult
+    : undefined
+  const activeBrowsePending = isBrowseResultPending({
+    itemStreaming: activeItem?.streaming,
+    itemEmpty: activeItem?.type === 'browse' && !(activeBrowseData?.content || '').trim(),
+    itemTitle: activeItem?.title,
     taskStreaming,
     activeItemId: activeItem?.id,
     latestItemId: lastItem?.id,
@@ -477,7 +489,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
               ) : activeItem.type === 'browser' || isVisualBrowserPayload(activeItem.data) ? (
                 <BrowserView result={activeItem.data as BrowserResult} streaming={activeItem.streaming} conversationId={activeItem.id === 'browser_live' ? conversationId : undefined} isLatest={isAtLatest} onJumpToLive={jumpToLive} />
               ) : (
-                <BrowseView result={activeItem.data as BrowseResult} streaming={activeItem.streaming} />
+                <BrowseView key={activeItem.id} result={activeItem.data as BrowseResult} streaming={activeBrowsePending} />
               )) : (
                 <div className="flex-1 flex items-center justify-center h-full py-16 px-6">
                   <span className="text-[13px] text-text-tertiary [font-family:var(--font-display)] text-center">

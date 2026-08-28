@@ -5,16 +5,7 @@
 import type { AgentStateData } from './AgentState'
 import { isToolDisabled } from './AgentState'
 import type { TaskType } from './TaskStrategy'
-import { PHASE_TOOL_FILTER } from './config'
 import { inferToolRiskLevel, toolHasSideEffects } from './toolSafety'
-
-const BROWSE_STRATEGY_TOOLS = new Set([
-  'browser_navigate', 'browser_click_at', 'browser_type',
-  'browser_fill_form', 'browser_find_text', 'browser_screenshot',
-  'browser_get_content', 'browser_scroll', 'browser_hover', 'browser_select',
-  'browser_press_key', 'browser_go_back', 'browser_action_sequence',
-  'browser_click_and_hold', 'browser_drag', 'web_search',
-])
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
@@ -114,9 +105,6 @@ export class ToolRegistry {
   getActiveDefinitions(state: AgentStateData, taskType?: TaskType): Array<Record<string, unknown>> {
     const active: Array<{ name: string; definition: Record<string, unknown>; order: number }> = []
 
-    const phaseFilter = state.currentPhase !== 'unknown'
-      ? (PHASE_TOOL_FILTER[state.currentPhase] as string[] | undefined)
-      : undefined
     const priority = new Map<string, number>()
     const priorityList = state.strategyConfig?.toolPriority || (taskType ? this.getRecommendedTools(taskType) : [])
     priorityList.forEach((name, index) => priority.set(name, index))
@@ -127,7 +115,6 @@ export class ToolRegistry {
       if (runtime && !runtime.enabled) continue
       if (isToolDisabled(state, name)) continue
       if (name === 'web_search' && state.searchDisabled) continue
-      if (phaseFilter && !phaseFilter.includes(name) && !(state.taskStrategy === 'browse' && BROWSE_STRATEGY_TOOLS.has(name))) continue
 
       active.push({ name, definition: metadata.definition, order })
       order++

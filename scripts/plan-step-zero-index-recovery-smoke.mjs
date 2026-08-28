@@ -82,16 +82,16 @@ try {
   )
 
   state.currentStepIdx = 1
-  const ambiguousLaterStep = await execute(pipeline, state, 'ambiguous-later-step', 1)
+  const repairedLaterStep = await execute(pipeline, state, 'repaired-later-step', 1)
   assert.equal(
-    Boolean(ambiguousLaterStep.acceptedForExecution),
-    false,
-    'a later off-by-one index is ambiguous and must remain blocked',
+    repairedLaterStep.acceptedForExecution,
+    true,
+    'display-only plan metadata must not block an otherwise valid model-selected action',
   )
-  assert.match(
-    String((ambiguousLaterStep.result as { error?: string }).error),
-    /declared plan_step_index 1 .*active step is 2/,
-    'the later mismatch must still be rejected by the strict phase-safety guard',
+  assert.equal(
+    JSON.parse(repairedLaterStep.tc.arguments).plan_step_index,
+    2,
+    'the runtime must normalize later plan metadata to the active one-based step',
   )
 } finally {
   await rm(getSandboxDirPath(conversationId), { recursive: true, force: true })

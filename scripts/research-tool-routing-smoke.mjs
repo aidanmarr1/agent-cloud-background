@@ -74,7 +74,7 @@ assert.equal(exactState.exactExtractionGuardSourceUrl, exactUrl, 'the extracted 
 assert.deepEqual(
   [...exactExtractionGuardToolNames(exactState)],
   ['browser_navigate'],
-  'the first rendered-confirmation turn should expose only exact navigation',
+  'the first rendered-confirmation stage should recognize exact navigation as its confirmation route',
 )
 assert.match(exactState.exactExtractionGuardPrompt || '', /same source[\s\S]*exact URL verbatim/i, 'confirmation must navigate the extracted source rather than discover a replacement')
 assert.ok((exactState.exactExtractionGuardPrompt || '').includes(JSON.stringify(exactUrl)), 'the exact extracted URL, including query and fragment, must survive in the navigation prompt')
@@ -102,7 +102,7 @@ assert.equal(exactState.exactExtractionGuardSourceUrl, null, 'the exact navigati
 assert.deepEqual(
   [...exactExtractionGuardToolNames(exactState)].sort(),
   ['browser_find_text', 'browser_get_content', 'browser_screenshot', 'browser_scroll'].sort(),
-  'rendered inspection should offer targeted text, content, screenshot, and scroll tools',
+  'rendered inspection should recognize targeted text, content, screenshot, and scroll confirmation routes',
 )
 assert.match(exactState.exactExtractionGuardPrompt || '', /browser_find_text[\s\S]*browser_screenshot/, 'the second stage must target rendered text or visual evidence')
 
@@ -358,9 +358,10 @@ assert.match(taskStrategy, /toolPriority: \['web_search', 'read_document', 'brow
 assert.match(taskStrategy, /browse:[\s\S]*toolPriority: \['browser_navigate'/, 'interaction/action strategy must keep browser navigation primary')
 assert.doesNotMatch(policyEngine, /ALL providers are down/, 'repeated search failures must not invent a global provider outage')
 assert.match(policyEngine, /This does not establish that all search providers or web access are unavailable[\s\S]*read_document or HTTP\/text extraction[\s\S]*exact visibly rendered confirmation/, 'search recovery should prefer direct extraction without asserting false global blocking')
-assert.match(toolPipeline, /web_search was skipped because the user supplied the exact target[\s\S]*Act on that exact URL now:[\s\S]*read_document or HTTP\/text extraction/, 'known user URLs must retain direct exact-target routing')
-assert.match(agentLoop, /hasDirectSourceTool[\s\S]*activeTools = activeTools\.filter\(tool => tool\.function\?\.name !== 'web_search'\)/, 'an exact user URL must still remove premature discovery search when a direct route exists')
+assert.match(agentLoop, /DIRECT USER TARGET:[\s\S]*Use the exact target directly when it is the best route[\s\S]*The full healthy tool set remains available/, 'known user URLs should guide direct exact-target routing without taking tool choice away from the model')
+assert.doesNotMatch(toolPipeline, /direct_navigation_required|research_source_balance/, 'source preferences must not become preflight rejection codes')
+assert.doesNotMatch(agentLoop, /hasDirectSourceTool[\s\S]{0,1200}activeTools = activeTools\.filter\(tool => tool\.function\?\.name !== 'web_search'\)/, 'an exact user URL must not remove discovery search from the healthy tool menu')
 assert.match(agentLoop, /explicitToolConstraint[\s\S]*toolAllowedByExplicitTaskConstraint\(explicitToolConstraint, 'browser_navigate'\)/, 'rendered confirmation must respect explicit browser prohibitions')
-assert.match(agentLoop, /if \(activeTools\.length === 0\)[\s\S]*clearExactExtractionGuard\(state\)[\s\S]*RENDERED CONFIRMATION UNAVAILABLE/, 'missing browser capability must release the guard with an honest unverified-confirmation instruction')
+assert.match(agentLoop, /allowedExactConfirmationTools = exactExtractionGuardToolNames\(state\)[\s\S]*hasConfirmationRoute = activeTools\.some[\s\S]*if \(!hasConfirmationRoute\)[\s\S]*clearExactExtractionGuard\(state\)[\s\S]*RENDERED CONFIRMATION UNAVAILABLE/, 'missing browser capability must release the guard with an honest unverified-confirmation instruction without filtering other tools')
 
 console.log('research tool routing smoke: PASS')

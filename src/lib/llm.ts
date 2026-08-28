@@ -22,7 +22,7 @@ export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
 export const ASSISTANT_SUPPORTS_FILE_INPUT = true
 export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
-export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
+export const PINNED_OPENROUTER_PROVIDER = 'google-vertex/global' as const
 export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -531,10 +531,10 @@ function providerReasoningPayload(
   _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Contributor reasoning is mandatory and supports OpenRouter's `minimal`
-  // effort. Clamp at the provider boundary so stale callers, saved settings,
-  // or max-token heuristics cannot silently raise reasoning cost. Keep traces
-  // excluded from user-visible output while still preserving native tool use.
+  // Gemini 3.7 Flash supports OpenRouter's `minimal` effort. Clamp at the
+  // provider boundary so stale callers, saved settings, or max-token heuristics
+  // cannot silently raise reasoning cost. Keep traces excluded from user-visible
+  // output while still preserving native tool use.
   void _reasoning
   void _maxOutputTokens
   void _toolChoice
@@ -562,6 +562,7 @@ function withPinnedModel(
   const {
     parallel_tool_calls: _parallelToolCalls,
     thinking: _thinking,
+    temperature: _temperature,
     requestTimeoutMs: _requestTimeoutMs,
     abortSignal: _abortSignal,
     includeTemporalContext,
@@ -590,9 +591,9 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    // Meta's Muse Spark 1.2 Contributor endpoint accepts native tools. Keep the
-    // proven automatic tool-choice mode at this provider boundary; AgentLoop
-    // narrows the exposed tool set on constrained turns.
+    // Google Vertex accepts native tools and tool_choice, while this endpoint
+    // does not advertise temperature or parallel_tool_calls. Keep automatic
+    // model-authored tool choice and omit unsupported request parameters.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
     // The endpoint does not advertise OpenAI's parallel_tool_calls request
     // parameter. AgentLoop still controls whether it exposes one tool or a safe

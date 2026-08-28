@@ -55,7 +55,7 @@ import {
   MIN_ITERATION_DELAY_MS, MAX_TIMEOUT_NUDGES,
   STREAM_MAX_RETRIES, STREAM_RETRY_BASE_MS, STREAM_RETRY_EXPONENT,
   STREAM_REQUEST_TIMEOUT_MS, STREAM_RETRY_MAX_DELAY_MS,
-  MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, MODEL_MAX_COMPLETION_TOKENS, URGENCY_FINAL_FRACTION,
+  MAX_ATTACHMENT_CHARS, MAX_CONTEXT_ATTACHMENT_CHARS, MODEL_MAX_COMPLETION_TOKENS,
   TOOL_CACHE_MAX_ENTRIES, TOOL_CACHE_TTL_MS, TOOL_CACHE_MAX_SIZE_CHARS,
   MIN_TOOL_CALLS_BY_COMPLEXITY,
   MAX_ITERATIONS,
@@ -95,7 +95,6 @@ import {
   currentStepWebSearchLimit,
   explicitTaskToolTargetLabel,
   explicitTaskToolConstraintFromText,
-  explicitWebSearchLimitFromText,
   hasSingleWebSearchLimit,
   isFixedWebSearchInlineAnswerState,
   taskDefaultsToMarkdownDeliverable,
@@ -139,7 +138,6 @@ import {
   hydrateResearchActivityIndex,
   loadResearchActivityEntries,
   normalizeResearchUrl,
-  researchSearchCandidateCoverage,
   researchActivityContext,
 } from './ResearchActivityLog'
 import { userErrorMessage } from '@/lib/errorMessages'
@@ -153,7 +151,6 @@ import {
 } from './BriefInlineResearch'
 import { toolTypeRateLimitForState } from './ToolLimits'
 import { persistSandboxTaskFile } from '@/lib/taskFiles'
-import { researchSourceBalanceBlockReason } from './ResearchPreflightRecovery'
 
 const PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES = new Set(['read_document', 'http_request'])
 
@@ -164,9 +161,8 @@ function executedParallelSourceExtractionBatch(results: ToolExecutionResult[]): 
 /**
  * Phase 12 Fix NNN: scan the user's most recent message for a URL or bare
  * domain. Returns the first match (full URL preferred over bare domain), or
- * null if none. Used by AgentLoop to populate state.userProvidedUrl, which
- * ToolPipeline reads to reject and suppress premature web_search calls so the
- * next model turn authors the required direct navigation explicitly.
+ * null if none. Used by AgentLoop to give the model direct-target context while
+ * preserving its full healthy tool menu and judgment about the best route.
  *
  * Bare-domain regex requires `[a-z]{2,}` TLD AND a leading domain part so
  * filenames (`report.pdf`) and version strings (`1.2.3`) don't false-positive.
@@ -239,36 +235,6 @@ function isMalformedToolArgumentsRecovery(result: ToolExecutionResult): boolean 
     ? (result.result as { error?: unknown }).error
     : null
   return typeof error === 'string' && /^INTERNAL_RECOVERY:\s*malformed tool arguments\b/i.test(error)
-}
-
-function isPreflightRejectionRecovery(result: ToolExecutionResult): boolean {
-  return result.internalRecovery === 'preflight_rejection' &&
-    result.acceptedForExecution !== true &&
-    !!result.preflightRejection?.code
-}
-
-function preflightRejectionRecoveryMessage(
-  state: AgentStateData,
-  results: ToolExecutionResult[],
-): string {
-  const rejectedTools = [...new Set(results.map(result => result.tc.name))].join(', ')
-  const sourceBalanceRejected = results.some(
-    result => result.preflightRejection?.code === 'research_source_balance',
-  )
-  const directNavigationRequired = results.some(
-    result => result.preflightRejection?.code === 'direct_navigation_required',
-  )
-  return [
-    'ACTION ROUTE RECOVERY: the previous model-selected action was rejected before execution, so it produced no new evidence and must not be selected again on this turn.',
-    rejectedTools ? `Rejected route: ${rejectedTools}.` : '',
-    directNavigationRequired
-      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Act on that exact URL now using read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters, including dynamic/visual confirmation and action work. Choose the least cumbersome valid route and use a fresh action label.`
-      : sourceBalanceRejected
-      ? 'A search result set already exists but still needs a usable opened source. The rejected web_search route is temporarily unavailable. Open a different unfailed URL from the Remaining candidate URLs with an available source reader or browser navigation tool. After two distinct source-opening failures, one fresh search route may reopen.'
-      : 'Choose one materially different available action that satisfies the active phase and current runtime constraints.',
-    `Continue active phase ${state.currentStepIdx + 1} now with exactly one executable native tool call.`,
-    'Do not write ordinary prose, repeat the rejected action, expose this recovery, or ask permission.',
-  ].filter(Boolean).join(' ')
 }
 
 function paidTurnProgressForIteration(
@@ -938,7 +904,7 @@ function iterationBudgetFinalizationMessage(state: AgentStateData, overrunStep: 
     content: [
       'ITERATION BUDGET FINALIZATION: stop source gathering and produce the final user-facing result now.',
       `The task spent too long on "${overrunStep}", so use the gathered evidence and clearly mention any important gaps inside the output.`,
-      'Do not call web_search, read_document, browser tools, image_search, or optional verification.',
+      'Prioritize the final output now; avoid more research or optional verification unless one short action is genuinely necessary to make the requested result valid.',
       'If a file/report is required, make exactly one create_file call for the final output under deliverables/; continue with append_file only if the write is clipped.',
       'If the answer belongs in chat, write the answer directly now.',
     ].join(' '),
@@ -1031,76 +997,6 @@ type ModelToolDefinition = ToolDefinitionLike & {
   }
   [key: string]: unknown
 }
-
-const BROWSER_NONFINAL_RUNTIME_TOOLS = new Set([
-  'browser_navigate',
-  'browser_click_at',
-  'browser_type',
-  'browser_fill_form',
-  'browser_find_text',
-  'browser_screenshot',
-  'browser_get_content',
-  'browser_scroll',
-  'browser_hover',
-  'browser_select',
-  'browser_press_key',
-  'browser_go_back',
-  'browser_action_sequence',
-  'browser_click_and_hold',
-  'browser_drag',
-  'web_search',
-  'read_document',
-])
-
-const BROWSER_STEP_START_RUNTIME_TOOLS = new Set([
-  'browser_navigate',
-  'browser_screenshot',
-  'browser_get_content',
-  'browser_find_text',
-  'web_search',
-  'read_document',
-])
-
-const RESEARCH_FILE_WRITE_RUNTIME_TOOLS = new Set(['create_file', 'edit_file', 'append_file'])
-const RESEARCH_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search'])
-const RESEARCH_COLD_BROWSER_RUNTIME_TOOLS = new Set(['browser_navigate', 'browse_page', 'browser_get_content'])
-const FIXED_WEB_SEARCH_RUNTIME_TOOLS = new Set(['web_search'])
-const COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS = new Set([
-  'web_search',
-  'read_document',
-  'http_request',
-  'image_search',
-  'browser_get_content',
-  'browser_navigate',
-])
-const SOURCE_OPENING_RUNTIME_TOOLS = new Set([
-  'read_document',
-  'http_request',
-  'browser_navigate',
-  'browser_get_content',
-  'browser_find_text',
-])
-const COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS = new Set([
-  'web_search',
-  'read_document',
-  'http_request',
-  'browser_navigate',
-  'browser_get_content',
-  'browser_find_text',
-  'browser_scroll',
-])
-const COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS = new Set([
-  'web_search',
-  'read_document',
-  'http_request',
-  'browser_navigate',
-  'browser_get_content',
-  'browser_find_text',
-])
-const SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD = 6
-const BUILD_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
-const FINAL_OPTIONAL_RUNTIME_TOOLS = new Set(['image_search', 'browser_screenshot', 'browser_scroll', 'export_pdf', 'delete_file'])
-const BROWSER_ADVANCED_POINTER_TOOLS = new Set(['browser_click_and_hold', 'browser_drag', 'browser_hover'])
 
 function cleanDraftContent(content: string): string {
   return content
@@ -1203,17 +1099,6 @@ function looksLikeFutureOnlyAssistantInjection(content: string): boolean {
 
 function containsFalseCapabilityRefusal(content: string): boolean {
   return /(?:i (?:cannot|can't|am unable to|am not able to).{0,120}(?:access|browse|interact|perform|retrieve|search|images?|photos?|pictures?)|i can only provide text[- ]based information|please use (?:a )?(?:search engine|google images|bing images))/i.test(content)
-}
-
-function taskWantsImageArtifact(
-  state: AgentStateData,
-  messages: Array<{ role: string; content: string }>,
-): boolean {
-  const userText = messages
-    .filter(m => m.role === 'user')
-    .map(m => m.content)
-    .join(' ')
-  return /\b(image|images|photo|photos|picture|pictures|asset|assets|retrieve|return|download)\b/i.test(`${currentToolIntentText(state)} ${userText}`)
 }
 
 function taskWantsPdfArtifact(
@@ -1473,19 +1358,6 @@ function pendingFinalDeliverableRevisionPath(state: AgentStateData): string | nu
 
 function existingFinalDeliverablePath(state: AgentStateData): string | null {
   return pendingFinalDeliverableRevisionPath(state) || latestSavedFinalDeliverablePath(state)
-}
-
-function finalDeliverableRevisionToolNames(
-  state: AgentStateData,
-  messages: Array<{ role: string; content: string }>,
-): Set<string> {
-  return new Set([
-    ...(state.fileWriteRepairPending && !state.fileWriteRepairPending.inspected ? ['read_file'] : []),
-    'append_file',
-    'edit_file',
-    ...(taskWantsPdfArtifact(state, messages) ? ['export_pdf'] : []),
-    ...(taskWantsZipArtifact(state, messages) ? ['package_files'] : []),
-  ])
 }
 
 function requireDeliverableInspectionBeforeRevision(
@@ -1973,39 +1845,6 @@ function isFastSourceActionToolTurn(
     state.currentPhase === 'research'
 }
 
-function fastSourceActionToolsForState(
-  state: AgentStateData,
-  tools: ToolDefinitionLike[],
-): ToolDefinitionLike[] {
-  if (state.taskStrategy === 'browse' && state.currentPhase !== 'research') return tools
-
-  const needsOpenedSourceBeforeMoreSearch = researchSearchNeedsOpenedSourceBeforeMoreSearch(state)
-  const hasKnownSourceTarget =
-    !!state.userProvidedUrl ||
-    state.stepSearchQueries.size > 0 ||
-    state.stepVisitedUrls.size > 0 ||
-    stepOpenedSourceDomains(state).size > 0
-  const allowed = needsOpenedSourceBeforeMoreSearch
-    ? new Set(SOURCE_OPENING_RUNTIME_TOOLS)
-    : hasKnownSourceTarget
-    ? new Set(['read_document', 'http_request', 'browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search'])
-    : new Set(['web_search', ...(researchStepAllowsImageSearch(state) ? ['image_search'] : [])])
-  if (needsOpenedSourceBeforeMoreSearch && !hasRenderedBrowserContext(state)) {
-    allowed.delete('browser_get_content')
-    allowed.delete('browser_find_text')
-  }
-  const narrowed = tools.filter(tool => {
-    const name = tool.function?.name || ''
-    if (state.suppressedResearchToolName && name === state.suppressedResearchToolName) return false
-    return allowed.has(name)
-  })
-  return narrowed.length > 0
-    ? narrowed
-    : state.suppressedResearchToolName
-      ? []
-      : tools
-}
-
 function userRequestedRepeatedSourceExtraction(state: AgentStateData): boolean {
   return /\b(?:exhaustive(?:ly)?|all\s+(?:the\s+)?(?:results?|sources?|links?|pages?)|every\s+(?:result|source|link|page)|open\s+(?:and\s+)?read\s+(?:them\s+)?all|extract\s+(?:them\s+)?all|read\s+every)\b/i
     .test(state.originalUserRequest || '')
@@ -2016,10 +1855,6 @@ function sourceExtractionBatchConsumedForLatestSearch(state: AgentStateData): bo
   const searchCount = state.stepSearchQueries.size
   return searchCount > 0 &&
     state.stepLastSourceExtractionSearchCount === searchCount
-}
-
-function researchSearchNeedsOpenedSourceBeforeMoreSearch(state: AgentStateData): boolean {
-  return researchSourceBalanceBlockReason('web_search', state) !== null
 }
 
 function shouldUseNaturalCadenceNarration(
@@ -2149,16 +1984,6 @@ function shouldInjectResearchActivityContext(state: AgentStateData): boolean {
   return isNonFinalBrowserStep(state)
 }
 
-function filterToolDefinitions(
-  tools: ToolDefinitionLike[],
-  allowed: Set<string>,
-): ToolDefinitionLike[] {
-  return tools.filter(tool => {
-    const name = tool.function?.name || ''
-    return allowed.has(name)
-  })
-}
-
 function toolStepRateLimitReached(state: AgentStateData, toolName: string): boolean {
   const limit = toolTypeRateLimitForState(state, toolName)
   if (limit === undefined) return false
@@ -2217,188 +2042,11 @@ function compactToolDefinitionsForModel(tools: ToolDefinitionLike[]): ToolDefini
   })
 }
 
-function researchStepAllowsSupportFileTools(state: AgentStateData): boolean {
-  if (state.currentPhase !== 'research') return true
-  const stepText = state.currentPlanItems?.[state.currentStepIdx] || ''
-  const scopeText = state.currentPlanScopes?.[state.currentStepIdx] || ''
-  const text = [
-    state.originalUserRequest || '',
-    stepText,
-    scopeText,
-    state.stepMicroPlan || '',
-  ].join('\n')
-  return /\b(?:research[- ]?notes?|phase[- ]?notes?|notes?\.md|markdown notes?|save (?:the )?(?:notes?|findings)|write (?:the )?(?:notes?|findings)|create (?:a )?(?:notes?|markdown|\.md)|todo\.md|checklist|tracking file|progress file)\b/i.test(text)
-}
-
-function researchStepAllowsImageSearch(state: AgentStateData): boolean {
-  if (state.currentPhase !== 'research') return true
-  return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|return|download|real one|use real|logo|logos|icon|icons|illustration|illustrations)\b/i.test(currentToolIntentText(state))
-}
-
-function shouldPreferExtractionBeforeColdBrowser(state: AgentStateData): boolean {
-  if (state.taskStrategy === 'browse') return false
-  if (state.currentPhase === 'build' || state.currentPhase === 'deliver') return false
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.userProvidedUrl) return false
-  if (state.stepResearchCallCount > 0 || state.stepVisitedUrls.size > 0) return false
-
-  return /\b(?:research|source|sources|cite|citation|pricing|price|latest|current|recent|fact|facts|verify|check|find|fetch|gather|read|extract|report|analysis|compare)\b/i.test(currentToolIntentText(state))
-}
-
 function shouldUseCompactResearchRecoveryTools(state: AgentStateData): boolean {
   if (!shouldUseCompactResearchTurn(state)) return false
   if (!compactResearchNeedsToolAction(state)) return false
   return state.consecutiveNoToolCalls > 0 ||
     (state.stepToolCallCount > 0 && state.stepResearchCallCount === 0)
-}
-
-function compactResearchRecoveryToolsForState(
-  state: AgentStateData,
-  tools: ToolDefinitionLike[],
-): ToolDefinitionLike[] {
-  const allowed = new Set(COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS)
-  if (!researchStepAllowsImageSearch(state)) allowed.delete('image_search')
-  if (!hasRenderedBrowserContext(state)) allowed.delete('browser_get_content')
-  const needsOpenedSourceRoute = compactResearchNeedsOpenedSource(state) ||
-    state.suppressedResearchToolName === 'read_document'
-  if (!state.userProvidedUrl && state.stepResearchCallCount > 0 && !needsOpenedSourceRoute) {
-    allowed.delete('browser_navigate')
-  }
-  const narrowed = filterToolDefinitions(tools, allowed)
-  return narrowed.length > 0
-    ? narrowed
-    : state.suppressedResearchToolName
-      ? []
-      : tools
-}
-
-function compactResearchOpenedSourceToolsForState(
-  state: AgentStateData,
-  tools: ToolDefinitionLike[],
-): ToolDefinitionLike[] {
-  const openedDomains = stepOpenedSourceDomains(state).size
-  const candidateDomains = state.stepSourceDomainCounts.size
-  const candidateCoverage = researchSearchCandidateCoverage({
-    stepIdx: state.currentStepIdx,
-    searchResults: state.workLedger.searchResults,
-    visitedUrls: state.stepVisitedUrls,
-  })
-  const hasKnownCandidateUrls = candidateCoverage.knownCandidateCount > 0
-  const hasUnopenedCandidateUrls = candidateCoverage.unopenedCandidateCount > 0
-  const exhaustedKnownCandidateUrls = hasKnownCandidateUrls && !hasUnopenedCandidateUrls
-  const hasSearchCandidatesAwaitingOpen =
-    state.stepSearchQueries.size > 0 &&
-    candidateDomains > 0 &&
-    (hasUnopenedCandidateUrls || (
-      !hasKnownCandidateUrls &&
-      openedDomains === 0 &&
-      state.stepVisitedUrls.size === 0
-    ))
-  const recentSourceOpeningFailures = state.failureLog.slice(-8).filter(f =>
-    (f.tool === 'read_document' || f.tool === 'browser_navigate' || f.tool === 'browse_page' || f.tool === 'browser_get_content') &&
-    (f.category === 'access-block' || f.category === 'timeout' || f.category === 'service-down' || /404|403|not found|forbidden|timed out|timeout/i.test(f.error)),
-  ).length
-  const needsAlternateSourceRoute =
-    state.suppressedResearchToolName === 'read_document' ||
-    state.stepLoopDetections > 0 ||
-    state.consecutiveNoToolCalls > 0 ||
-    exhaustedKnownCandidateUrls ||
-    (state.stepResearchCallCount >= 2 && openedDomains < Math.min(2, Math.max(1, candidateDomains)))
-
-  const allowed = needsAlternateSourceRoute
-    ? new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
-    : new Set(SOURCE_OPENING_RUNTIME_TOOLS)
-  if (state.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD && state.suppressedResearchToolName !== 'web_search') {
-    allowed.clear()
-    allowed.add('web_search')
-  }
-  if (
-    !needsAlternateSourceRoute &&
-    hasSearchCandidatesAwaitingOpen &&
-    recentSourceOpeningFailures < 2 &&
-    state.stepLoopDetections < 4
-  ) {
-    allowed.delete('web_search')
-  }
-  if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
-  if (!hasRenderedBrowserContext(state)) {
-    allowed.delete('browser_get_content')
-    allowed.delete('browser_find_text')
-    allowed.delete('browser_scroll')
-  }
-  const narrowed = filterToolDefinitions(tools, allowed)
-  const mustKeepSourceOnlyMenu =
-    hasSearchCandidatesAwaitingOpen ||
-    !!state.suppressedResearchToolName
-  return narrowed.length > 0
-    ? narrowed
-    : mustKeepSourceOnlyMenu
-      ? []
-      : tools
-}
-
-function compactResearchSourceRecoveryToolsForState(
-  state: AgentStateData,
-  currentTools: ToolDefinitionLike[],
-  sourcePool: ToolDefinitionLike[],
-): ToolDefinitionLike[] {
-  const hasPrimarySourceRoute = currentTools.some(tool =>
-    COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS.has(tool.function?.name || ''),
-  )
-  if (hasPrimarySourceRoute) return currentTools
-
-  const allowed = new Set(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS)
-  if (state.suppressedResearchToolName) allowed.delete(state.suppressedResearchToolName)
-  if (!hasRenderedBrowserContext(state)) {
-    allowed.delete('browser_get_content')
-    allowed.delete('browser_find_text')
-    allowed.delete('browser_scroll')
-  }
-  const recovered = filterToolDefinitions(sourcePool, allowed)
-  const recoveredHasPrimarySourceRoute = recovered.some(tool =>
-    COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS.has(tool.function?.name || ''),
-  )
-  return recoveredHasPrimarySourceRoute ? recovered : currentTools
-}
-
-function loopRecoveryToolForState(
-  state: AgentStateData,
-  tools: ToolDefinitionLike[],
-): ToolDefinitionLike[] {
-  const suppressed = state.suppressedResearchToolName
-  if (!suppressed) return tools
-
-  if (suppressed === 'web_search' && state.stepLoopDetections >= 1) {
-    const names = hasRenderedBrowserContext(state)
-      ? ['read_document', 'browser_navigate', 'browser_get_content', 'browser_find_text']
-      : ['read_document', 'browser_navigate']
-    const narrowed = tools.filter(tool => names.includes(tool.function?.name || ''))
-    if (narrowed.length > 0) return narrowed
-  }
-
-  if (state.stepLoopDetections < 2) return tools
-  if (state.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD && suppressed !== 'web_search') {
-    const searchOnly = tools.filter(tool => tool.function?.name === 'web_search')
-    if (searchOnly.length > 0) return searchOnly
-  }
-
-  const preferred = suppressed === 'read_document'
-    ? ['browser_navigate', 'browser_get_content', 'browser_find_text', 'web_search']
-    : ['read_document', 'web_search', 'browser_get_content', 'browser_navigate', 'browser_find_text']
-
-  const narrowed = tools.filter(tool => {
-    const name = tool.function?.name || ''
-    if (name === suppressed) return false
-    if ((name === 'browser_get_content' || name === 'browser_find_text') && !hasRenderedBrowserContext(state)) return false
-    return preferred.includes(name)
-  })
-  if (narrowed.length > 0) return narrowed
-  return tools.length > 1 ? tools.slice(0, 1) : tools
-}
-
-function hasRenderedBrowserContext(state: AgentStateData): boolean {
-  const signature = state.lastBrowserStateHash
-  return !!signature && signature !== '||0' && !signature.startsWith('about:blank|')
 }
 
 function currentToolIntentText(state: AgentStateData): string {
@@ -2414,126 +2062,6 @@ function shouldIncludeTemporalContextForTurn(state: AgentStateData): boolean {
   if (state.forceTextNextIteration) return false
   if (state.taskStrategy === 'research' || state.taskStrategy === 'browse' || state.taskStrategy === 'analysis') return true
   return /\b(?:today|tomorrow|yesterday|latest|recent|up[-\s]?to[-\s]?date|date|time|timezone|time\s*zone|as of|current\s+(?:date|time|weather|news|price|score|schedule|status|version))\b/i.test(currentToolIntentText(state))
-}
-
-function browserStepAllowsAdvancedPointerTools(state: AgentStateData): boolean {
-  if (state.browserRecoveryRequired || state.stepFailureCount >= 2) return true
-  return /\b(?:drag|drop|drag[- ]?and[- ]?drop|click[- ]?and[- ]?hold|click hold|long[- ]?press|hold|hover|tooltip|flyout|sub[- ]?menu|menu|mega[- ]?menu|slider|range input|resize handle|reorder|sort|move item|move card|move marker|pan map|canvas|drawing|scrub|swipe)\b/i.test(currentToolIntentText(state))
-}
-
-function browserStepAllowsDocumentTool(state: AgentStateData): boolean {
-  if (state.browserRecoveryRequired || state.stepFailureCount >= 2) return true
-  return /\b(?:pdf|document|docx?|paper|report|manual|whitepaper|file|download|transcript|terms|policy)\b/i.test(currentToolIntentText(state))
-}
-
-function buildStepAllowsOptionalTool(state: AgentStateData, toolName: string): boolean {
-  if (state.currentPhase !== 'build') return true
-  const text = currentToolIntentText(state)
-  if (toolName === 'image_search') {
-    return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|download|real one|use real)\b/i.test(text)
-  }
-  if (toolName === 'browser_screenshot' || toolName === 'browser_scroll') {
-    const stalePreviewNeedsRefresh =
-      state.nextWebsitePreviewAttempted &&
-      !state.nextWebsitePreviewDone &&
-      /stale after/i.test(state.nextWebsitePreviewError || '')
-    return state.websiteBrowserCheckDone ||
-      state.websiteResponsiveCheckPrompted ||
-      state.nextWebsitePreviewDone ||
-      stalePreviewNeedsRefresh
-  }
-  if (toolName === 'export_pdf') {
-    return /\b(?:pdf|export)\b/i.test(text)
-  }
-  if (toolName === 'delete_file') {
-    return /\b(?:delete|remove|cleanup|clean up|discard)\b/i.test(text)
-  }
-  return true
-}
-
-function finalStepAllowsOptionalTool(state: AgentStateData, toolName: string): boolean {
-  if (state.currentPhase !== 'deliver') return true
-  const text = currentToolIntentText(state)
-  if (toolName === 'image_search') {
-    return /\b(?:image|images|photo|photos|picture|pictures|asset|assets|retrieve|download|real one|use real)\b/i.test(text)
-  }
-  if (toolName === 'browser_screenshot' || toolName === 'browser_scroll') {
-    const stalePreviewNeedsRefresh =
-      state.nextWebsitePreviewAttempted &&
-      !state.nextWebsitePreviewDone &&
-      /stale after/i.test(state.nextWebsitePreviewError || '')
-    return state.taskStrategy === 'browse' ||
-      state.websiteBrowserCheckDone ||
-      state.websiteResponsiveCheckPrompted ||
-      state.nextWebsitePreviewDone ||
-      stalePreviewNeedsRefresh
-  }
-  if (toolName === 'export_pdf') {
-    return /\b(?:pdf|export)\b/i.test(text)
-  }
-  if (toolName === 'delete_file') {
-    return /\b(?:delete|remove|cleanup|clean up|discard)\b/i.test(text)
-  }
-  return true
-}
-
-function pruneToolsForCurrentStep(state: AgentStateData, tools: ToolDefinitionLike[]): ToolDefinitionLike[] {
-  if (isNonFinalBrowserStep(state)) {
-    if (state.stepToolCallCount === 0 && !state.browserRecoveryRequired) {
-      const startTools = filterToolDefinitions(tools, BROWSER_STEP_START_RUNTIME_TOOLS)
-      return browserStepAllowsDocumentTool(state)
-        ? startTools
-        : startTools.filter(tool => tool.function?.name !== 'read_document')
-    }
-    const browserTools = filterToolDefinitions(tools, BROWSER_NONFINAL_RUNTIME_TOOLS)
-    const toolsWithoutColdDocument = browserStepAllowsDocumentTool(state)
-      ? browserTools
-      : browserTools.filter(tool => tool.function?.name !== 'read_document')
-    if (browserStepAllowsAdvancedPointerTools(state)) return toolsWithoutColdDocument
-    return browserTools.filter(tool => {
-      const name = tool.function?.name || ''
-      return !BROWSER_ADVANCED_POINTER_TOOLS.has(name) && (name !== 'read_document' || browserStepAllowsDocumentTool(state))
-    })
-  }
-  let stepTools = sourceExtractionBatchConsumedForLatestSearch(state)
-    ? tools.filter(tool => !PARALLEL_SOURCE_EXTRACTION_TOOL_NAMES.has(tool.function?.name || ''))
-    : tools
-  if (shouldPreferExtractionBeforeColdBrowser(state)) {
-    const narrowed = stepTools.filter(tool => !RESEARCH_COLD_BROWSER_RUNTIME_TOOLS.has(tool.function?.name || ''))
-    if (narrowed.length > 0) stepTools = narrowed
-  }
-  if (state.currentPhase === 'research') {
-    if (explicitWebSearchLimitFromText(state.originalUserRequest || '') !== null) {
-      return filterToolDefinitions(stepTools, FIXED_WEB_SEARCH_RUNTIME_TOOLS)
-    }
-    const allowSupportFiles = researchStepAllowsSupportFileTools(state)
-    const allowImageSearch = researchStepAllowsImageSearch(state)
-    const allowColdBrowserOpen =
-      !!state.userProvidedUrl ||
-      state.stepResearchCallCount > 0 ||
-      state.stepVisitedUrls.size > 0 ||
-      state.suppressedResearchToolName === 'read_document'
-    return stepTools.filter(tool => {
-      const name = tool.function?.name || ''
-      if (!allowSupportFiles && RESEARCH_FILE_WRITE_RUNTIME_TOOLS.has(name)) return false
-      if (!allowImageSearch && RESEARCH_OPTIONAL_RUNTIME_TOOLS.has(name)) return false
-      if (!allowColdBrowserOpen && RESEARCH_COLD_BROWSER_RUNTIME_TOOLS.has(name)) return false
-      return true
-    })
-  }
-  if (state.currentPhase === 'build') {
-    return stepTools.filter(tool => {
-      const name = tool.function?.name || ''
-      return !BUILD_OPTIONAL_RUNTIME_TOOLS.has(name) || buildStepAllowsOptionalTool(state, name)
-    })
-  }
-  if (state.currentPhase === 'deliver') {
-    return stepTools.filter(tool => {
-      const name = tool.function?.name || ''
-      return !FINAL_OPTIONAL_RUNTIME_TOOLS.has(name) || finalStepAllowsOptionalTool(state, name)
-    })
-  }
-  return stepTools
 }
 
 function selectedSkillAttachments(messages: AgentLoopOptions['messages']): Array<{ name: string; content: string }> {
@@ -3847,7 +3375,7 @@ function compactResearchToolRequiredMessage(state: AgentStateData, reason: strin
     ? 'The evidence floor is already satisfied; emit <next_step/> only if this phase is complete.'
     : 'The evidence floor is not satisfied yet.'
   const recoveryToolNote = shouldUseCompactResearchRecoveryTools(state)
-    ? 'Recovery mode is active: choose one focused evidence tool from the narrowed source menu. Use web_search for a specific missing angle, or when candidate URLs already exist, use up to 3 parallel read_document/http_request source extraction calls. Do not ask for another broad planning turn.'
+    ? 'Recovery mode is active: choose one focused evidence action from the full healthy tool menu. A targeted web_search may help with a missing angle; when candidate URLs already exist, up to 3 parallel read_document/http_request source extractions may be efficient. Use another available tool when it better closes the actual evidence gap.'
     : 'Choose the most useful source/search/browser/document action for this specific step; if independent candidate URLs already exist, you may use up to 3 parallel read_document/http_request calls. Use strict JSON object arguments.'
   return [
     'RESEARCH TOOL REQUIRED:',
@@ -6204,7 +5732,7 @@ export class AgentLoop {
               if (!inlineRecoveryScheduled && taskNeedsSavedFinalArtifact(state, this.options.messages)) {
                 contextManager.push({
                   role: 'system',
-                  content: 'FINALIZATION TURN: use the evidence already gathered and produce the requested saved deliverable now. Do not call research, search, browsing, or source-extraction tools. Make the concrete file action required by the active final step.',
+                  content: 'FINALIZATION TURN: use the evidence already gathered and prioritize the requested saved deliverable now. Further research is usually unnecessary here, but the full healthy tool set remains available if one action is genuinely required to make the deliverable valid.',
                 } as ChatMessageParam)
                 state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 2)
               }
@@ -6214,55 +5742,6 @@ export class AgentLoop {
                 totalSteps: planLength,
                 mode: inlineRecoveryScheduled ? 'inline' : 'saved',
                 blockedTools: lastToolResults.map(result => result.tc.name),
-              })
-              state.lastIterationEnd = Date.now()
-              phase = 'STREAMING'
-              break
-            }
-
-            if (
-              lastToolResults.length > 0 &&
-              lastToolResults.every(isPreflightRejectionRecovery)
-            ) {
-              if (currentPaidTurnProgress) {
-                currentPaidTurnProgress.internalRecoveryScheduled = 'preflight_rejection'
-              }
-              state.consecutiveNoToolCalls = Math.max(1, state.consecutiveNoToolCalls)
-              state.forceTextNextIteration = false
-              state.phaseEndNarrationPending = false
-              const directNavigationRecovery = lastToolResults.some(
-                result => result.preflightRejection?.code === 'direct_navigation_required',
-              )
-              if (!directNavigationRecovery) {
-                state.recentToolCalls = []
-                state.recentToolSequence = []
-              }
-
-              const rejectionDetails = lastToolResults.map(result => ({
-                tool: result.tc.name,
-                code: result.preflightRejection?.code || 'preflight',
-              }))
-              contextManager.push({
-                role: 'system',
-                content: preflightRejectionRecoveryMessage(state, lastToolResults),
-              } as ChatMessageParam)
-              const rejectionDiagnostic = {
-                iteration: state.iterations,
-                step: state.currentStepIdx,
-                recoveryCount: state.stepLoopDetections,
-                rejections: rejectionDetails,
-              }
-              this.emitter.diagnostic?.('action_rejected', rejectionDiagnostic)
-              this.options.diagnostics?.({
-                type: 'action_rejected',
-                data: rejectionDiagnostic,
-              })
-              console.warn('[AgentDiagnostics] Rejected model action before execution and changed route', {
-                iteration: state.iterations,
-                step: state.currentStepIdx,
-                totalSteps: state.currentPlanItems?.length || 0,
-                suppressedTool: state.suppressedResearchToolName || null,
-                rejections: rejectionDetails,
               })
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -7485,7 +6964,7 @@ export class AgentLoop {
           role: 'system',
           content: [
             'SOURCE-SET DECISION COMPLETE: you already chose and opened the useful direct-extraction batch from the latest search results.',
-            'Do not mine that same result set with another read_document/http_request batch.',
+            'Usually avoid mining that same result set with another read_document/http_request batch unless a concrete unresolved detail makes it useful.',
             'Use your judgment now: synthesize or advance if the evidence is sufficient, browse a promising site when rendered exploration will help, or make a materially different targeted search for a real remaining gap.',
           ].join(' '),
         } as ChatMessageParam,
@@ -7501,10 +6980,10 @@ export class AgentLoop {
         {
           role: 'system',
           content: sourceOpeningExhausted
-            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence, so do not emit <next_step/> and do not write failure narration. Make a different source action now: web_search for a new authoritative domain, one parallel batch of up to 2 read_document/http_request calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content only if a useful page is already open. Prefer new domains over retrying the same blocked source.'
+            ? 'SOURCE OPENING RECOVERY: prior source-opening attempts did not produce usable page evidence. Prefer a materially different source action now: web_search for a new authoritative domain, one parallel batch of up to 2 read_document/http_request calls for different surfaced URLs, browser_navigate to a different URL, or browser_get_content if a useful page is already open. New domains are usually more useful than retrying the same blocked source, but choose based on the actual evidence gap.'
             : state.suppressedResearchToolName === 'read_document'
-              ? 'SOURCE OPENING RECOVERY: read_document is temporarily suppressed because it repeated in a loop. Use a materially different source route now. Open a usable untried URL from the Remaining candidate URLs block with browser_navigate, browser_get_content from a different already-open useful page, or http_request when appropriate. If no remaining candidate is visible or the remaining candidates are already attempted, blocked, or unusable, make one targeted web_search for a new authoritative domain. Do not retry the same cached URL or repeat the same search query.'
-              : 'SOURCE OPENING REQUIRED: known search result URLs are already available and search breadth is high enough for this phase. Do not call web_search again. Extract the strongest surfaced URLs in the research activity context using one parallel batch of up to 2 read_document/http_request calls, or use browser_navigate/browser_get_content when rendered state is needed. After this opened/read source batch, synthesize or advance instead of doing more query variants.',
+              ? 'SOURCE OPENING RECOVERY: read_document repeated in a loop, so a materially different source route is likely best. Consider an untried URL from the Remaining candidate URLs block with browser_navigate, browser_get_content from a different useful open page, http_request when appropriate, or a targeted web_search for a new authoritative domain when the existing candidates are unusable. The full healthy tool set remains available; choose based on the evidence gap.'
+              : 'SOURCE OPENING RECOMMENDATION: known search result URLs are already available and search breadth is high enough for this phase. Opening or extracting the strongest surfaced URLs will usually add more value than another query variant. Use read_document/http_request for readable pages or browser tools when rendered state matters, while retaining judgment to choose another healthy tool when it better serves the evidence gap.',
         } as ChatMessageParam,
       ]
     }
@@ -7522,7 +7001,7 @@ export class AgentLoop {
         ...requestMessages,
         {
           role: 'system',
-          content: 'LIVE EVIDENCE REQUIRED BEFORE WRITING: The requested saved research output does not yet have usable source-page evidence from this run. Choose the most direct research action now. Select a concrete source URL before calling a source reader, do not reopen an already extracted source, and do not create or revise the deliverable until evidence exists.',
+          content: 'LIVE EVIDENCE RECOMMENDATION: The requested saved research output does not yet have usable source-page evidence from this run. A direct evidence action on a concrete, untried source URL is likely the strongest next move. Keep the full healthy tool set available and choose the route that best supports a valid deliverable.',
         } as ChatMessageParam,
       ]
     } else if (state.finalDeliverableHandoffPending && !useCompactFinalDeliverableHandoff) {
@@ -7588,222 +7067,46 @@ export class AgentLoop {
       : STREAM_MAX_RETRIES + MAX_PROVIDER_REQUEST_REPAIR_ATTEMPTS + 1
     for (let attempt = 0; attempt < maxModelStartAttempts; attempt++) {
       try {
-        const budgetFraction = state.dynamicIterationLimit
-          ? state.iterations / state.dynamicIterationLimit
-          : 0
-
         let activeTools: ToolDefinitionLike[]
         const isPostCompletion = state.currentPlanItems && state.currentStepIdx >= state.currentPlanItems.length
-        if (isPostCompletion || state.finalDeliverableHandoffPending) {
+        const intentionalTextOnlyTurn =
+          isPostCompletion ||
+          state.finalDeliverableHandoffPending ||
+          useCompactNarration ||
+          useTextFinalDeliverable ||
+          compactResearchPhaseCanAdvance ||
+          (state.deadlineFinalizationStarted && !taskNeedsSavedFinalArtifact(state, this.options.messages)) ||
+          (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state))
+
+        if (intentionalTextOnlyTurn) {
           activeTools = []
-        } else if (state.exactExtractionGuardPending) {
+        } else {
+          // Phase, strategy, urgency, and recovery state guide ordering and
+          // prompts; they never hide a healthy tool from the model. Actual
+          // availability remains governed by registry health/config checks,
+          // explicit user constraints, permissions, and execution safety.
+          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
+        }
+
+        if (state.exactExtractionGuardPending && activeTools.length > 0) {
           const activeGuardPrompt = state.exactExtractionGuardPrompt
-          const exactConfirmationToolState = {
-            ...state,
-            // browser_screenshot is intentionally not part of the broad research
-            // menu, but it is valid inside this narrow visual-confirmation lane.
-            currentPhase: 'unknown' as const,
-          }
           const allowedExactConfirmationTools = exactExtractionGuardToolNames(state)
-          activeTools = (toolRegistry.getActiveDefinitions(exactConfirmationToolState) as ToolDefinitionLike[])
-            .filter(t => allowedExactConfirmationTools.has(t.function?.name || ''))
-          if (activeTools.length === 0) {
+          const hasConfirmationRoute = activeTools.some(tool =>
+            allowedExactConfirmationTools.has(tool.function?.name || ''),
+          )
+          if (!hasConfirmationRoute) {
             clearExactExtractionGuard(state)
             requestMessages = requestMessages.filter(message => message.content !== activeGuardPrompt)
             requestMessages.push({
               role: 'system',
               content: 'RENDERED CONFIRMATION UNAVAILABLE: continue from the successful direct extraction. Do not claim that the detail was visually confirmed; state the missing rendered confirmation as a limitation only when it materially affects the answer.',
             } as ChatMessageParam)
-            activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
           }
-        } else if (useCompactNarration) {
-          activeTools = []
-        } else if (useTextFinalDeliverable) {
-          activeTools = []
-        } else if (compactResearchPhaseCanAdvance) {
-          activeTools = []
-        } else if (state.deadlineFinalizationStarted) {
-          if (!taskNeedsSavedFinalArtifact(state, this.options.messages)) {
-            activeTools = []
-          } else {
-            const finalWantsPdf = taskWantsPdfArtifact(state, this.options.messages)
-            const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
-            const finalWantsWebsite = shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '')
-            const deadlineFinalTools = new Set([
-              'create_file',
-              'append_file',
-              'edit_file',
-              'read_file',
-              'list_files',
-              ...(finalWantsPdf ? ['export_pdf'] : []),
-              ...(finalWantsZip ? ['package_files'] : []),
-              ...(finalWantsWebsite ? ['create_website'] : []),
-            ])
-            activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
-              .filter(t => deadlineFinalTools.has(t.function?.name || ''))
-          }
-        } else if (savedResearchNeedsEvidenceAction) {
-          const researchToolState = {
-            ...state,
-            currentPhase: 'research' as const,
-          }
-          const allowedSavedResearchTools = new Set([
-            'web_search',
-            'browser_navigate',
-            'browser_get_content',
-            'browser_find_text',
-            'read_document',
-            'http_request',
-          ])
-          activeTools = (toolRegistry.getActiveDefinitions(researchToolState) as ToolDefinitionLike[])
-            .filter(tool => allowedSavedResearchTools.has(tool.function?.name || ''))
-        } else if (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state)) {
-          activeTools = []
-        } else if (finalInlineAnswerTurn(state, this.options.messages)) {
-          // The final phase may still contain model-authored actions before the
-          // answer. Keep tools available and let the model decide from scope.
-          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
-        } else if (isLeanFinalSynthesisStep(state)) {
-          // A final phase is an outcome boundary, not a file-only tool lane.
-          // It can research a missing fact, perform several user-requested
-          // actions, create multiple artifacts, verify them, or answer inline.
-          // Narrow tool recovery is applied only after a concrete failed write.
-          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
-        } else if (budgetFraction >= URGENCY_FINAL_FRACTION) {
-          const finalWantsImage = taskWantsImageArtifact(state, this.options.messages)
-          const finalWantsZip = taskWantsZipArtifact(state, this.options.messages)
-          const allActiveTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
-          if (state.taskStrategy === 'browse') {
-            activeTools = allActiveTools.filter(t => {
-              const name = t.function?.name || ''
-              return name.startsWith('browser_') ||
-                name === 'web_search' ||
-                name === 'read_document' ||
-                name === 'create_file' ||
-                name === 'edit_file' ||
-                name === 'append_file' ||
-                name === 'read_file'
-            })
-          } else {
-            activeTools = allActiveTools
-              .filter(t => {
-                const name = t.function?.name
-                return name === 'create_file' ||
-                  name === 'create_website' ||
-                  name === 'edit_file' ||
-                  name === 'append_file' ||
-                  name === 'export_pdf' ||
-                  (finalWantsZip && name === 'package_files') ||
-                  name === 'read_file' ||
-                  name === 'browser_screenshot' ||
-                  name === 'browser_scroll' ||
-                  (finalWantsImage && name === 'image_search')
-              })
-          }
-        } else {
-          activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
         }
         const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction(state)
-        const compactResearchToolState = compactResearchNeedsTool && state.currentPhase !== 'research'
-          ? ({ ...state, currentPhase: 'research' as const })
-          : state
-        if (compactResearchToolState !== state) {
-          activeTools = toolRegistry.getActiveDefinitions(compactResearchToolState) as ToolDefinitionLike[]
-        }
-        if (compactResearchNeedsTool) {
-          const sourceRecoveryPool = toolRegistry.getActiveDefinitions(compactResearchToolState) as ToolDefinitionLike[]
-          const restoredTools = compactResearchSourceRecoveryToolsForState(
-            state,
-            activeTools,
-            sourceRecoveryPool,
-          )
-          if (restoredTools !== activeTools) {
-            console.log('[AgentDiagnostics] Restored compact research source tools', {
-              step: state.currentStepIdx,
-              totalSteps: state.currentPlanItems?.length || 0,
-              beforeTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-              afterTools: restoredTools.map(tool => tool.function?.name).filter(Boolean),
-            })
-            activeTools = restoredTools
-          }
-        }
-        activeTools = pruneToolsForCurrentStep(compactResearchToolState, activeTools)
-        if (standaloneWebsiteNeedsInitialCreate) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = activeTools.filter(tool => tool.function?.name === 'create_website')
-          console.log('[AgentDiagnostics] Narrowed initial website action to create_website', {
-            step: state.currentStepIdx,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (compactResearchNeedsTool && compactResearchNeedsOpenedSource(state)) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = compactResearchOpenedSourceToolsForState(state, activeTools)
-          console.log('[AgentDiagnostics] Narrowed compact research to opened-source tools', {
-            step: state.currentStepIdx,
-            totalSteps: state.currentPlanItems?.length || 0,
-            stepResearchCallCount: state.stepResearchCallCount,
-            stepSearchQueries: state.stepSearchQueries.size,
-            stepVisitedUrls: state.stepVisitedUrls.size,
-            stepSourceDomains: stepOpenedSourceDomains(state).size,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (compactResearchNeedsTool && shouldUseCompactResearchRecoveryTools(state)) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = compactResearchRecoveryToolsForState(state, activeTools)
-          console.log('[AgentDiagnostics] Narrowed compact research recovery tools', {
-            step: state.currentStepIdx,
-            totalSteps: state.currentPlanItems?.length || 0,
-            consecutiveNoToolCalls: state.consecutiveNoToolCalls,
-            stepToolCallCount: state.stepToolCallCount,
-            stepResearchCallCount: state.stepResearchCallCount,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (
-          compactResearchNeedsTool &&
-          state.suppressedResearchToolName &&
-          !compactResearchEvidenceComplete(state)
-        ) {
-          const suppressed = state.suppressedResearchToolName
-          const filtered = activeTools.filter(tool => tool.function?.name !== suppressed)
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = filtered.length > 0
-            ? loopRecoveryToolForState(state, filtered)
-            : []
-          console.log('[AgentDiagnostics] Suppressed looped research tool for recovery', {
-            step: state.currentStepIdx,
-            totalSteps: state.currentPlanItems?.length || 0,
-            suppressed,
-            loopDetections: state.stepLoopDetections,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (partialFileContinuationNeedsTool) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = activeTools.filter(tool => tool.function?.name === 'append_file')
-          console.log('[AgentDiagnostics] Narrowed tools for partial file continuation', {
-            step: state.currentStepIdx,
-            partialPath: state.partialFileWriteRecoveryPending?.path || '',
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
         if (state.fileWriteRepairPending && !partialFileContinuationNeedsTool) {
           const pending = state.fileWriteRepairPending
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
           const codeLikeTarget = /\.(?:[cm]?[jt]sx?|css|scss|sass|less|vue|svelte|astro|json|ya?ml|toml|xml|html?)$/i.test(pending.path)
-          const allowedRepairTools = !pending.inspected
-            ? new Set(['read_file'])
-            : codeLikeTarget
-              ? new Set(['edit_file'])
-              : new Set(['edit_file', 'append_file'])
-          activeTools = activeTools.filter(tool => allowedRepairTools.has(tool.function?.name || ''))
           requestMessages = [
             ...requestMessages,
             {
@@ -7811,22 +7114,14 @@ export class AgentLoop {
               content: [
                 `FILE REVISION REQUIRED: "${pending.path}" has an unresolved write conflict.`,
                 !pending.inspected
-                  ? 'Read that exact file now. No unrelated tool or replacement file is allowed until its current contents are refreshed.'
+                  ? 'The most direct recovery is to read that exact file before deciding how to repair it.'
                   : codeLikeTarget
-                    ? 'The current contents are refreshed. Make one exact edit_file repair now; never append a second code module.'
-                    : 'The current contents are refreshed. Make one exact edit_file repair, or append only the genuinely missing prose continuation.',
-                'Do not create a replacement or duplicate file. If no repair is needed for the current phase, emit <next_step/> without another tool call.',
+                    ? 'The current contents are refreshed; prefer one targeted edit rather than appending a duplicate code module.'
+                    : 'The current contents are refreshed; choose a targeted edit or append only genuinely missing prose.',
+                'Avoid replacement or duplicate files. Use another available tool only when it is genuinely the better recovery for this conflict.',
               ].join(' '),
             } as ChatMessageParam,
           ]
-          console.log('[AgentDiagnostics] Narrowed tools during exact-path file repair', {
-            step: state.currentStepIdx,
-            path: pending.path,
-            reason: pending.reason,
-            inspected: pending.inspected,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
         }
         const exhaustedStepToolPrune = pruneExhaustedStepToolsForCurrentTurn(state, activeTools)
         if (exhaustedStepToolPrune.exhausted.length > 0) {
@@ -7858,58 +7153,15 @@ export class AgentLoop {
             !hasSavedFinalDeliverableCandidate(state)
           )
         if (
-          finalSavedDeliverableNeedsTool &&
-          !partialFileContinuationNeedsTool &&
-          !standaloneWebsiteNeedsInitialCreate &&
-          !hasSavedFinalDeliverableCandidate(state)
-        ) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          activeTools = activeTools.filter(tool => tool.function?.name === 'create_file')
-          console.log('[AgentDiagnostics] Narrowed tools for initial final saved deliverable', {
-            step: state.currentStepIdx,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (
-          finalSavedDeliverableNeedsTool &&
-          !partialFileContinuationNeedsTool &&
-          finalSavedDeliverableRevisionNeedsTool
-        ) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
-          const allowedRevisionTools = finalDeliverableRevisionToolNames(state, this.options.messages)
-          activeTools = activeTools.filter(tool => allowedRevisionTools.has(tool.function?.name || ''))
-          console.log('[AgentDiagnostics] Narrowed tools for final saved deliverable revision', {
-            step: state.currentStepIdx,
-            finalPath: existingFinalDeliverablePath(state),
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
-        }
-        if (
           briefInlineResearchNeedsEvidenceAction &&
           !isPostCompletion &&
           !useCompactNarration
         ) {
-          const researchToolState = {
-            ...state,
-            currentPhase: 'research' as const,
-          }
-          const allowedBriefResearchTools = new Set([
-            'web_search',
-            'browser_navigate',
-            'browser_get_content',
-            'browser_find_text',
-            'read_document',
-            'http_request',
-          ])
-          activeTools = (toolRegistry.getActiveDefinitions(researchToolState) as ToolDefinitionLike[])
-            .filter(tool => allowedBriefResearchTools.has(tool.function?.name || ''))
           requestMessages = [
             ...requestMessages,
             {
               role: 'system',
-              content: 'INLINE RESEARCH EVIDENCE REQUIRED: Before answering this short current-information request, make one targeted evidence action now. Use the most direct available research tool; if the user supplied a URL, open or read that URL directly. Do not create a file and do not add unrelated research.',
+              content: 'INLINE RESEARCH EVIDENCE REQUIRED: Before answering this short current-information request, make one targeted evidence action now. Choose the most direct available tool for the actual target; if the user supplied a URL, directly reading or opening it will usually be more useful than rediscovering it.',
             } as ChatMessageParam,
           ]
         }
@@ -7947,11 +7199,16 @@ export class AgentLoop {
           if (unavailableTargets.length > 0) {
             activeTools = []
           } else if (pendingExplicitTaskToolTargets.length > 0) {
-            activeTools = permittedAvailableTools.filter(tool =>
+            const preferredTools = activeTools.filter(tool =>
               pendingExplicitTaskToolTargets.some(target =>
                 toolMatchesExplicitTaskToolTarget(target, tool.function?.name || ''),
               ),
             )
+            const preferredNames = new Set(preferredTools.map(tool => tool.function?.name || ''))
+            activeTools = [
+              ...preferredTools,
+              ...activeTools.filter(tool => !preferredNames.has(tool.function?.name || '')),
+            ]
           } else if (explicitTaskToolConstraint.exclusive.length > 0) {
             activeTools = permittedAvailableTools
           } else if (explicitTaskToolConstraint.forbidden.length > 0) {
@@ -8006,31 +7263,23 @@ export class AgentLoop {
           !useCompactNarration &&
           !useTextFinalDeliverable
         if (directUserUrlNeedsFirstAction) {
-          const beforeTools = activeTools.map(tool => tool.function?.name).filter(Boolean)
           const hasDirectSourceTool = activeTools.some(tool => {
             const name = tool.function?.name || ''
             return name === 'browser_navigate' || name === 'read_document' || name === 'http_request'
           })
           if (hasDirectSourceTool) {
-            activeTools = activeTools.filter(tool => tool.function?.name !== 'web_search')
             requestMessages = [
               ...requestMessages,
               {
                 role: 'system',
                 content: [
                   `DIRECT USER TARGET: The user supplied ${state.userProvidedUrl}.`,
-                  'The next action must use that exact target directly; do not turn it into search keywords or discover a replacement first.',
-                  'For ordinary research-page reading, default to read_document or HTTP/text extraction. Use browser navigation/content when the request needs dynamic or scripted state, interaction/action work, screenshots, or exact visibly rendered confirmation. Then author the native tool call yourself.',
+                  'Use the exact target directly when it is the best route; do not rediscover a replacement without a concrete reason.',
+                  'For ordinary research-page reading, full-page extraction is usually efficient. Browser tools are useful for dynamic or scripted state, interaction/action work, screenshots, or exact visibly rendered confirmation. The full healthy tool set remains available—choose from it based on the page and requested outcome.',
                 ].join(' '),
               } as ChatMessageParam,
             ]
           }
-          console.log('[AgentDiagnostics] Evaluated discovery search before exact user target is opened', {
-            step: state.currentStepIdx,
-            target: state.userProvidedUrl,
-            beforeTools,
-            afterTools: activeTools.map(tool => tool.function?.name).filter(Boolean),
-          })
         }
         const effectiveCadenceNarrationInMainTurn =
           cadenceNarrationInMainTurn &&
@@ -8074,10 +7323,6 @@ export class AgentLoop {
           !hasPersistentExplicitTaskToolRestriction &&
           fastActionTurn &&
           isFastSourceActionToolTurn(state, this.options.messages)
-        if (fastSourceActionTurn) {
-          const fastSourceTools = fastSourceActionToolsForState(state, activeTools)
-          if (fastSourceTools !== activeTools) activeTools = fastSourceTools
-        }
         fastActionTurn = fastActionTurn && activeTools.length > 0
         fastSourceActionTurn = fastSourceActionTurn && activeTools.length > 0
         // Reserve the next action for the narration-carrying request. Without
@@ -8114,11 +7359,7 @@ export class AgentLoop {
           !relaxRequiredToolChoice &&
           supportsProviderRequiredToolChoice(model)
         const requestedToolChoice = useRequiredToolCall
-          ? explicitTerminalNeedsInitialAction && activeTools.some(tool => tool.function?.name === 'execute_command')
-            ? { type: 'function', function: { name: 'execute_command' } }
-            : standaloneWebsiteNeedsInitialCreate
-            ? { type: 'function', function: { name: 'create_website' } }
-            : 'required'
+          ? 'required'
           : undefined
         lastShouldRequireToolCall = useRequiredToolCall
 

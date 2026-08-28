@@ -58,10 +58,15 @@ async function runSourceContracts() {
   }
   assert.match(agentLoop, /loadResearchActivityEntries/, 'AgentLoop must hydrate hidden research activity')
   assert.match(agentLoop, /shouldInjectResearchActivityContext/, 'AgentLoop must gate hidden research context injection')
+  assert.doesNotMatch(
+    agentLoop,
+    /const exhaustedKnownCandidateUrls = hasKnownCandidateUrls && !hasUnopenedCandidateUrls[\s\S]*const needsAlternateSourceRoute/,
+    'research telemetry must not hard-route the model into an alternate-source-only tool lane',
+  )
   assert.match(
     agentLoop,
-    /const exhaustedKnownCandidateUrls = hasKnownCandidateUrls && !hasUnopenedCandidateUrls[\s\S]*const needsAlternateSourceRoute =[\s\S]*exhaustedKnownCandidateUrls/,
-    'compact research must reopen alternate discovery routes after every known search result has been opened',
+    /SOURCE OPENING RECOVERY:[\s\S]*The full healthy tool set remains available; choose based on the evidence gap/,
+    'exhausted source candidates must produce advisory recovery guidance while preserving tool autonomy',
   )
   assert.match(agentLoop, /state\.currentPhase === 'research'/, 'AgentLoop must keep hidden research context during research phases')
   assert.doesNotMatch(agentLoop, /hasActivePlanStep && !state\.forceTextNextIteration\s*\?\s*researchActivityContext/, 'AgentLoop must not inject hidden research context into every active plan step')

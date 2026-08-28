@@ -42,6 +42,24 @@ function makeActions(narrations: CapturedNarration[], latestGroups: unknown[]): 
   }
 }
 
+function startupMessage(id: string): Message {
+  return {
+    id,
+    role: 'assistant',
+    content: 'I’ll inspect the supplied evidence, verify the requested details, and deliver the result.',
+    timestamp: Date.now(),
+    taskGroups: [{
+      id: id + '-placeholder',
+      index: -1,
+      title: 'Preparing a fresh computer for this task…',
+      status: 'running',
+      subtasks: [],
+      narrations: [],
+      synthesis: '',
+    }],
+  }
+}
+
 function completeSearch(dispatcher: EventDispatcher, id: string, label: string, step: number): void {
   dispatcher.dispatch({
     type: 'tool_start',
@@ -66,6 +84,21 @@ const progressText = 'The three verified benchmarks now agree that short action 
     'durable-startup-progress',
     makeActions(narrations, groups),
     () => {},
+    {
+      id: 'assistant-durable-startup-progress',
+      role: 'assistant',
+      content: 'I’ll inspect the supplied page, verify the requested content, and save the result.',
+      timestamp: Date.now(),
+      taskGroups: [{
+        id: 'startup-placeholder',
+        index: -1,
+        title: 'Preparing a fresh computer for this task…',
+        status: 'running',
+        subtasks: [],
+        narrations: [],
+        synthesis: '',
+      }],
+    },
   )
 
   dispatcher.dispatch({
@@ -113,7 +146,7 @@ const progressText = 'The three verified benchmarks now agree that short action 
   const initialMessage: Message = {
     id: 'assistant-startup-reconnect',
     role: 'assistant',
-    content: '',
+    content: 'I’ll inspect the supplied page, verify the requested content, and save the result.',
     timestamp: acceptedAt,
     taskGroups: [{
       id: 'task-startup-reconnect',
@@ -151,6 +184,7 @@ const progressText = 'The three verified benchmarks now agree that short action 
     'cross-step-progress-update',
     makeActions(narrations, groups),
     () => {},
+    startupMessage('assistant-cross-step-progress-update'),
   )
 
   dispatcher.dispatch({ type: 'plan', items: ['Gather initial evidence', 'Compare the evidence'] })
@@ -254,6 +288,7 @@ const doneSubtask = (id: string, label: string): Subtask => ({
     'pre-action-frontier-progress-update',
     makeActions(narrations, groups),
     () => {},
+    startupMessage('assistant-pre-action-frontier-progress-update'),
   )
 
   dispatcher.dispatch({ type: 'plan', items: ['Gather current evidence'] })
@@ -287,6 +322,7 @@ const doneSubtask = (id: string, label: string): Subtask => ({
     'live-file-pre-action-progress-update',
     makeActions(narrations, groups),
     () => {},
+    startupMessage('assistant-live-file-pre-action-progress-update'),
   )
 
   dispatcher.dispatch({ type: 'plan', items: ['Write the verified benchmark report'] })
@@ -334,6 +370,7 @@ const doneSubtask = (id: string, label: string): Subtask => ({
     'same-step-frontier-progress-update',
     makeActions(narrations, groups),
     () => {},
+    startupMessage('assistant-same-step-frontier-progress-update'),
   )
 
   dispatcher.dispatch({ type: 'plan', items: ['Gather current evidence'] })

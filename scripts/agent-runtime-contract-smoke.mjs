@@ -244,7 +244,7 @@ async function assertSourceContracts() {
   assert.match(prompts, /Custom instructions supersede.*including the visible number of plan phases\/steps.*except for safety, permissions, sandbox\/tool availability, and core runtime rules/s, 'custom instructions must supersede defaults including visible phase count except safety/core rules')
   assert.match(prompts, /They do NOT supersede safety, permissions, sandbox\/tool availability, or core runtime rules/, 'planner prompt must preserve safety/core constraints above custom instructions')
   assert.match(prompts, /fixed number of visible phases, honor that count/, 'planner prompt must honor custom visible phase-count instructions')
-  assert.match(planManager, /PLANNER_ACK_MAX_TOKENS = 96/, 'planner acknowledgements must stay bounded for a fast direct paragraph')
+  assert.match(planManager, /PLANNER_ACK_MAX_TOKENS = 256/, 'planner acknowledgement repair must leave room for mandatory hidden reasoning plus a fast direct paragraph')
   assert.match(planManager, /PLANNER_SIMPLE_JSON_MAX_TOKENS = 620/, 'simple planner JSON calls must have room for task-specific internal checklists without delaying startup')
   assert.match(planManager, /PLANNER_MEDIUM_JSON_MAX_TOKENS = 820/, 'medium planner JSON calls must have room for task-specific internal checklists')
   assert.match(planManager, /PLANNER_JSON_MAX_TOKENS = 980/, 'complex planner JSON calls must preserve detailed task-specific planning headroom')
@@ -311,13 +311,10 @@ async function assertSourceContracts() {
   assert.ok(agentLoop.includes("return ASSISTANT_PROVIDER !== 'openrouter' || model.trim().length > 0"), 'the pinned OpenRouter route must retain provider-required native tool calls')
   assert.match(agentLoop, /const useRequiredToolCall = \(standaloneWebsiteNeedsInitialCreate \|\| requiredToolIntent\)[\s\S]*supportsProviderRequiredToolChoice\(model\)/, 'provider-forced tool choice must be gated by the exact active model route, including the one-shot website write')
   assert.match(agentLoop, /compactResearchToolRequiredMessage[\s\S]*Choose the most useful source\/search\/browser\/document action/, 'research repairs must nudge the model to choose the evidence tool itself')
-  assert.match(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS[\s\S]*web_search[\s\S]*read_document/, 'compact research recovery must narrow to source-focused model-selected tools after a miss')
-  assert.doesNotMatch(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS[\s\S]*source_sweep/, 'compact research recovery must not reintroduce broad source_sweep actions')
-  assert.match(agentLoop, /needsAlternateSourceRoute[\s\S]*state\.stepLoopDetections > 0[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)/, 'compact research opened-source recovery must reopen search/browser routes after repeated read loops')
+  assert.doesNotMatch(agentLoop, /COMPACT_RESEARCH_RECOVERY_RUNTIME_TOOLS|COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS/, 'compact research recovery must guide the model without replacing its complete healthy tool menu with an allowlist')
   assert.match(agentLoop, /compactResearchRemainingCandidates[\s\S]*state\.workLedger\.searchResults[\s\S]*visited\.has\(normalized\)[\s\S]*failed\.has\(normalized\)/, 'compact research turns must preserve actionable unvisited candidate URLs after old tool results are compacted')
-  assert.match(agentLoop, /read_document is temporarily suppressed[\s\S]*If no remaining candidate is visible[\s\S]*one targeted web_search for a new authoritative domain/, 'cached source-loop recovery guidance must allow alternate discovery when the retained candidates are unavailable or unusable')
-  assert.match(agentLoop, /COMPACT_RESEARCH_PRIMARY_SOURCE_RUNTIME_TOOLS[\s\S]*web_search[\s\S]*read_document[\s\S]*browser_navigate/, 'compact research must define primary source routes separately from contextual scroll-only browser controls')
-  assert.match(agentLoop, /compactResearchSourceRecoveryToolsForState[\s\S]*hasPrimarySourceRoute[\s\S]*sourceRecoveryPool[\s\S]*Restored compact research source tools/, 'compact research recovery must restore source tools from the full registry when active tools collapse to scroll-only controls')
+  assert.match(agentLoop, /read_document repeated in a loop[\s\S]*targeted web_search for a new authoritative domain[\s\S]*full healthy tool set remains available/, 'cached source-loop recovery guidance must recommend alternate discovery while preserving model autonomy')
+  assert.match(agentLoop, /Phase, strategy, urgency, and recovery state guide ordering and[\s\S]*they never hide a healthy tool from the model/, 'action turns must preserve autonomous access to the complete healthy tool registry')
   assert.match(taskStrategy, /toolPriority:\s*\['web_search', 'read_document', 'browser_navigate', 'create_file'\]/, 'research tools must prioritize document extraction before full browser navigation')
   assert.match(agentConfig, /BASE_ITERATIONS\s*=\s*48/, 'long tasks need a larger base iteration budget')
   assert.match(agentConfig, /MAX_ITERATIONS\s*=\s*180/, 'long tasks need a higher global iteration ceiling')
@@ -462,7 +459,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /currentStepIdx < state\.currentPlanItems\.length - 1\) return false/, 'deadline finalization must not start before the final phase')
   assert.doesNotMatch(agentLoop, /while \(state\.currentStepIdx < state\.currentPlanItems\.length - 1\)/, 'deadline finalization must not fast-forward unfinished phases')
   assert.match(agentLoop, /RUNTIME FINALIZATION DEADLINE/, 'deadline finalization prompt must stop new research and create the deliverable')
-  assert.match(agentLoop, /deadlineFinalTools/, 'deadline finalization must expose only deliverable tools, not more research tools')
+  assert.doesNotMatch(agentLoop, /deadlineFinalTools/, 'deadline pressure must guide completion without replacing the model\'s healthy tool menu with a deliverable allowlist')
   assert.match(agentLoop, /agentRunRemainingMs\(state\) - \(state\.deadlineHardStopBufferMs \|\| AGENT_DEADLINE_HARD_STOP_BUFFER_MS\)/, 'deadline finalization model calls must stay below the remaining platform time')
   assert.match(messageList, /lastAssistantMsg/, 'stream autoscroll must follow the active assistant even after a live user message')
   assert.match(messageList, /FOLLOW_BOTTOM_THRESHOLD_PX/, 'chat autoscroll must use a distance-from-bottom threshold instead of forcing every stream update')
@@ -667,10 +664,10 @@ async function assertSourceContracts() {
   assert.match(fileHandling, /isImageFile\(file\)[\s\S]*isDocumentFile\(file\)[\s\S]*isPdfFile\(file\) \|\| isAudioFile\(file\) \|\| isVideoFile\(file\) \|\| isArchiveFile\(file\)/, 'client-side attachment processing must preserve native multimodal, document, archive, and generic files')
   assert.match(attachmentsRoute, /isAllowedUserUpload/, 'server attachment uploads must validate broad user uploads without a media-type denylist')
   assert.match(attachments, /data:\$\{record\.mimeType\};base64/, 'stored native multimodal attachments must be rehydrated as provider-ready data URLs')
-  assert.match(llm, /ASSISTANT_SUPPORTS_IMAGE_INPUT = true/, 'the pinned Muse route must advertise native image input')
-  assert.match(llm, /ASSISTANT_SUPPORTS_VIDEO_INPUT = true/, 'the pinned Muse route must advertise native video input')
-  assert.match(llm, /ASSISTANT_SUPPORTS_FILE_INPUT = true/, 'the pinned Muse route must advertise native file input')
-  assert.match(llm, /ASSISTANT_SUPPORTS_AUDIO_INPUT = true/, 'the pinned Muse route must advertise native audio input')
+  assert.match(llm, /ASSISTANT_SUPPORTS_IMAGE_INPUT = true/, 'the pinned Gemini route must advertise native image input')
+  assert.match(llm, /ASSISTANT_SUPPORTS_VIDEO_INPUT = true/, 'the pinned Gemini route must advertise native video input')
+  assert.match(llm, /ASSISTANT_SUPPORTS_FILE_INPUT = true/, 'the pinned Gemini route must advertise native file input')
+  assert.match(llm, /ASSISTANT_SUPPORTS_AUDIO_INPUT = true/, 'the pinned Gemini route must advertise native audio input')
   assert.match(llm, /type: 'file'[\s\S]*type: 'input_audio'[\s\S]*type: 'video_url'/, 'provider message types must preserve PDF, audio, and video parts')
   assert.match(agentLoop, /visualImageUploadedAttachments/, 'agent loop must distinguish visual image attachments from text attachments')
   assert.match(agentLoop, /nativeMultimodalUploadedAttachments/, 'agent loop must identify provider-native multimodal attachments')
@@ -684,7 +681,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /Do not say no file was attached/, 'metadata-only attachments must prevent false "no file attached" replies')
   assert.match(agentLoop, /Use the listed sandbox path with document or terminal tools/, 'metadata-only sandboxed uploads must direct the agent toward the uploaded sandbox file')
   assert.match(agentLoop, /requiredAttachmentPlanSteps/, 'non-native uploaded attachments must still get a preloaded read step before runtime work')
-  assert.match(agentLoop, /function assistantSupportsNativeAttachment[\s\S]*ASSISTANT_SUPPORTS_IMAGE_INPUT[\s\S]*ASSISTANT_SUPPORTS_VIDEO_INPUT[\s\S]*ASSISTANT_SUPPORTS_AUDIO_INPUT[\s\S]*ASSISTANT_SUPPORTS_FILE_INPUT/, 'native attachment routing must match Muse’s advertised modalities')
+  assert.match(agentLoop, /function assistantSupportsNativeAttachment[\s\S]*ASSISTANT_SUPPORTS_IMAGE_INPUT[\s\S]*ASSISTANT_SUPPORTS_VIDEO_INPUT[\s\S]*ASSISTANT_SUPPORTS_AUDIO_INPUT[\s\S]*ASSISTANT_SUPPORTS_FILE_INPUT/, 'native attachment routing must match Gemini’s advertised modalities')
   assert.match(agentLoop, /uploadedAttachments\(messages\)\.filter\(\(attachment\) => !\([\s\S]*attachment\.contentEncoding === 'data-url'[\s\S]*assistantSupportsNativeAttachment\(attachment\)/, 'only model-supported native uploads may bypass the visible attachment preflight step')
   assert.match(attachments, /withMessageAttachmentSandboxPaths/, 'uploaded attachments must be annotated with sandbox paths before planning')
   assert.match(attachments, /materializeMessageAttachmentsToSandbox/, 'uploaded attachments must be copied into the task sandbox before tool execution')
@@ -730,7 +727,7 @@ async function assertSourceContracts() {
   assert.ok((planManager.match(/reasoning:\s*PLANNER_CONTROL_REASONING/g) || []).length >= 4, 'initial plan, repair, and replan calls should use planner control reasoning')
   assert.match(agentLoop, /const maxNormalOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'normal substantive turns must receive the provider\'s full completion budget')
   assert.match(agentLoop, /const maxBuildOutputTokens = MODEL_MAX_COMPLETION_TOKENS[\s\S]*const maxDeliverableOutputTokens = MODEL_MAX_COMPLETION_TOKENS/, 'build, deliverable, and deadline turns must receive the provider\'s full completion budget')
-  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 983_040[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 65_536[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Muse Spark Contributor must preserve its one-million-token context with the application-selected completion cap')
+  assert.match(agentConfig, /MODEL_MAX_PROMPT_TOKENS = 983_040[\s\S]*MODEL_MAX_COMPLETION_TOKENS = 65_536[\s\S]*MAX_CONTEXT_MESSAGES = 4_096/, 'Gemini 3.7 Flash must preserve its one-million-token context and 65,536-token completion cap')
   const attemptPlanCallContract = planManager.match(/private async attemptPlanCall[\s\S]*?\n  \/\*\*/)?.[0] || ''
   assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must exhaust model repair before fallback')
   assert.match(planManager, /PLANNER_QUALITY_REPAIR_ATTEMPTS = 1/, 'planner repair must stay bounded so startup does not wait behind repeated repair loops')
@@ -746,7 +743,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /QUALITY FAILURE TO FIX/, 'planner repair must include quality-gate failure context')
   assert.doesNotMatch(attemptPlanCallContract, /throw new Error\(PLANNER_QUALITY_ERROR\)/, 'the exact planner quality validator text must not escape from the planner call path')
   assert.match(planManager, /repairPlannerResponse\(nextRepairInput,\s*qualityIssue\)/, 'parseable but low-quality planner output must go through bounded model repair before failing')
-  assert.match(agentLoop, /compactResearchToolState[\s\S]*currentPhase: 'research'[\s\S]*getActiveDefinitions\(compactResearchToolState\)[\s\S]*pruneToolsForCurrentStep\(compactResearchToolState/, 'compact research recovery must request source tools through the research phase filter before pruning')
+  assert.doesNotMatch(agentLoop, /compactResearchToolState|pruneToolsForCurrentStep/, 'compact research recovery must guide the model without replacing its healthy tool menu')
   assert.match(planManager, /INVALID ACK TO REPLACE/, 'invalid generated acknowledgements must get one model-authored retry')
   assert.match(planManager, /response_format:\s*\{\s*type:\s*'json_object'\s*\}/, 'planner calls should request strict JSON when the provider supports it')
   assert.match(prompts, /Treat command wrappers such as "research about"/, 'planner prompt must extract the real topic instead of using command wrappers as the subject')
@@ -766,24 +763,20 @@ async function assertSourceContracts() {
   assert.match(toolPipeline, /planStepIndexBlockReason/, 'tool pipeline must block calls declared for the wrong plan step')
   assert.doesNotMatch(activityDescriber, /runtimeVisibleActionLabel/, 'runtime must not invent deterministic visible action labels')
   assert.doesNotMatch(toolPipeline, /runtimeDisplayActionLabel|args\.action_label\s*=\s*runtimeVisibleActionLabel/, 'tool execution must preserve LLM-authored action labels and reject invalid ones through model repair')
-  assert.match(toolPipeline, /phaseSemanticBlockReason/, 'tool pipeline must block future-phase semantic drift before executing tools')
-  assert.match(toolPipeline, /appears to continue previous step/, 'tool pipeline must block previous-phase semantic drift before executing tools')
+  assert.doesNotMatch(toolPipeline, /phaseSemanticBlockReason|appears to continue previous step/, 'plan phases must guide the model without rejecting otherwise valid tool choices')
   assert.doesNotMatch(toolPipeline, /synthesisPhaseResearchBlockReason/, 'tool pipeline must let the model fill a genuine evidence gap during synthesis instead of enforcing phase labels literally')
-  assert.match(toolPipeline, /researchSourceBalanceBlockReason/, 'research phases must balance search discovery with opened or extracted source pages')
+  assert.doesNotMatch(toolPipeline, /researchSourceBalanceBlockReason/, 'research source balance must remain guidance instead of an execution-time tool block')
   assert.match(researchPreflightRecovery, /search result sets but no opened or extracted source pages yet/, 'research source balance must stop search-only chains before more searches')
-  assert.match(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch[\s\S]*researchSourceBalanceBlockReason\('web_search', state\) !== null/, 'hot-path source tools must use the same search/source balance decision as execution preflight')
-  assert.match(agentLoop, /fastSourceActionToolsForState[\s\S]*needsOpenedSourceBeforeMoreSearch[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)/, 'hot-path source turns must remove web_search when an opened source is required next')
-  assert.match(agentLoop, /hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'compact source-opening recovery must remove web_search while known result URLs are still unopened')
-  assert.match(agentLoop, /SOURCE OPENING REQUIRED:[\s\S]*Do not call web_search again/, 'source-opening recovery prompt must forbid another search when known candidate URLs need opening')
-  assert.match(agentLoop, /SOURCE_OPENING_RUNTIME_TOOLS[\s\S]*read_document[\s\S]*http_request[\s\S]*browser_navigate/, 'source-opening turns must expose extraction and alternate rendered-navigation routes')
+  assert.doesNotMatch(agentLoop, /researchSearchNeedsOpenedSourceBeforeMoreSearch|fastSourceActionToolsForState|allowed\.delete\('web_search'\)/, 'research heuristics must not remove search or alternate tools from the model menu')
+  assert.match(agentLoop, /SOURCE OPENING RECOMMENDATION:[\s\S]*usually add more value than another query variant[\s\S]*full healthy tool set/, 'source-opening recovery must recommend stronger evidence without forbidding another model-selected route')
   assert.match(researchPreflightRecovery, /latestSearchCandidateCount[\s\S]*latestCandidateCount > 0/, 'empty or failed searches must not demand an impossible source-opening action')
   assert.match(researchPreflightRecovery, /stepFailedSourceTargets\.add\(normalizedTarget\)[\s\S]*stepFailedSourceTargets\.size < 2/, 'fresh search recovery must require two distinct normalized source failures')
   assert.match(toolPipeline, /state\.stepFailedSourceTargets\.clear\(\)/, 'an executed discovery search must reset failures from the previous candidate pool')
-  assert.match(streamProcessor, /researchSourceBalanceBlockReason\(toolName, state\) !== null/, 'provisional search visibility must use the same source-balance decision as execution')
+  assert.doesNotMatch(streamProcessor, /researchSourceBalanceBlockReason/, 'provisional search visibility must not enforce a hidden source-routing allowlist')
   assert.doesNotMatch(agentLoop, /youtube_transcript/, 'removed YouTube transcript tooling must not remain in runtime prompts or tool sets')
   assert.match(prompts, /After one or two good searches, read or extract the strongest result pages before searching more/, 'runtime prompt must frame web search as source discovery before extraction')
   assert.match(stepMessages, /Use web_search to discover candidates, then read\/extract the strongest source pages before searching more/, 'per-step research prompt must require source extraction after search discovery')
-  assert.match(toolPipeline, /Previous-step "next" notes are closed/, 'previous phase bleed recovery must tell the model to ignore stale prior next-notes')
+  assert.doesNotMatch(toolPipeline, /Previous-step "next" notes are closed/, 'previous-step guidance must not be enforced as a tool execution rejection')
   assert.match(stepMessages, /PHASE SWITCH: Previous steps are closed/, 'step injections must explicitly close the previous phase on step advance')
   assert.match(stepMessages, /FINAL PHASE SWITCH: Previous research\/build\/browser steps are closed/, 'final step injections must explicitly close prior phases before synthesis')
   assert.match(stepMessages, /unless this final step explicitly needs a missing source/, 'final synthesis instructions must allow a targeted evidence repair when the deliverable genuinely needs it')
@@ -791,9 +784,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /FINAL SYNTHESIS TOOL REQUIRED/, 'final deliverable steps must force an immediate saved-output tool call after text-only drift')
   assert.doesNotMatch(policyEngine, /Continue working\. If you are writing your deliverable/, 'final deliverable steps must not allow several vague text-only warm-up turns')
   assert.match(toolPipeline, /fileWritePreflightBlockReason\(tc\.name,\s*args,\s*state\)/, 'blocked file-write calls must be stopped before visible tool_start pills')
-  assert.match(toolPipeline, /isTaskTrackingMarkdownPath/, 'task-tracking markdown files must be recognized centrally')
-  assert.match(toolPipeline, /currentStepAllowsTaskTrackingMarkdown/, 'custom-instruction tracking files must be allowed when present in current step scope')
-  assert.doesNotMatch(toolPipeline, /state\.stepResearchCallCount < 2 && !currentStepAllowsTaskTrackingMarkdown/, 'custom-instruction tracking files must not require prior research calls')
+  assert.doesNotMatch(toolPipeline, /isTaskTrackingMarkdownPath|currentStepAllowsTaskTrackingMarkdown|state\.stepResearchCallCount < 2/, 'research file access must not depend on inferred phase ownership or a prior research-call quota')
   assert.doesNotMatch(eventDispatcher, /runtimeVisibleActionLabel/, 'client action pills must never invent deterministic labels')
   assert.match(eventDispatcher, /const visibleActionLabel = strictActionLabelFromArgs\(event\.args\)/, 'client action pills must use the model-authored label')
   assert.match(eventDispatcher, /preserveVisibleSourceRecoveryPanel[\s\S]*event\.name !== 'read_document' && event\.name !== 'http_request'[\s\S]*streaming: false/, 'blocked source extraction must remain as the truthful current Computer panel item instead of jumping backwards')
@@ -867,14 +858,14 @@ async function assertSourceContracts() {
   assert.match(llm, /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/, 'runtime provider must be statically pinned to OpenRouter')
   assert.match(llm, /function trimmedEnv\(value: string \| undefined\)/, 'runtime must expose shared env trimming for provider settings')
   assert.match(llm, /export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL/, 'stale environment or client model IDs must not change the pinned model')
-  assert.match(llm, /PINNED_OPENROUTER_PROVIDER\s*=\s*'meta'[\s\S]*exactOpenRouterProviderRoute/, 'runtime must pin Muse to OpenRouter\'s exact Meta provider route')
+  assert.match(llm, /PINNED_OPENROUTER_PROVIDER\s*=\s*'google-vertex\/global'[\s\S]*exactOpenRouterProviderRoute/, 'runtime must pin Gemini to OpenRouter\'s exact Google Vertex global provider endpoint')
   assert.doesNotMatch(llm, /process\.env\.OPENROUTER_REASONING_EFFORT|process\.env\.OPENROUTER_REASONING_EXCLUDE/, 'stale environment variables must not override code-pinned minimal reasoning')
   assert.match(llm, /getAssistantApiKey[\s\S]*trimmedEnv\(process\.env\.OPENROUTER_API_KEY\)/, 'provider credentials must be trimmed before request headers are built')
   assert.doesNotMatch(llm, /process\.env\.DEEPSEEK_API_KEY|api\.deepseek\.com/, 'active provider runtime must not retain a DeepSeek credential or endpoint')
-  assert.match(llm, /ASSISTANT_REASONING_EFFORT = 'minimal'[\s\S]*function providerReasoningPayload[\s\S]*effort:\s*ASSISTANT_REASONING_EFFORT[\s\S]*exclude:\s*true/, 'Muse Contributor calls must pin mandatory reasoning to minimal and hide internal traces')
-  assert.match(llm, /const hasNativeTools = Array\.isArray\(rest\.tools\)[\s\S]*hasNativeTools \? \{ tool_choice: 'auto' as const \} : \{\}/, 'Muse tool turns must use the proven automatic tool-choice boundary')
+  assert.match(llm, /ASSISTANT_REASONING_EFFORT = 'minimal'[\s\S]*function providerReasoningPayload[\s\S]*effort:\s*ASSISTANT_REASONING_EFFORT[\s\S]*exclude:\s*true/, 'Gemini calls must pin reasoning to minimal and hide internal traces')
+  assert.match(llm, /temperature:\s*_temperature[\s\S]*const hasNativeTools = Array\.isArray\(rest\.tools\)[\s\S]*hasNativeTools \? \{ tool_choice: 'auto' as const \} : \{\}/, 'Gemini tool turns must use automatic tool choice while stripping unsupported temperature')
   assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter calls must explicitly request usage data for compatibility')
-  assert.match(llm, /provider:\s*exactOpenRouterProviderRoute\(\)/, 'OpenRouter calls must use only the exact Meta provider route')
+  assert.match(llm, /provider:\s*exactOpenRouterProviderRoute\(\)/, 'OpenRouter calls must use only the exact Google Vertex global provider endpoint')
   assert.match(llm, /estimateUsageCost/, 'OpenRouter token usage must be normalized into billable provider cost')
   assert.match(streamProcessor, /reasoningContent \+= String\(delta\.reasoning_content\)/, 'thinking-mode tool calls must preserve reasoning content internally for provider history')
   assert.match(llm, /ASSISTANT_LOG_LABEL\s*=\s*'Agent'/, 'provider/runtime internals must be redacted from logs')
@@ -947,15 +938,10 @@ async function assertSourceContracts() {
   assert.match(planManager, /recordCompletionUsage\(res\.usage/, 'planner completion responses must record provider billing cost')
   assert.doesNotMatch(agentLoop, /chargeServerTokenUsage\(this\.options\.userId,\s*this\.options\.conversationId,\s*this\.options\.creditRunId,\s*totalUsage\)/, 'agent sessions must not double-charge final cumulative token usage')
   assert.match(agentLoop, /this\.emitter\.done\(totalUsage\)/, 'completed sessions must still send token usage metadata to the stream')
-  assert.match(agentLoop, /FIXED_WEB_SEARCH_RUNTIME_TOOLS = new Set\(\['web_search'\]\)/, 'fixed-search tasks must not send the full tool schema to small model routes')
-  assert.match(agentLoop, /explicitWebSearchLimitFromText\(state\.originalUserRequest \|\| ''\) !== null[\s\S]*filterToolDefinitions\(stepTools,\s*FIXED_WEB_SEARCH_RUNTIME_TOOLS\)/, 'fixed-search research phases must expose only web_search')
+  assert.doesNotMatch(agentLoop, /FIXED_WEB_SEARCH_RUNTIME_TOOLS|filterToolDefinitions\(stepTools/, 'fixed-search requests must preserve the healthy tool set while the explicit count is enforced at execution')
   assert.match(agentLoop, /category:\s*'provider_token_or_credit_limit'/, 'provider 402 token or credit limits must be categorized explicitly')
   assert.match(agentLoop, /status === 402[\s\S]*state\.lastModelErrorForUser = 'Agent could not start the next action because the assistant service token or credit limit was exceeded\.'/, 'provider 402 errors must fail fast instead of retrying until iteration cap')
-  assert.match(agentLoop, /BROWSER_STEP_START_RUNTIME_TOOLS/, 'browser action steps must have a narrow first-action tool set')
-  assert.match(agentLoop, /state\.stepToolCallCount === 0[\s\S]{0,180}BROWSER_STEP_START_RUNTIME_TOOLS/, 'first browser-step calls must expose only page-state tools before interaction tools')
-  assert.match(agentLoop, /BROWSER_NONFINAL_RUNTIME_TOOLS/, 'browser action steps must expand to the full browser tool set after page state exists')
-  assert.match(agentLoop, /browserStepAllowsDocumentTool/, 'browser action steps should avoid exposing read_document unless document intent or recovery makes it useful')
-  assert.match(agentLoop, /tool\.function\?\.name !== 'read_document'/, 'ordinary browser action turns should trim the read_document schema to reduce prompt cost')
+  assert.doesNotMatch(agentLoop, /BROWSER_STEP_START_RUNTIME_TOOLS|BROWSER_NONFINAL_RUNTIME_TOOLS|browserStepAllowsDocumentTool/, 'browser action steps must retain non-browser alternatives instead of using phase-specific allowlists')
   assert.ok(!tools.includes("name: 'browser_click',"), 'legacy selector browser_click must not be exposed in model tool schemas')
   assert.doesNotMatch(tools, /Arguments — same shape as the corresponding single tool/, 'browser action sequence schema must stay compact')
   assert.doesNotMatch(tools, /e\.g\. \{index: 5\}/, 'tool schemas must not repeat long examples already covered by runtime prompts')
@@ -970,20 +956,7 @@ async function assertSourceContracts() {
   assert.match(toolRegistry, /register\('browser_hover'[\s\S]*args\.selector/, 'runtime must keep selector compatibility for stale browser_hover calls')
   assert.ok(!agentLoop.includes("'browser_click',"), 'browser action tool pruning must expose browser_click_at, not legacy browser_click')
   assert.ok(!toolRegistry.includes("'browser_navigate', 'browser_click',"), 'browse strategy registry should not re-enable legacy browser_click schemas')
-  assert.match(agentLoop, /BROWSER_ADVANCED_POINTER_TOOLS = new Set\(\['browser_click_and_hold', 'browser_drag', 'browser_hover'\]\)/, 'advanced browser pointer tools must be explicitly gated')
-  assert.match(agentLoop, /browserStepAllowsAdvancedPointerTools/, 'advanced drag/hold tools must only be exposed for relevant browse steps or recovery')
-  assert.match(agentLoop, /state\.browserRecoveryRequired \|\| state\.stepFailureCount >= 2/, 'advanced pointer tools must return during browser recovery')
-  assert.match(agentLoop, /drag\|drop\|drag\[- \]\?and\[- \]\?drop/, 'advanced pointer tool gate must recognize drag/drop intent')
-  assert.match(agentLoop, /hover\|tooltip\|flyout\|sub\[- \]\?menu\|menu/, 'advanced pointer tool gate must recognize hover/menu intent')
-  assert.match(agentLoop, /RESEARCH_FILE_WRITE_RUNTIME_TOOLS/, 'ordinary research turns should not pay for file-write schemas')
-  assert.match(agentLoop, /RESEARCH_OPTIONAL_RUNTIME_TOOLS = new Set\(\['image_search'\]\)/, 'ordinary text research turns should not pay for image_search schemas')
-  assert.match(agentLoop, /researchStepAllowsSupportFileTools/, 'research file-write tools must stay available when notes or markdown are explicitly requested')
-  assert.match(agentLoop, /researchStepAllowsImageSearch/, 'research image_search must stay available when images/assets are requested')
-  assert.match(agentLoop, /if \(!allowSupportFiles && RESEARCH_FILE_WRITE_RUNTIME_TOOLS\.has\(name\)\) return false/, 'research pruning must remove write tools unless support files are requested')
-  assert.match(agentLoop, /if \(!allowImageSearch && RESEARCH_OPTIONAL_RUNTIME_TOOLS\.has\(name\)\) return false/, 'research pruning must remove image_search unless image assets are requested')
-  assert.match(agentLoop, /BUILD_OPTIONAL_RUNTIME_TOOLS/, 'pure build/code turns should not pay for optional image/browser/PDF/delete schemas')
-  assert.match(agentLoop, /buildStepAllowsOptionalTool/, 'optional build tools must be restored when the step or QA state requires them')
-  assert.match(agentLoop, /state\.currentPhase === 'build'[\s\S]{0,220}BUILD_OPTIONAL_RUNTIME_TOOLS/, 'build pruning must remove optional tool schemas unless relevant')
+  assert.doesNotMatch(agentLoop, /BROWSER_ADVANCED_POINTER_TOOLS|browserStepAllowsAdvancedPointerTools|RESEARCH_FILE_WRITE_RUNTIME_TOOLS|RESEARCH_OPTIONAL_RUNTIME_TOOLS|researchStepAllowsSupportFileTools|researchStepAllowsImageSearch|BUILD_OPTIONAL_RUNTIME_TOOLS|buildStepAllowsOptionalTool/, 'browser, research, and build heuristics must prioritize rather than hide healthy tools')
   assert.match(toolPipeline, /compactBrowserContentForModel/, 'browser tool results must be semantically compacted instead of raw string-sliced')
   assert.match(toolPipeline, /TARGET HINTS[\s\S]*TASK COMPLETION[\s\S]*Interactive elements/, 'browser result compaction must preserve actionable controls, target hints, and completion signals')
   assert.match(toolPipeline, /BROWSER_RESULT_TOOLS\.has\(tc\.name\)[\s\S]*compactBrowserResultForModel/, 'browser result messages must use the compact browser result helper')
@@ -1197,13 +1170,10 @@ async function assertSourceContracts() {
   assert.match(browserIntelligence, /isNamedAiConversationObjective/, 'browser completion must detect named AI chat/debate objectives')
   assert.match(browserIntelligence, /The named AI chat page shows a response/, 'browser completion must treat visible AI replies as named-chat completion evidence')
   assert.match(toolPipeline, /recordWorkLedgerFailure\(state,\s*\{\s*tool: tc\.name,[\s\S]*?error: errorResult\.error/, 'blocked preflight calls must be recorded in the ledger')
-  assert.match(toolPipeline, /researchFileDetourBlockReason/, 'live research phases must block file-note/artifact detours before source evidence')
-  assert.match(toolPipeline, /Do not create\/read research notes, inspect existing artifacts, or log inability/, 'research detour recovery must force source tools instead of note/log work')
+  assert.doesNotMatch(toolPipeline, /researchFileDetourBlockReason|Do not create\/read research notes, inspect existing artifacts, or log inability/, 'research phases must not reject file, terminal, or artifact tools merely because evidence work is underway')
   assert.match(toolPipeline, /isBrowserPreflightActionBlock/, 'preflight action blocks must be classified separately from page failures')
   assert.match(toolPipeline, /useFreshSnapshotForCompletion/, 'fresh snapshots from preflight blocks must still be able to prove browser task completion')
-  assert.match(toolPipeline, /sameSourceDomain\(visitedUrl,\s*userUrl\)/, 'explicit URL search guard must treat www/naked-domain navigation as an attempted direct navigation')
-  assert.match(toolPipeline, /directNavigationBeforeSearchTarget/, 'explicit URL tasks must detect the direct navigation target before allowing search')
-  assert.match(toolPipeline, /web_search was skipped because the user supplied the exact target[\s\S]*use read_document or HTTP\/text extraction[\s\S]*browser_navigate when rendered state or interaction matters/, 'explicit URL web_search attempts must return to the model for a model-selected direct read or navigation action')
+  assert.doesNotMatch(toolPipeline, /directNavigationBeforeSearchTarget|web_search was skipped because the user supplied the exact target/, 'an explicit URL may guide direct extraction without blocking the model from searching when useful')
   assert.doesNotMatch(toolPipeline, /Rerouted web_search to direct navigation/, 'the runtime must not silently change a tool while retaining wording authored for another action')
   assert.doesNotMatch(toolPipeline, /maybeAutoOpenSearchResult|Source evidence details|chooseSearchResultToAutoOpen|explicitQuickInlineScope|bareResearchRenderedBrowserBlockReason|AUTO_OPEN_TRUSTED_SOURCE_DOMAIN_HINTS/, 'research speed must not come from backend-forced source-opening or canned source-detail pills')
   assert.match(agentLoop, /function savedDeliverableChunkEndsCleanly/, 'saved markdown deliverables must check clean chunk boundaries before accepting completion')
@@ -1240,19 +1210,19 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /shouldStartIterationBudgetFinalization[\s\S]*budgetFinalizationWouldSkipRequiredResearch\(state,\s*messages\)[\s\S]*return false/, 'deep/current research tasks must keep researching instead of being folded into finalization')
   assert.match(agentLoop, /state\.dynamicIterationLimit = Math\.min\([\s\S]*MAX_ITERATIONS[\s\S]*state\.iterations \+ finalizationTurns/, 'iteration budget finalization must reserve enough turns to save or emit the final output')
   assert.match(agentLoop, /function requireDeliverableInspectionBeforeRevision[\s\S]*fileWriteRepairPending[\s\S]*inspected: false/, 'failed verification must require one exact-file inspection before structural revision')
-  assert.match(agentLoop, /finalDeliverableRevisionToolNames[\s\S]*fileWriteRepairPending && !state\.fileWriteRepairPending\.inspected \? \['read_file'\]/, 'final revision tool narrowing must retain read_file during exact-path recovery')
+  assert.doesNotMatch(agentLoop, /finalDeliverableRevisionToolNames/, 'final revision recovery must not replace the healthy menu with a file-only allowlist')
+  assert.match(agentLoop, /FILE REVISION REQUIRED:[\s\S]*read that exact file before deciding how to repair it[\s\S]*another available tool/, 'final revision recovery must recommend exact-file inspection while preserving another justified route')
   assert.match(toolPipeline, /tc\.name === 'append_file'[\s\S]*would corrupt the Markdown report structure[\s\S]*reason: 'ambiguous_write'/, 'blocked structural appends must switch into inspect-and-edit recovery instead of repeating append_file')
   assert.match(toolPipeline, /state\.pendingDeliverableRevision[\s\S]*Use edit_file for structural\/content repairs/, 'failed final deliverable verification must constrain structural revisions to the existing file')
   assert.match(streamProcessor, /pendingDeliverableRevisionAllowsPreview[\s\S]*toolName !== 'append_file' && toolName !== 'edit_file'[\s\S]*return false/, 'blocked final-deliverable recreate attempts must not emit misleading provisional file previews')
   assert.match(agentLoop, /function compactResearchSourceOpeningExhausted[\s\S]*state\.stepLoopDetections >= 4[\s\S]*state\.stepToolCallCount >= Math\.max/, 'source-opening loops must be detected after repeated failed extraction/navigation attempts')
   assert.doesNotMatch(agentLoop, /compactResearchSourceOpeningExhausted\(state,\s*depth\)[\s\S]{0,120}return true/, 'source-opening exhaustion alone must not mark compact research evidence complete')
-  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*do not emit <next_step\/>[\s\S]*different source action now/, 'exhausted source-opening recovery must try a different concrete source route instead of advancing with failure narration')
+  assert.match(agentLoop, /SOURCE OPENING RECOVERY:[\s\S]*Prefer a materially different source action now[\s\S]*choose based on the actual evidence gap/, 'exhausted source-opening recovery must recommend a materially different route without hardcoding the tool choice')
   assert.match(agentLoop, /FORCED_NARRATION_REQUEST_TIMEOUT_MS = 6_000/, 'progress narration must use no-thinking generation with a short realistic provider-start window')
   assert.match(agentLoop, /FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 2_000/, 'progress narration must tolerate ordinary routed chunk gaps without becoming slow')
   assert.match(agentLoop, /FORCED_NARRATION_MAX_TOKENS = 128/, 'phase narration must have enough room to finish a natural update without truncation')
   assert.match(streamProcessor, /throw new InactivityTimeoutError\(elapsed,\s*assistantContent \|\| ''\)/, 'stream polling inactivity must remain nudgeable instead of becoming a fatal generic error')
-  assert.match(agentLoop, /function shouldPreferExtractionBeforeColdBrowser[\s\S]*stepResearchCallCount > 0[\s\S]*RESEARCH_COLD_BROWSER_RUNTIME_TOOLS/, 'source-like tasks must prefer search/document extraction before cold browser navigation')
-  assert.match(agentLoop, /if \(shouldPreferExtractionBeforeColdBrowser\(state\)\)[\s\S]*RESEARCH_COLD_BROWSER_RUNTIME_TOOLS\.has\(tool\.function\?\.name/, 'tool pruning must remove cold browser opens from first source-like action turns')
+  assert.doesNotMatch(agentLoop, /shouldPreferExtractionBeforeColdBrowser|RESEARCH_COLD_BROWSER_RUNTIME_TOOLS/, 'source-like tasks may prioritize extraction without hiding browser navigation from the model')
   assert.match(streamProcessor, /contentOnlyStallMs[\s\S]*Math\.min\(5_000,\s*Math\.max\(150,\s*this\.tierTimeouts\.contentOnlyTimeoutMs\)\)/, 'content-only action stalls must respect tighter fast-action timeouts')
   assert.doesNotMatch(toolPipeline, new RegExp(['userProvided', 'Domain', 'IsBlocked'].join('') + '|' + ['is', 'Domain', 'Blocking', 'BrowseResult'].join('')), 'explicit URL and browse logic must not rely on site-level block state')
   assert.doesNotMatch(toolPipeline, /success === false && browseResult\.recoverable === true && \/\s*\\bnavigation failed/, 'recoverable 404/navigation misses must not be treated as domain bot blocks')
@@ -1385,8 +1355,8 @@ async function assertSourceContracts() {
   assert.match(tools, /name:\s*'web_search'[\s\S]*Discover candidate webpages/, 'research runtime must expose ordinary web_search for source discovery')
   assert.match(agentLoop, /Use targeted web_search for the next missing evidence gap/, 'compact research turns must ask for targeted web_search before source reads')
   assert.doesNotMatch(agentLoop, /researchStepAllowsSourceSweep|researchStepAllowsPlainWebSearch/, 'research tool pruning must not gate normal web_search behind source_sweep state')
-  assert.doesNotMatch(agentConfig, /research:\s*\[[\s\S]*'source_sweep'/, 'source_sweep must not be available in active research phase tools')
-  assert.match(agentConfig, /research:\s*\[[\s\S]*'web_search'[\s\S]*'read_document'/, 'active research phase tools must include web_search and read_document')
+  assert.doesNotMatch(agentConfig, /PHASE_TOOL_FILTER|research:\s*\[[\s\S]*'web_search'/, 'configuration must not define phase-specific tool permission lists')
+  assert.doesNotMatch(toolRegistry, /PHASE_TOOL_FILTER|phaseFilter/, 'the active registry must not remove tools according to a planner phase label')
   assert.match(toolPipeline, /Used cached HTTP result[\s\S]*this\.memory\?\.extractFromBrowse\(url, body/, 'cached http_request hits must preserve response bodies in working memory')
   assert.match(toolPipeline, /tc\.name === 'http_request'[\s\S]*recordHttpRequestEvidence\(args, result, state, false\)[\s\S]*recordResearchActivity/, 'fresh http_request results must update evidence tracking before the next model turn')
   assert.match(toolPipeline, /recordHttpRequestEvidence[\s\S]*trackVisitedSourceDomain[\s\S]*recordWorkLedgerSource/, 'http_request evidence should be tracked as a source, not just raw tool output')
@@ -1435,7 +1405,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /function hasFailureLimitedResearchEvidence[\s\S]*state\.stepFailureCount < 2[\s\S]*calls < Math\.max\(4,[\s\S]*reportResearchNeedsSources/, 'blocked source reads should let a worked research phase move only after enough searches and source candidates')
   assert.match(agentState, /state\.stepFailureCount = 0/, 'step advancement must reset per-phase failure counts so blocked sources do not poison later phases')
   assert.doesNotMatch(policyEngine, /state\.stepLoopDetections = 1/, 'research loop recovery must not reset the per-step loop escalation and spin indefinitely')
-  assert.match(agentLoop, /loopRecoveryToolForState[\s\S]*suppressed === 'web_search'[\s\S]*read_document[\s\S]*browser_navigate[\s\S]*return narrowed/, 'research loop recovery must expose alternate source-opening routes instead of boxing the agent into the same slow pattern')
+  assert.doesNotMatch(agentLoop, /loopRecoveryToolForState[\s\S]*return narrowed/, 'loop recovery must recommend alternate source routes without narrowing the complete healthy tool set')
   assert.match(policyEngine, /A short phase can complete before the ordinary three-action window opens[\s\S]*needsPhaseNarrationBeforeAdvance/, 'research phase transitions must close a short phase with one genuine model-authored update')
   assert.match(policyEngine, /repeatedIncompleteResearchNoTool[\s\S]*shouldAdvanceResearchAtBudgetBoundary\(state,\s*researchDepth\)[\s\S]*Advanced from repeated text-only research/, 'repeated text-only research must advance with recorded evidence gaps once the phase has enough evidence')
   assert.match(agentConfig, /MIN_RESEARCH_CALLS_BY_COMPLEXITY = \{ 1: 4, 2: 10, 3: 18 \}/, 'research evidence thresholds must stay above shallow three-action phases while keeping quick tasks light')
@@ -1444,9 +1414,7 @@ async function assertSourceContracts() {
   assert.match(policyEngine, /profile\.label === 'wide' \? 9 : profile\.label === 'deep' \? 7 : 4/, 'research saturation must not let deep phases shortcut after a shallow floor')
   assert.match(goalTracker, /shallow search snippets can tick off the plan/, 'goal completion must require opened source evidence for complex research phases')
   assert.match(policyEngine, /Build a real evidence packet inside this phase/, 'phase guidance must push more work inside each phase instead of adding more phases')
-  assert.match(toolPipeline, /topicFamiliesFor/, 'phase semantic guard must detect future-topic family drift')
-  assert.match(toolPipeline, /ARTIFACT_MUTATION_TOOLS[\s\S]*activeStepAuthorizesArtifactMutation[\s\S]*phaseSemanticBlockReason/, 'phase safety must distinguish active authoring from later verification vocabulary')
-  assert.match(toolPipeline, /ARTIFACT_MUTATION_TOOLS\.has\(toolName\) && activeStepAuthorizesArtifactMutation\(state\)/, 'an explicitly authoring plan phase must allow its requested file mutation')
+  assert.doesNotMatch(toolPipeline, /topicFamiliesFor|ARTIFACT_MUTATION_TOOLS|activeStepAuthorizesArtifactMutation|phaseSemanticBlockReason/, 'topic and phase heuristics must not become execution-time tool permission rules')
   assert.match(agentConfig, /MIN_ITERATION_DELAY_MS = 0/, 'agent loop should not add a sluggish fixed inter-iteration delay')
   assert.match(agentConfig, /PLAN_STARTUP_DELAY_MS = 0/, 'planner startup should not wait before requesting the task plan')
   assert.match(agentConfig, /iterationTimeoutMs:\s*IS_OLLAMA \? 600_000 : 60_000/, 'normal model turns must tolerate medium reasoning while remaining bounded')
@@ -1525,17 +1493,12 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /compactResearchNeedsToolAction[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*compactResearchNeedsTool[\s\S]*shouldRequireToolCall/, 'compact research turns must keep using tools until the fast evidence floor is met')
   assert.match(agentLoop, /compactResearchPhaseCanAdvance[\s\S]*compactResearchEvidenceComplete\(state\)[\s\S]*PHASE EVIDENCE READY[\s\S]*Do not call tools, output only <next_step\/>/, 'compact research must close a phase with visible narration once the evidence floor is met instead of offering extra research tools')
   assert.match(agentLoop, /\(lastToolResults\.length === 0 \|\| state\.stepResearchCallCount === 0\)[\s\S]*compactResearchNeedsToolAction\(state\)/, 'compact research recovery must ignore stale prior-phase tool results when the current phase has zero research calls')
-  assert.match(agentLoop, /needsOpenedSourceRoute[\s\S]*compactResearchNeedsOpenedSource\(state\)[\s\S]*state\.suppressedResearchToolName === 'read_document'[\s\S]*allowed\.delete\('browser_navigate'\)/, 'compact research recovery must keep browser navigation available when the next required move is opening a source')
+  assert.match(agentLoop, /compactResearchNeedsOpenedSource\(state\)[\s\S]*SOURCE OPENING RECOMMENDATION/, 'compact research recovery must explain the evidence preference without editing tool availability')
   assert.match(agentState, /suppressedResearchToolName: string \| null/, 'agent state must track a temporarily suppressed research tool after loop detection')
   assert.match(agentState, /rawTool/, 'loop detection must expose the canonical internal tool name separately from the display label')
   assert.doesNotMatch(policyEngine, /sameTargetSourceReadLoop[\s\S]*state\.suppressedResearchToolName = sameTargetSourceReadLoop/, 'same-source read loops must not bypass research tool suppression and keep rereading the same source')
   assert.match(policyEngine, /state\.suppressedResearchToolName = loopCheck\.rawTool \|\| loopCheck\.tool/, 'research loop detection must suppress the canonical internal tool name, including same-source read_document loops')
-  assert.match(agentLoop, /state\.suppressedResearchToolName[\s\S]*!compactResearchEvidenceComplete\(state\)[\s\S]*activeTools = filtered\.length > 0[\s\S]*loopRecoveryToolForState\(state,\s*filtered\)[\s\S]*:\s*\[\]/, 'compact research recovery must remove the repeated tool and keep the model on a different evidence route while the evidence floor is still incomplete')
-  assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*state\.suppressedResearchToolName === 'read_document'[\s\S]*new Set\(COMPACT_RESEARCH_SOURCE_RUNTIME_TOOLS\)[\s\S]*allowed\.delete\(state\.suppressedResearchToolName\)/, 'opened-source narrowing must widen to alternate source routes when read_document is the looped tool')
-  assert.match(agentLoop, /!needsAlternateSourceRoute[\s\S]*hasSearchCandidatesAwaitingOpen[\s\S]*allowed\.delete\('web_search'\)/, 'known candidate URLs must not hide web_search after a cached or failed source route needs alternate discovery')
-  assert.match(agentLoop, /SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD\s*=\s*6/, 'source-opening loops must have a bounded escape threshold instead of alternating forever')
-  assert.match(agentLoop, /state\.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD[\s\S]*allowed\.clear\(\)[\s\S]*allowed\.add\('web_search'\)/, 'deep source-opening loops must force a materially different search route')
-  assert.match(agentLoop, /state\.stepLoopDetections >= SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD[\s\S]*searchOnly = tools\.filter/, 'loop recovery must stop offering alternate open/read routes after repeated source cycling')
+  assert.doesNotMatch(agentLoop, /activeTools = filtered\.length > 0[\s\S]*loopRecoveryToolForState|compactResearchOpenedSourceToolsForState|SOURCE_LOOP_WEB_SEARCH_ESCAPE_THRESHOLD|allowed\.delete\(state\.suppressedResearchToolName\)/, 'loop detection may guide a different route but must not remove healthy tools from the model menu')
   assert.doesNotMatch(agentLoop, /read_document is temporarily suppressed[\s\S]*Do not call web_search again while known result URLs are still unopened/, 'cached source recovery must not forbid alternate discovery after the retained candidates become unusable')
   assert.match(toolPipeline, /countVisibleToolActionForNarration[\s\S]*state\.visibleToolActionsSinceLastNarration\+\+/, 'auto-extracted source clusters must advance the visible-action narration frontier')
   assert.match(agentLoop, /const cadenceVisibleActionFrontier = state\.visibleToolActionsSinceLastNarration[\s\S]*const cadenceNarrationInMainTurn =/, 'completed action clusters must arm narration on the following native action turn')
@@ -1570,14 +1533,14 @@ async function assertSourceContracts() {
   assert.match(agentState, /exactExtractionGuardPending/, 'state must track when exact extraction must happen before narration')
   assert.match(agentLoop, /EXACT EXTRACTION REQUIRED BEFORE NARRATION/, 'exact wording/date extraction risk must be handled before progress narration')
   assert.match(agentLoop, /function shouldUseNaturalCadenceNarration[\s\S]*state\.exactExtractionGuardPending\) return false/, 'exact extraction guard must be evaluated before compact cadence narration')
-  assert.match(agentLoop, /EXACT_EXTRACTION_TOOLS[\s\S]*?browser_find_text[\s\S]*?browser_screenshot[\s\S]*?browser_get_content/, 'exact extraction guard must restrict the model to visual/text extraction tools')
+  assert.match(agentLoop, /EXACT_EXTRACTION_TOOLS[\s\S]*?browser_find_text[\s\S]*?browser_screenshot[\s\S]*?browser_get_content/, 'exact extraction guard must recognize successful visual/text confirmation routes without restricting the model menu')
   assert.match(agentLoop, /state\.exactExtractionGuardPending[\s\S]*let requiredToolIntent = shouldRequireToolCall/, 'exact extraction and cadence turns must keep a concrete extraction tool intent')
   assert.match(agentLoop, /requiredToolIntent = requiredToolIntent && activeTools\.length > 0/, 'final tool narrowing must not leave provider-required tool choice enabled with an empty menu')
   assert.match(agentLoop, /compactResearchNeedsOpenedSource[\s\S]*stepFailedSourceTargets\.size >= 2[\s\S]*return false/, 'two distinct source failures must remove the stale source-opening-only prompt before discovery reopens')
   assert.match(agentLoop, /fastActionTurn = fastActionTurn && activeTools\.length > 0[\s\S]*fastSourceActionTurn = fastSourceActionTurn && activeTools\.length > 0/, 'empty final tool menus must disable hot-path tool-only prompts and request limits')
   assert.match(agentLoop, /state\.exactExtractionGuardPending = true[\s\S]*state\.exactExtractionGuardPrompt =/, 'arming exact extraction must retain a concrete guard that suppresses narration until evidence is extracted')
-  assert.match(agentLoop, /const requestedToolChoice =[\s\S]*: 'required'[\s\S]*tool_choice: requestedToolChoice/, 'provider-forced tool choice should remain available only when the active provider supports it')
-  assert.match(agentLoop, /isLeanFinalSynthesisStep\(state\)[\s\S]*activeTools = toolRegistry\.getActiveDefinitions\(state\)/, 'final synthesis must retain the model-selected tool set for missing evidence, multiple actions, and multiple artifacts')
+  assert.match(agentLoop, /const useRequiredToolCall =[\s\S]*supportsProviderRequiredToolChoice\(model\)[\s\S]*const requestedToolChoice = useRequiredToolCall[\s\S]*tool_choice: requestedToolChoice/, 'provider-required action selection must request a tool generically rather than naming one for the model')
+  assert.match(agentLoop, /intentionalTextOnlyTurn[\s\S]*activeTools = toolRegistry\.getActiveDefinitions\(state\)/, 'ordinary final synthesis and action turns must retain the complete healthy registry')
   assert.match(agentLoop, /function shouldUseTextSavedFinalDeliverable[\s\S]*Never manufacture a filename from a plan title or local fallback[\s\S]*return false/, 'saved reports must not enter a runtime-named text fallback path')
   assert.doesNotMatch(agentLoop, /function (?:textSavedDeliverableTarget|autosaveDraftPath|slugifyDraftName)/, 'the runtime must not manufacture report filenames from plan titles or generic fallbacks')
   assert.match(agentLoop, /Choose a concise topic-specific report filename[\s\S]*Never copy the plan-step title[\s\S]*never use output\.md, report\.md, draft\.md/, 'the model must author a topic-specific report filename in its native file call')
@@ -1594,11 +1557,11 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /function compactResearchNeedsOpenedSource[\s\S]*uniqueSearches >= 1[\s\S]*openedPages < usefulOpenedPages/, 'compact research must force a source read after one useful search packet')
   assert.match(agentLoop, /deep\|deeper\|deepest[\s\S]*return false[\s\S]*const brief = /, 'deep research with a concise final answer must not use the shallow brief-inline shortcut')
   assert.match(policyEngine, /function isBriefInlineResearchRequest[\s\S]*analyzeTaskIntent[\s\S]*!intent\.wantsDeep[\s\S]*intent\.wantsQuick \|\| intent\.wantsInlineAnswer[\s\S]*!intent\.requiresSavedArtifact/, 'policy brief-inline detection must use shared user intent and must not downgrade deep research because the final answer should be concise')
-  assert.match(agentLoop, /SOURCE OPENING REQUIRED[\s\S]*Do not call web_search again[\s\S]*parallel batch of up to 2 read_document\/http_request calls/, 'source-saturated compact research turns must retain a fast source pair without consuming the narration boundary')
-  assert.match(agentLoop, /function hasRenderedBrowserContext[\s\S]*lastBrowserStateHash[\s\S]*signature !== '\|\|0'[\s\S]*!signature\.startsWith\('about:blank\|'\)/, 'extracted/read source URLs and about:blank must not count as an open rendered browser page')
+  assert.match(agentLoop, /SOURCE OPENING RECOMMENDATION[\s\S]*Opening or extracting the strongest surfaced URLs[\s\S]*full healthy tool set/, 'source-saturated compact research turns must recommend opening sources without forcing a route')
+  assert.doesNotMatch(agentLoop, /function hasRenderedBrowserContext/, 'rendered browser state must not be used as a prerequisite for exposing browser content tools')
   assert.match(agentLoop, /const multiSourcePacket[\s\S]*stepResearchCallCount >= 4[\s\S]*stepToolCallCount >= 6[\s\S]*stepVisitedUrls\.size >= 1[\s\S]*stepSourceDomainCounts\.size >= 2[\s\S]*stepFailureCount >= 1/, 'ordinary research must advance at the paid retry boundary when one authoritative page survives a broad mixed source packet')
   assert.match(agentLoop, /const hasPriorOpenedEvidence[\s\S]*currentStepIdx > 0[\s\S]*visitedUrls\.size > state\.stepVisitedUrls\.size[\s\S]*stepResearchCallCount >= 1[\s\S]*stepToolCallCount >= 2[\s\S]*stepSourceDomainCounts\.size >= 2/, 'later ordinary research phases must preserve prior opened evidence after a bounded current multi-domain packet')
-  assert.match(agentLoop, /compactResearchOpenedSourceToolsForState[\s\S]*new Set\(SOURCE_OPENING_RUNTIME_TOOLS\)[\s\S]*!hasRenderedBrowserContext\(state\)[\s\S]*allowed\.delete\('browser_get_content'\)/, 'source-saturated compact research turns must prefer extraction tools and only expose browser content after a real browser page exists')
+  assert.doesNotMatch(agentLoop, /compactResearchOpenedSourceToolsForState|SOURCE_OPENING_RUNTIME_TOOLS|allowed\.delete\('browser_get_content'\)/, 'source-saturated compact research turns must not hide browser, extraction, search, terminal, or file tools')
   assert.doesNotMatch(agentLoop, /function researchStepAllowsSourceSweep/, 'research phases should not use the broad source_sweep path')
   assert.doesNotMatch(tools, /source_sweep/, 'source_sweep must not be exposed in the model-visible tool schema')
   assert.doesNotMatch(toolRegistry, /source_sweep/, 'source_sweep must not have a registered executor')
@@ -1629,7 +1592,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /rejectedUnsavedFinalDeliverableDraft[\s\S]*finalSavedDeliverableTurn[\s\S]*Held back an unsaved final-deliverable draft/, 'unsaved final-file prose must stay hidden instead of repeating in chat before the model retries its file call')
   assert.match(outputVerifier, /bulletItems >= 3[\s\S]*savedMarkdownReport && !conciseStructuredDeliverable/, 'complete concise heading-and-bullet deliverables must bypass long-report-only structure requirements')
   assert.match(agentLoop, /FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000[\s\S]*maxModelStartAttempts = state\.finalDeliverableHandoffPending[\s\S]*\? 1/, 'personalized final handoffs must stay bounded instead of multiplying provider retries')
-  assert.match(agentLoop, /partialFileContinuationNeedsTool[\s\S]*activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'append_file'\)/, 'partial file recovery must narrow the model to append_file only')
+  assert.doesNotMatch(agentLoop, /partialFileContinuationNeedsTool[\s\S]*activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'append_file'\)/, 'partial file recovery must guide append continuation without hiding unrelated healthy tools')
   assert.match(toolPipeline, /function repairRequiredFileContinuationArgs[\s\S]*pendingPartial[\s\S]*args\.path = pendingPartial\.path/, 'partial file recovery must repair missing or wrong append_file paths instead of burning turns')
   assert.match(policyEngine, /partialFileWriteRecoveryPending[\s\S]*loopCheck\.rawTool === 'append_file'[\s\S]*return null/, 'generic loop recovery must not fight required append_file continuation chunks')
   assert.match(agentLoop, /finalSavedDeliverableNeedsTool[\s\S]*partialFileContinuationNeedsTool[\s\S]*!hasSavedFinalDeliverableCandidate\(state\)[\s\S]*requiredToolIntent/, 'saved final deliverables and partial continuation actions must keep a file-tool intent until a final file exists')
@@ -1645,29 +1608,26 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /function existingFinalDeliverablePath[\s\S]*pendingFinalDeliverableRevisionPath\(state\) \|\| latestSavedFinalDeliverablePath\(state\)/, 'final deliverable revisions must target the already-saved file path')
   assert.match(agentLoop, /FINAL SAVED DELIVERABLE REVISION TOOL CALL ONLY[\s\S]*Do not call create_file/, 'existing saved deliverables must not offer create_file in compact revision prompts')
   assert.match(agentLoop, /const finalSavedDeliverableRevisionNeedsTool[\s\S]*existingFinalDeliverablePath\(state\)[\s\S]*!state\.deliverableVerificationDone[\s\S]*finalSavedDeliverableNeedsTool/, 'verification failures on existing saved deliverables must still force a file-tool turn')
-  assert.match(agentLoop, /const allowedRevisionTools = finalDeliverableRevisionToolNames\(state, this\.options\.messages\)[\s\S]*Narrowed tools for final saved deliverable revision/, 'final saved deliverable revisions must narrow tools before the model can choose create_file again')
+  assert.doesNotMatch(agentLoop, /allowedRevisionTools|Narrowed tools for final saved deliverable revision/, 'final saved deliverable revisions must use instructions and file-integrity preflight without hiding unrelated healthy tools')
   assert.doesNotMatch(agentLoop, /const allowedFinalTools = existingFinalPath/, 'ordinary final phases must not use a static file-only allowlist')
   assert.match(agentLoop, /function finalSavedDeliverableToolCallInstruction[\s\S]*Make exactly one native file tool call now/, 'saved final deliverable recovery must stay in the file-tool lane')
   assert.match(agentLoop, /if \(finalSavedDeliverableTurn\(state,\s*this\.options\.messages\)\) \{[\s\S]*state\.forceTextNextIteration = false[\s\S]*finalSavedDeliverableToolCallInstruction/, 'final saved deliverable tool repair must not accidentally enter narration-only mode')
   assert.match(agentLoop, /Reissued final saved deliverable file-tool instruction after model-start timeout/, 'final saved deliverables must not route model-start timeouts through generic progress narration')
   assert.match(agentLoop, /FINAL SAVED DELIVERABLE TIME CHECK[\s\S]*final output turn stalled before saving the deliverable/, 'mid-stream final saved deliverable stalls must reissue a file-tool instruction')
-  assert.match(agentLoop, /activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'create_file'\)[\s\S]*Narrowed tools for initial final saved deliverable/, 'initial final saved deliverables must expose only create_file when no final file exists yet')
+  assert.doesNotMatch(agentLoop, /Narrowed tools for initial final saved deliverable|activeTools = activeTools\.filter\(tool => tool\.function\?\.name === 'create_file'\)/, 'initial final saved deliverables must strongly request a file write without replacing the healthy tool menu')
   assert.match(agentLoop, /toolCallsNeedStartupReady\(lastStreamResult\.toolCalls\)/, 'source actions must not wait for sandbox startup when they do not need it')
   assert.match(toolPipeline, /state\.partialFileWriteRecoveryPending[\s\S]*FILE_WRITE_TOOLS\.has\(toolName\)[\s\S]*toolName === 'append_file' && requestedPath === pending\.path[\s\S]*INTERNAL_RECOVERY/, 'partial file recovery preflight must block recreate/wrong-path writes before visible tool_start')
   assert.match(tools, /Create a workspace file\. Emit action_label, plan_step_index, and path before beginning content so the task stream and live file viewer open before writing starts\./, 'create_file schema must bias providers toward path-first live file writes')
   assert.match(agentLoop, /Math\.min\(0\.35,\s*state\.strategyConfig\?\.temperature \?\? strategy\.temperature\)/, 'final chat-answer turns should use a calmer temperature to avoid status chatter')
   assert.match(agentLoop, /const requestReasoning = useCompactNarration[\s\S]*PRESENTATION_REASONING[\s\S]*isFinalInlineAnswerTurn[\s\S]*DEEP_TASK_REASONING[\s\S]*fastActionTurn[\s\S]*FAST_ACTION_REASONING[\s\S]*TASK_REASONING/, 'every turn class must resolve to the globally minimal reasoning configuration')
   assert.match(agentLoop, /!hasSavedFinalDeliverable && state\.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES[\s\S]*The final file write took too long to start/, 'nudgeable final saved deliverable timeouts must error instead of resetting forever when no file exists')
-  assert.match(agentLoop, /FINAL_OPTIONAL_RUNTIME_TOOLS/, 'final steps should not pay for optional image/browser/PDF/delete schemas unless relevant')
-  assert.match(agentLoop, /finalStepAllowsOptionalTool/, 'final optional tools must be restored when task intent or QA state requires them')
-  assert.match(agentLoop, /const finalWantsPdf = taskWantsPdfArtifact/, 'lean final synthesis should expose export_pdf only when PDF/export is requested')
-  assert.match(agentLoop, /\.\.\.\(finalWantsPdf \? \['export_pdf'\] : \[\]\)/, 'export_pdf should be conditional in lean final synthesis')
+  assert.doesNotMatch(agentLoop, /FINAL_OPTIONAL_RUNTIME_TOOLS|finalStepAllowsOptionalTool|const finalWantsPdf|\.\.\.\(finalWantsPdf \? \['export_pdf'\] : \[\]\)/, 'final phases must retain optional healthy tools and rely on model judgment')
   assert.doesNotMatch(agentLoop, /state\.visibleToolActionsSinceLastNarration >= 3[\s\S]{0,120}state\.forceTextNextIteration = true/, 'the loop must not use the old forced-narration repair flag for ordinary cadence turns')
   assert.doesNotMatch(toolPipeline, /validSameTurnNarration|The 3-action window is a hard gate|this visible tool call was skipped because 3 visible actions/, 'visible tool preflight must not block actions on narration generation')
   assert.match(toolPipeline, /function isRequiredSavedDeliverableWrite[\s\S]*pendingDeliverableRevision[\s\S]*partialFileWriteRecoveryPending[\s\S]*isRequiredSavedDeliverableWrite\(tc\.name,\s*args,\s*state\)/, 'required final report repair writes must bypass narration cadence instead of stalling after verification failure')
   assert.match(agentLoop, /withCadenceProgressUpdateSchemas\([\s\S]*effectiveCadenceNarrationInMainTurn/, 'LLM narration must share the ordinary provider-compatible tool request')
   assert.match(toolPipeline, /countVisibleToolActionForNarration[\s\S]*state\.visibleToolActionsSinceLastNarration\+\+/, 'visible tool starts must advance narration cadence without gating later actions')
-  assert.match(toolPipeline, /directNavigationBeforeSearchTarget[\s\S]*?superseded:\s*true[\s\S]*?return preflightResult\(errorMessage,\s*true,\s*'direct_navigation_required'\)/, 'explicit URL search corrections must classify and supersede any provisional search activity')
+  assert.doesNotMatch(toolPipeline, /direct_navigation_required|directNavigationBeforeSearchTarget/, 'explicit URL guidance must not supersede a model-selected search action')
   assert.match(eventDispatcher, /isSupersededToolResult\(event\.result\)[\s\S]*?removeHiddenTool\(event\.id\)/, 'superseded provisional search activity must be removed instead of appearing as completed work')
   assert.match(eventDispatcher, /Never insert it between completed/, 'client must attach late narration recovery at the current frontier instead of inserting it between completed tools')
   assert.match(eventDispatcher, /discardNarrationBuffer/, 'client must drop early narration buffers instead of carrying them into later tool gaps')
@@ -2193,6 +2153,79 @@ export async function runLedgerSmoke() {
     'an analytical phase covering a new subtopic must retain model freedom to gather its own evidence',
   )
 
+  const scopedResearchState = createInitialState(false, timeouts)
+  scopedResearchState.originalUserRequest = 'Research about AI'
+  scopedResearchState.taskStrategy = 'research'
+  scopedResearchState.currentPlanItems = [
+    'Map AI foundations and core branches',
+    'Synthesize findings into a structured report',
+  ]
+  scopedResearchState.currentPlanScopes = [
+    'Establish definitions, taxonomy, and evidence needed for the final structured report.',
+    'Compile the gathered evidence with sources.',
+  ]
+  scopedResearchState.strategyConfig = {
+    type: 'research',
+    temperature: 0,
+    iterationTimeoutMs: 30000,
+    narrationThreshold: 3,
+    researchBudgetMultiplier: 1,
+    deliverableBudgetFraction: 1,
+    allowParallelTools: false,
+    preferredPhaseOrder: ['research', 'deliver'],
+    stepGuidance: { research: '', deliverable: '' },
+    toolPriority: ['read_document', 'web_search', 'execute_command'],
+  }
+  scopedResearchState.currentStepIdx = 0
+  updatePhase(scopedResearchState)
+  assert.equal(
+    scopedResearchState.currentPhase,
+    'research',
+    'a non-final research action must not become delivery merely because its scope mentions the eventual report',
+  )
+  const phaseRegistry = new ToolRegistry()
+  for (const name of ['web_search', 'read_document', 'execute_command']) {
+    phaseRegistry.register({
+      name,
+      capabilities: [],
+      description: name,
+      riskLevel: 'low',
+      sideEffects: false,
+      definition: { type: 'function', function: { name } },
+    })
+  }
+  assert.deepEqual(
+    phaseRegistry.getActiveDefinitions(scopedResearchState).map(tool => tool.function.name),
+    ['read_document', 'web_search', 'execute_command'],
+    'early research modules must keep every healthy tool available while strategy controls ordering',
+  )
+  scopedResearchState.currentStepIdx = 1
+  updatePhase(scopedResearchState)
+  assert.equal(
+    scopedResearchState.currentPhase,
+    'deliver',
+    'an explicit synthesis title must still use delivery routing',
+  )
+  assert.deepEqual(
+    phaseRegistry.getActiveDefinitions(scopedResearchState).map(tool => tool.function.name),
+    ['read_document', 'web_search', 'execute_command'],
+    'changing phase must not remove tools from the model-authored action menu',
+  )
+  phaseRegistry.disable('execute_command', 'runtime unavailable')
+  assert.deepEqual(
+    phaseRegistry.getActiveDefinitions(scopedResearchState).map(tool => tool.function.name),
+    ['read_document', 'web_search'],
+    'an actually disabled runtime tool must remain unavailable',
+  )
+  phaseRegistry.enable('execute_command')
+  scopedResearchState.searchDisabled = true
+  assert.deepEqual(
+    phaseRegistry.getActiveDefinitions(scopedResearchState).map(tool => tool.function.name),
+    ['read_document', 'execute_command'],
+    'a search circuit breaker must remove only web_search while preserving every other healthy tool',
+  )
+  scopedResearchState.searchDisabled = false
+
   const deepReportDepth = researchDepthProfileForState(makeDepthState(
     'Conduct the deepest possible research on DevRev AI and produce a concise, visually rich Markdown report. Research history, founding team, funding, leadership, product evolution, AI capabilities, customer adoption, enterprise traction, financial indicators, hiring trends, partnerships, competitive position, pricing, reviews, market sentiment, technical strengths, weaknesses, risks and long term opportunities. Compare DevRev with Zendesk, Intercom, Salesforce, ServiceNow, Freshworks and Linear.',
     3,
@@ -2446,6 +2479,11 @@ export async function runLedgerSmoke() {
   assert.equal(isUsablePlannerAck('I’ll develop Warmwind’s visual identity and deliver polished brand artwork.', 'Create a logo for Warmwind.'), true)
   assert.equal(isUsablePlannerAck('I’ll create Acme’s landing page, verify responsive behaviour and deliver the finished site.', 'Design a homepage for Acme.'), true)
   assert.equal(isUsablePlannerAck('I’ll investigate the parrotlet habitat, care needs and behaviour, then deliver a sourced overview.', 'Research parrotlets.'), true)
+  assert.equal(
+    isUsablePlannerAck('I’ll research gözleme’s origins, regional forms and preparation, then deliver a sourced overview.', 'research about gozleme'),
+    true,
+    'canonical accents restored by the model must match an otherwise identical unaccented user topic',
+  )
   assert.equal(isUsablePlannerAck('I’ll inspect the auth flow, correct the broken callback and verify sign-in.', 'Fix authentication.'), true)
   assert.equal(isUsablePlannerAck('“I’ll inspect the auth flow, correct the broken callback and verify sign-in.”', 'Fix authentication.'), true)
   const recoveredAckEvents: string[] = []
@@ -3084,8 +3122,8 @@ export async function runLedgerSmoke() {
       plan_step_index: 1,
     }),
   }]]), researchDetourState)
-  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 0, 'research artifact read_file detour must be blocked before visible tool_start')
-  assert.match(JSON.stringify(detourReadResults[0]?.result || {}), /live research phase/)
+  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 1, 'research phases must allow the model-selected read_file action to execute visibly')
+  assert.doesNotMatch(JSON.stringify(detourReadResults[0]?.result || {}), /live research phase|phase owns/, 'read_file must not be rejected solely by inferred research phase ownership')
 
   const detourWriteResults = await researchDetourPipeline.executeAll(new Map([[0, {
     id: 'detour-create-file',
@@ -3097,8 +3135,8 @@ export async function runLedgerSmoke() {
       plan_step_index: 1,
     }),
   }]]), researchDetourState)
-  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 0, 'research blocker-note create_file detour must be blocked before visible tool_start')
-  assert.match(JSON.stringify(detourWriteResults[0]?.result || {}), /Do not create\\/read research notes/)
+  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 2, 'research phases must leave create_file available for a model-authored support artifact')
+  assert.doesNotMatch(JSON.stringify(detourWriteResults[0]?.result || {}), /Do not create\\/read research notes|live research phase/, 'create_file must not be rejected solely by research routing heuristics')
 
   researchDetourState.stepResearchCallCount = 2
   const prematureReportResults = await researchDetourPipeline.executeAll(new Map([[0, {
@@ -3111,8 +3149,8 @@ export async function runLedgerSmoke() {
       plan_step_index: 1,
     }),
   }]]), researchDetourState)
-  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 0, 'a user-facing Markdown report must be blocked before visible tool_start during an earlier research phase')
-  assert.match(JSON.stringify(prematureReportResults[0]?.result || {}), /final synthesis phase owns the report/)
+  assert.equal(researchDetourEvents.filter((event) => event.type === 'tool_start').length, 3, 'an earlier research phase must not hide or preflight-block a model-selected report write')
+  assert.doesNotMatch(JSON.stringify(prematureReportResults[0]?.result || {}), /final synthesis phase owns the report|live research phase/, 'report writes must be governed by model judgment rather than inferred phase ownership')
 
   const searchBalanceEvents: Array<{ type: string; name?: string; result?: unknown }> = []
   const searchBalanceEmitter = {
@@ -3159,8 +3197,8 @@ export async function runLedgerSmoke() {
       plan_step_index: 1,
     }),
   }]]), searchBalanceState)
-  assert.equal(searchBalanceEvents.filter((event) => event.type === 'tool_start').length, 0, 'search-only research chains must be blocked before visible tool_start')
-  assert.match(JSON.stringify(searchBalanceResults[0]?.result || {}), /no opened or extracted source pages yet/)
+  assert.equal(searchBalanceEvents.filter((event) => event.type === 'tool_start').length, 1, 'source-balance guidance must not preflight-block a model-selected additional search')
+  assert.doesNotMatch(JSON.stringify(searchBalanceResults[0]?.result || {}), /no opened or extracted source pages yet/, 'source balance must remain advisory rather than an execution rejection')
 
   const malformedSearchEvents: Array<{ type: string; name?: string; result?: unknown }> = []
   const malformedSearchEmitter = {

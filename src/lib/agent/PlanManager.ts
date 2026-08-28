@@ -65,7 +65,10 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-const PLANNER_ACK_MAX_TOKENS = 96
+// Gemini uses hidden reasoning at the pinned minimal effort. Leave enough room
+// for that reasoning plus the short visible paragraph when an otherwise valid
+// planner acknowledgement needs a model-authored repair.
+const PLANNER_ACK_MAX_TOKENS = 256
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
@@ -80,8 +83,7 @@ const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
 const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-// Contributor reasoning is mandatory. Keep both planning and acknowledgement
-// turns at its minimum supported effort.
+// Keep both planning and acknowledgement turns at the minimum requested effort.
 const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
@@ -434,7 +436,15 @@ function containsPromptInstructionLeak(text: string): boolean {
 }
 
 function normalizedPlanPhrase(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  // Users often omit diacritics while the model restores the canonical name
+  // (for example, "gozleme" -> "gözleme"). Compare their folded forms so a
+  // correct, task-specific acknowledgement is not rejected as unrelated.
+  return text
+    .normalize('NFKD')
+    .replace(/\p{M}+/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
 }
 
 export function isPlannerInventedMetaProcessTitle(title: string, request = ''): boolean {

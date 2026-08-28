@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { createJiti } from 'jiti'
 
 const root = process.cwd()
+const jiti = createJiti(import.meta.url)
+const { isBrowseResultPending } = await jiti.import(
+  join(root, 'src/components/computer/browseLoadingState.ts'),
+)
 
-const [browse, readablePageLimits, documentReader, browserRuntime, panelMapper, dispatcher, browseView, deferredEmptyState, conversationSerialization] = await Promise.all([
+const [browse, readablePageLimits, documentReader, browserRuntime, panelMapper, dispatcher, browseView, deferredEmptyState, conversationSerialization, computerPanel, browseLoadingState] = await Promise.all([
   readFile(join(root, 'src/lib/browse.ts'), 'utf8'),
   readFile(join(root, 'src/lib/readablePageLimits.ts'), 'utf8'),
   readFile(join(root, 'src/lib/document.ts'), 'utf8'),
@@ -14,6 +19,8 @@ const [browse, readablePageLimits, documentReader, browserRuntime, panelMapper, 
   readFile(join(root, 'src/components/computer/BrowseView.tsx'), 'utf8'),
   readFile(join(root, 'src/components/computer/useDeferredEmptyState.ts'), 'utf8'),
   readFile(join(root, 'src/lib/conversationSerialization.ts'), 'utf8'),
+  readFile(join(root, 'src/components/computer/ComputerPanel.tsx'), 'utf8'),
+  readFile(join(root, 'src/components/computer/browseLoadingState.ts'), 'utf8'),
 ])
 
 assert.match(
@@ -140,6 +147,102 @@ assert.match(
   panelMapper,
   /content: internalRecovery \? '' : content,/,
   'empty extracted-page results must remain empty until BrowseView finishes its loading hand-off',
+)
+
+assert.match(
+  browseLoadingState,
+  /isInFlightBrowsePlaceholder[\s\S]*Reading document[\s\S]*Fetching/,
+  'task-level reconciliation must recognize only explicit in-flight extraction placeholders',
+)
+
+assert.match(
+  computerPanel,
+  /isBrowseResultPending\(\{[\s\S]*taskStreaming,[\s\S]*activeItemId:[\s\S]*latestItemId:/,
+  'the Computer panel must derive extraction loading from both item and task lifecycle state',
+)
+
+assert.match(
+  computerPanel,
+  /<BrowseView key=\{activeItem\.id\}[^>]*streaming=\{activeBrowsePending\}/,
+  'each extracted page must receive the task-aware pending state with isolated hook state',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: true,
+    itemEmpty: true,
+    itemTitle: 'Reading document...',
+    taskStreaming: false,
+    activeItemId: 'read-1',
+    latestItemId: 'read-1',
+  }),
+  true,
+  'an explicitly streaming extraction must render its loading skeleton',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: false,
+    itemEmpty: true,
+    itemTitle: 'Reading document...',
+    taskStreaming: true,
+    activeItemId: 'read-1',
+    latestItemId: 'read-1',
+  }),
+  true,
+  'the newest extraction placeholder must remain loading after persistence strips its transient flag',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: false,
+    itemEmpty: true,
+    itemTitle: 'Fetching example.com...',
+    taskStreaming: true,
+    activeItemId: 'http-1',
+    latestItemId: 'http-1',
+  }),
+  true,
+  'HTTP extraction placeholders must use the same reconciliation-safe loading lifecycle',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: false,
+    itemEmpty: true,
+    itemTitle: 'Document Content',
+    taskStreaming: true,
+    activeItemId: 'read-1',
+    latestItemId: 'read-1',
+  }),
+  false,
+  'a completed empty extraction must render its truthful final state instead of loading forever',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: false,
+    itemEmpty: true,
+    itemTitle: 'Reading document...',
+    taskStreaming: true,
+    activeItemId: 'read-1',
+    latestItemId: 'read-2',
+  }),
+  false,
+  'a historical extraction placeholder must not impersonate the newest live action',
+)
+
+assert.equal(
+  isBrowseResultPending({
+    itemStreaming: false,
+    itemEmpty: true,
+    itemTitle: 'Reading document...',
+    taskStreaming: false,
+    activeItemId: 'read-1',
+    latestItemId: 'read-1',
+  }),
+  false,
+  'a terminal extraction placeholder must not remain stuck in loading state',
 )
 
 console.log('Extracted page panel smoke passed')

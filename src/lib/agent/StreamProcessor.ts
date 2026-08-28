@@ -11,7 +11,6 @@ import {
   reviewProgressNarration,
   stripCadenceProgressUpdateFromArguments,
 } from './NarrationMemory'
-import { researchSourceBalanceBlockReason } from './ResearchPreflightRecovery'
 
 export interface ToolCallData {
   id: string
@@ -422,9 +421,7 @@ function searchWouldBePreflightBlocked(toolName: string, args: Record<string, un
   if (state.taskStrategy === 'browse' || state.taskStrategy === 'build' || state.taskStrategy === 'code') return false
 
   const query = typeof args.query === 'string' ? args.query.toLowerCase().trim() : ''
-  if (query && state.stepSearchQueries.has(query)) return true
-
-  return researchSourceBalanceBlockReason(toolName, state) !== null
+  return !!query && state.stepSearchQueries.has(query)
 }
 
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {

@@ -30,7 +30,6 @@ import {
   satisfyWorkLedgerRequirement,
   currentStepText,
   isConcreteBuildStep,
-  isResearchStepText,
 } from './AgentState'
 import { inferArtifactType, tryEncodeImageBase64, IMAGE_EXTENSIONS } from './guards'
 import type { ToolCallData } from './StreamProcessor'
@@ -109,11 +108,7 @@ import {
   type ResearchActivityEntry,
   type ResearchActivityKind,
 } from './ResearchActivityLog'
-import {
-  applyResearchPreflightRouteRecovery,
-  releaseSearchAfterDistinctSourceFailures,
-  researchSourceBalanceBlockReason,
-} from './ResearchPreflightRecovery'
+import { releaseSearchAfterDistinctSourceFailures } from './ResearchPreflightRecovery'
 
 export interface ToolExecutionResult {
   tc: ToolCallData
@@ -165,8 +160,6 @@ const MAX_PARALLEL_SOURCE_EXTRACTIONS = 3
 
 const FILE_WRITE_TOOLS = new Set(['create_file', 'create_website', 'edit_file', 'append_file', 'export_pdf', 'package_files'])
 const MAX_ORDINARY_REPORT_APPENDS = 2
-
-const RESEARCH_FILE_DETOUR_TOOLS = new Set(['create_file', 'append_file', 'edit_file', 'read_file', 'list_files'])
 
 const BROWSER_VISION_TOOLS = new Set([
   'browse_page', 'browser_navigate', 'browser_click', 'browser_click_at', 'browser_type',
@@ -343,8 +336,7 @@ function repairRuntimeDisplayContractArgs(
   if (state.currentStepIdx === 0 && parsedStep === 0) {
     // Some providers occasionally emit the first plan phase using a zero-based
     // index. That case is unambiguous: both index systems point at the first
-    // phase. Normalize it before the strict phase-safety guard. Later values
-    // are ambiguous, so they must continue through the normal mismatch block.
+    // phase. Normalize it before the display-contract guard.
     args.plan_step_index = 1
     repairs.push('plan_step_index_zero_based_first_step')
   } else if (!Number.isInteger(parsedStep) || parsedStep !== state.currentStepIdx + 1) {
@@ -392,19 +384,6 @@ function repairRequiredFileContinuationArgs(
   return repairs
 }
 
-function isTaskTrackingMarkdownPath(filePath: string): boolean {
-  const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
-  return /^(?:todo|todos|task|tasks|plan|plans|checklist|progress|status|scratch|notes?)\.md$/.test(base)
-}
-
-function currentStepAllowsTaskTrackingMarkdown(state: AgentStateData, filePath: string): boolean {
-  const stepText = currentStepText(state)
-  const base = filePath.split(/[\\/]/).pop()?.toLowerCase() || ''
-  if (!base) return false
-  if (new RegExp(`\\b${base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(stepText)) return true
-  return /\b(?:todo\.md|to-do\.md|tracking file|task tracking|progress file|checklist\.md|plan\.md)\b/i.test(stepText)
-}
-
 function isCodeLikeFilePath(filePath: string): boolean {
   return /\.(?:[cm]?[jt]sx?|css|scss|sass|less|vue|svelte|astro|json|ya?ml|toml|xml|html?)$/i.test(filePath)
 }
@@ -429,11 +408,11 @@ function fileWritePreflightBlockReason(
     const exactTarget = requestedPath === pending.path
 
     if (!pending.inspected) {
-      if (!(toolName === 'read_file' && exactTarget)) {
+      if (FILE_WRITE_TOOLS.has(toolName) && !(toolName === 'read_file' && exactTarget)) {
         state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
-        return `INTERNAL_RECOVERY: "${pending.path}" has an unresolved file-write conflict. Inspect that exact file once with read_file before any other action. Do not call ${toolName}${requestedPath ? ` on "${requestedPath}"` : ''}, do not create a replacement, and do not continue unrelated work yet.`
+        return `INTERNAL_RECOVERY: "${pending.path}" has an unresolved file-write conflict. Inspect that exact file once with read_file before another write to it. Do not call ${toolName}${requestedPath ? ` on "${requestedPath}"` : ''} or create a replacement until its current contents are refreshed.`
       }
-    } else {
+    } else if (FILE_WRITE_TOOLS.has(toolName)) {
       const allowedRepairTools = isCodeLikeFilePath(pending.path)
         ? new Set(['edit_file'])
         : new Set(['edit_file', 'append_file'])
@@ -530,30 +509,6 @@ function fileWritePreflightBlockReason(
     }
   }
 
-  if (
-    FILE_WRITE_TOOLS.has(toolName) &&
-    isResearchPhaseStep(state) &&
-    state.currentPlanItems &&
-    state.currentPlanItems.length > 1
-  ) {
-    const rawPath = typeof args.path === 'string'
-      ? args.path
-      : typeof args.output_path === 'string'
-        ? args.output_path
-        : ''
-    const filePath = rawPath ? normalizeSandboxFilePath(rawPath) : ''
-    const phaseOwnsExplicitNotes =
-      toolName !== 'export_pdf' &&
-      !!filePath &&
-      isSupportOnlyFilePath(filePath) &&
-      currentStepExplicitlyRequestsNotes(state)
-
-    if (!phaseOwnsExplicitNotes) {
-      state.lastLoopSignal = { type: 'file_rewrite', tool: toolName }
-      return `INTERNAL_RECOVERY: The active research phase does not own a user-facing saved deliverable. Do not call ${toolName}${filePath ? ` for "${filePath}"` : ''} here. Keep gathering/analyzing evidence and advance normally; the final synthesis phase owns the report and other requested deliverables. A phase may write only explicitly requested support notes under research-notes/step-${state.currentStepIdx + 1}.md. Do not mention this correction to the user.`
-    }
-  }
-
   if (toolName === 'create_file') {
     const filePath = (args.path as string) || ''
     const isMdFile = filePath.endsWith('.md')
@@ -563,12 +518,6 @@ function fileWritePreflightBlockReason(
     const isBuildStep = hasPlan ? isConcreteBuildStep(state, stepText) : false
     console.log(`[ToolPipeline] create_file guard: path="${filePath}" isMd=${isMdFile} hasPlan=${!!hasPlan} isLastStep=${isLastStep} isBuildStep=${isBuildStep} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0} researchCalls=${state.stepResearchCallCount}`)
 
-    if (hasPlan && !isLastStep && !isBuildStep && !isMdFile) {
-      return 'BLOCKED: Saved deliverables belong to the final plan phase. Continue the active research phase without creating this file.'
-    }
-    if (hasPlan && !isLastStep && !isBuildStep && isMdFile && isTaskTrackingMarkdownPath(filePath) && !currentStepAllowsTaskTrackingMarkdown(state, filePath)) {
-      return 'BLOCKED: Do not invent task-tracking, todo, checklist, plan, progress, scratch, or generic notes files. If the user or saved custom instructions require one, it must appear in the current step title or scope; otherwise use research-notes/step-N.md for genuine phase notes after research.'
-    }
     const content = args.content as string | undefined
     if (!content || content.trim().length < 50) {
       return 'BLOCKED: File content is too short (minimum 50 characters). Write substantive content before creating a file.'
@@ -583,89 +532,6 @@ function fileWritePreflightBlockReason(
   }
 
   return null
-}
-
-function isResearchPhaseStep(state: AgentStateData): boolean {
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
-  if (state.currentStepIdx === state.currentPlanItems.length - 1) return false
-  if (state.taskStrategy === 'browse' || state.taskStrategy === 'creative') return false
-  if (state.taskStrategy === 'build' || state.taskStrategy === 'code') {
-    const stepText = state.currentPlanItems[state.currentStepIdx] || ''
-    return /\b(research|gather|find|search|source|collect|asset|image|reference|investigate)\b/i.test(stepText)
-  }
-  return state.taskStrategy === 'research' || state.currentPhase === 'research'
-}
-
-function visibleToolActionText(toolName: string, args: Record<string, unknown>): string {
-  const parts = [
-    typeof args.action_label === 'string' ? args.action_label : '',
-    typeof args.query === 'string' ? args.query : '',
-    typeof args.url === 'string' ? args.url.replace(/^https?:\/\//i, ' ').replace(/[/?#=&._-]+/g, ' ') : '',
-    typeof args.source === 'string' ? args.source.replace(/^https?:\/\//i, ' ').replace(/[/?#=&._-]+/g, ' ') : '',
-    typeof args.path === 'string' ? args.path.replace(/[/?#=&._-]+/g, ' ') : '',
-    typeof args.output_path === 'string' ? args.output_path.replace(/[/?#=&._-]+/g, ' ') : '',
-    typeof args.command === 'string' ? args.command : '',
-    toolName,
-  ]
-  return parts.filter(Boolean).join(' ')
-}
-
-function currentStepLooksLikeLiveResearch(state: AgentStateData): boolean {
-  const stepText = [
-    currentStepText(state),
-    state.currentPlanScopes?.[state.currentStepIdx] || '',
-  ].join(' ')
-
-  return isResearchStepText(stepText) ||
-    /\b(?:search(?:es)?|sources?|evidence|research|find|reported|publicly|public|web|news|controvers(?:y|ies|ial)?|investigate|verify|gather|collect|surface|claims?|audit|reviews?)\b/i.test(stepText)
-}
-
-function hasCurrentStepLiveResearchEvidence(state: AgentStateData): boolean {
-  return state.stepResearchCallCount > 0 ||
-    state.stepSearchQueries.size > 0 ||
-    state.stepVisitedUrls.size > 0 ||
-    state.stepSourceDomainCounts.size > 0
-}
-
-function looksLikeAccessBlockerOrNoteDetour(text: string): boolean {
-  return /\b(?:without live access|no live access|chat environment|tools?\s+(?:unavailable|limited|blocked)|web access(?:\s+is)?\s+(?:unavailable|blocked|limited)|blocked from doing|inability to access|access limitation|log web access|existing research (?:notes|artifacts|files)|workspace only contains|static pages?|snapshots?|research blocker|blocker note|plan step|establish .* scope)\b/i.test(text)
-}
-
-function currentStepExplicitlyRequestsNotes(state: AgentStateData): boolean {
-  const stepText = [
-    currentStepText(state),
-    state.currentPlanScopes?.[state.currentStepIdx] || '',
-  ].join(' ')
-  return /\b(?:write|save|record|create|append)\b.{0,80}\b(?:research notes?|source notes?|findings notes?|phase notes?)\b/i.test(stepText)
-}
-
-function researchFileDetourBlockReason(
-  toolName: string,
-  args: Record<string, unknown>,
-  state: AgentStateData,
-): string | null {
-  if (!RESEARCH_FILE_DETOUR_TOOLS.has(toolName)) return null
-  if (!isResearchPhaseStep(state)) return null
-  if (state.uploadedAttachmentContextAvailable) return null
-  if (!currentStepLooksLikeLiveResearch(state)) return null
-
-  const hasLiveEvidence = hasCurrentStepLiveResearchEvidence(state)
-  const actionText = visibleToolActionText(toolName, args)
-  const contentText = typeof args.content === 'string' ? args.content.slice(0, 600) : ''
-  const combinedText = `${actionText}\n${contentText}`
-
-  if (
-    hasLiveEvidence &&
-    currentStepExplicitlyRequestsNotes(state) &&
-    !looksLikeAccessBlockerOrNoteDetour(combinedText)
-  ) {
-    return null
-  }
-
-  if (hasLiveEvidence && !looksLikeAccessBlockerOrNoteDetour(combinedText)) return null
-
-  const current = currentStepText(state) || 'the active research step'
-  return `INTERNAL_RECOVERY: ${toolName} was skipped because active step ${state.currentStepIdx + 1} ("${current}") is a live research phase, and file/note work cannot substitute for source evidence. Do not create/read research notes, inspect existing artifacts, or log inability as a substitute for web research. Make a concrete source tool call now: web_search for a targeted query, up to 3 parallel read_document/http_request calls for known independent source URLs, or browser_get_content/browser_find_text for an already-open relevant page. Use browser_navigate only when rendered state or interaction is needed. Do not claim no live access or chat-environment limitations unless a concrete tool result says so.`
 }
 
 const ATTACHMENT_MATCH_STOPWORDS = new Set([
@@ -891,150 +757,6 @@ function isRequiredSavedDeliverableWrite(
   }
 
   return false
-}
-
-function topicFamiliesFor(text: string): Set<string> {
-  const families = new Set<string>()
-  const normalized = text.toLowerCase()
-  if (/\b(?:tools?|platforms?|apps?|chatgpt|gemini|claude|writing|feedback|summari[sz](?:e|ing|ation)|coding|revision|study|essay|planner|tutor)\b/.test(normalized)) {
-    families.add('tools')
-  }
-  if (/\b(?:risks?|academic integrity|honesty|cheat(?:ing)?|plagiarism|over[-\s]?reliance|skill atrophy|cognitive atrophy|misuse|harm|concerns?)\b/.test(normalized)) {
-    families.add('risk')
-  }
-  if (/\b(?:unequal access|digital divide|equity|inequity|inequality|access gap|disadvantage|low[-\s]?income|rural)\b/.test(normalized)) {
-    families.add('access')
-  }
-  if (/\b(?:policy|policies|framework|guidelines?|authority|department|school system|education authority|teacher|teachers|union|regulation|rules?)\b/.test(normalized)) {
-    families.add('policy')
-  }
-  if (/\b(?:benefits?|support|learning support|pedagogy|scaffold(?:ing)?|socratic|cognitive partner|learning partner|personal(?:i|iza)sed|improve|assist(?:ance)?)\b/.test(normalized)) {
-    families.add('benefits')
-  }
-  return families
-}
-
-function hasOnlyFutureTopicFamily(actionFamilies: Set<string>, currentFamilies: Set<string>, futureFamilies: Set<string>): boolean {
-  if (actionFamilies.size === 0 || futureFamilies.size === 0) return false
-  let overlapsFuture = false
-  for (const family of actionFamilies) {
-    if (futureFamilies.has(family)) overlapsFuture = true
-    if (currentFamilies.has(family)) return false
-  }
-  return overlapsFuture
-}
-
-const ARTIFACT_MUTATION_TOOLS = new Set([
-  'create_file',
-  'append_file',
-  'edit_file',
-  'export_pdf',
-])
-
-function activeStepAuthorizesArtifactMutation(state: AgentStateData): boolean {
-  const currentTitle = state.currentPlanItems?.[state.currentStepIdx] || ''
-  const currentScope = state.currentPlanScopes?.[state.currentStepIdx] || ''
-  return /\b(?:draft|write|author|compose|create|build|implement|develop|save|produce|generate|assemble|synthesi[sz]e|prepare|design|finali[sz]e|polish|revise|edit|export|deliver)\b/i.test(
-    `${currentTitle} ${currentScope}`,
-  )
-}
-
-function phaseSemanticBlockReason(
-  toolName: string,
-  args: Record<string, unknown>,
-  state: AgentStateData,
-): string | null {
-  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
-  if (state.taskStrategy === 'browse') return null
-  if (toolName === 'read_file' || toolName === 'list_files') return null
-  // Research queries and source reads frequently contain vocabulary shared
-  // with adjacent plan phases. Token-similarity blocking misclassified valid
-  // active-step evidence gathering as future work and could leave the model
-  // with no executable action. The model-authored plan_step_index remains the
-  // phase contract, and the runtime already normalizes it to the active step.
-  if (RESEARCH_TOOLS.has(toolName)) return null
-  // Plans often separate drafting, saving, and verifying a deliverable. A file
-  // created during the drafting phase naturally shares vocabulary with the
-  // later verification phase, so token similarity alone must not reject the
-  // actual artifact write. Verification remains distinct because read/list
-  // tools are handled separately and later-step mutations are still guarded
-  // when the active phase does not explicitly authorize authoring.
-  if (ARTIFACT_MUTATION_TOOLS.has(toolName) && activeStepAuthorizesArtifactMutation(state)) return null
-
-  const actionTokens = tokenizeQuery(visibleToolActionText(toolName, args))
-  if (actionTokens.size < 3) return null
-
-  const currentTitle = state.currentPlanItems[state.currentStepIdx] || ''
-  const currentScope = state.currentPlanScopes?.[state.currentStepIdx] || ''
-  const currentText = `${currentTitle} ${currentScope}`
-  const currentTokens = tokenizeQuery(currentText)
-  const currentScore = tokenSimilarity(actionTokens, currentTokens)
-  const actionText = visibleToolActionText(toolName, args)
-  const actionFamilies = topicFamiliesFor(actionText)
-  const currentFamilies = topicFamiliesFor(currentText)
-  const activeBroadResearchStep =
-    RESEARCH_TOOLS.has(toolName) &&
-    /\b(?:reviews?|analysis|analyses|comparisons?|compare|third[-\s]?party|expert|community|forums?|use cases?|case studies?|evidence|sources?)\b/i.test(currentText) &&
-    /\b(?:reviews?|analysis|analyses|comparisons?|compare|versus|vs\.?|third[-\s]?party|expert|community|forums?|use cases?|case studies?|evidence|sources?|agent|workflow|automation)\b/i.test(actionText)
-  if (activeBroadResearchStep && currentScore >= 0.08) return null
-
-  if (state.currentStepIdx > 0 && state.currentStepIdx < state.currentPlanItems.length - 1 && state.stepResearchCallCount < 2) {
-    let bestPreviousScore = 0
-    let bestPreviousIdx = -1
-    for (let i = 0; i < state.currentStepIdx; i++) {
-      const previousTitle = state.currentPlanItems[i] || ''
-      const previousScope = state.currentPlanScopes?.[i] || ''
-      const previousTokens = tokenizeQuery(`${previousTitle} ${previousScope}`)
-      const score = tokenSimilarity(actionTokens, previousTokens)
-      if (score > bestPreviousScore) {
-        bestPreviousScore = score
-        bestPreviousIdx = i
-      }
-    }
-
-    const stronglyLooksPrevious = bestPreviousScore >= 0.24 &&
-      currentScore < 0.36 &&
-      (bestPreviousScore >= currentScore + 0.12 || bestPreviousScore >= currentScore * 1.35)
-
-    if (stronglyLooksPrevious && bestPreviousIdx >= 0) {
-      const current = state.currentPlanItems[state.currentStepIdx] || 'the active step'
-      const previous = state.currentPlanItems[bestPreviousIdx] || `step ${bestPreviousIdx + 1}`
-      return `INTERNAL_RECOVERY: this ${toolName} call appears to continue previous step ${bestPreviousIdx + 1} ("${previous}") instead of starting active step ${state.currentStepIdx + 1} ("${current}"). Previous-step "next" notes are closed. Retry with one tool/query/action scoped to the active step's title and scope only.`
-    }
-  }
-
-  if (state.currentStepIdx >= state.currentPlanItems.length - 1) return null
-
-  let bestFutureScore = 0
-  let bestFutureIdx = -1
-  let bestFutureFamilies = new Set<string>()
-  for (let i = state.currentStepIdx + 1; i < state.currentPlanItems.length; i++) {
-    const futureTitle = state.currentPlanItems[i] || ''
-    const futureScope = state.currentPlanScopes?.[i] || ''
-    const futureText = `${futureTitle} ${futureScope}`
-    const futureTokens = tokenizeQuery(futureText)
-    const score = tokenSimilarity(actionTokens, futureTokens)
-    if (score > bestFutureScore) {
-      bestFutureScore = score
-      bestFutureIdx = i
-      bestFutureFamilies = topicFamiliesFor(futureText)
-    }
-  }
-
-  if (bestFutureIdx < 0) return null
-  const futureFamilyDrift = hasOnlyFutureTopicFamily(actionFamilies, currentFamilies, bestFutureFamilies)
-  if (!futureFamilyDrift) {
-    if (bestFutureScore < 0.22) return null
-    if (bestFutureScore <= currentScore && currentScore >= 0.28) return null
-    if (bestFutureScore < currentScore + 0.12 && bestFutureScore < currentScore * 1.35) return null
-    if (currentScore >= 0.42) return null
-  } else if (currentScore >= 0.36 && bestFutureScore <= currentScore) {
-    return null
-  }
-
-  const current = state.currentPlanItems[state.currentStepIdx] || 'the active step'
-  const future = state.currentPlanItems[bestFutureIdx] || `step ${bestFutureIdx + 1}`
-  return `INTERNAL_RECOVERY: this ${toolName} call appears to belong to future step ${bestFutureIdx + 1} ("${future}") instead of the active step ${state.currentStepIdx + 1} ("${current}"). Do not execute future-phase work early. If the active step is complete, emit <next_step/> with no tool call; otherwise choose a tool/query/file action scoped to the active step only.`
 }
 
 function countVisibleToolActionForNarration(
@@ -2009,52 +1731,11 @@ function parsedHttpUrl(rawUrl: unknown): URL | null {
   }
 }
 
-function sameSourceDomain(a: URL, b: URL): boolean {
-  return a.hostname.toLowerCase().replace(/^www\./, '') === b.hostname.toLowerCase().replace(/^www\./, '')
-}
-
 function isLocalNavigationUrl(rawUrl: unknown): boolean {
   const parsed = parsedHttpUrl(rawUrl)
   if (!parsed) return false
   const host = parsed.hostname.toLowerCase()
   return host === 'localhost' || host === '127.0.0.1' || host === '::1'
-}
-
-function hasTriedUserProvidedNavigation(state: AgentStateData): boolean {
-  const userUrl = parsedHttpUrl(state.userProvidedUrl)
-  if (!userUrl) return false
-  const normalizedUserUrl = normalizeUrl(userUrl.toString())
-
-  for (const visited of state.visitedUrls) {
-    const visitedUrl = parsedHttpUrl(visited)
-    if (visitedUrl && (normalizeUrl(visitedUrl.toString()) === normalizedUserUrl || sameSourceDomain(visitedUrl, userUrl))) return true
-  }
-
-  return state.workLedger.failedRoutes.some(failure => {
-    if (failure.tool !== 'browser_navigate' && failure.tool !== 'browse_page') return false
-    const targetUrl = parsedHttpUrl(failure.target)
-    return !!targetUrl && (normalizeUrl(targetUrl.toString()) === normalizedUserUrl || sameSourceDomain(targetUrl, userUrl))
-  })
-}
-
-function directNavigationBeforeSearchTarget(
-  toolName: string,
-  state: AgentStateData,
-): URL | null {
-  if (toolName !== 'web_search') return null
-  if (!state.userProvidedUrl) return null
-  const userUrl = parsedHttpUrl(state.userProvidedUrl)
-  if (!userUrl) return null
-  if (hasTriedUserProvidedNavigation(state)) return null
-
-  const currentStep = state.currentPlanItems?.[state.currentStepIdx] || ''
-  const stepLooksLikeBrowserEntry = state.currentStepIdx === 0 ||
-    /\b(navigate|open|visit|go to|access|load|enter|website|site|page|interface)\b/i.test(currentStep)
-  const browseTask = state.taskStrategy === 'browse'
-
-  if (!browseTask && !stepLooksLikeBrowserEntry) return null
-
-  return userUrl
 }
 
 function duplicateSourceOpenBlockReason(
@@ -2212,29 +1893,6 @@ function researchActivityKindForTool(toolName: string): ResearchActivityKind | n
 
 function isBrowserPreflightActionBlock(error?: string): boolean {
   return !!error && /BROWSER_ACTION_PREFLIGHT_BLOCKED|blocked before execution|browser_(?:click_at|type|select|fill_form) requires/i.test(error)
-}
-
-/**
- * Tokenize a search query into meaningful words for similarity comparison.
- */
-function tokenizeQuery(query: string): Set<string> {
-  return new Set(
-    query.toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
-      .split(/\s+/)
-      .filter(w => w.length > 2 && !SEARCH_STOPWORDS.has(w))
-  )
-}
-
-/**
- * Compute Jaccard similarity between two token sets.
- */
-function tokenSimilarity(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 1
-  let intersection = 0
-  for (const t of a) { if (b.has(t)) intersection++ }
-  const union = a.size + b.size - intersection
-  return union > 0 ? intersection / union : 0
 }
 
 /**
@@ -3840,20 +3498,11 @@ export class ToolPipeline {
       rejectionCode = 'preflight',
     ): ToolExecutionResult => {
       closeVisibleProvisionalStart(result)
-      const schedulesRouteRecovery =
-        rejectionCode === 'research_source_balance' ||
-        rejectionCode === 'direct_navigation_required'
-      if (schedulesRouteRecovery) {
-        applyResearchPreflightRouteRecovery(state, tc.name, rejectionCode)
-      }
       return {
         tc,
         result,
         isError,
         durationMs: Date.now() - startTime,
-        ...(schedulesRouteRecovery
-          ? { internalRecovery: 'preflight_rejection' as const }
-          : {}),
         preflightRejection: {
           code: rejectionCode,
         },
@@ -3898,8 +3547,7 @@ export class ToolPipeline {
         const minChars = tc.name === 'create_file' ? 50 : 20
         if (partial && partial.content.trim().length >= minChars) {
           const recoveredArgs = { path: partial.path, content: partial.content }
-          const preflightReason = researchFileDetourBlockReason(tc.name, recoveredArgs, state) ||
-            fileWritePreflightBlockReason(tc.name, recoveredArgs, state)
+          const preflightReason = fileWritePreflightBlockReason(tc.name, recoveredArgs, state)
           if (preflightReason) {
             const errorResult = { error: preflightReason }
             recordWorkLedgerFailure(state, {
@@ -4133,35 +3781,6 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
-    const phaseSemanticReason = phaseSemanticBlockReason(tc.name, args, state)
-    if (phaseSemanticReason) {
-      const errorResult = { error: phaseSemanticReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: phaseSemanticReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.stepFailureCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
-
-    const researchFileDetourReason = researchFileDetourBlockReason(tc.name, args, state)
-    if (researchFileDetourReason) {
-      const errorResult = { error: researchFileDetourReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: researchFileDetourReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult)
-    }
-
     const uploadedAttachmentReason = uploadedAttachmentToolBlockReason(tc.name, args, state)
     if (uploadedAttachmentReason) {
       const errorResult = { error: uploadedAttachmentReason }
@@ -4203,20 +3822,6 @@ export class ToolPipeline {
         ? { type: 'search_duplicate', tool: 'web_search' }
         : { type: 'tool_rate_limit', tool: tc.name }
       return preflightResult(errorResult)
-    }
-
-    const researchSourceBalanceReason = researchSourceBalanceBlockReason(tc.name, state)
-    if (researchSourceBalanceReason) {
-      const errorResult = { error: researchSourceBalanceReason }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: toolTargetFromArgs(args),
-        error: researchSourceBalanceReason,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      state.stepToolCallCount++
-      state.lastLoopSignal = { type: 'tool_rate_limit', tool: tc.name }
-      return preflightResult(errorResult, true, 'research_source_balance')
     }
 
     if (state.fileWriteRepairPending) {
@@ -4318,32 +3923,6 @@ export class ToolPipeline {
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
       return preflightResult(errorResult)
-    }
-
-    // If the user supplied an explicit URL/domain, reject search scaffolding
-    // before it becomes visible and let the model choose the correct direct
-    // read or navigation action. Never preserve a search label while executing a
-    // different tool behind it.
-    const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
-    if (directNavigationTarget) {
-      const errorMessage = {
-        error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Act on that exact URL now: use read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters, including dynamic/visual confirmation and action work. Author a fresh action_label for the route you choose.`,
-        // The streamed tool_start was only provisional. Marking this result as
-        // superseded makes the client remove the rejected search pill/panel
-        // instead of presenting a preflight correction as completed work.
-        superseded: true,
-      }
-      recordWorkLedgerFailure(state, {
-        tool: tc.name,
-        target: directNavigationTarget.toString(),
-        error: errorMessage.error,
-      })
-      trackToolCall(state, tc.name, JSON.stringify(args))
-      // This is a model-selection correction, not a task action. Do not spend
-      // the phase action budget or make the next model turn believe that work
-      // has started. AgentLoop removes web_search from that repair turn so the
-      // model must author the appropriate direct URL action itself.
-      return preflightResult(errorMessage, true, 'direct_navigation_required')
     }
 
     if (tc.name === 'web_search') {

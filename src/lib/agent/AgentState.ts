@@ -367,7 +367,12 @@ export function isCurrentSynthesisStep(
     if (hasReusableEvidence) return true
     return false
   }
-  return isSynthesisStepText(currentStepText(state))
+  // A scope describes the wider phase contract and often mentions the eventual
+  // report or answer while the current action is still gathering evidence (for
+  // example, "Map AI foundations" with a scope promising a structured report).
+  // Let the visible action title own phase selection; retain a combined-text
+  // fallback only for malformed or legacy plans without a title.
+  return isSynthesisStepText(title || currentStepText(state))
 }
 
 export function isBuildStrategyState(state: Pick<AgentStateData, 'currentPhase' | 'taskStrategy' | 'buildTask'>): boolean {
