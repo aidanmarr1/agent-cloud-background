@@ -15,6 +15,7 @@ import {
 } from './browserIntelligence'
 import type { ScreenshotQuality } from './visualQuality'
 import { registerBrowserSessionFenceAcquirer } from './browserSessionLifecycle'
+import { truncateReadablePageContent } from './readablePageLimits'
 
 export interface BrowserActionResult {
   success: boolean
@@ -5157,7 +5158,10 @@ export async function browserGetContent(
       }
     }
     const errorReason = detectErrorPage({ status: 0, finalUrl, title, bodyText: content })
-    if (content.length > 8000) content = content.slice(0, 8000) + '\n...[truncated]'
+    // An explicit content read is the page-reading operation, so retain the
+    // full bounded readable payload. Initial browser_navigate remains concise
+    // because it also carries controls, progress metadata, and a screenshot.
+    content = truncateReadablePageContent(content)
 
     if (errorReason) {
       const normFinal = normalizeNavUrl(finalUrl)

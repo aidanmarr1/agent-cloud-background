@@ -290,6 +290,7 @@ export class EventDispatcher {
   private postLastToolText = ''
   private prePlanBuf = ''
   private startupAcknowledgment = ''
+  private pendingStartupPlanItems: string[] | null = null
   private toolsSinceLastNarration = 0
   private pendingNarrationTools: Array<{ toolName: string; result: unknown }> = []
   private toolStartsById = new Map<string, ToolStartEvent>()
@@ -617,6 +618,20 @@ export class EventDispatcher {
           this.prePlanBuf = this.prePlanBuf.slice(safe.length)
         }
       })
+
+      // Defensive ordering fence: if a replayed/precomputed plan reached the
+      // client before its worker-owned opening, keep the plan hidden until the
+      // complete model-authored acknowledgement has painted. Normal streams
+      // already arrive text-first, so this only runs on the exceptional path.
+      if (this.pendingStartupPlanItems) {
+        this.batch.flushSync()
+        this.captureStartupAcknowledgment()
+        if (this.startupAcknowledgment) {
+          const pendingPlan = this.pendingStartupPlanItems
+          this.pendingStartupPlanItems = null
+          this.activatePlan(pendingPlan)
+        }
+      }
     } else if (this.currentGroupIdx >= 0) {
       this.setThinkingIfNoVisibleActionRunning()
       this.narrationBuf.append(content)
@@ -725,6 +740,17 @@ export class EventDispatcher {
       this.prePlanBuf = ''
     }
     this.captureStartupAcknowledgment()
+
+    if (!this.startupAcknowledgment) {
+      this.pendingStartupPlanItems = [...items]
+      return
+    }
+
+    this.activatePlan(items)
+  }
+
+  private activatePlan(items: string[]): void {
+    if (this.planTextParsed || !items || items.length === 0) return
 
     const existingSubtasks = this.parsedGroups.length > 0 ? [...safeSubtasks(this.parsedGroups[0])] : []
     const existingStartedAt = this.parsedGroups[0]?.startedAt

@@ -4,25 +4,58 @@ import { join } from 'node:path'
 
 const root = process.cwd()
 
-const [browse, documentReader, panelMapper, dispatcher, browseView, deferredEmptyState] = await Promise.all([
+const [browse, readablePageLimits, documentReader, browserRuntime, panelMapper, dispatcher, browseView, deferredEmptyState, conversationSerialization] = await Promise.all([
   readFile(join(root, 'src/lib/browse.ts'), 'utf8'),
+  readFile(join(root, 'src/lib/readablePageLimits.ts'), 'utf8'),
   readFile(join(root, 'src/lib/document.ts'), 'utf8'),
+  readFile(join(root, 'src/lib/browser.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/panelMapper.ts'), 'utf8'),
   readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
   readFile(join(root, 'src/components/computer/BrowseView.tsx'), 'utf8'),
   readFile(join(root, 'src/components/computer/useDeferredEmptyState.ts'), 'utf8'),
+  readFile(join(root, 'src/lib/conversationSerialization.ts'), 'utf8'),
 ])
 
 assert.match(
   browse,
-  /export function parseReadableHtml/,
-  'webpage readability extraction must be shareable by browser and document reads',
+  /Readability[\s\S]*JSDOM[\s\S]*export function parseReadableHtml/,
+  'webpage extraction must use readability scoring',
+)
+
+assert.match(
+  readablePageLimits,
+  /MAX_READABLE_PAGE_CHARS = 40_000[\s\S]*truncateReadablePageContent/,
+  'webpage extraction must retain a bounded full-page payload',
+)
+
+assert.match(
+  browse,
+  /largestReadableContainerHtml[\s\S]*fallbackLength[\s\S]*readableLength[\s\S]*fallbackLength \* 0\.65/,
+  'a tiny leading article or teaser must not displace the substantive main page',
+)
+
+assert.match(
+  browse,
+  /<h\(\[1-6\]\)[\s\S]*'#'\.repeat[\s\S]*<li/,
+  'readability conversion must preserve heading and list structure',
 )
 
 assert.match(
   documentReader,
   /parseReadableHtml\(buffer\.toString\('utf-8'\), resolvedSource\)/,
   'read_document must convert text/html pages into readable extracted source content',
+)
+
+assert.match(
+  conversationSerialization,
+  /MAX_BROWSE_CONTENT = 40_000/,
+  'persisted extracted pages must retain the same bounded full-page payload after reload',
+)
+
+assert.match(
+  browserRuntime,
+  /browserGetContent[\s\S]*content = truncateReadablePageContent\(content\)/,
+  'explicit browser content reads must use the shared bounded full-page payload',
 )
 
 assert.doesNotMatch(

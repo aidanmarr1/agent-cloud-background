@@ -15,6 +15,7 @@ import { getWorkSummary, getToolHealthSummary } from './AgentState'
 import {
   MAX_CONTEXT_MESSAGES,
   CONTEXT_TRIM_SUMMARY_MAX_CHARS,
+  MAX_SOURCE_RESULT_CHARS,
 } from './config'
 import { compactToolMessageContent, unicodeSafeSlice } from './ToolMessageSerialization'
 
@@ -100,6 +101,70 @@ type MessageCategory =
   | 'plan_progress'
   | 'context_summary'
 
+const CURRENT_EVIDENCE_RESULT_TOOLS = new Set([
+  'read_document',
+  'browser_get_content',
+  'http_request',
+  'browser_find_text',
+  'browser_navigate',
+  'browse_page',
+])
+
+interface CurrentModelEvidenceBatch {
+  sourceResultIds: Set<string>
+  visualMessageIndexes: Set<number>
+}
+
+function currentModelEvidenceBatch(messages: ChatMessage[]): CurrentModelEvidenceBatch {
+  // Tool results belong to the most recent assistant tool-call batch. Stop at
+  // the first assistant message so an earlier page read cannot remain exempt
+  // after the model has already consumed it and continued.
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index] as unknown as {
+      role?: string
+      tool_calls?: Array<{ id?: string; function?: { name?: string } }>
+    }
+    if (message.role !== 'assistant') continue
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) {
+      return { sourceResultIds: new Set(), visualMessageIndexes: new Set() }
+    }
+
+    const completedToolResultIds = new Set(
+      messages.slice(index + 1)
+        .map(candidate => candidate as unknown as { role?: string; tool_call_id?: string })
+        .filter(candidate => candidate.role === 'tool' && typeof candidate.tool_call_id === 'string')
+        .map(candidate => candidate.tool_call_id as string),
+    )
+    const sourceResultIds = new Set(message.tool_calls
+      .filter(call => (
+        !!call.id &&
+        completedToolResultIds.has(call.id) &&
+        CURRENT_EVIDENCE_RESULT_TOOLS.has(call.function?.name || '')
+      ))
+      .map(call => call.id as string))
+    const visualMessageIndexes = new Set<number>()
+    for (let candidateIndex = index + 1; candidateIndex < messages.length; candidateIndex++) {
+      const candidate = messages[candidateIndex] as unknown as { role?: string; content?: unknown }
+      if (candidate.role === 'user' && isBrowserVisualSnapshot(candidate.content)) {
+        visualMessageIndexes.add(candidateIndex)
+      }
+    }
+    return { sourceResultIds, visualMessageIndexes }
+  }
+  return { sourceResultIds: new Set(), visualMessageIndexes: new Set() }
+}
+
+/**
+ * True only while the latest assistant tool-call batch has source content or a
+ * browser frame that no subsequent assistant turn has consumed. AgentLoop uses
+ * this at the final request-selection boundary so compact research prompts do
+ * not replace the evidence on its one useful model turn.
+ */
+export function hasCurrentModelEvidenceBatch(messages: ChatMessageParam[]): boolean {
+  const batch = currentModelEvidenceBatch(messages)
+  return batch.sourceResultIds.size > 0 || batch.visualMessageIndexes.size > 0
+}
+
 // ── Context Manager ─────────────────────────────────────────────────────────
 
 export class ContextManager {
@@ -157,18 +222,22 @@ export class ContextManager {
     const MAX_OLD_RESULT = 180
     const MAX_OLD_ARGS = 120
     const MAX_OLD_ASSISTANT_CONTENT = 260
+    const currentEvidenceBatch = currentModelEvidenceBatch(this.messages)
+    const currentSourceResultIds = currentEvidenceBatch.sourceResultIds
 
     for (let i = 3; i < this.messages.length - RECENT; i++) {
       const msg = this.messages[i] as unknown as {
         role: string
         content?: unknown
         tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
+        tool_call_id?: string
       }
       const contentText = contentToText(msg.content)
 
       // Keep only recent browser screenshots as multimodal context. Older
       // screenshots are costly and stale once the page has changed.
       if (msg.role === 'user' && isBrowserVisualSnapshot(msg.content) && Array.isArray(msg.content)) {
+        if (currentEvidenceBatch.visualMessageIndexes.has(i)) continue
         msg.content = 'BROWSER VISUAL SNAPSHOT omitted from older context. Use the latest browser screenshot and elements list instead.'
         this.metadata[i].importance = Math.min(this.metadata[i].importance, 2)
         continue
@@ -176,6 +245,12 @@ export class ContextManager {
 
       // Compress old tool results
       if (msg.role === 'tool' && contentText.length > MAX_OLD_RESULT) {
+        if (typeof msg.tool_call_id === 'string' && currentSourceResultIds.has(msg.tool_call_id)) {
+          if (contentText.length > MAX_SOURCE_RESULT_CHARS) {
+            msg.content = compactToolMessageContent(contentText, MAX_SOURCE_RESULT_CHARS, 'Current source result bounded to the source context limit.')
+          }
+          continue
+        }
         msg.content = compactToolMessageContent(contentText, MAX_OLD_RESULT, 'Older tool result compressed.')
         this.metadata[i].importance = Math.min(this.metadata[i].importance, 3)
       }
@@ -221,6 +296,7 @@ export class ContextManager {
         role: string
         content?: unknown
         tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
+        tool_call_id?: string
       }
       const meta = this.metadata[i]
       const contentText = contentToText(msg.content)
@@ -280,17 +356,21 @@ export class ContextManager {
       state.websiteBrowserCheckAttempted ||
       state.websiteResponsiveCheckPrompted
     let latestVisualKept = false
+    const currentEvidenceBatch = currentModelEvidenceBatch(this.messages)
+    const currentSourceResultIds = currentEvidenceBatch.sourceResultIds
 
     for (let i = this.messages.length - 1; i >= 3; i--) {
       const msg = this.messages[i] as unknown as {
         role: string
         content?: unknown
         tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>
+        tool_call_id?: string
       }
       const meta = this.metadata[i]
       const contentText = contentToText(msg.content)
 
       if (msg.role === 'user' && isBrowserVisualSnapshot(msg.content)) {
+        if (currentEvidenceBatch.visualMessageIndexes.has(i)) continue
         const shouldKeep = keepLatestVisual && !latestVisualKept
         if (shouldKeep) {
           latestVisualKept = true
@@ -303,6 +383,12 @@ export class ContextManager {
       }
 
       if (msg.role === 'tool' && contentText.length > 900) {
+        if (typeof msg.tool_call_id === 'string' && currentSourceResultIds.has(msg.tool_call_id)) {
+          if (contentText.length > MAX_SOURCE_RESULT_CHARS) {
+            msg.content = compactToolMessageContent(contentText, MAX_SOURCE_RESULT_CHARS, 'Current source result bounded to the source context limit.')
+          }
+          continue
+        }
         msg.content = compactToolMessageContent(contentText, 900, 'Tool result compacted before model call.')
         meta.importance = Math.min(meta.importance, 4)
         compacted++

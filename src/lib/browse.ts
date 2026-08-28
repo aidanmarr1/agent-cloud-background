@@ -1,5 +1,10 @@
 import { BrowseResult } from '@/types'
+import { Readability } from '@mozilla/readability'
+import { JSDOM } from 'jsdom'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
+import { MAX_READABLE_PAGE_CHARS, truncateReadablePageContent } from './readablePageLimits'
+
+export { MAX_READABLE_PAGE_CHARS, truncateReadablePageContent } from './readablePageLimits'
 
 const USER_AGENTS = [
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -55,10 +60,17 @@ function htmlTagText(html: string, tag: string): string {
 }
 
 function extractMainHtml(html: string): string {
-  const article = html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1]
-  if (article) return article
-  const main = html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1]
-  if (main) return main
+  // Keep the largest semantic candidate. Taking the first <article> commonly
+  // selects a recommendation card or teaser that appears before the real page.
+  const candidates = [
+    ...Array.from(html.matchAll(/<article\b[^>]*>([\s\S]*?)<\/article>/gi), match => match[1]),
+    ...Array.from(html.matchAll(/<main\b[^>]*>([\s\S]*?)<\/main>/gi), match => match[1]),
+  ].filter(Boolean)
+  if (candidates.length > 0) {
+    return candidates.reduce((largest, candidate) => (
+      htmlToText(candidate).length > htmlToText(largest).length ? candidate : largest
+    ))
+  }
   return html.match(/<body\b[^>]*>([\s\S]*?)<\/body>/i)?.[1] || html
 }
 
@@ -69,7 +81,8 @@ function htmlToText(html: string): string {
       .replace(/<(script|style|noscript|svg|canvas|iframe)\b[\s\S]*?<\/\1>/gi, ' ')
       .replace(/<(nav|footer|aside|form)\b[\s\S]*?<\/\1>/gi, ' ')
       .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(?:p|div|section|article|main|header|h[1-6]|tr|table|blockquote)>/gi, '\n\n')
+      .replace(/<h([1-6])\b[^>]*>/gi, (_match, level: string) => `\n\n${'#'.repeat(Number(level))} `)
+      .replace(/<\/(?:p|div|section|article|main|header|h[1-6]|tr|table|blockquote|pre)>/gi, '\n\n')
       .replace(/<li\b[^>]*>/gi, '\n- ')
       .replace(/<\/li>/gi, '\n')
       .replace(/<[^>]+>/g, ' ')
@@ -78,6 +91,67 @@ function htmlToText(html: string): string {
     .replace(/\n[ \t]+/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
     .trim()
+}
+
+const READABLE_CONTAINER_SELECTOR = 'article, main, [role="main"]'
+const NON_CONTENT_SELECTOR = [
+  'script', 'style', 'noscript', 'template', 'svg', 'canvas', 'iframe',
+  'nav', 'footer', 'aside', 'form', '[role="navigation"]', '[role="banner"]',
+  '[role="contentinfo"]', '[aria-hidden="true"]',
+].join(',')
+
+function cleanedContainerHtml(element: Element): string {
+  const clone = element.cloneNode(true) as Element
+  clone.querySelectorAll(NON_CONTENT_SELECTOR).forEach(node => node.remove())
+  return clone.innerHTML
+}
+
+function largestReadableContainerHtml(document: Document): string {
+  const semanticCandidates = Array.from(document.querySelectorAll(READABLE_CONTAINER_SELECTOR))
+  const candidates = semanticCandidates.length > 0
+    ? semanticCandidates
+    : document.body
+      ? [document.body]
+      : []
+
+  let bestHtml = ''
+  let bestScore = -1
+  for (const candidate of candidates) {
+    const candidateHtml = cleanedContainerHtml(candidate)
+    const textLength = htmlToText(candidateHtml).length
+    const structureCount = candidate.querySelectorAll('p, h1, h2, h3, h4, li, blockquote, pre').length
+    const score = textLength + structureCount * 40
+    if (score > bestScore) {
+      bestHtml = candidateHtml
+      bestScore = score
+    }
+  }
+  return bestHtml
+}
+
+function extractReadableContentHtml(html: string, url: string): string {
+  try {
+    const dom = new JSDOM(html, { url })
+    const fallbackHtml = largestReadableContainerHtml(dom.window.document)
+    const fallbackLength = htmlToText(fallbackHtml).length
+    const article = new Readability(dom.window.document, {
+      charThreshold: 120,
+      keepClasses: false,
+    }).parse()
+    const readableHtml = article?.content || ''
+    const readableLength = htmlToText(readableHtml).length
+
+    // Readability is normally the cleaner choice. Some documentation/help
+    // layouts contain a tiny article-like teaser before a large semantic main;
+    // in that case retain the substantive main content instead of the teaser.
+    if (fallbackLength >= 1_200 && readableLength < fallbackLength * 0.65) {
+      return fallbackHtml
+    }
+    return readableHtml || fallbackHtml || extractMainHtml(html)
+  } catch {
+    // Malformed legacy HTML should still get the bounded regex fallback.
+    return extractMainHtml(html)
+  }
 }
 
 async function fetchPage(url: string, userAgent: string, timeoutMs: number): Promise<{ ok: boolean; status: number; statusText: string; html: string }> {
@@ -133,7 +207,7 @@ export function parseReadableHtml(html: string, url: string): BrowseResult {
     || htmlAttributeValue(html, /<time\b[^>]*datetime=["']([^"']*)["'][^>]*>/i)
 
   let title = ogTitle || htmlTagText(html, 'title') || url
-  let content = htmlToText(extractMainHtml(html))
+  let content = htmlToText(extractReadableContentHtml(html, url))
 
   // Clean up whitespace but preserve paragraph breaks
   content = content
@@ -153,24 +227,7 @@ export function parseReadableHtml(html: string, url: string): BrowseResult {
     content = metaParts.join(' | ') + '\n\n' + content
   }
 
-  // Smart truncation: try to break at paragraph boundaries
-  const MAX_CONTENT_LENGTH = 6000
-  const originalLength = content.length
-  if (content.length > MAX_CONTENT_LENGTH) {
-    // Find last paragraph break before the limit
-    const breakPoint = content.lastIndexOf('\n\n', MAX_CONTENT_LENGTH - 100)
-    if (breakPoint > MAX_CONTENT_LENGTH * 0.6) {
-      content = content.slice(0, breakPoint) + `\n\n... [Truncated from ${originalLength} characters]`
-    } else {
-      // Fallback: break at sentence boundary
-      const sentenceBreak = content.lastIndexOf('. ', MAX_CONTENT_LENGTH - 50)
-      if (sentenceBreak > MAX_CONTENT_LENGTH * 0.7) {
-        content = content.slice(0, sentenceBreak + 1) + ` [Truncated from ${originalLength} characters]`
-      } else {
-        content = content.slice(0, MAX_CONTENT_LENGTH) + `... [Truncated from ${originalLength} characters]`
-      }
-    }
-  }
+  content = truncateReadablePageContent(content)
 
   return { title, content, url }
 }

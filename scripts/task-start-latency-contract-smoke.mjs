@@ -13,16 +13,23 @@ const [chatRoute, taskJobs, planManager, taskWorker] = await Promise.all([
 ])
 
 const postRoute = chatRoute.match(/export async function POST\(request: Request\) \{[\s\S]*$/)?.[0] || ''
-const prepareCalls = postRoute.match(/prepareConversationForTaskStartInsert\(\{/g) || []
+const initialPrepareCalls = postRoute.match(
+  /const conversationInsertPromise = timedRoutePromise\([\s\S]*?prepareConversationForTaskStartInsert\(conversationStartInput\)/g,
+) || []
 assert.equal(
-  prepareCalls.length,
+  initialPrepareCalls.length,
   1,
-  'queued task start must prepare the conversation once rather than repeating its remote read',
+  'queued task start must begin one speculative conversation preparation before acceptance settles',
 )
 assert.match(
   postRoute,
-  /const conversationInsertPromise = timedRoutePromise\([\s\S]*prepareConversationForTaskStartInsert\(\{[\s\S]*const creditsPromise/,
+  /const conversationInsertPromise = timedRoutePromise\([\s\S]*prepareConversationForTaskStartInsert\(conversationStartInput\)[\s\S]*const creditsPromise/,
   'read-only conversation preparation must begin before the parallel acceptance gates settle',
+)
+assert.match(
+  postRoute,
+  /TaskConversationPersistenceConflictError[\s\S]*conversationRebaseAttempt >= 1[\s\S]*prepareConversationForTaskStartInsert\(conversationStartInput\)/,
+  'conversation preparation may repeat only for the single bounded persistence-conflict rebase',
 )
 assert.match(
   postRoute,
@@ -75,12 +82,17 @@ assert.doesNotMatch(
 assert.doesNotMatch(
   planStart,
   /await Promise\.race\(\[[\s\S]*acknowledgementDisplayPromise/,
-  'planner request must start concurrently with acknowledgement generation',
+  'planner request must not wait behind an acknowledgement display timer',
+)
+assert.doesNotMatch(
+  planStart,
+  /scheduleAcknowledgementCall|emitModelGeneratedAcknowledgement|acknowledgementPromise/,
+  'normal startup must avoid a duplicate acknowledgement request and its usage-settlement latency',
 )
 assert.match(
   planStart,
-  /\.then\(async \(result\) => \{[\s\S]*await this\.acknowledgementPromise[\s\S]*return result/,
-  'planner completion must still require acknowledgement completion and accounting',
+  /this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/,
+  'normal startup must use the single planner response for acknowledgement and plan',
 )
 
 assert.match(

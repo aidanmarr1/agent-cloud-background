@@ -1,5 +1,6 @@
 import { sanitizeNarrationText } from '@/lib/stream/cleaners'
 import type { AgentStateData } from './AgentState'
+import { isProspectiveWorkflowNarration } from '@/lib/narrationSignals'
 import {
   NARRATION_MAX_VISIBLE_ACTION_GAP,
   NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS,
@@ -92,7 +93,7 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
           properties: {
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Summarize the newest useful outcome from already-completed actions: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. Action pills already show searches, page opens, reads, and file operations, so do not announce operations. Be neutral and evidence-led: synthesize what the evidence establishes rather than making a vendor, publication, or webpage the speaking subject; name a source only when provenance, disagreement, or access failure matters. Avoid hype and unsupported judgement. For continuing work, normally use two clean sentences: concrete result first, then a short "Next, I\'ll..." sentence naming the immediate useful direction. Omit that sentence at phase completion or without a concrete direction. The current action has not returned and is not evidence; never invent its result. Do not repeat recent claims or expose providers, APIs, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, or tool accounting. This field is display-only and removed before execution.',
+              description: 'Required cadence field. Summarize the newest useful outcome from already-completed actions: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. Lead with a fact-dense outcome and make it read as a natural continuation of the completed work, carrying forward only context needed to understand what changed. State uncertainty, disagreement, or an evidence gap when it materially affects the result. If work is continuing, an immediate useful direction may follow; omit it when the phase is ending, the direction is obvious, or none is concrete. Vary the syntax to fit the work: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural. Do not copy a fixed opening or transition. Action pills already show operations, but a source-action lead is valid when it immediately carries the concrete finding or important provenance; never make the operation itself the outcome. References to prior, previous, or earlier sources, sources reviewed so far, or research so far do not count as findings by themselves. Be neutral and evidence-led, avoid hype and unsupported judgement, and name a source when provenance, disagreement, or access failure matters. The current action has not returned and is not evidence; never invent its result. Do not repeat recent claims or expose providers, APIs, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, or tool accounting. This field is display-only and removed before execution.',
               minLength: 1,
               maxLength: 360,
             },
@@ -180,6 +181,7 @@ function isFutureActionOnlyNarration(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
   if (LEADING_FUTURE_ACTION_FRAGMENT_RE.test(trimmed)) return true
+  if (isProspectiveWorkflowNarration(trimmed)) return true
   return SPECULATIVE_SOURCE_FRAGMENT_RE.test(trimmed) && !COMPLETED_RESULT_SIGNAL_RE.test(trimmed)
 }
 
@@ -289,9 +291,52 @@ function hasNovelNumber(candidate: string, previous: string): boolean {
 
 const SOURCE_ACTIVITY_ONLY_LEAD = /^(?:(?:i|the agent)\s+)?(?:searched|opened|read|reviewed|visited|accessed|consulted|checked|examined|inspected|queried|looked up|navigated to|ran (?:a|the) search|completed (?:a|the) (?:targeted )?search)\b/i
 const CONCRETE_OUTCOME_SIGNAL = /\b(?:found|finding|show(?:s|ed)?|report(?:s|ed)?|state(?:s|d)?|describ(?:e|es|ed)|indicat(?:e|es|ed)|reveal(?:s|ed)?|confirm(?:s|ed)?|list(?:s|ed)?|document(?:s|ed)?|identif(?:y|ies|ied)|measure(?:s|d)?|demonstrat(?:e|es|ed)|attribute(?:s|d)?|distinguish(?:es|ed)?|compare(?:s|d)?|verify|verified|blocked|unavailable|inaccessible|failed|returned\s+(?:an?\s+)?(?:error|\d{3})|according to|\$?\d[\d,.]*(?:%|[a-z]+)?)\b/i
+const DEICTIC_RESEARCH_REFERENCE_RE = /\b(?:(?:prior|previous|earlier)\s+(?:sources?|research|evidence|findings?)|(?:reviewed|consulted|examined)\s+sources?|(?:sources?|research|evidence|findings?)\s+(?:reviewed|consulted|examined)(?:\s+so\s+far)?|(?:research|evidence|findings?)\s+so\s+far)\b/i
+const GENERIC_EVIDENCE_LEAD_RE = /^(?:the\s+)?(?:available\s+)?(?:evidence|research|findings?)\s+(?:shows?|showed|indicat(?:e|es|ed)|establish(?:es|ed)?|confirm(?:s|ed)?|suggest(?:s|ed)?|demonstrat(?:e|es|ed))\b[,:]?\s*/i
+const CONCRETE_RESEARCH_VALUE_RE = /(?:[$£€]\s?\d|\b\d[\d,.]*%|\b(?:19|20)\d{2}\b|\b\d+(?:\.\d+)?\s*(?:ms|milliseconds?|seconds?|minutes?|hours?|days?|weeks?|months?|years?|kb|mb|gb|tb|kg|km|miles?|degrees?)\b)/i
+const GENERIC_RESEARCH_PAYLOAD_TOKENS = new Set([
+  'a', 'also', 'an', 'and', 'are', 'as', 'at', 'available', 'be', 'been', 'being',
+  'broad', 'broadly', 'by', 'clear', 'clearly', 'collectively', 'conclusion',
+  'conclusions', 'confirm', 'confirmed', 'confirms', 'consistent', 'consistently',
+  'consistency', 'consulted', 'context', 'current', 'demonstrate', 'demonstrated',
+  'demonstrates', 'establish', 'established', 'establishes', 'evidence', 'examined',
+  'far', 'finding', 'findings', 'for', 'from', 'general', 'generally', 'has', 'have',
+  'in', 'indicate', 'indicated', 'indicates', 'information', 'into', 'is', 'it',
+  'its', 'material', 'materials', 'meaningful', 'of', 'on', 'or', 'overall',
+  'pattern', 'patterns', 'reinforce', 'reinforced', 'reinforces', 'report',
+  'reported', 'reports', 'research', 'result', 'results', 'reviewed', 'same', 'show',
+  'showed', 'shows', 'source', 'sources', 'strong', 'suggest', 'suggested',
+  'suggests', 'support', 'supported', 'supports', 'that', 'the', 'their', 'these',
+  'this', 'those', 'to', 'together', 'useful', 'was', 'were', 'with',
+])
 
 function isToolActivityOnlyNarration(text: string): boolean {
-  return SOURCE_ACTIVITY_ONLY_LEAD.test(text) && !CONCRETE_OUTCOME_SIGNAL.test(text)
+  if (!SOURCE_ACTIVITY_ONLY_LEAD.test(text) || CONCRETE_OUTCOME_SIGNAL.test(text)) return false
+  const immediateResultClause = text.match(/(?:[;:—]\s*|[.!?]\s+(?=[A-Z])|\b(?:confirming|showing|finding|revealing|establishing|identifying)\b\s+)(.+)/i)?.[1] || ''
+  if (!immediateResultClause || /\b(?:likely|may|might|could|appears?\s+to|seems?\s+to|potentially)\b/i.test(immediateResultClause)) {
+    return true
+  }
+  return !hasConcreteResearchPayload(immediateResultClause)
+}
+
+function hasConcreteResearchPayload(text: string, minimumTokens = 2): boolean {
+  if (CONCRETE_RESEARCH_VALUE_RE.test(text)) return true
+  const payloadTokens = text
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .filter(token => token.length >= 3 && !GENERIC_RESEARCH_PAYLOAD_TOKENS.has(token))
+  return payloadTokens.length >= minimumTokens
+}
+
+function isVagueResearchNarration(text: string): boolean {
+  const firstSentence = text.split(/(?<=[.!?])\s+/, 1)[0]?.trim() || text.trim()
+  if (DEICTIC_RESEARCH_REFERENCE_RE.test(firstSentence)) {
+    return !hasConcreteResearchPayload(firstSentence.replace(DEICTIC_RESEARCH_REFERENCE_RE, ' '), 4)
+  }
+  const genericLead = firstSentence.match(GENERIC_EVIDENCE_LEAD_RE)
+  if (!genericLead) return false
+  return !hasConcreteResearchPayload(firstSentence.slice(genericLead[0].length))
 }
 
 export function reviewProgressNarration(
@@ -308,6 +353,7 @@ export function reviewProgressNarration(
   const text = normalizeSingularAgentVoice(sanitizedText)
   if (isFutureActionOnlyNarration(text)) return { status: 'invalid', text: null }
   if (isToolActivityOnlyNarration(text)) return { status: 'invalid', text: null }
+  if (isVagueResearchNarration(text)) return { status: 'invalid', text: null }
 
   const fingerprint = narrationFingerprint(text)
   for (const previous of state.recentNarrations.slice(-RECENT_NARRATION_LIMIT)) {

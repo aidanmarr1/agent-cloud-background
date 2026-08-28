@@ -1,10 +1,8 @@
 import {
   createCompletion,
-  createStreamingCompletion,
   DEFAULT_MODEL,
   type ChatContentPart,
   type ChatMessageParam,
-  type StreamingChatCompletionChunk,
 } from '@/lib/llm'
 import type { FileResult } from '@/types'
 import { getFastPlanningPrompt, getPlanningPrompt } from '@/lib/prompts'
@@ -68,8 +66,7 @@ const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 const PLANNER_ACK_MAX_TOKENS = 96
-const PLANNER_ACK_STREAM_TIMEOUT_MS = 20_000
-const PLANNER_ACK_DISPLAY_WAIT_MS = 150
+const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
 const PLANNER_MEDIUM_JSON_MAX_TOKENS = 820
@@ -430,12 +427,6 @@ export function isUsablePlannerAck(ack: string, request = ''): boolean {
     !/\b(?:the requested task|the request|the site|the topic)\b.{0,80}\b(?:steps updated|visible steps)\b/.test(normalized)
 }
 
-function streamingChunkText(chunk: StreamingChatCompletionChunk): string {
-  const delta = chunk.choices?.[0]?.delta
-  const content = delta?.content
-  return typeof content === 'string' ? content : ''
-}
-
 function containsPromptInstructionLeak(text: string): boolean {
   return /\b(?:conduct|perform|run|carry\s+out)\s+(?:the\s+)?(?:deepest\s+possible|maximum\s+depth)\s+(?:research|analysis|investigation)\b/i.test(text) ||
     /\b(?:extremely|very)\s+deep\s+research\s+all\s+about\b/i.test(text) ||
@@ -614,7 +605,7 @@ function nonDeliverableStepGuidance(
 
   const noteGuidance = ''
   const depth = researchDepthProfileForState(state)
-  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Current depth profile: ${depth.label}; this phase should usually reach about ${depth.requiredCalls} research actions and ${depth.requiredSourceBreadth} distinct source domains unless the user explicitly limited scope or real blockers make that impossible.\n- Tool caps are ceilings, never targets. Do not try to use all available searches/extractions; stop as soon as the phase has the evidence packet its scope requires.\n- Use enough strong source actions to satisfy the request's actual depth. Prefer web_search plus read_document/http extraction for normal research pages; use browser_navigate only when rendered state, screenshots, interaction, or page scripts are needed.\n- Add source actions for comparison coverage, current claims, contradictions, named entities, or evidence gaps; stop when the phase has a credible evidence packet, not when an arbitrary small count is reached.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only when rendering matters.'}${noteGuidance}\n- Keep response text to one concise, progressive finding for this phase. Do not draft, paste, or rehearse the full final report during research; the final deliverable step owns the complete synthesis.\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
+  return `RULES:\n- Research this step's specific goal; do not start by continuing a previous phase's page.\n- Current depth profile: ${depth.label}; this phase should usually reach about ${depth.requiredCalls} research actions and ${depth.requiredSourceBreadth} distinct source domains unless the user explicitly limited scope or real blockers make that impossible.\n- Tool caps are ceilings, never targets. Do not try to use all available searches/extractions; stop as soon as the phase has the evidence packet its scope requires.\n- Use enough strong source actions to satisfy the request's actual depth. Use web_search for discovery, then default to read_document/http extraction for normal research pages. Use browser navigation/content primarily for dynamic or scripted state, interaction/action work, screenshots, or exact details that need visibly rendered confirmation.\n- Add source actions for comparison coverage, current claims, contradictions, named entities, or evidence gaps; stop when the phase has a credible evidence packet, not when an arbitrary small count is reached.\n- Extract concrete evidence from pages you open: dates, pricing, benchmarks, API/docs facts, caveats, contradictions, or product claims. Do not advance from titles alone.\n- Unpack the angle before advancing: mechanism/why, concrete evidence, example or comparison, limitation/counterpoint, and implication when relevant. If one part is missing, fill that gap rather than opening another generic source.\n- For comparisons, cover each named entity or record the source gap.\n- Use the hidden task research log as compact memory before web_search/read_document/extraction; avoid obvious repeats unless asked to revisit/refresh/monitor.\n- ${strategyGuidance?.research || 'Search targeted queries, read the strongest pages with read_document first, and use the full browser only for dynamic, visual, exact-confirmation, or interaction needs.'}${noteGuidance}\n- Keep response text to one concise, progressive finding for this phase. Do not draft, paste, or rehearse the full final report during research; the final deliverable step owns the complete synthesis.\n- Report findings in response text. Do NOT append raw source lists or lead with .md note creation.`
 }
 
 function planAwareIterationFloor(
@@ -668,12 +659,6 @@ export class PlanManager {
   private usageSequence = 0
   private acknowledgementEmitted = false
   private acknowledgementPromise: Promise<boolean> | null = null
-  private acknowledgementDisplayPromise: Promise<boolean> | null = null
-  private resolveAcknowledgementDisplay: ((emitted: boolean) => void) | null = null
-  private acknowledgementDisplayResolved = false
-  private acknowledgementFirstVisiblePromise: Promise<boolean> | null = null
-  private resolveAcknowledgementFirstVisible: ((emitted: boolean) => void) | null = null
-  private acknowledgementFirstVisibleResolved = false
   private suppressFurtherAcknowledgementDeltas = false
   private acknowledgementUsageError: unknown = null
   private lastAcknowledgementCandidate = ''
@@ -722,28 +707,9 @@ export class PlanManager {
     return plannerAbortController
   }
 
-  startPlanCall(): void {
-    console.log('[AgentDiagnostics] Planner scheduled', {
-      complexity: this.taskComplexity,
-      messages: this.messages.length,
-      hasCustomInstructions: !!this.customInstructions,
-    })
-    const plannerAbortController = this.resetPlannerAbortController()
+  private scheduleAcknowledgementCall(): void {
     if (!this.skipAcknowledgement && !this.acknowledgementPromise) {
-      this.acknowledgementDisplayResolved = false
-      this.acknowledgementDisplayPromise = new Promise<boolean>((resolve) => {
-        this.resolveAcknowledgementDisplay = resolve
-      })
-      this.acknowledgementFirstVisibleResolved = false
-      this.acknowledgementFirstVisiblePromise = new Promise<boolean>((resolve) => {
-        this.resolveAcknowledgementFirstVisible = resolve
-      })
       this.acknowledgementPromise = this.emitModelGeneratedAcknowledgement('task')
-        .then((emitted) => {
-          this.settleAcknowledgementFirstVisible(emitted)
-          this.settleAcknowledgementDisplay(emitted)
-          return emitted
-        })
         .catch((error) => {
           if (this.plannerWasAborted()) {
             this.acknowledgementUsageError = error
@@ -755,11 +721,37 @@ export class PlanManager {
           console.warn('[AgentDiagnostics] Startup acknowledgement call failed', {
             error: sanitizePlannerError(error),
           })
-          this.settleAcknowledgementFirstVisible(false)
-          this.settleAcknowledgementDisplay(false)
           return false
         })
     }
+  }
+
+  /**
+   * Precomputed plans still need the worker-owned, model-authored opening.
+   * Keep this separate from startPlanCall() so using a persisted plan does not
+   * start a duplicate planning request or emit a duplicate plan event.
+   */
+  startAcknowledgementCall(): void {
+    console.log('[AgentDiagnostics] Startup acknowledgement scheduled for precomputed plan', {
+      complexity: this.taskComplexity,
+      messages: this.messages.length,
+      hasCustomInstructions: !!this.customInstructions,
+    })
+    this.resetPlannerAbortController()
+    this.scheduleAcknowledgementCall()
+  }
+
+  startPlanCall(): void {
+    console.log('[AgentDiagnostics] Planner scheduled', {
+      complexity: this.taskComplexity,
+      messages: this.messages.length,
+      hasCustomInstructions: !!this.customInstructions,
+    })
+    const plannerAbortController = this.resetPlannerAbortController()
+    // The planner response owns both the opening and the plan on ordinary
+    // starts. Do not launch a parallel acknowledgement stream here: streamed
+    // provider usage arrives at the terminal chunk, so cancelling a losing
+    // duplicate could leave real upstream cost without an exact ledger debit.
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
         await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
@@ -772,11 +764,6 @@ export class PlanManager {
       .then(() => {
         deadlineTimer = setTimeout(() => plannerAbortController.abort(), PLANNER_OVERALL_DEADLINE_MS)
         return this.attemptPlanCall(0, true)
-      })
-      .then(async (result) => {
-        await this.acknowledgementPromise
-        if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
-        return result
       })
       .finally(() => {
         if (deadlineTimer) clearTimeout(deadlineTimer)
@@ -792,8 +779,6 @@ export class PlanManager {
     this.removeExternalAbortListener = null
     this.plannerAbortController?.abort()
     this.plannerAbortController = null
-    this.settleAcknowledgementFirstVisible(false)
-    this.settleAcknowledgementDisplay(false)
   }
 
   usePrecomputedPlan(
@@ -816,7 +801,9 @@ export class PlanManager {
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     const modelPlan = withRequired
 
-    if (options.emitPlan !== false) this.emitter.plan(modelPlan.titles)
+    if (options.emitPlan !== false && !this.emitPlanAfterAcknowledgement(modelPlan.titles)) {
+      return false
+    }
     state.planItems = modelPlan.titles
     state.planScopes = modelPlan.scopes
     state.planEmitted = true
@@ -828,21 +815,31 @@ export class PlanManager {
     return true
   }
 
-  private settleAcknowledgementFirstVisible(emitted: boolean): void {
-    if (this.acknowledgementFirstVisibleResolved) return
-    this.acknowledgementFirstVisibleResolved = true
-    this.resolveAcknowledgementFirstVisible?.(emitted)
-    this.resolveAcknowledgementFirstVisible = null
-  }
-
-  private settleAcknowledgementDisplay(emitted: boolean): void {
-    if (this.acknowledgementDisplayResolved) return
-    this.acknowledgementDisplayResolved = true
-    this.resolveAcknowledgementDisplay?.(emitted)
-    this.resolveAcknowledgementDisplay = null
+  private emitPlanAfterAcknowledgement(items: string[]): boolean {
+    if (!this.skipAcknowledgement && !this.acknowledgementEmitted) {
+      console.warn('[AgentDiagnostics] Suppressed visible plan because no model-authored acknowledgement was emitted')
+      return false
+    }
+    this.emitter.plan(items)
+    return true
   }
 
   async awaitPlan(state: AgentStateData): Promise<void> {
+    // A precomputed plan does not run attemptPlanCall(), so explicitly finish
+    // the same model-authored acknowledgement gate before the first plan step
+    // can be injected or any action can start. No locally fabricated placeholder is
+    // permitted: an unusable provider draft gets one model repair, otherwise
+    // startup fails without exposing plan-only UI.
+    if (state.planEmitted && this.planPromise && !this.skipAcknowledgement) {
+      await this.acknowledgementPromise
+      if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
+      const acknowledged = this.acknowledgementEmitted || await this.emitAcknowledgement(undefined, 'task')
+      if (!acknowledged || !this.acknowledgementEmitted) {
+        throw new Error(PLANNER_QUALITY_ERROR)
+      }
+      return
+    }
+
     if (!state.planEmitted && this.planPromise && (state.iterations <= 1 || state.currentPlanItems === null)) {
       const startedAt = Date.now()
       console.log('[AgentDiagnostics] Awaiting planner', {
@@ -863,21 +860,21 @@ export class PlanManager {
   recoverFromPlannerFailure(state: AgentStateData): boolean {
     if (state.planEmitted || this.emitter.isClosed) return state.planEmitted
 
+    // Never recover into a visible plan with a canned opening. Recovery may
+    // retain a model acknowledgement that was already emitted before the
+    // planner failed, but otherwise the caller must surface the startup error.
+    if (!this.skipAcknowledgement && !this.acknowledgementEmitted) {
+      this.suppressFurtherAcknowledgementDeltas = true
+      return false
+    }
+
     const target = conciseTopicLabel(requestedTargetLabel(this.messages))
     const recoveryTitle = `Complete ${target}`
     const recoveryScope = [
       `Complete the user's requested work for ${target}.`,
       'Preserve explicit constraints, use available native tools, change route when a source/action fails, verify the result, and deliver it in the requested form.',
     ].join(' ')
-    const acknowledgement = `I’ll work through ${target}, adapt around blocked routes or unavailable tools, verify the result, and deliver it in the requested form.`
-
     this.suppressFurtherAcknowledgementDeltas = true
-    if (!this.acknowledgementEmitted) {
-      this.emitter.textDelta(acknowledgement)
-      this.acknowledgementEmitted = true
-    }
-    this.settleAcknowledgementFirstVisible(true)
-    this.settleAcknowledgementDisplay(true)
 
     const recovered = this.usePrecomputedPlan(
       state,
@@ -962,7 +959,7 @@ export class PlanManager {
     })
     await this.assertCreditRunway('ack')
     const afterCreditAt = Date.now()
-    const stream = await createStreamingCompletion({
+    const response = await createCompletion({
       model: DEFAULT_MODEL,
       messages: [
         {
@@ -995,74 +992,36 @@ Requirements:
       max_tokens: PLANNER_ACK_MAX_TOKENS,
       reasoning: PLANNER_ACK_REASONING,
       includeTemporalContext: false,
-      stream_options: { include_usage: true },
-      requestTimeoutMs: PLANNER_ACK_STREAM_TIMEOUT_MS,
+      requestTimeoutMs: PLANNER_ACK_REQUEST_TIMEOUT_MS,
       retryMaxAttempts: 0,
       abortSignal: this.plannerAbortController?.signal,
     })
-    console.log('[AgentDiagnostics] Startup acknowledgement stream opened', {
+    console.log('[AgentDiagnostics] Startup acknowledgement response received', {
       elapsedMs: Date.now() - ackStartedAt,
       creditPreflightMs: afterCreditAt - ackStartedAt,
     })
 
-    let ack = ''
-    let firstBuffer = ''
-    let emittedAny = false
-    let ownsVisibleAcknowledgement = false
-    let usage: RawCompletionUsage
-
-    const emitVisible = async (content: string) => {
-      if (!content || this.emitter.isClosed) return
-      if (this.suppressFurtherAcknowledgementDeltas) return
-      if (this.acknowledgementEmitted && !ownsVisibleAcknowledgement) return
-      if (this.emitter.isClosed) return
-      if (this.suppressFurtherAcknowledgementDeltas) return
-      if (this.acknowledgementEmitted && !ownsVisibleAcknowledgement) return
-      ownsVisibleAcknowledgement = true
-      this.settleAcknowledgementFirstVisible(true)
-      this.emitter.textDelta(content)
-      this.acknowledgementEmitted = true
-      emittedAny = true
-    }
-
-    for await (const chunk of stream) {
-      if (chunk.usage) usage = chunk.usage
-      const delta = streamingChunkText(chunk)
-      if (!delta) continue
-      ack += delta
-      firstBuffer += delta
-    }
-
     // A provider response is one acknowledgement candidate, not a sequence of
     // independently displayable messages. Validate the complete candidate
     // before exposing it so provider repetition/degeneration cannot leak seven
-    // greeting variants or a partial clause into the conversation. Planning is
-    // already running concurrently, so this adds no extra model round trip.
-    const sanitizedAck = sanitizePlannerAck(firstBuffer || ack)
+    // greeting variants or a partial clause into the conversation.
+    const sanitizedAck = sanitizePlannerAck(response.choices[0]?.message?.content || '')
     this.lastAcknowledgementCandidate = sanitizedAck
-    if (isUsablePlannerAck(sanitizedAck, request)) {
-      await emitVisible(sanitizedAck)
-      console.log('[AgentDiagnostics] Startup acknowledgement first visible text emitted', {
-        elapsedMs: Date.now() - ackStartedAt,
-        chars: sanitizedAck.length,
-      })
-    }
-
-    if (emittedAny && ownsVisibleAcknowledgement && !this.emitter.isClosed) {
-      this.emitter.textDelta('\n\n')
-      this.settleAcknowledgementDisplay(true)
-    }
-
-    await this.recordCompletionUsage(usage, 'ack')
+    // This separate request exists only for precomputed plans. Debit its exact
+    // non-streaming usage before any acknowledgement or first-step work becomes
+    // visible. createCompletion also recovers missing inline usage by generation
+    // ID, which a cancelled streaming loser could not guarantee.
+    await this.recordCompletionUsage(response.usage, 'ack')
     this.throwIfPlannerAborted()
 
-    if (emittedAny) {
-      if (!isUsablePlannerAck(sanitizedAck, request)) {
-        console.warn('[AgentDiagnostics] Startup acknowledgement streamed but failed post-hoc quality check', {
-          length: sanitizedAck.length,
-          taskShape,
-        })
-      }
+    if (
+      isUsablePlannerAck(sanitizedAck, request) &&
+      !this.emitter.isClosed &&
+      !this.suppressFurtherAcknowledgementDeltas &&
+      !this.acknowledgementEmitted
+    ) {
+      this.emitter.textDelta(sanitizedAck + '\n\n')
+      this.acknowledgementEmitted = true
       console.log('[AgentDiagnostics] Startup acknowledgement complete', {
         elapsedMs: Date.now() - ackStartedAt,
         chars: sanitizedAck.length,
@@ -1070,7 +1029,10 @@ Requirements:
       return true
     }
 
-    this.settleAcknowledgementDisplay(false)
+    console.warn('[AgentDiagnostics] Startup acknowledgement failed quality check', {
+      length: sanitizedAck.length,
+      taskShape,
+    })
     throw new Error(PLANNER_QUALITY_ERROR)
   }
 
@@ -1104,7 +1066,7 @@ Use plain, specific language. Example shape: "I'll inspect the current checkout 
       max_tokens: PLANNER_ACK_MAX_TOKENS,
       reasoning: PLANNER_ACK_REASONING,
       includeTemporalContext: false,
-      requestTimeoutMs: PLANNER_ACK_STREAM_TIMEOUT_MS,
+      requestTimeoutMs: PLANNER_ACK_REQUEST_TIMEOUT_MS,
       retryMaxAttempts: 0,
       abortSignal: this.plannerAbortController?.signal,
     })
@@ -1113,39 +1075,19 @@ Use plain, specific language. Example shape: "I'll inspect the current checkout 
     return sanitizePlannerAck(response.choices[0]?.message?.content || '')
   }
 
-  private async emitAcknowledgement(ack: string | undefined, taskShape: string): Promise<void> {
-    if (this.skipAcknowledgement) return
+  private async emitAcknowledgement(ack: string | undefined, taskShape: string): Promise<boolean> {
+    if (this.skipAcknowledgement) return true
 
     if (this.acknowledgementEmitted) {
       this.suppressFurtherAcknowledgementDeltas = true
-      this.settleAcknowledgementDisplay(true)
-      return
-    }
-
-    if (this.acknowledgementDisplayPromise) {
-      const displayed = await Promise.race([
-        this.acknowledgementDisplayPromise,
-        new Promise<boolean>(resolve => setTimeout(() => resolve(false), PLANNER_ACK_DISPLAY_WAIT_MS)),
-      ])
-      if (this.acknowledgementEmitted || displayed) {
-        this.suppressFurtherAcknowledgementDeltas = true
-        return
-      }
+      return true
     }
 
     const sanitized = typeof ack === 'string' ? sanitizePlannerAck(ack) : ''
     if (isUsablePlannerAck(sanitized, effectiveTaskRequest(this.messages))) {
       this.emitter.textDelta(sanitized + '\n\n')
       this.acknowledgementEmitted = true
-      return
-    }
-
-    if (this.acknowledgementPromise) {
-      const emitted = await Promise.race([
-        this.acknowledgementPromise,
-        new Promise<boolean>(resolve => setTimeout(() => resolve(false), PLANNER_ACK_DISPLAY_WAIT_MS)),
-      ])
-      if (this.acknowledgementEmitted || emitted) return
+      return true
     }
 
     try {
@@ -1153,8 +1095,7 @@ Use plain, specific language. Example shape: "I'll inspect the current checkout 
       if (isUsablePlannerAck(repaired, effectiveTaskRequest(this.messages))) {
         this.emitter.textDelta(repaired + '\n\n')
         this.acknowledgementEmitted = true
-        this.settleAcknowledgementDisplay(true)
-        return
+        return true
       }
       console.warn('[AgentDiagnostics] Model acknowledgement repair was still unusable', {
         taskShape,
@@ -1171,7 +1112,7 @@ Use plain, specific language. Example shape: "I'll inspect the current checkout 
     }
 
     this.suppressFurtherAcknowledgementDeltas = true
-    this.settleAcknowledgementDisplay(false)
+    return false
   }
 
   getStepInjection(state: AgentStateData, iterationLimit: number): { role: string; content: string } | null {
@@ -1463,10 +1404,11 @@ Rules:
 - Never copy a long user command phrase into the ack, step titles, scopes, or search labels.
 - The ack must be one natural, very brief direct paragraph using plain words. Keep it roughly 8-48 words, begin with "I'll" or "I will", and say what Agent will do across the exact task and what it will deliver. Reject status headlines such as "Clarifying...", "Mapping...", or "Researching...".
 - The ack covers the whole request, including every side of a comparison, rather than describing only the first phase. It must not end by promising an action "next".
-- The planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title. Preserve explicit user order and real dependencies without forcing stock research, analysis, synthesis, or a literal "Deliver ..." phase. A non-empty plan must still culminate in the requested answer, outcome, confirmation, or artifact, but the last phase may naturally combine final work, verification, synthesis, and handoff. Do not force a separate delivery phase when it adds no useful work.
-- Choose whatever task-specific structure will execute best. Do not use a fixed count, impose title/scope word ranges, require artificial non-overlap, or reshape the plan into stock phases.
+- The planning model owns the visible plan's wording, boundaries, order, and task-specific module count. Use a compact set of meaningful work modules: a narrow lookup or single action often needs 2; ordinary research, comparison, or build work typically needs 3-4; deep multi-region, multi-artifact, illustrated, or PDF work often needs 5. These are tendencies, not caps or templates. Use fewer or more for genuinely independent outcomes, and preserve any explicit user-authored count.
+- Organize the plan by task-specific evidence angles, entities, regions, source classes, workflow stages, artifacts, or decisions. Each visible module represents a meaningful workstream or outcome, not one source page, tool call, or internal micro-step. Include assessment or synthesis when evidence must be compared, judged, reconciled, or turned into recommendations.
+- End every non-empty plan with a user-facing completion module that names the concrete answer, action state, artifact, report, export, or handoff. It may combine final synthesis, writing, verification, export, and delivery; do not use a context-free generic "Deliver results" label.
 - Give every non-trivial phase a short internal checklist of concrete, task-specific outcomes. These are execution memory beneath the visible phase, not extra UI phases and not a universal workflow. Include the facts, entities, interactions, files, decisions, or verification that this phase must cover; adapt or replace them when later user direction changes.
-- The agent chooses the least cumbersome research route that fits the evidence gap: web_search for discovery, read_document or HTTP/text extraction for normal webpages and documents, and browser tools only when rendered state, screenshots, scripts, or interaction matter. Browser use is available, not compulsory.
+- The agent chooses the least cumbersome research route that fits the evidence gap: web_search for discovery, then read_document or HTTP/text extraction by default for normal webpages and documents. Browser tools are primarily for dynamic or scripted state, interaction/action work, screenshots, or exact details that need visibly rendered confirmation. Browser use is available, not compulsory.
 - "code" means the user asked to write, modify, debug, run, or deploy code. A question or research request about code, code generation, developer tools, or software behaviour is research/general unless it asks for code changes or a code artifact.
 - Gather evidence before claims that rely on it, but let the model decide whether research, evaluation, synthesis, writing, verification, and handoff are separate or combined visible phases. The final visible phase should complete the requested concrete result without being forced into a stock title or verb.
 - Saved custom instructions still apply and supersede default planner behavior for process, tools, source rules, files, format, narration, verification, and visible step count. They do not supersede safety, permissions, sandbox/tool availability, or core runtime rules. If they specify a fixed phase count such as "three-step" or "4 phases", honor that visible count unless the latest user request or a higher-priority runtime/safety rule requires otherwise.
@@ -1536,7 +1478,10 @@ Rules:
       ) {
         return false
       }
-      await this.emitAcknowledgement(obj.ack, mappedTaskType)
+      const acknowledged = await this.emitAcknowledgement(obj.ack, mappedTaskType)
+      if (!acknowledged || (!this.skipAcknowledgement && !this.acknowledgementEmitted)) {
+        throw new Error(PLANNER_QUALITY_ERROR)
+      }
       this.throwIfPlannerAborted()
       state.planItems = null
       state.planScopes = null
@@ -1562,9 +1507,14 @@ Rules:
     const withCustomRequirements = this.applyCustomInstructionPlanRequirements(enforcedTitles, alignedScopes)
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     const modelPlan = withRequired
-    await this.emitAcknowledgement(obj.ack, mappedTaskType)
+    const acknowledged = await this.emitAcknowledgement(obj.ack, mappedTaskType)
+    if (!acknowledged || (!this.skipAcknowledgement && !this.acknowledgementEmitted)) {
+      throw new Error(PLANNER_QUALITY_ERROR)
+    }
     this.throwIfPlannerAborted()
-    this.emitter.plan(modelPlan.titles)
+    if (!this.emitPlanAfterAcknowledgement(modelPlan.titles)) {
+      throw new Error(PLANNER_QUALITY_ERROR)
+    }
     state.planItems = modelPlan.titles
     state.planScopes = modelPlan.scopes
     state.planEmitted = true
@@ -1749,7 +1699,7 @@ REMAINING STEPS: ${remainingSteps.map((s, i) => `${state.currentStepIdx + 2 + i}
 REASON FOR REPLANNING: ${reason}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (including a revised current step if needed). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, dependency-aware order, and final-phase title; do not force stock research, analysis, synthesis, or "Deliver ..." phases. The remaining plan must still culminate in the task-specific answer, outcome, confirmation, or artifact, but combine final work and handoff when that is more natural. Keep every step actionable and specific.`,
+Generate an updated compact list of remaining task modules (including a revised current module if needed). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order. Group tool calls and source pages beneath meaningful workstreams or outcomes; retain separate evidence-angle, entity, region, assessment/synthesis, build, or verification modules only when the remaining work genuinely needs them. The final remaining module must name the concrete user-facing answer, action state, artifact, report, export, or handoff, and may combine final work with delivery. Avoid context-free labels such as "Deliver results". Keep every module actionable and specific.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
@@ -1795,7 +1745,7 @@ Generate an updated list of remaining steps (including a revised current step if
             state.deliverableStepBudget = Math.max(MIN_DELIVERABLE_BUDGET, remainingIterations - (baseBudget * (remainingStepCount - 1)))
           }
 
-          this.emitter.plan(updatedPlan)
+          if (!this.emitPlanAfterAcknowledgement(updatedPlan)) return false
           console.log(`[Plan] Replanned: ${updatedPlan.length} steps (replan #${state.replanCount})`)
           return true
         }
@@ -1999,7 +1949,7 @@ ${trigger.workingMemorySnapshot || '(no facts collected yet)'}
 REASON FOR REPLANNING: ${reasonText}
 ${customInstructionContext}
 
-Generate an updated list of remaining steps (starting from a revised current step). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, dependency-aware order, and final-phase title; do not force stock research, analysis, synthesis, or "Deliver ..." phases. The remaining plan must still culminate in the task-specific answer, outcome, confirmation, or artifact, but combine final work and handoff when that is more natural. The steps should account for what was learned.`,
+Generate an updated compact list of remaining task modules (starting from a revised current module). Return ONLY a JSON array of strings. You own the new plan shape, wording, boundaries, and dependency-aware order. Group tool calls and source pages beneath meaningful workstreams or outcomes; retain separate evidence-angle, entity, region, assessment/synthesis, build, or verification modules only when the remaining work genuinely needs them. The final remaining module must name the concrete user-facing answer, action state, artifact, report, export, or handoff, and may combine final work with delivery. Avoid context-free labels such as "Deliver results". The modules should account for what was learned.`,
           },
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
@@ -2044,7 +1994,7 @@ Generate an updated list of remaining steps (starting from a revised current ste
             state.deliverableStepBudget = Math.max(MIN_DELIVERABLE_BUDGET, remainingIterations - (baseBudget * (remainingStepCount - 1)))
           }
 
-          this.emitter.plan(updatedPlan)
+          if (!this.emitPlanAfterAcknowledgement(updatedPlan)) return false
           console.log(`[Plan] Info-replan: ${updatedPlan.length} steps (trigger: ${trigger.type}, replan #${state.replanCount})`)
           return true
         }

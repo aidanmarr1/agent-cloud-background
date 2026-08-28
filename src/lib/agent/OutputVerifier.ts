@@ -12,6 +12,7 @@ import {
   BUILD_MIN_CONTENT_CHARS,
   PLACEHOLDER_PATTERNS,
   OUTLINE_ONLY_THRESHOLD,
+  RESEARCH_MIN_WORDS_BY_COMPLEXITY,
 } from './config'
 import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 import { requestedBriefInlineSourceCount } from './BriefInlineResearch'
@@ -309,6 +310,16 @@ export class OutputVerifier {
     if (requestedWordTarget && words < requestedWordTarget.minimum) {
       failures.push(`Word count ${words}, requested approximately ${requestedWordTarget.requested}`)
       suggestions.push('Meet the user-authored length target without adding repetitive filler')
+    } else if (!requestedWordTarget && this.isDeepResearchRequest(originalRequest)) {
+      // A request for a concise executive summary does not make the complete
+      // comprehensive/in-depth report concise. Keep this floor scoped to an
+      // explicit depth request, and let any user-authored word target win.
+      const complexity = Math.max(1, Math.min(5, Math.round(taskComplexity))) as 1 | 2 | 3 | 4 | 5
+      const minimumWords = RESEARCH_MIN_WORDS_BY_COMPLEXITY[complexity]
+      if (words < minimumWords) {
+        failures.push(`Word count ${words}, minimum ${minimumWords} for the requested research depth`)
+        suggestions.push('Expand the report with substantive evidence, analysis, caveats, and implications')
+      }
     }
 
     // Citation count (URLs or "Source:" references)

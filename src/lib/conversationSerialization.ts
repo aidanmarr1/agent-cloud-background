@@ -6,7 +6,10 @@ const MAX_TEXT_CONTENT_CHARS = 120_000
 const MAX_ARTIFACT_CONTENT_CHARS = 120_000
 const MAX_PANEL_ITEMS = 50
 const MAX_SEARCH_RESULTS = 15
-const MAX_BROWSE_CONTENT = 10_000
+// Keep a complete ordinary article/help page across persistence and reloads.
+// This matches the bounded extraction ceiling in browse.ts without allowing an
+// unbounded HTML/page dump into conversation storage.
+const MAX_BROWSE_CONTENT = 40_000
 const MAX_TERMINAL_OUTPUT = 20_000
 const MAX_FILE_CONTENT = 20_000
 

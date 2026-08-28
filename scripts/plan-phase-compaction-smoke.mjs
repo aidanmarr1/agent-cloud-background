@@ -23,8 +23,18 @@ assert.match(
 )
 assert.match(
   promptsSource,
-  /planning model owns the visible plan's wording, step count, boundaries, order, and final-phase title/i,
+  /planning model owns the visible plan's wording, boundaries, order, and task-specific module count/i,
   'planner prompts must explicitly grant model control over the visible plan',
+)
+assert.match(
+  promptsSource,
+  /These are tendencies, not caps or templates/,
+  'planner complexity calibration must remain a soft model-authored tendency',
+)
+assert.match(
+  promptsSource,
+  /Each visible module represents a meaningful workstream or outcome, not one source page, tool call, or internal micro-step/,
+  'planner prompts must group micro-actions beneath meaningful progress modules',
 )
 assert.doesNotMatch(
   promptsSource,

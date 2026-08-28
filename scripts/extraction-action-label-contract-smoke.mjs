@@ -55,8 +55,8 @@ assert.match(
 )
 assert.match(
   tools,
-  /name: 'browser_get_content',[\s\S]*description: 'Extract rendered text from the current webpage\.'/,
-  'current-page content extraction must remain clearly described without constraining the label wording',
+  /name: 'browser_get_content',[\s\S]*description: 'Extract rendered text from the current webpage\.[^']*exact rendered detail[^']*not as the default reader for an ordinary search-result page\.'/,
+  'current-page content extraction must remain scoped to rendered confirmation without constraining the label wording',
 )
 assert.doesNotMatch(
   tools,

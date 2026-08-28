@@ -80,13 +80,13 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /hardWindowOpen =[\s\S]*NARRATION_MAX_VISIBLE_ACTION_GAP - 1[\s\S]*state\.forceTextNextIteration \|\| state\.exactExtractionGuardPending[\s\S]*!hardWindowOpen/, 'internal text/extraction guards must never suppress narration once three actions have settled')
   assert.match(agentLoop, /const cadenceNarrationInMainTurn =[\s\S]*shouldUseNaturalCadenceNarration\(state, this\.options\.messages\)[\s\S]*beginNarrationCadenceAttempt\(state\)/, 'cadence must be armed on the next ordinary action request once three visible actions complete')
   assert.match(agentLoop, /withCadenceProgressUpdateSchemas\([\s\S]*effectiveCadenceNarrationInMainTurn/, 'cadence narration must share the native tool request instead of opening a competing provider call')
-  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*action pills already say what was searched, opened, read, inspected, or written[\s\S]*State what the preceding results established/, 'main-turn narration must synthesize outcomes instead of repeating visible action pills')
+  assert.match(agentLoop, /cadenceNarrationMainTurnGuidance[\s\S]*Lead with a fact-dense outcome[\s\S]*do not use an operation[\s\S]*as the outcome/, 'main-turn narration must synthesize outcomes instead of repeating visible action pills')
   assert.doesNotMatch(agentLoop, /launchNarrationSidecarIfDue|NARRATION_SIDECAR_REQUEST_TIMEOUT_MS|Emitted asynchronous LLM progress narration/, 'cadence must not use a rate-limit-prone narration sidecar')
   assert.match(agentLoop, /if \(lastStreamResult\.cadenceProgressUpdate\)[\s\S]*carriedCadenceActionCount\(lastStreamResult\)[\s\S]*acceptProgressNarration[\s\S]*remainingVisibleActions: carriedVisibleActions[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*beforeToolId: lastStreamResult\.cadenceProgressToolCallId[\s\S]*remainingVisibleActions: 0[\s\S]*streamProcessor\.commitBufferedEmission\(\)[\s\S]*lastToolResults = await toolPipeline\.executeAll/, 'model-authored progress must release at the exact pre-action position while staged, exposed-file, and deferred paths each count that action once')
   assert.match(streamProcessor, /function carriedCadenceActionCount[\s\S]*cadenceProgressToolCallId[\s\S]*provisionalStartEmitted \? 1 : 0/, 'server cadence reset must carry only the exact action that was provisionally staged')
   assert.match(agentLoop, /retryNarrationCadenceAttemptWithoutNewAction\(state\)/, 'a failed cadence stream must stay due without blocking later work')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'narration must not be seeded with a broad next-plan-phase cue')
-  assert.match(narrationMemory, /already-completed actions[\s\S]*do not announce operations[\s\S]*Be neutral and evidence-led/, 'native cadence schema must require neutral findings from preceding completed work rather than action bookkeeping')
+  assert.match(narrationMemory, /already-completed actions[\s\S]*source-action lead is valid[\s\S]*never make the operation itself the outcome[\s\S]*Be neutral and evidence-led/, 'native cadence schema must distinguish concrete source-led findings from action bookkeeping')
   assert.match(dispatcher, /case 'progress_update':[\s\S]*handleProgressUpdate\(event\)/, 'client must route the complete explicit progress event with placement metadata')
   assert.match(dispatcher, /handleProgressUpdate[\s\S]*requireSignal:\s*false[\s\S]*progressUpdateGroupIndex\(event\.stepIndex\)[\s\S]*afterToolId[\s\S]*beforeToolId[\s\S]*addNarrationAt\(targetGroupIdx,\s*narrationText,\s*targetPosition\)[\s\S]*reconcileNarrationCadence\(remainingVisibleActions\)/, 'server-accepted progress must render at its captured plan-step and exact before/after action frontier')
   assert.match(dispatcher, /const safePosition = Math\.max[\s\S]*addGroupNarration\(this\.conversationId,\s*groupIdx,\s*narrationText,\s*safePosition\)/, 'client narration insertion must clamp the captured position before storing it')
@@ -121,14 +121,16 @@ async function assertSourceContracts() {
   assert.match(config, /checkIntervalMs:\s*150/, 'stream inactivity checks should run quickly enough to keep thinking state honest')
   assert.match(prompts, /Do not narrate with fewer than 3 new visible actions, and never go past 4 visible actions/, 'agent prompt must enforce the exact 3-4 action narration window')
   assert.doesNotMatch(prompts, /never fewer than 15 words|exactly \d+(?:-\d+)? words/, 'agent prompt must not impose a rigid narration length template')
-  assert.match(prompts, /default to a clean, slightly fuller two-sentence paragraph/, 'agent prompt must default continuing narration to a clean Manus-style result and direction pair')
-  assert.match(prompts, /Use one sentence when the result is genuinely simple or work is ending/, 'agent prompt must keep short and terminal updates proportionate')
   assert.match(prompts, /result-first/, 'agent prompt must request result-first evidence narration')
   assert.match(prompts, /progressive evidence trace/, 'agent prompt must advance the newest evidence instead of paraphrasing a running summary')
-  assert.match(prompts, /newest factual delta since the preceding update/, 'agent prompt must anchor each update in genuinely new evidence')
-  assert.match(prompts, /Synthesize what the evidence establishes instead of making a vendor, publication, or webpage the speaking subject/, 'agent prompt must keep narration neutral and evidence-led')
-  assert.doesNotMatch(prompts, /minority case|uncommon/, 'agent prompt must not impose a frequency quota on natural Next transitions')
-  assert.match(prompts, /normally end with a short "Next, I'll\.\.\." sentence/, 'agent prompt must use a brief immediate direction for continuing work')
+  assert.match(prompts, /Lead with a fact-dense outcome from the newest completed work and continue naturally from what the user has already seen/, 'agent prompt must lead with dense completed-work evidence and preserve continuity')
+  assert.match(prompts, /When uncertainty, source disagreement, or an evidence gap materially changes the result, say so plainly/, 'agent prompt must preserve material uncertainty and disagreement')
+  assert.match(prompts, /Add an immediate next direction only when work is continuing and that direction helps orient the user/, 'agent prompt must make a next direction conditional on useful continuing work')
+  assert.match(prompts, /Do not force a second sentence or a stock transition/, 'agent prompt must not turn structural inspiration into a sentence template')
+  assert.match(prompts, /direct factual subjects, first-person confirmations, and concise review or finding leads are all valid/, 'agent prompt must allow varied natural result-first syntax')
+  assert.match(prompts, /A concrete source-action lead is also valid when it immediately states the extracted result or material provenance/, 'agent prompt must retain source-action leads that carry concrete findings')
+  assert.match(prompts, /do not count as outcomes by themselves/, 'agent prompt must reject deictic source framing only when it substitutes for a result')
+  assert.doesNotMatch(prompts, /default to a clean, slightly fuller two-sentence paragraph|normally end with a short "Next, I'll|Manus-style progress paragraph/, 'agent prompt must not force example wording or one canned cadence form')
   assert.match(prompts, /After 3 visible actions are complete, the next native action turn must carry the update/, 'agent prompt must carry narration on the action-four request and display it before that action')
   assert.match(prompts, /standing cadence for every phase/, 'agent prompt must frame narration as a per-phase cadence, not only research narration')
   assert.match(prompts, /narration is the default first visible text/, 'agent prompt must make narration the preferred first visible text at the 3-action window')
@@ -137,11 +139,20 @@ async function assertSourceContracts() {
   assert.match(prompts, /Never ask permission to continue an active task/, 'agent prompt must ban lazy opt-in handoffs during active tasks')
   assert.doesNotMatch(agentLoop, /NARRATION_STRUCTURAL_FORMS|Preferred structural form for this update/, 'compact narration must not force a rotating template')
   assert.match(agentLoop, /Use it to synthesize the newest useful outcome from the completed actions immediately above this call/, 'native narration must summarize preceding tool outcomes')
-  assert.match(agentLoop, /default to two clean sentences[\s\S]*Next, I\\'ll/, 'native narration must default to a concrete result followed by the immediate next direction')
-  assert.match(agentLoop, /Synthesize neutrally instead of making a vendor, publication, or webpage the speaking subject/, 'native narration must not sound like vendor-authored commentary')
+  assert.match(agentLoop, /Lead with a fact-dense outcome and make it continue naturally from the completed work immediately above/, 'native narration must lead with a dense outcome connected to completed work')
+  assert.match(agentLoop, /state material uncertainty, disagreement, or an evidence gap/, 'native narration must preserve consequential evidence limitations')
+  assert.match(agentLoop, /A concise source-action lead is valid when it immediately carries the concrete finding or important provenance/, 'native narration must accept concrete source-action leads')
+  assert.match(agentLoop, /Vary the syntax to fit the result: a direct factual subject, first-person confirmation, or concise review\/finding lead can all be natural/, 'native narration must allow natural syntactic variation')
+  assert.match(agentLoop, /Do not copy a fixed opening, transition, or sentence count/, 'native narration must not force a canned form')
+  assert.match(agentLoop, /compactForcedNarrationMessages[\s\S]*Lead with a fact-dense new result[\s\S]*first-person confirmation[\s\S]*source-action lead is valid/, 'phase-end narration must use the same flexible outcome-first structure')
+  assert.doesNotMatch(agentLoop, /truncation, confirmations, caches/, 'phase-end guard wording must not accidentally ban first-person confirmation syntax')
   assert.doesNotMatch(agentLoop, /Never write a future action, plan, promise, command, or a sentence beginning "Next"/, 'native narration must not impose a blanket ban on useful immediate transitions')
-  assert.match(narrationMemory, /normally use two clean sentences[\s\S]*Next, I\\'ll/, 'tool-schema narration must request the clean result-then-direction structure')
-  assert.match(narrationMemory, /rather than making a vendor, publication, or webpage the speaking subject/, 'tool-schema narration must remain neutral and evidence-led')
+  assert.match(narrationMemory, /Lead with a fact-dense outcome and make it read as a natural continuation of the completed work/, 'tool-schema narration must encode outcome-first continuity')
+  assert.match(narrationMemory, /State uncertainty, disagreement, or an evidence gap when it materially affects the result/, 'tool-schema narration must preserve material uncertainty')
+  assert.match(narrationMemory, /an immediate useful direction may follow/, 'tool-schema narration must make direction optional and continuation-dependent')
+  assert.match(narrationMemory, /a direct factual subject, first-person confirmation, or concise review\/finding lead can all be natural/, 'tool-schema narration must allow varied syntax')
+  assert.match(narrationMemory, /a source-action lead is valid when it immediately carries the concrete finding or important provenance/, 'tool-schema narration must preserve concrete source-action leads')
+  assert.doesNotMatch(narrationMemory, /normally use two clean sentences|short "Next, I\\'ll/, 'tool-schema narration must not prescribe a canned two-sentence transition')
   assert.match(agentLoop, /repeat\/paraphrase an already-shown update/, 'native narration must reject repetitive cumulative summaries')
   assert.match(cleaners, /PERMISSION_TO_CONTINUE_PATTERN/, 'narration cleaners must reject permission-to-continue handoff text')
   assert.match(taskGroupView, /task-thread-body/, 'task group view must render a subtle timeline body')
@@ -330,6 +341,81 @@ export function runNarrationSmoke() {
     'accepted',
     'a concrete completed-source result must remain valid narration',
   )
+
+  const specificityState = createInitialState(false, state.tierTimeouts)
+  for (const vagueNarration of [
+    'Prior sources also support the overall conclusion and provide useful context for the remaining comparison.',
+    'The previous evidence confirms the same general pattern across the materials reviewed so far.',
+    'The sources reviewed so far indicate broad consistency across the available research.',
+    'The research so far shows a clear overall pattern and supports the current conclusion.',
+    'The research shows a consistent pattern across the sources and supports the overall conclusion.',
+    'The evidence indicates broad consistency across the sources and supports the overall conclusion.',
+    'Progress continues across the requested task, with additional research planned before the final answer is prepared.',
+    'Future work will examine more sources and compare the evidence before producing the final answer for the user.',
+    'Broader research will examine more sources before the final answer is prepared for the user.',
+    'Further analysis will compare the remaining evidence before producing the final report for the user.',
+    'The investigation will continue across additional sources before the final answer is completed for the user.',
+    'The broader research effort will examine more sources before the final answer is prepared for the user.',
+    'This analysis phase will compare the remaining evidence before producing the final report for the user.',
+    'The investigation is going to compare additional evidence before completing the final report for the user.',
+    'The research project will examine more sources before the final answer is prepared for the user.',
+    'The next step will compare the remaining evidence before producing the final report for the user.',
+    'The next steps will compare the remaining evidence before producing the final report for the user.',
+    'The remaining research stages will compare additional evidence before producing the final report for the user.',
+    'The next phase is to compare additional evidence before producing the final report for the user.',
+    'The next step involves comparing the remaining evidence before producing the final report for the user.',
+    'The remaining work consists of reviewing additional sources before producing the final report for the user.',
+    'The confirmed research plan will compare additional evidence before producing the final report for the user.',
+    'The documented analysis phase will examine more sources before the final answer is prepared for the user.',
+    'The investigation for this task continues across additional sources to compare the remaining evidence and resolve open questions.',
+    'The current task continues with additional research to resolve remaining evidence gaps before delivery to the user.',
+    'Progress continues across the requested task, with additional research planned to resolve the remaining evidence gaps.',
+    'The remaining work continues across additional sources to compare the evidence and resolve open questions for this request.',
+    'The next phase continues with additional research to resolve remaining evidence gaps and support the requested analysis.',
+    "The task's confirmed research plan will compare additional evidence before producing the final report for the user.",
+  ]) {
+    assert.equal(
+      reviewProgressNarration(specificityState, vagueNarration, { requireSignal: true }).status,
+      'invalid',
+      'vague source-summary narration must be rejected: ' + vagueNarration,
+    )
+  }
+  assert.equal(
+    reviewProgressNarration(
+      specificityState,
+      "The evidence indicates shorter action loops reduce user-visible latency across the tested agents. Next, I'll compare implementation trade-offs.",
+      { requireSignal: true },
+    ).status,
+    'accepted',
+    'neutral evidence-led phrasing must remain valid when it immediately states a concrete finding',
+  )
+  for (const naturalNarration of [
+    'Cold-start measurements show median startup fell from 3.4 to 2.1 seconds, while warm starts stayed flat.',
+    'I confirmed the Pro plan costs $20 per month, although regional tax treatment remains unclear.',
+    'The evidence indicates demand fell after launch, especially among smaller teams adopting the product without existing integrations.',
+    'The benchmark review found cache reuse removes most repeat-start latency, but the mobile sample remains too small for a firm conclusion.',
+    'Reviewed the official pricing page and confirmed the Pro plan costs $20 per month before regional taxes.',
+    'Reviewed the official product page; Genspark offers Super Agent and AI Suite for collaborative workflow automation.',
+    'Genspark’s products include Super Agent, AI Suite, Call for Me, and an API for workflow automation and integration.',
+    'Sea levels will rise by 10–12 inches by 2050 under the central NOAA projection, increasing routine coastal flood exposure.',
+    'Research shows sea levels will rise by 10–12 inches by 2050, increasing routine coastal flood exposure.',
+    'The research team will publish additional findings in its final report next month, according to the announced schedule.',
+    'The published roadmap shows the research project will require additional evidence before the final report is released next quarter.',
+    'The audit shows further analysis will require additional evidence before the final report can be completed for regulators.',
+    'The report confirms further analysis will require additional evidence before the final response can be completed for regulators.',
+    'The audit, however, shows further analysis will require additional evidence before the final report can be completed for regulators.',
+    'The audit, after reviewing all available evidence, shows further analysis will require additional evidence before regulators approve the final report.',
+    'The published review focuses on additional evidence from clinical trials, including safety outcomes and long-term efficacy measures.',
+    'The official assessment involves additional research on climate adaptation, with detailed projections for coastal communities through 2050.',
+    'Reviewed Genspark’s primary products and legal terms. Its subscription model combines tiered access with usage-based limits for automation features.',
+    'Reviewed sources from NASA and NOAA and confirmed Mars surface radiation remains the dominant habitat risk for long-duration crews.',
+  ]) {
+    assert.equal(
+      reviewProgressNarration(specificityState, naturalNarration, { requireSignal: true }).status,
+      'accepted',
+      'fact-dense narration must allow direct, first-person, review, and concrete source-action leads: ' + naturalNarration,
+    )
+  }
 
   const structureState = createInitialState(false, state.tierTimeouts)
   const evidenceTransitionOne = "NASA measurements confirmed Mars surface radiation remains the dominant long-duration habitat risk for crews. Next, I'll compare shielding requirements."

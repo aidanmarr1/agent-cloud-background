@@ -132,6 +132,7 @@ export interface ToolExecutionResult {
 
 import {
   TOOL_TIMEOUT_MS, FILE_WRITE_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS, MAX_BROWSE_RESULT_CHARS,
+  MAX_SOURCE_RESULT_CHARS,
   WEB_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
   TOOL_TIMEOUT_SETTLE_GRACE_MS,
   URL_NORMALIZE_STRIP_PARAMS,
@@ -192,6 +193,7 @@ const BROWSER_ACTION_PREFLIGHT_TOOLS = new Set([
 ])
 
 const BROWSER_RESULT_TOOLS = new Set(['browse_page', 'browser_navigate', 'browser_get_content', 'browser_find_text'])
+const READABLE_MODEL_SOURCE_TOOLS = new Set(['read_document', 'browser_get_content'])
 
 const BROWSER_CONTENT_INVALIDATING_TOOLS = new Set([
   'browser_navigate',
@@ -1520,6 +1522,86 @@ function truncateBrowserText(value: string, maxChars: number): string {
   const lineBreak = head.lastIndexOf('\n')
   const prefix = lineBreak > usable * 0.45 ? head.slice(0, lineBreak) : head
   return `${prefix.trimEnd()}...[truncated]`
+}
+
+function isReadableHttpResult(resultObj: Record<string, unknown> | null): boolean {
+  if (!resultObj || typeof resultObj.body !== 'string' || !resultObj.body.trim()) return false
+  const headers = resultObj.headers && typeof resultObj.headers === 'object' && !Array.isArray(resultObj.headers)
+    ? resultObj.headers as Record<string, unknown>
+    : null
+  const contentTypeEntry = headers
+    ? Object.entries(headers).find(([name]) => name.toLowerCase() === 'content-type')?.[1]
+    : undefined
+  const contentType = typeof contentTypeEntry === 'string' ? contentTypeEntry.toLowerCase() : ''
+  if (contentType) {
+    return /(?:^text\/|json|xml|javascript|xhtml|yaml|csv)/i.test(contentType)
+  }
+
+  // Headerless API responses are common. Reject obvious binary bodies while
+  // retaining ordinary UTF-8 text and structured data.
+  const sample = resultObj.body.slice(0, 2_000)
+  if (sample.includes('\0')) return false
+  const controlCharacters = Array.from(sample).filter(char => {
+    const code = char.charCodeAt(0)
+    return code < 32 && code !== 9 && code !== 10 && code !== 13
+  }).length
+  return controlCharacters / Math.max(1, sample.length) < 0.02
+}
+
+function isReadableModelSourceResult(toolName: string, resultObj: Record<string, unknown> | null): boolean {
+  if (READABLE_MODEL_SOURCE_TOOLS.has(toolName)) return true
+  return toolName === 'http_request' && isReadableHttpResult(resultObj)
+}
+
+function compactReadableSourceText(value: string, maxChars: number): string {
+  const clean = value.replace(/\r\n/g, '\n').trim()
+  if (clean.length <= maxChars) return clean
+
+  const marker = '\n\n...[source middle omitted to fit context]...\n\n'
+  const available = Math.max(400, maxChars - marker.length)
+  const preferredHeadLength = Math.floor(available * 0.7)
+  const preferredTailLength = available - preferredHeadLength
+  const rawHead = clean.slice(0, preferredHeadLength)
+  const rawTail = clean.slice(-preferredTailLength)
+  const headBreak = rawHead.lastIndexOf('\n\n')
+  const tailBreak = rawTail.indexOf('\n\n')
+  const head = headBreak > preferredHeadLength * 0.6 ? rawHead.slice(0, headBreak) : rawHead
+  const tail = tailBreak >= 0 && tailBreak < preferredTailLength * 0.4
+    ? rawTail.slice(tailBreak + 2)
+    : rawTail
+  return `${head.trimEnd()}${marker}${tail.trimStart()}`
+}
+
+function compactReadableSourceResultForModel(
+  toolName: string,
+  resultObj: Record<string, unknown> | null,
+  resultStr: string,
+  limit: number,
+): string {
+  if (!resultObj) {
+    return JSON.stringify({ result_preview: compactReadableSourceText(resultStr, Math.max(400, limit - 400)) })
+  }
+
+  const textKey = toolName === 'http_request' ? 'body' : 'content'
+  const sourceText = typeof resultObj[textKey] === 'string' ? resultObj[textKey] as string : ''
+  const compact: Record<string, unknown> = {}
+  const metadataKeys = toolName === 'http_request'
+    ? ['status', 'statusText', 'headers', 'durationMs']
+    : ['type', 'title', 'source', 'url', 'wordCount', 'pageCount', 'status', 'statusText', 'success', 'recoverable', 'action', 'error', 'recoveryHint']
+  for (const key of metadataKeys) {
+    if (resultObj[key] !== undefined) compact[key] = resultObj[key]
+  }
+
+  for (const fraction of [0.88, 0.8, 0.7, 0.58]) {
+    compact[textKey] = compactReadableSourceText(sourceText, Math.max(600, Math.floor(limit * fraction)))
+    compact.contentTruncated = sourceText.length > String(compact[textKey]).length
+    compact.originalContentCharacters = sourceText.length
+    const serialized = JSON.stringify(compact)
+    if (serialized.length <= limit - 360) return serialized
+  }
+
+  compact[textKey] = compactReadableSourceText(sourceText, Math.max(400, Math.floor(limit * 0.45)))
+  return JSON.stringify(compact)
 }
 
 function indexOfPattern(value: string, pattern: RegExp, start = 0): number {
@@ -4245,7 +4327,7 @@ export class ToolPipeline {
     const directNavigationTarget = directNavigationBeforeSearchTarget(tc.name, state)
     if (directNavigationTarget) {
       const errorMessage = {
-        error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Act on that exact URL now: use read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters. Author a fresh action_label for the route you choose.`,
+        error: `INTERNAL_RECOVERY: web_search was skipped because the user supplied the exact target ${directNavigationTarget.toString()}. Do not show this message to the user. Act on that exact URL now: use read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters, including dynamic/visual confirmation and action work. Author a fresh action_label for the route you choose.`,
         // The streamed tool_start was only provisional. Marking this result as
         // superseded makes the client remove the rejected search pill/panel
         // instead of presenting a preflight correction as completed work.
@@ -5302,10 +5384,15 @@ export class ToolPipeline {
         resultStr = JSON.stringify({ error: 'Result could not be serialized' })
       }
 
+      const readableSourceResult = isReadableModelSourceResult(tc.name, resultObj)
+      const modelResultLimit = readableSourceResult
+        ? MAX_SOURCE_RESULT_CHARS
+        : MAX_TOOL_RESULT_CHARS
+
       // Smart truncation: for search results, try to keep complete JSON items
       let compactedResult: unknown = serializableResult
       let truncationNote: string | undefined
-      if (resultStr.length > MAX_TOOL_RESULT_CHARS) {
+      if (resultStr.length > modelResultLimit) {
         if (tc.name === 'web_search' && Array.isArray(result)) {
           // Progressively remove results to fit within limit
           const arr = result as Array<Record<string, unknown>>
@@ -5317,6 +5404,10 @@ export class ToolPipeline {
           if (truncated.length < arr.length) {
             truncationNote = `${arr.length - truncated.length} search results omitted; top-ranked results retained.`
           }
+        } else if (readableSourceResult) {
+          const compacted = compactReadableSourceResultForModel(tc.name, resultObj, resultStr, MAX_SOURCE_RESULT_CHARS)
+          try { compactedResult = JSON.parse(compacted) } catch { compactedResult = { result_preview: compacted } }
+          truncationNote = 'Readable source content compacted to the current-source context limit; beginning and ending evidence retained.'
         } else if (BROWSER_RESULT_TOOLS.has(tc.name)) {
           const compacted = compactBrowserResultForModel(resultObj, resultStr, MAX_BROWSE_RESULT_CHARS)
           try { compactedResult = JSON.parse(compacted) } catch { compactedResult = { result_preview: compacted } }
@@ -5331,8 +5422,8 @@ export class ToolPipeline {
       }
 
       const finalContent = serializeToolMessageContent(compactedResult, {
-        maxChars: MAX_TOOL_RESULT_CHARS,
-        truncated: resultStr.length > MAX_TOOL_RESULT_CHARS,
+        maxChars: modelResultLimit,
+        truncated: resultStr.length > modelResultLimit,
         note: truncationNote,
       })
 

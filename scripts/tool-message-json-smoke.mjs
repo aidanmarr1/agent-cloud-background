@@ -14,6 +14,7 @@ try {
 import assert from 'node:assert/strict'
 import { ContextManager } from ${JSON.stringify(join(root, 'src/lib/agent/ContextManager.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
+import { MAX_SOURCE_RESULT_CHARS } from ${JSON.stringify(join(root, 'src/lib/agent/config.ts'))}
 import {
   compactToolMessageContent,
   ensureJsonToolMessageContent,
@@ -82,6 +83,7 @@ const pipeline = new ToolPipeline({} as never, undefined)
 const cases = [
   { name: 'read_document', result: pathological },
   { name: 'browser_get_content', result: { success: true, url: 'https://example.com', content: pathological.content } },
+  { name: 'http_request', result: { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' }, body: pathological.content } },
   { name: 'execute_command', result: { exitCode: 0, stdout: pathological.content, stderr: '' } },
   { name: 'web_search', result: Array.from({ length: 8 }, (_, index) => ({ title: 'Result ' + index, url: 'https://example.com/' + index, snippet: pathological.content.slice(0, 900) })) },
 ]
@@ -94,7 +96,10 @@ for (const [index, entry] of cases.entries()) {
   }])
   assert.equal(messages.length, 1, entry.name + ' should emit one tool message')
   assert.equal(messages[0].role, 'tool')
-  assertJsonContent(messages[0].content, 1800, entry.name)
+  const expectedCap = entry.name === 'read_document' || entry.name === 'browser_get_content' || entry.name === 'http_request'
+    ? MAX_SOURCE_RESULT_CHARS
+    : 1800
+  assertJsonContent(messages[0].content, expectedCap, entry.name)
 }
 
 for (const exactLength of [6184, 6324]) {
@@ -109,8 +114,24 @@ for (const exactLength of [6184, 6324]) {
     result: exactReplayShape,
     isError: false,
   }])
-  assertJsonContent(message.content, 1800, 'paid replay length ' + exactLength)
+  assertJsonContent(message.content, MAX_SOURCE_RESULT_CHARS, 'paid replay length ' + exactLength)
+  assert.ok(message.content.length > 1800, 'current read_document content must not be reduced to the generic result cap')
 }
+
+const [oversizedSourceMessage] = pipeline.buildToolResultMessages([{
+  tc: { id: 'oversized-source', name: 'read_document', arguments: '{}' },
+  result: {
+    title: 'Oversized source',
+    source: 'https://example.com/oversized',
+    content: 'HEAD_SOURCE_MARKER ' + 'middle evidence. '.repeat(4_000) + ' TAIL_SOURCE_MARKER',
+  },
+  isError: false,
+}])
+assertJsonContent(oversizedSourceMessage.content, MAX_SOURCE_RESULT_CHARS, 'oversized current source')
+const oversizedSourceEnvelope = JSON.parse(oversizedSourceMessage.content)
+const oversizedSourceResult = oversizedSourceEnvelope.result || oversizedSourceEnvelope
+assert.match(oversizedSourceResult.content, /^HEAD_SOURCE_MARKER/, 'oversized source compaction must retain the beginning')
+assert.match(oversizedSourceResult.content, /TAIL_SOURCE_MARKER$/, 'oversized source compaction must retain the ending')
 
 // Context compaction used to re-break a valid tool payload with text.slice().
 const context = new ContextManager({ maxMessages: 20 })
@@ -127,7 +148,56 @@ context.push({ role: 'tool', tool_call_id: 'context-tool', content: JSON.stringi
 context.compactForModelCall({} as never)
 const compactedTool = context.getMessages().find(message => message.role === 'tool')
 assert.ok(compactedTool)
-assertJsonContent(compactedTool!.content, 900, 'context-compacted tool result')
+assertJsonContent(compactedTool!.content, MAX_SOURCE_RESULT_CHARS, 'current source tool result')
+assert.ok(compactedTool!.content.length > 1800, 'the immediate source turn must retain the complete bounded result')
+
+context.push({ role: 'assistant', content: 'Source findings consumed.' })
+context.compactForModelCall({} as never)
+assertJsonContent(compactedTool!.content, 900, 'stale source tool result')
+
+// Every result in one current parallel source batch must survive the immediate
+// model turn. The first result cannot become "old" merely because the second
+// sibling result was pushed after it.
+const parallelContext = new ContextManager({ maxMessages: 20 })
+parallelContext.initialize(
+  { role: 'system', content: 'system' },
+  [{ role: 'user', content: 'task' }, { role: 'user', content: 'context' }],
+)
+const sourceA = { title: 'Source A', source: 'https://example.com/a', content: 'A'.repeat(39_000) + 'TAIL_A' }
+const sourceB = { title: 'Source B', source: 'https://example.com/b', content: 'B'.repeat(39_000) + 'TAIL_B' }
+const sourceC = { title: 'Source C', source: 'https://example.com/c', content: 'C'.repeat(39_000) + 'TAIL_C' }
+parallelContext.push({
+  role: 'assistant',
+  content: null,
+  tool_calls: [
+    { id: 'source-a', type: 'function', function: { name: 'read_document', arguments: '{}' } },
+    { id: 'source-b', type: 'function', function: { name: 'read_document', arguments: '{}' } },
+    { id: 'source-c', type: 'function', function: { name: 'read_document', arguments: '{}' } },
+  ],
+})
+for (const [id, result] of [['source-a', sourceA], ['source-b', sourceB], ['source-c', sourceC]] as const) {
+  const [message] = pipeline.buildToolResultMessages([{
+    tc: { id, name: 'read_document', arguments: '{}' },
+    result,
+    isError: false,
+  }])
+  parallelContext.push(message)
+}
+parallelContext.compactForModelCall({} as never)
+const currentBatch = parallelContext.getMessages().filter(message => message.role === 'tool')
+assert.equal(currentBatch.length, 3)
+for (const [index, message] of currentBatch.entries()) {
+  assertJsonContent(message.content, MAX_SOURCE_RESULT_CHARS, 'current source batch result ' + index)
+  const parsed = JSON.parse(message.content)
+  const expectedTail = index === 0 ? /TAIL_A$/ : index === 1 ? /TAIL_B$/ : /TAIL_C$/
+  assert.match(parsed.content, expectedTail, 'each current source result must retain its deep-page tail')
+}
+
+parallelContext.compactForStepTransition({ currentStepIdx: 1, currentPlanItems: ['Research', 'Synthesize'] } as never)
+for (const message of currentBatch) {
+  assert.ok(message.content.length <= 520, 'source results must compact normally at a step transition')
+  assert.doesNotThrow(() => JSON.parse(message.content))
+}
 
 console.log(JSON.stringify({
   ok: true,
@@ -135,6 +205,7 @@ console.log(JSON.stringify({
   boundaryCapsChecked: 265,
   paidReplayLengthsChecked: [6184, 6324],
   contextCompactionJsonSafe: true,
+  currentSourceBatchPreserved: true,
 }))
 `)
 

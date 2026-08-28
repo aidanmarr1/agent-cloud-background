@@ -107,7 +107,7 @@ try {
                 properties: {
                   progress_update: {
                     type: 'string',
-                    description: 'Required cadence field. Summarize the newest useful outcome from already-completed actions. Be neutral and evidence-led: synthesize what the evidence establishes rather than making a vendor, publication, or webpage the speaking subject. For continuing work, normally use two clean sentences: concrete result first, then a short Next, I will sentence naming the immediate useful direction. The current action has not returned and is not evidence.',
+                    description: 'Required cadence field. Lead with a fact-dense outcome from already-completed work and continue naturally from what the user has seen. Preserve material uncertainty. An immediate direction may follow when it helps orient continuing work, but do not force a second sentence, stock opening, or transition. Direct factual subjects, first-person confirmations, concise review/finding leads, and concrete source-action leads are all valid when they carry the result. The current action has not returned and is not evidence.',
                     minLength: 1,
                     maxLength: 360,
                   },
@@ -141,7 +141,7 @@ try {
               { role: 'tool', tool_call_id: 'call_3', content: 'Across the available documentation, the core claim is direct application control through an agent-oriented interface; detailed independent architectural validation remains limited.' },
               {
                 role: 'system',
-                content: 'CADENCE ACTION TURN: make one concrete native tool call. In required progress_update, neutrally synthesize what the preceding evidence establishes instead of making a vendor, publication or webpage the speaking subject. For continuing work, use two clean sentences: concrete result first, then a short "Next, I\\'ll..." sentence naming the immediate direction. The update appears before the pending action, so do not claim its result.',
+                content: 'CADENCE ACTION TURN: make one concrete native tool call. In required progress_update, lead with the concrete newest outcome from preceding evidence, preserve the limited independent validation, and continue naturally. Add an immediate direction only if useful. Vary the syntax; do not copy a fixed opening, transition, or sentence count. The update appears before the pending action, so do not claim its result.',
               },
             ],
             tools: cadenceTools,
@@ -176,7 +176,10 @@ try {
   const action = toolArgs(result.action)
   const narration = toolArgs(result.narration)
   const ack = String(plan?.ack || '').trim()
-  const firstTitle = String(plan?.steps?.[0]?.title || plan?.steps?.[0] || '').trim()
+  const planSteps = Array.isArray(plan?.steps) ? plan.steps : []
+  const planTitles = planSteps.map((step) => String(step?.title || step || '').trim()).filter(Boolean)
+  const firstTitle = planTitles[0] || ''
+  const finalTitle = planTitles.at(-1) || ''
   const actionLabel = String(action?.action_label || '').trim()
   const progressUpdate = String(narration?.progress_update || '').trim()
   const nextActionLabel = String(narration?.action_label || '').trim()
@@ -184,13 +187,17 @@ try {
   assert.match(String(result.planner?.model || ''), /^meta\/muse-spark-1\.2-contributor(?:-\d+)?$/)
   assert.match(String(result.planner?.provider || ''), /^Meta$/i)
   assert.match(ack, /^(?:I(?:'|’)?ll|I will)\b/, 'planner acknowledgement must begin with a first-person commitment')
+  assert.ok(planTitles.length >= 2, 'non-trivial research should expose more than one meaningful visible module')
   assert.doesNotMatch(firstTitle, /^(?:Clarify|Define|Scope|Map|Frame)\b/i, 'first plan phase must begin actual task work')
+  assert.notEqual(finalTitle.toLowerCase(), firstTitle.toLowerCase(), 'the final planner module must represent a distinct completion outcome')
+  assert.doesNotMatch(finalTitle, /^(?:Finish|Complete|Deliver|Finalize|Wrap up)(?: the)?(?: task|results?)?$/i, 'the final planner module must not be a context-free handoff label')
+  assert.ok(planTitles.every(title => !/^(?:Open|Read|Search|Browse|Visit|Click)\b/i.test(title)), 'visible planner modules must group source/tool micro-actions beneath meaningful workstreams')
   assert.ok(actionLabel.split(/\s+/).length >= 3, 'action label must be a specific mini-objective')
   assert.doesNotMatch(actionLabel, /^(?:Open article|Find details on page|Read page)$/i)
   assert.ok(actionLabel.length > 32, 'action label must retain useful target and evidence detail')
-  assert.match(progressUpdate, /\b(?:evidence|research|documentation|Warmwind OS)\b/i, 'progress narration must synthesize a concrete result')
-  assert.match(progressUpdate, /\bNext, I(?:'|’)?ll\b/i, 'continuing narration must name the immediate next direction')
-  assert.doesNotMatch(progressUpdate, /^(?:OpenRouter|Meta|Geeky Gadgets|The (?:official )?(?:website|webpage|blog|article))\b/i, 'progress narration must not make a vendor or webpage the speaking subject')
+  assert.match(progressUpdate, /\b(?:AI-native|application control|agent-oriented|availability|architecture|validation|Warmwind OS)\b/i, 'progress narration must carry a concrete result from completed evidence')
+  assert.doesNotMatch(progressUpdate, /\b(?:prior|previous|earlier) sources?\b|\b(?:sources|research) (?:reviewed )?so far\b/i, 'progress narration must not substitute vague deictic source framing for the result')
+  assert.doesNotMatch(progressUpdate, /^(?:Searched|Opened|Read|Reviewed|Visited|Checked)\b[^.;!?]*[.!]?$/i, 'progress narration must not be only a tool-operation status')
   assert.ok(nextActionLabel.split(/\s+/).length >= 3, 'the cadence action must retain its own specific mini-objective')
 
   console.log(JSON.stringify({
@@ -198,7 +205,7 @@ try {
     model: result.planner?.model,
     provider: result.planner?.provider,
     ack,
-    firstTitle,
+    planTitles,
     actionLabel,
     progressUpdate,
     nextActionLabel,

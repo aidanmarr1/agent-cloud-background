@@ -1,3 +1,5 @@
+import { isProspectiveWorkflowNarration } from '@/lib/narrationSignals'
+
 const JSON_CHANNEL_MARKER_PATTERN = /\|\s*!\s*\(?\s*json\s*>\s*json\s*\)?|\(?\s*json\s*>\s*json\s*\)?/gi
 const DSML_MARKER = String.raw`(?:\uFF5C|[|])\s*(?:\uFF5C|[|])\s*DSML\s*(?:\uFF5C|[|])\s*(?:\uFF5C|[|])`
 const DSML_TOOL_CALL_OPEN_RE = new RegExp(String.raw`<\s*${DSML_MARKER}\s*tool_calls\b[^>]*>`, 'i')
@@ -170,8 +172,10 @@ export function cleanThinkingTags(text: string): string {
  * ("1. GOAL: ...", "DONE: ...", "BLOCKER: ...", "NEXT: ..."), and that's
  * scaffolding — not narration the user should see.
  *
- * We deliberately do NOT broaden isIntentionNarration: general meta-narration
- * like "the research so far has established..." is preserved per user request.
+ * We deliberately do NOT broaden isIntentionNarration here. This cleaner keeps
+ * complete evidence-led sentences intact; NarrationMemory reviews vague or
+ * deictic research framing after sanitation, where concrete payload can be
+ * distinguished from a source-summary placeholder.
  */
 export function stripPolicyScaffolding(text: string): string {
   return stripInternalPolicyScaffolding(text)
@@ -394,6 +398,21 @@ function isCompleteNarrationSentence(text: string): boolean {
   return COMPLETE_SENTENCE_PATTERN.test(text.trim())
 }
 
+function hasDirectFactualSubject(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed || /^(?:i|we|you|next|now|will|proceeding|moving|let)\b/i.test(trimmed)) return false
+  // A capitalized sentence about work that remains is still a plan, not a
+  // finding. Keep the structural subject allowance below from turning generic
+  // future-task prose into accepted progress narration while preserving topical
+  // forecasts such as "Sea levels will rise ...".
+  if (isProspectiveWorkflowNarration(trimmed)) return false
+  // A complete, already-sanitized declarative sentence may lead with the
+  // concrete subject itself (for example, "Genspark's products include …")
+  // without using one of the historical finding verbs. This is deliberately a
+  // structural check, not a vocabulary whitelist.
+  return /^(?:the\s+)?[A-Z0-9\u00C0-\uFFFF][^.!?]{8,}[.!?][)"'\]]*$/.test(trimmed)
+}
+
 function looksDanglingNarration(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
@@ -613,6 +632,7 @@ export function sanitizeNarrationText(
   if (
     isPlanLeakNarration(rawCleaned) ||
     isPhaseLeakNarration(rawCleaned) ||
+    isMalformedNarration(rawCleaned) ||
     INTERNAL_RUNTIME_NARRATION_RE.test(rawCleaned) ||
     INTERNAL_PROVIDER_NARRATION_RE.test(rawCleaned)
   ) return null
@@ -644,9 +664,11 @@ export function sanitizeNarrationText(
 
   const sentences: string[] = []
   for (const sentence of candidates) {
-    const hasSignal = FINDING_SIGNAL_PATTERN.test(sentence) || BLOCKER_SIGNAL_PATTERN.test(sentence)
+    const hasSignal = FINDING_SIGNAL_PATTERN.test(sentence) ||
+      BLOCKER_SIGNAL_PATTERN.test(sentence) ||
+      hasDirectFactualSubject(sentence)
     const isNext = sentences.length > 0 && isHighLevelNextNarration(sentence)
-    if (sentences.length > 0 && !isNext) continue
+    if (sentences.length > 0 && !isNext && !hasSignal) continue
     if (requireSignal && !hasSignal && !isNext) continue
     sentences.push(sentence)
     if (sentences.length >= maxSentences) break

@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { build } from 'esbuild'
+
+const root = process.cwd()
+const workDir = await mkdtemp(join(root, 'scripts', '.startup-ack-plan-ordering-'))
+const runnerPath = join(workDir, 'runner.ts')
+const bundlePath = join(workDir, 'runner.mjs')
+
+try {
+  const eventDispatcher = await readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8')
+  assert.match(
+    eventDispatcher,
+    /if \(!this\.startupAcknowledgment\) \{[\s\S]*this\.pendingStartupPlanItems = \[\.\.\.items\][\s\S]*return/,
+    'the client must hold a plan event when its model-authored opening has not painted',
+  )
+  assert.match(
+    eventDispatcher,
+    /if \(this\.pendingStartupPlanItems\) \{[\s\S]*this\.captureStartupAcknowledgment\(\)[\s\S]*this\.activatePlan\(pendingPlan\)/,
+    'the held plan must activate only after acknowledgement text reaches the message store',
+  )
+
+  await writeFile(runnerPath, `
+import assert from 'node:assert/strict'
+import { PlanManager } from ${JSON.stringify(join(root, 'src/lib/agent/PlanManager.ts'))}
+import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
+import { computeTimeouts } from ${JSON.stringify(join(root, 'src/lib/agent/TaskStrategy.ts'))}
+
+type VisibleEvent = { type: 'text'; content: string } | { type: 'plan'; items: string[] }
+
+let providerCallCount = 0
+let completionResponder: (params: unknown) => Promise<unknown> = async () => {
+  throw new Error('Unexpected provider call')
+}
+;(globalThis as any).__startupAckCompletion = async (params: unknown) => {
+  providerCallCount += 1
+  return completionResponder(params)
+}
+
+function emitterFor(events: VisibleEvent[]) {
+  return {
+    get isClosed() { return false },
+    get terminalStatus() { return null },
+    textDelta(content: string) { events.push({ type: 'text', content }) },
+    plan(items: string[]) { events.push({ type: 'plan', items }) },
+    heartbeat() {}, progressUpdate() {}, reasoningDelta() {}, reasoningDone() {},
+    toolStart() {}, toolResult() {}, browserFrame() {}, terminalOutput() {},
+    fileContentStart() {}, fileContentDelta() {}, artifactCreated() {},
+    creditEvent() {}, stepAdvance() {}, done() {}, error() {}, close() {},
+  }
+}
+
+function state() {
+  return createInitialState(false, computeTimeouts(2))
+}
+
+export async function run() {
+  const request = 'Research Warmwind OS AI and deliver a sourced report.'
+  const validAck = 'I’ll research Warmwind OS AI across primary and independent sources, then deliver a sourced report on its capabilities and limitations.'
+  const plan = {
+    ack: validAck,
+    taskType: 'research',
+    complexity: 2,
+    steps: [
+      { title: 'Research Warmwind OS AI evidence', scope: 'Gather concrete primary and independent evidence.' },
+      { title: 'Deliver the sourced Warmwind OS AI report', scope: 'Synthesize the findings and limitations.' },
+    ],
+  }
+
+  // Normal planner path: a valid model acknowledgement must be visible first.
+  const normalEvents: VisibleEvent[] = []
+  const normalManager = new PlanManager(emitterFor(normalEvents) as any, [{ role: 'user', content: request }], 2)
+  const normalState = state()
+  ;(normalManager as any).setStateRef(normalState)
+  assert.equal(await (normalManager as any).emitParsedPlan(normalState, plan), true)
+  assert.deepEqual(normalEvents.map(event => event.type), ['text', 'plan'])
+  assert.match((normalEvents[0] as { type: 'text'; content: string }).content, /^I’ll research Warmwind OS AI/)
+
+  // A valid acknowledgement carried by the planner must win immediately.
+  const fastPlannerEvents: VisibleEvent[] = []
+  const fastPlannerManager = new PlanManager(emitterFor(fastPlannerEvents) as any, [{ role: 'user', content: request }], 2)
+  await Promise.race([
+    (fastPlannerManager as any).emitParsedPlan(state(), plan),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('valid planner acknowledgement was delayed')), 75)),
+  ])
+  assert.deepEqual(fastPlannerEvents.map(event => event.type), ['text', 'plan'])
+
+  // Normal startup is a single billable planner request. It must not launch a
+  // second stream that could be aborted before OpenRouter's final usage chunk.
+  const singleCallEvents: VisibleEvent[] = []
+  const singleCallManager = new PlanManager(emitterFor(singleCallEvents) as any, [{ role: 'user', content: request }], 2)
+  const singleCallState = state()
+  providerCallCount = 0
+  completionResponder = async () => ({
+    id: 'gen-normal-startup',
+    choices: [{ message: { content: JSON.stringify(plan) } }],
+    usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
+  })
+  ;(singleCallManager as any).setStateRef(singleCallState)
+  singleCallManager.startPlanCall()
+  await singleCallManager.awaitPlan(singleCallState)
+  assert.equal(providerCallCount, 1)
+  assert.deepEqual(singleCallEvents.map(event => event.type), ['text', 'plan'])
+
+  // The one acknowledgement request used with a precomputed plan must remain
+  // invisible until its exact usage debit has committed.
+  const usageFencedEvents: VisibleEvent[] = []
+  let releaseUsage!: () => void
+  let usageStarted!: () => void
+  const usageStartedPromise = new Promise<void>(resolve => { usageStarted = resolve })
+  const usageGate = new Promise<void>(resolve => { releaseUsage = resolve })
+  const usageFencedManager = new PlanManager(
+    emitterFor(usageFencedEvents) as any,
+    [{ role: 'user', content: request }],
+    2,
+    [],
+    undefined,
+    async (usage, chargeId) => {
+      assert.equal(chargeId, 'plan:ack:1')
+      assert.equal(usage.cost, 0.0001)
+      usageStarted()
+      await usageGate
+    },
+  )
+  const usageFencedState = state()
+  assert.equal(usageFencedManager.usePrecomputedPlan(usageFencedState, {
+    items: plan.steps.map(step => step.title),
+  }, { emitPlan: false }), true)
+  providerCallCount = 0
+  completionResponder = async () => ({
+    id: 'gen-precomputed-ack',
+    choices: [{ message: { content: validAck } }],
+    usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
+  })
+  usageFencedManager.startAcknowledgementCall()
+  const fencedAwait = usageFencedManager.awaitPlan(usageFencedState)
+  await usageStartedPromise
+  assert.equal(providerCallCount, 1)
+  assert.deepEqual(usageFencedEvents, [])
+  let fencedSettled = false
+  void fencedAwait.then(() => { fencedSettled = true })
+  await Promise.resolve()
+  assert.equal(fencedSettled, false)
+  releaseUsage()
+  await fencedAwait
+  assert.deepEqual(usageFencedEvents.map(event => event.type), ['text'])
+
+  // If every model acknowledgement candidate is unusable, no plan can leak.
+  const rejectedEvents: VisibleEvent[] = []
+  const rejectedManager = new PlanManager(emitterFor(rejectedEvents) as any, [{ role: 'user', content: request }], 2)
+  ;(rejectedManager as any).repairAcknowledgementCandidate = async () => ''
+  await assert.rejects(
+    (rejectedManager as any).emitParsedPlan(state(), { ...plan, ack: 'Researching...' }),
+    /task-specific plan or acknowledgement/,
+  )
+  assert.equal(rejectedEvents.some(event => event.type === 'plan'), false)
+
+  // Precomputed plans start only the worker-owned acknowledgement request and
+  // await it before first-step work, without emitting a duplicate plan event.
+  const precomputedEvents: VisibleEvent[] = []
+  const precomputedManager = new PlanManager(emitterFor(precomputedEvents) as any, [{ role: 'user', content: request }], 2)
+  const precomputedState = state()
+  assert.equal(precomputedManager.usePrecomputedPlan(precomputedState, {
+    items: plan.steps.map(step => step.title),
+    scopes: plan.steps.map(step => step.scope),
+  }, { emitPlan: false }), true)
+  ;(precomputedManager as any).emitModelGeneratedAcknowledgement = async () => {
+    ;(precomputedManager as any).emitter.textDelta(validAck + '\\n\\n')
+    ;(precomputedManager as any).acknowledgementEmitted = true
+    return true
+  }
+  precomputedManager.startAcknowledgementCall()
+  await precomputedManager.awaitPlan(precomputedState)
+  assert.deepEqual(precomputedEvents.map(event => event.type), ['text'])
+
+  // A caller cannot accidentally emit a precomputed plan before the opening.
+  const guardedEvents: VisibleEvent[] = []
+  const guardedManager = new PlanManager(emitterFor(guardedEvents) as any, [{ role: 'user', content: request }], 2)
+  assert.equal(guardedManager.usePrecomputedPlan(state(), {
+    items: plan.steps.map(step => step.title),
+  }), false)
+  assert.deepEqual(guardedEvents, [])
+
+  // Failed precomputed acknowledgement generation stops before work and never
+  // substitutes a deterministic placeholder.
+  const failedPrecomputedEvents: VisibleEvent[] = []
+  const failedPrecomputedManager = new PlanManager(emitterFor(failedPrecomputedEvents) as any, [{ role: 'user', content: request }], 2)
+  const failedPrecomputedState = state()
+  assert.equal(failedPrecomputedManager.usePrecomputedPlan(failedPrecomputedState, {
+    items: plan.steps.map(step => step.title),
+  }, { emitPlan: false }), true)
+  ;(failedPrecomputedManager as any).emitModelGeneratedAcknowledgement = async () => false
+  ;(failedPrecomputedManager as any).repairAcknowledgementCandidate = async () => ''
+  failedPrecomputedManager.startAcknowledgementCall()
+  await assert.rejects(
+    failedPrecomputedManager.awaitPlan(failedPrecomputedState),
+    /task-specific plan or acknowledgement/,
+  )
+  assert.deepEqual(failedPrecomputedEvents, [])
+}
+`, 'utf8')
+
+  await build({
+    entryPoints: [runnerPath],
+    outfile: bundlePath,
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    target: ['node20'],
+    logLevel: 'silent',
+    packages: 'external',
+    plugins: [{
+      name: 'mock-startup-ack-llm',
+      setup(buildApi) {
+        buildApi.onResolve({ filter: /^@\/lib\/llm$/ }, () => ({
+          path: 'startup-ack-llm',
+          namespace: 'startup-ack-test',
+        }))
+        buildApi.onLoad({ filter: /.*/, namespace: 'startup-ack-test' }, () => ({
+          loader: 'js',
+          contents: `
+            export const DEFAULT_MODEL = 'test/startup-model'
+            export async function createCompletion(params) {
+              return globalThis.__startupAckCompletion(params)
+            }
+          `,
+        }))
+      },
+    }],
+  })
+
+  const { run } = await import(pathToFileURL(bundlePath).href)
+  await run()
+  console.log('startup acknowledgement/plan ordering smoke checks passed')
+} finally {
+  await rm(workDir, { recursive: true, force: true })
+}

@@ -68,6 +68,7 @@ export function researchSourceBalanceBlockReason(
   const latestCandidateCount = latestSearchCandidateCount(state)
   const distinctSourceFailures = state.stepFailedSourceTargets.size
   const sourceReadTools = [...SOURCE_OPENING_TOOLS].join(', ')
+  const sourceRouteGuidance = 'Prefer read_document or http_request for an ordinary readable result page; use browser navigation/content only for dynamic or scripted state, interaction, screenshots, or exact visibly rendered confirmation.'
 
   // Only a successful result set with concrete candidate URLs can require an
   // opening action. Two distinct failed source URLs unlock a fresh discovery
@@ -78,7 +79,7 @@ export function researchSourceBalanceBlockReason(
     latestCandidateCount > 0 &&
     distinctSourceFailures < 2
   ) {
-    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase has ${completedSearches} search result sets but no opened or extracted source pages yet. Use one of these source-reading tools next: ${sourceReadTools}. Extract concrete facts from the strongest result before searching again.`
+    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase has ${completedSearches} search result sets but no opened or extracted source pages yet. Use one of these source-reading tools next: ${sourceReadTools}. ${sourceRouteGuidance} Extract concrete facts from the strongest result before searching again.`
   }
 
   if (
@@ -87,7 +88,7 @@ export function researchSourceBalanceBlockReason(
     latestCandidateCount > 0 &&
     distinctSourceFailures < 2
   ) {
-    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase is leaning too heavily on search previews (${completedSearches} searches, ${openedSourceReads} opened/extracted sources). Read or extract another strong source page with ${sourceReadTools} before searching again.`
+    return `INTERNAL_RECOVERY: this web_search was skipped because this research phase is leaning too heavily on search previews (${completedSearches} searches, ${openedSourceReads} opened/extracted sources). Read or extract another strong source page with ${sourceReadTools} before searching again. ${sourceRouteGuidance}`
   }
 
   return null

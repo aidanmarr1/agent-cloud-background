@@ -101,6 +101,10 @@ export const TOOL_TIMEOUT_SETTLE_GRACE_MS = 1_000
 // --- File & content limits ---
 export const MAX_TOOL_RESULT_CHARS = 1800
 export const MAX_BROWSE_RESULT_CHARS = 1800
+// A current page/document read needs enough room for the complete 40k readable
+// payload plus its metadata/JSON envelope. This remains bounded per result;
+// stale results use the smaller context-compaction limits below.
+export const MAX_SOURCE_RESULT_CHARS = 44_000
 export const MAX_ATTACHMENT_CHARS = 15_000
 export const MAX_CONTEXT_ATTACHMENT_CHARS = 80_000
 export const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024

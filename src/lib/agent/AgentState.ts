@@ -91,6 +91,7 @@ export interface AgentStateData {
   autonomousRecoveryEscalations: number
   exactExtractionGuardPending: boolean
   exactExtractionGuardPrompt: string | null
+  exactExtractionGuardSourceUrl: string | null
   exactExtractionGuardAttempts: number
 
   // Plan / step tracking
@@ -439,6 +440,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     autonomousRecoveryEscalations: 0,
     exactExtractionGuardPending: false,
     exactExtractionGuardPrompt: null,
+    exactExtractionGuardSourceUrl: null,
     exactExtractionGuardAttempts: 0,
     planEmitted: false,
     planItems: null,
@@ -718,6 +720,10 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.phaseNarrationEmittedThisStep = false
   state.phaseEndNarrationPending = false
   state.forcedNarrationRepairAttempts = 0
+  state.exactExtractionGuardPending = false
+  state.exactExtractionGuardPrompt = null
+  state.exactExtractionGuardSourceUrl = null
+  state.exactExtractionGuardAttempts = 0
   // Narration cadence belongs to the active phase. Never inherit a partly
   // consumed 3-4 action window from the phase that just completed.
   state.visibleToolActionsSinceLastNarration = 0

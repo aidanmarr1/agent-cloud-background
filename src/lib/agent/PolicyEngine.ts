@@ -2318,7 +2318,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: "IMPORTANT: Search is currently unavailable — ALL providers are down. Do NOT call web_search again. Instead, use browser_navigate to visit well-known websites directly (Wikipedia, official docs, news sites). If the task doesn't require web data, proceed to your final deliverable step now.",
+          content: 'RESEARCH ROUTE RECOVERY: Recent web_search attempts failed. This does not establish that all search providers or web access are unavailable, so do not claim that blocker. Do not repeat the same query. If an exact candidate or known source URL is available, use read_document or HTTP/text extraction for an ordinary readable page. Use browser navigation/content only when the target needs dynamic or scripted state, interaction/action work, a screenshot, or exact visibly rendered confirmation. If no concrete URL is available and web_search remains enabled, try one materially different targeted query; otherwise continue only when the existing evidence is sufficient.',
         },
       })
     }
@@ -2330,7 +2330,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         type: 'inject_message',
         message: {
           role: 'system',
-          content: 'CRITICAL: web_search has been permanently disabled for this task. The tool has been removed. Use browser_navigate with direct URLs if you need web information, or proceed with your existing knowledge.',
+          content: 'RESEARCH ROUTE RECOVERY: web_search has been disabled for this task after repeated failures. Do not generalize that concrete tool state into a claim that all web access is unavailable. Use read_document or HTTP/text extraction on exact known source URLs for ordinary readable pages. Use browser navigation/content only for dynamic or scripted state, interaction/action work, screenshots, or exact visibly rendered confirmation. Proceed from existing evidence only if it is sufficient.',
         },
       })
     }
@@ -2632,7 +2632,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
     const suggestions: string[] = []
 
     if (failedTools.has('web_search')) {
-      suggestions.push('- Search is failing: Use browser_navigate to go directly to authoritative URLs (Wikipedia, official docs, MDN, GitHub)')
+      suggestions.push('- Search is failing: If an exact authoritative URL is already known, use read_document or HTTP/text extraction for ordinary page content. Use browser_navigate only for dynamic, visual-confirmation, or interaction needs; do not invent a replacement URL.')
     }
     if (failedTools.has('browse_page')) {
       suggestions.push('- Browse is failing: Use browser_navigate for rendered pages, browser_get_content to inspect loaded content, or read_document for PDFs/documents.')

@@ -2,6 +2,7 @@ import { constants } from 'fs'
 import { open } from 'fs/promises'
 import { join } from 'path'
 import { parseReadableHtml } from './browse'
+import { MAX_READABLE_PAGE_CHARS } from './readablePageLimits'
 import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 
@@ -18,7 +19,7 @@ export interface DocumentResult {
   recoveryHint?: string
 }
 
-const MAX_CONTENT_CHARS = 40_000
+const MAX_CONTENT_CHARS = MAX_READABLE_PAGE_CHARS
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50MB
 const MAX_REDIRECTS = 5
 const URL_FETCH_TIMEOUT_MS = 10_000

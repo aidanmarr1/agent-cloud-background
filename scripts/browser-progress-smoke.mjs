@@ -50,10 +50,10 @@ async function call(
   assistantContent = '',
 ) {
   const actionLabel = name === 'browser_navigate'
-    ? 'Open smoke test page'
+    ? 'Inspect Browser Progress smoke test controls'
     : name === 'browser_action_sequence'
-      ? 'Run smoke control sequence'
-      : 'Activate smoke test control'
+      ? 'Exercise Browser Progress smoke control sequence'
+      : 'Inspect Browser Progress smoke test state'
   const calls = new Map([[0, {
     id,
     name,
@@ -90,7 +90,11 @@ export async function runSmoke() {
   const pipeline = new ToolPipeline(emitter as any, conversationId, { cache: new ToolCache() })
 
   try {
+    const longReadableText = 'Rendered browser evidence remains readable across the complete page. '.repeat(240)
     const launch = await writePage(conversationId, 'index.html', \`
+      <h1>Browser Progress long-page evidence</h1>
+      <p>\${longReadableText}</p>
+      <p>FINAL_BROWSER_CONTENT_MARKER</p>
       <button id="noop" type="button">No-op</button>
       <button id="next" type="button" onclick="document.body.dataset.next = 'yes'; document.querySelector('main').insertAdjacentHTML('beforeend', '<button id=&quot;done&quot; type=&quot;button&quot;>Done</button>')">Next</button>
     \`)
@@ -99,6 +103,8 @@ export async function runSmoke() {
     assert.equal(nav1.isError, false, 'navigation failed: ' + JSON.stringify(nav1.result))
     const content1 = await call(pipeline, state, 'content1', 'browser_get_content', {})
     assert.equal(content1.isError, false)
+    assert.ok(String((content1.result as any).content || '').length > 12_000, 'explicit browser content reads must exceed the former 8,000-character cap')
+    assert.match(String((content1.result as any).content || ''), /FINAL_BROWSER_CONTENT_MARKER/, 'explicit browser content reads must retain the deep-page tail')
     assert.equal((content1.result as any).browserProgress?.kind, 'progress')
     const content2 = await call(pipeline, state, 'content2', 'browser_get_content', {})
     assert.equal(content2.cached, true)
@@ -188,7 +194,7 @@ export async function runSmoke() {
     platform: 'node',
     format: 'esm',
     target: ['node20'],
-    external: ['@sparticuz/chromium', 'playwright'],
+    external: ['@mozilla/readability', '@sparticuz/chromium', 'jsdom', 'playwright'],
     logLevel: 'silent',
   })
 

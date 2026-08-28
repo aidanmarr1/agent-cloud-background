@@ -104,7 +104,7 @@ import {
 } from './taskConstraints'
 
 import { resolveStrategy, computeIterationLimit, computeTimeouts, type TaskStrategyConfig } from './TaskStrategy'
-import { ContextManager } from './ContextManager'
+import { ContextManager, hasCurrentModelEvidenceBatch } from './ContextManager'
 import { ToolRegistry } from './ToolRegistry'
 import type { InflightToolDrain } from './toolSafety'
 import { scopeAgentTaskMessages } from './messageScope'
@@ -262,7 +262,7 @@ function preflightRejectionRecoveryMessage(
     'ACTION ROUTE RECOVERY: the previous model-selected action was rejected before execution, so it produced no new evidence and must not be selected again on this turn.',
     rejectedTools ? `Rejected route: ${rejectedTools}.` : '',
     directNavigationRequired
-      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Act on that exact URL now using read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters. Choose the least cumbersome valid route and use a fresh action label.`
+      ? `The user already supplied the exact target${state.userProvidedUrl ? ` ${state.userProvidedUrl}` : ''}. web_search is temporarily unavailable. Act on that exact URL now using read_document or HTTP/text extraction for a normal readable page/document, or browser_navigate when rendered state or interaction matters, including dynamic/visual confirmation and action work. Choose the least cumbersome valid route and use a fresh action label.`
       : sourceBalanceRejected
       ? 'A search result set already exists but still needs a usable opened source. The rejected web_search route is temporarily unavailable. Open a different unfailed URL from the Remaining candidate URLs with an available source reader or browser navigation tool. After two distinct source-opening failures, one fresh search route may reopen.'
       : 'Choose one materially different available action that satisfies the active phase and current runtime constraints.',
@@ -389,6 +389,8 @@ function toolResultPath(result: ToolExecutionResult): string {
 }
 
 const EXACT_EXTRACTION_SOURCE_TOOLS = new Set([
+  'read_document',
+  'http_request',
   'browser_navigate',
   'browse_page',
   'browser_get_content',
@@ -404,7 +406,9 @@ const EXACT_EXTRACTION_TOOLS = new Set([
 ])
 
 const EXACT_EXTRACTION_NEED_PATTERN =
-  /\b(?:exact|wording|quote|verbatim|specific|precise|date|timing|pre[-\s]?order|availability|available|launch|release|announc(?:e|ed|ement)|price|pricing|deadline|starts?|begins?|ships?|on sale)\b/i
+  /\b(?:exact(?:ly)?|wording|quote|verbatim|precise|visual(?:ly)?|rendered|screenshot|shown|displayed|on[-\s]?page)\b/i
+const RENDERED_CONFIRMATION_NEED_PATTERN =
+  /\b(?:visual(?:ly)?|rendered|screenshot|shown|displayed|on[-\s]?page)\b/i
 
 function contentTextForGuard(value: unknown): string {
   if (typeof value === 'string') return value
@@ -426,6 +430,63 @@ function currentTaskTextForGuard(
   ].filter(Boolean).join(' ')
 }
 
+function exactExtractionToolArgs(toolResult: ToolExecutionResult): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(toolResult.tc.arguments || '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch {
+    return {}
+  }
+}
+
+function exactExtractionHttpUrl(value: unknown): string | null {
+  if (typeof value !== 'string' || !/^https?:\/\//i.test(value.trim())) return null
+  try {
+    const url = new URL(value.trim())
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
+function exactExtractionSourceUrl(toolResult: ToolExecutionResult): string | null {
+  const args = exactExtractionToolArgs(toolResult)
+  if (
+    toolResult.tc.name === 'http_request' &&
+    typeof args.method === 'string' &&
+    !/^(?:GET|HEAD)$/i.test(args.method.trim())
+  ) return null
+
+  const result = toolResult.result && typeof toolResult.result === 'object'
+    ? toolResult.result as Record<string, unknown>
+    : null
+  return exactExtractionHttpUrl(args.url) ||
+    exactExtractionHttpUrl(args.source) ||
+    exactExtractionHttpUrl(result?.source) ||
+    exactExtractionHttpUrl(result?.url)
+}
+
+function exactExtractionResultHasEvidence(toolResult: ToolExecutionResult): boolean {
+  if (toolResult.isError) return false
+  const result = toolResult.result && typeof toolResult.result === 'object'
+    ? toolResult.result as Record<string, unknown>
+    : null
+  if (result?.error || result?.success === false) return false
+  if (
+    typeof result?.status === 'number' &&
+    (result.status < 200 || result.status >= 400)
+  ) return false
+  const evidence = result
+    ? [result.content, result.body, result.text, result.title, result.screenshotPath, result.screenshotUrl]
+      .filter(value => typeof value === 'string')
+      .join('\n')
+      .trim()
+    : contentTextForGuard(toolResult.result).trim()
+  return evidence.length > 0
+}
+
 function exactExtractionHints(text: string): string[] {
   const hints = new Set<string>()
   const lower = text.toLowerCase()
@@ -442,58 +503,182 @@ function exactExtractionHints(text: string): string[] {
   return [...hints].slice(0, 5)
 }
 
+function exactExtractionResultMatchesTask(
+  toolResult: ToolExecutionResult,
+  hints: string[],
+): boolean {
+  if (hints.length === 0) return true
+  // Match against returned page evidence only. Action labels, tool arguments,
+  // and source URLs often repeat the requested phrase even when the rendered
+  // page did not contain it.
+  const result = toolResult.result && typeof toolResult.result === 'object'
+    ? toolResult.result as Record<string, unknown>
+    : null
+  const text = (result
+    ? [result.content, result.body, result.text, result.title]
+      .filter(value => typeof value === 'string')
+      .join('\n')
+    : contentTextForGuard(toolResult.result)
+  ).toLowerCase()
+  return hints.some(hint => text.includes(hint.toLowerCase()))
+}
+
+function exactExtractionInspectionPrompt(taskText: string): string {
+  const hints = exactExtractionHints(taskText)
+  const hintText = hints.length > 0
+    ? `Search targeted rendered text first with browser_find_text using one of: ${hints.map(h => `"${h}"`).join(', ')}.`
+    : 'Search targeted rendered text first with browser_find_text using the key phrase, value, or label from the current step.'
+
+  return [
+    'EXACT EXTRACTION REQUIRED BEFORE NARRATION: the request explicitly needs an exact or visually confirmed detail from the rendered page.',
+    'Do not write a progress update, uncertainty paragraph, synthesis, or <next_step/> yet.',
+    hintText,
+    'If rendered text is incomplete or no text-node match appears, use browser_screenshot to inspect the visible value, browser_scroll to reveal it, or browser_get_content to refresh the rendered text.',
+    'Make exactly one native browser_find_text, browser_screenshot, browser_get_content, or browser_scroll call now. After that result, answer from the verified evidence or continue the phase.',
+  ].join(' ')
+}
+
+function exactExtractionNavigationPrompt(sourceUrl: string): string {
+  return [
+    'EXACT EXTRACTION REQUIRED BEFORE NARRATION: direct webpage extraction returned relevant evidence, and the request explicitly needs an exact or visually confirmed detail.',
+    'Do not search for a replacement page or write a progress update yet.',
+    `Open the same source in the rendered browser with browser_navigate using this exact URL verbatim: ${JSON.stringify(sourceUrl)}.`,
+    'After it loads, inspect the targeted rendered text or visible value before narrating or advancing.',
+    'Make exactly one native browser_navigate call now.',
+  ].join(' ')
+}
+
+export function exactExtractionGuardToolNames(state: AgentStateData): ReadonlySet<string> {
+  return state.exactExtractionGuardSourceUrl
+    ? new Set(['browser_navigate'])
+    : EXACT_EXTRACTION_TOOLS
+}
+
 function shouldArmExactExtractionGuard(
   state: AgentStateData,
   toolResults: ToolExecutionResult[],
   messages: Array<{ role: string; content: string }>,
-): { shouldArm: boolean; prompt: string | null } {
+): { shouldArm: boolean; prompt: string | null; sourceUrl: string | null } {
   if (state.exactExtractionGuardPending || state.exactExtractionGuardAttempts >= 2) {
-    return { shouldArm: false, prompt: null }
+    return { shouldArm: false, prompt: null, sourceUrl: null }
   }
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) {
-    return { shouldArm: false, prompt: null }
+    return { shouldArm: false, prompt: null, sourceUrl: null }
+  }
+  // Browser-action tasks already operate on live rendered state and must not be
+  // interrupted by a research-only exact-detail detour.
+  if (state.taskStrategy === 'browse') return { shouldArm: false, prompt: null, sourceUrl: null }
+
+  const explicitToolConstraint = explicitTaskToolConstraintFromText(effectiveTaskRequest(messages))
+  if (
+    explicitToolConstraint &&
+    !toolAllowedByExplicitTaskConstraint(explicitToolConstraint, 'browser_navigate')
+  ) {
+    return { shouldArm: false, prompt: null, sourceUrl: null }
   }
 
   const taskText = currentTaskTextForGuard(state, messages)
   if (!EXACT_EXTRACTION_NEED_PATTERN.test(taskText)) {
-    return { shouldArm: false, prompt: null }
+    return { shouldArm: false, prompt: null, sourceUrl: null }
   }
 
-  const source = toolResults.find(({ tc, result, isError }) => {
-    if (isError || !EXACT_EXTRACTION_SOURCE_TOOLS.has(tc.name)) return false
-    const resultText = contentTextForGuard(result)
-    if (!resultText || /\b(?:captcha|access denied|blocked|not found|failed|error)\b/i.test(resultText)) return false
-    return true
-  })
-  if (!source) return { shouldArm: false, prompt: null }
-
   const hints = exactExtractionHints(taskText)
-  const hintText = hints.length > 0
-    ? ` Search targeted rendered text first with browser_find_text using one of: ${hints.map(h => `"${h}"`).join(', ')}.`
-    : ' Search targeted rendered text first with browser_find_text using the key phrase/date/label from the current step.'
+  const source = toolResults.find(toolResult => {
+    if (!EXACT_EXTRACTION_SOURCE_TOOLS.has(toolResult.tc.name)) return false
+    if (!exactExtractionResultHasEvidence(toolResult)) return false
+    return exactExtractionResultMatchesTask(toolResult, hints)
+  })
+  if (!source) return { shouldArm: false, prompt: null, sourceUrl: null }
+
+  const directExtraction = source.tc.name === 'read_document' || source.tc.name === 'http_request'
+  // Direct extraction already satisfies exact textual/data requests. Escalate
+  // into the rendered browser only when the request itself calls for visual or
+  // on-page confirmation; "exact" or "precise" alone is not enough.
+  if (directExtraction && !RENDERED_CONFIRMATION_NEED_PATTERN.test(taskText)) {
+    return { shouldArm: false, prompt: null, sourceUrl: null }
+  }
+  const sourceUrl = directExtraction ? exactExtractionSourceUrl(source) : null
+  // Local files and non-GET endpoints cannot be opened as the same rendered
+  // webpage. Keep their successful extraction usable instead of inventing a
+  // browser blocker with no exact route.
+  if (directExtraction && !sourceUrl) {
+    return { shouldArm: false, prompt: null, sourceUrl: null }
+  }
 
   return {
     shouldArm: true,
-    prompt: [
-      'EXACT EXTRACTION REQUIRED BEFORE NARRATION: the current task/step needs precise wording, timing, date, availability, launch, or pricing evidence from the page you just opened/read.',
-      'Do not write a progress update, uncertainty paragraph, synthesis, or <next_step/> yet.',
-      `${hintText} If rendered text is incomplete or no text-node match appears, use browser_screenshot to visually read the relevant area, browser_scroll to reveal it, or browser_get_content to refresh the page text.`,
-      'Make exactly one native tool call now using browser_find_text, browser_screenshot, browser_get_content, or browser_scroll. After that result, answer from the verified evidence or continue the phase.',
-    ].join(' '),
+    prompt: sourceUrl
+      ? exactExtractionNavigationPrompt(sourceUrl)
+      : exactExtractionInspectionPrompt(taskText),
+    sourceUrl,
   }
 }
 
-function updateExactExtractionGuardAfterTools(
+function clearExactExtractionGuard(state: AgentStateData): void {
+  state.exactExtractionGuardPending = false
+  state.exactExtractionGuardPrompt = null
+  state.exactExtractionGuardSourceUrl = null
+}
+
+function exactInspectionResultSatisfied(
+  toolResult: ToolExecutionResult,
+  taskText: string,
+): boolean {
+  if (!EXACT_EXTRACTION_TOOLS.has(toolResult.tc.name) || !exactExtractionResultHasEvidence(toolResult)) {
+    return false
+  }
+  const resultText = contentTextForGuard(toolResult.result)
+  if (toolResult.tc.name === 'browser_scroll') return false
+  if (toolResult.tc.name === 'browser_find_text') {
+    if (/\b(?:no visible text nodes matched|found\s+0\s+match|0\s+matches|text not found)\b/i.test(resultText)) {
+      return false
+    }
+    return /\bfound\s+[1-9]\d*\s+match/i.test(resultText) ||
+      exactExtractionResultMatchesTask(toolResult, exactExtractionHints(taskText))
+  }
+  if (toolResult.tc.name === 'browser_get_content') {
+    return exactExtractionResultMatchesTask(toolResult, exactExtractionHints(taskText))
+  }
+  // A successful screenshot supplies the visual frame to the model itself.
+  // The model must still report whether the target is actually visible; the
+  // runtime records only that the requested visual inspection took place.
+  return toolResult.tc.name === 'browser_screenshot'
+}
+
+export function updateExactExtractionGuardAfterTools(
   state: AgentStateData,
   toolResults: ToolExecutionResult[],
   messages: Array<{ role: string; content: string }>,
 ): void {
+  const pendingNavigationUrl = state.exactExtractionGuardPending
+    ? state.exactExtractionGuardSourceUrl
+    : null
+  if (pendingNavigationUrl) {
+    const navigation = toolResults.find(({ tc }) => tc.name === 'browser_navigate')
+    if (!navigation) return
+    const requestedUrl = exactExtractionSourceUrl(navigation)
+    if (
+      exactExtractionResultHasEvidence(navigation) &&
+      requestedUrl === pendingNavigationUrl
+    ) {
+      state.exactExtractionGuardSourceUrl = null
+      state.exactExtractionGuardPrompt = exactExtractionInspectionPrompt(
+        currentTaskTextForGuard(state, messages),
+      )
+    } else {
+      // Direct extraction is still usable. A failed or off-target browser open
+      // must not become a permanent false blocker.
+      clearExactExtractionGuard(state)
+    }
+    return
+  }
+
+  const taskText = currentTaskTextForGuard(state, messages)
   const completedGuardExtraction = state.exactExtractionGuardPending &&
-    toolResults.some(({ tc, isError }) => EXACT_EXTRACTION_TOOLS.has(tc.name) && !isError)
+    toolResults.some(toolResult => exactInspectionResultSatisfied(toolResult, taskText))
 
   if (completedGuardExtraction) {
-    state.exactExtractionGuardPending = false
-    state.exactExtractionGuardPrompt = null
+    clearExactExtractionGuard(state)
     return
   }
 
@@ -502,6 +687,7 @@ function updateExactExtractionGuardAfterTools(
 
   state.exactExtractionGuardPending = true
   state.exactExtractionGuardPrompt = nextGuard.prompt
+  state.exactExtractionGuardSourceUrl = nextGuard.sourceUrl
   state.exactExtractionGuardAttempts++
   state.forceTextNextIteration = false
   state.forcedNarrationRepairAttempts = 0
@@ -3044,10 +3230,10 @@ function compactForcedNarrationMessages(state: AgentStateData, allMessages: Chat
     'Write one natural progress update from the compact context only.',
     'Treat it as a progressive evidence trace: select the newest delta, not the cumulative task conclusion.',
     'Size the update to the evidence: one sentence for a clear finding, two when a contrast or implication matters, or a short paragraph for a dense milestone.',
-    'Lead with the genuinely new result or progress and choose the wording and structure freely. Do not force a stock opening or repeat the recent updates.',
+    'Lead with a fact-dense new result and connect it naturally to the completed work. Preserve material uncertainty, disagreement, or an evidence gap. Choose the wording freely: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural, and a source-action lead is valid when it immediately carries the concrete result or important provenance. Do not force a stock opening or repeat the recent updates.',
     'Because this asynchronous narration-only request has no selected next action, keep it result-only. Do not add a future-action sentence or infer an action from the following plan phase.',
     'No permission questions, internal step numbers, action counts, source dumps, vague sufficiency claims, or command fragments.',
-    'Describe only user-visible findings, completed changes, or real blockers. Never mention providers, APIs, service names, quotas, rate limits, tools, tool results, payloads, JSON, parsing, truncation, confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
+    'Describe only user-visible findings, completed changes, or real blockers. Never mention providers, APIs, service names, quotas, rate limits, tools, tool results, payloads, JSON, parsing, truncation, download confirmations, caches, retries, runtime/backend state, call IDs, or other implementation mechanics.',
     state.phaseEndNarrationPending ? 'Put <next_step/> on its own final line after the paragraph.' : '',
   ].filter(Boolean).join(' ')
 
@@ -3099,8 +3285,8 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   return [
     'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
     'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
-    'The visible action pills already say what was searched, opened, read, inspected, or written. Do not repeat those operations or write vague purpose text such as "to expand the evidence base." State what the preceding results established. Synthesize neutrally instead of making a vendor, publication, or webpage the speaking subject; name a source only when its authority, disagreement, or access failure is itself important. Avoid hype, praise, criticism, and unsupported evaluative adjectives. The current tool has not returned yet, so never invent what it will find.',
-    'For continuing work, default to two clean sentences: the concrete evidence or verified state first, then one short "Next, I\'ll..." sentence naming the immediate useful direction. Omit the second sentence at phase completion or when there is no concrete direction. Never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
+    'Lead with a fact-dense outcome and make it continue naturally from the completed work immediately above. Carry forward only context needed to show what changed, and state material uncertainty, disagreement, or an evidence gap instead of smoothing it away. The visible action pills already show operations, so do not use an operation or vague purpose such as "to expand the evidence base" as the outcome. A concise source-action lead is valid when it immediately carries the concrete finding or important provenance. Avoid hype, praise, criticism, and unsupported evaluative adjectives. The current tool has not returned yet, so never invent what it will find.',
+    'If work is continuing, add an immediate useful direction only when it helps orient the user; omit it at phase completion, when the next move is obvious, or when no concrete direction is selected. Vary the syntax to fit the result: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural. Do not copy a fixed opening, transition, or sentence count. Never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
     'progress_update is display-only. The runtime will place it immediately before this native action starts. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
     newWork.length ? `New completed work to synthesize (use its outcomes, not its action labels):\n- ${newWork.join('\n- ')}` : 'Use the concrete completed tool-result context already in the conversation. If evidence access failed, state that user-relevant blocker and the alternate evidence route—not that a search or page-open happened.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
@@ -4388,7 +4574,14 @@ export class AgentLoop {
     const startupPlanUsed = this.options.startupPlan?.items?.length
       ? planManager.usePrecomputedPlan(state, this.options.startupPlan, { emitPlan: false })
       : false
-    if (!startupPlanUsed) planManager.startPlanCall()
+    if (startupPlanUsed) {
+      // The persisted plan is already present in the task event stream, but
+      // the worker still owns the opening message. Start only the model-authored
+      // acknowledgement call here; awaitPlan() fences first-step work on it.
+      planManager.startAcknowledgementCall()
+    } else {
+      planManager.startPlanCall()
+    }
 
     // ── Mutable iteration state ───────────────────────────────────────
 
@@ -7200,10 +7393,12 @@ export class AgentLoop {
       !savedResearchNeedsEvidenceAction &&
       !explicitTaskToolNeedsInitialAction &&
       !hasPersistentExplicitTaskToolRestriction
+    const preserveCurrentEvidenceForModel = hasCurrentModelEvidenceBatch(allMessages)
     const useCompactResearchTurn = !useCompactNarration &&
       !useCompactFinalInlineAnswer &&
       !useTextFinalDeliverable &&
       !useCompactFinalDeliverable &&
+      !preserveCurrentEvidenceForModel &&
       shouldUseCompactResearchTurn(state)
     const compactResearchPhaseCanAdvance = !explicitTaskToolNeedsInitialAction &&
       useCompactResearchTurn &&
@@ -7402,8 +7597,25 @@ export class AgentLoop {
         if (isPostCompletion || state.finalDeliverableHandoffPending) {
           activeTools = []
         } else if (state.exactExtractionGuardPending) {
-          activeTools = (toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[])
-            .filter(t => EXACT_EXTRACTION_TOOLS.has(t.function?.name || ''))
+          const activeGuardPrompt = state.exactExtractionGuardPrompt
+          const exactConfirmationToolState = {
+            ...state,
+            // browser_screenshot is intentionally not part of the broad research
+            // menu, but it is valid inside this narrow visual-confirmation lane.
+            currentPhase: 'unknown' as const,
+          }
+          const allowedExactConfirmationTools = exactExtractionGuardToolNames(state)
+          activeTools = (toolRegistry.getActiveDefinitions(exactConfirmationToolState) as ToolDefinitionLike[])
+            .filter(t => allowedExactConfirmationTools.has(t.function?.name || ''))
+          if (activeTools.length === 0) {
+            clearExactExtractionGuard(state)
+            requestMessages = requestMessages.filter(message => message.content !== activeGuardPrompt)
+            requestMessages.push({
+              role: 'system',
+              content: 'RENDERED CONFIRMATION UNAVAILABLE: continue from the successful direct extraction. Do not claim that the detail was visually confirmed; state the missing rendered confirmation as a limitation only when it materially affects the answer.',
+            } as ChatMessageParam)
+            activeTools = toolRegistry.getActiveDefinitions(state) as ToolDefinitionLike[]
+          }
         } else if (useCompactNarration) {
           activeTools = []
         } else if (useTextFinalDeliverable) {
@@ -7808,7 +8020,7 @@ export class AgentLoop {
                 content: [
                   `DIRECT USER TARGET: The user supplied ${state.userProvidedUrl}.`,
                   'The next action must use that exact target directly; do not turn it into search keywords or discover a replacement first.',
-                  'Choose the available direct tool that best matches the user’s requested method and the current step, then author the native tool call yourself.',
+                  'For ordinary research-page reading, default to read_document or HTTP/text extraction. Use browser navigation/content when the request needs dynamic or scripted state, interaction/action work, screenshots, or exact visibly rendered confirmation. Then author the native tool call yourself.',
                 ].join(' '),
               } as ChatMessageParam,
             ]

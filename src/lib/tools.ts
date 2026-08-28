@@ -11,7 +11,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'web_search',
-      description: 'Discover candidate webpages from a topical text query. Returns titles, snippets, and URLs. Never put a known or user-supplied URL/domain in query; open that exact target with browser_navigate or extract it with read_document instead.',
+      description: 'Discover candidate webpages from a topical text query. Returns titles, snippets, and URLs; after discovery, extract ordinary readable result pages with read_document by default. Never put a known or user-supplied URL/domain in query; extract that exact target with read_document, or use browser_navigate when live rendered state or interaction is required.',
       parameters: {
         type: 'object',
         properties: {
@@ -178,7 +178,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'read_document',
-      description: 'Extract PDF, DOCX, webpage, or text content from one concrete URL/workspace path. Pass the exact selected webpage or document address in the required url field.',
+      description: 'Extract PDF, DOCX, webpage, or text content from one concrete URL/workspace path. This is the default way to read an ordinary webpage selected from search results. Pass the exact selected webpage or document address in the required url field.',
       parameters: {
         type: 'object',
         properties: {
@@ -216,7 +216,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_navigate',
-      description: 'Open an exact, complete webpage URL and return live rendered page state/elements. Use this when rendered state, scripts, screenshots, or interaction are needed; use read_document for ordinary readable pages. Copy surfaced URLs verbatim; never abbreviate, shorten, or replace any part with "..." or an ellipsis.',
+      description: 'Open an exact, complete webpage URL and return live rendered page state/elements. Use this primarily for dynamic/scripted state, interaction/action tasks, screenshots, or exact details that must be confirmed as visibly rendered; use read_document for ordinary research-page reading. Copy surfaced URLs verbatim; never abbreviate, shorten, or replace any part with "..." or an ellipsis.',
       parameters: {
         type: 'object',
         properties: {
@@ -300,7 +300,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'browser_get_content',
-      description: 'Extract rendered text from the current webpage.',
+      description: 'Extract rendered text from the current webpage. Use it to inspect dynamic/current page state or confirm an exact rendered detail after browser navigation, not as the default reader for an ordinary search-result page.',
       parameters: {
         type: 'object',
         properties: {},

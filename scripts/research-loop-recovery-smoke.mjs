@@ -109,6 +109,10 @@ function makeResearchState() {
   state.perStepBudget = 18
   state.deliverableStepBudget = 12
   state.iterations = 4
+  // This smoke isolates loop recovery. Phase narration has already been shown;
+  // otherwise the policy correctly schedules narration before advancing and
+  // the assertion below would be testing the narration gate instead.
+  state.phaseNarrationEmittedThisStep = true
   return state
 }
 
