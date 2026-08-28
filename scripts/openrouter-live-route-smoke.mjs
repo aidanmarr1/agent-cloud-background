@@ -53,12 +53,12 @@ try {
     parallel_tool_calls: false,
     temperature: 0.3,
     max_tokens: 512,
-    reasoning: { effort: 'minimal', exclude: true },
+    reasoning: { effort: 'medium', exclude: true },
   })
 
-  assert.match(String(response.model || ''), /^meta\/muse-spark-1\.2-contributor(?:-\d+)?$/)
-  assert.match(String(response.provider || ''), /^Meta$/i, 'OpenRouter must use the exact Meta provider')
-  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Muse Spark Contributor must return the required native tool call')
+  assert.match(String(response.model || ''), /^z-ai\/glm-5\.3-flash(?:-\d+)?$/)
+  assert.match(String(response.provider || ''), /^Z\.AI$/i, 'OpenRouter must use the exact Z.AI provider')
+  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'GLM 5.3 Flash must return the required native tool call')
 
   const reasoningTokens = Number(response.usage?.completion_tokens_details?.reasoning_tokens || 0)
   assert.ok(reasoningTokens >= 0, 'reasoning usage must be a non-negative token count')

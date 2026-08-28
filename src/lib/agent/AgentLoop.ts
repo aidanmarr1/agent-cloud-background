@@ -305,10 +305,10 @@ const FAST_ACTION_MAX_TOKENS = 1_024
 // while retaining a firm latency/cost boundary.
 const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const PRESENTATION_REASONING = { effort: 'minimal' as const, exclude: true }
-const FAST_ACTION_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
-const DEEP_TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PRESENTATION_REASONING = { effort: 'medium' as const, exclude: true }
+const FAST_ACTION_REASONING = { effort: 'medium' as const, exclude: true }
+const TASK_REASONING = { effort: 'medium' as const, exclude: true }
+const DEEP_TASK_REASONING = { effort: 'medium' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {

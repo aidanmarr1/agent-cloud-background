@@ -19,11 +19,11 @@ function trimmedEnv(value: string | undefined): string | undefined {
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
-export const ASSISTANT_SUPPORTS_FILE_INPUT = true
-export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
+export const ASSISTANT_SUPPORTS_FILE_INPUT = false
+export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
-export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
-export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
+export const PINNED_OPENROUTER_PROVIDER = 'z-ai/fp8' as const
+export const ASSISTANT_REASONING_EFFORT = 'medium' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -531,9 +531,9 @@ function providerReasoningPayload(
   _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Contributor reasoning is mandatory and supports OpenRouter's `minimal`
-  // effort. Clamp at the provider boundary so stale callers, saved settings,
-  // or max-token heuristics cannot silently raise reasoning cost. Keep traces
+  // GLM 5.3 Flash supports OpenRouter's medium reasoning effort. Clamp at the
+  // provider boundary so stale callers, saved settings, or max-token heuristics
+  // cannot silently change the requested reasoning level. Keep traces
   // excluded from user-visible output while still preserving native tool use.
   void _reasoning
   void _maxOutputTokens
@@ -590,11 +590,10 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    // Meta's live Muse endpoint currently accepts only automatic tool choice,
-    // despite broader modes appearing in OpenRouter's endpoint metadata. Keep
-    // every healthy tool available and let Muse choose autonomously with `auto`.
+    // The exact Z.AI endpoint accepts automatic tool choice. Keep every healthy
+    // tool available and let GLM choose autonomously with `auto`.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
-    // The endpoint does not advertise OpenAI's parallel_tool_calls request
+    // The exact endpoint does not advertise OpenAI's parallel_tool_calls request
     // parameter. AgentLoop still controls whether it exposes one tool or a safe
     // extraction batch, and ToolPipeline executes eligible batches in parallel.
     ...providerReasoningPayload(_reasoning, params.max_tokens, _toolChoice),

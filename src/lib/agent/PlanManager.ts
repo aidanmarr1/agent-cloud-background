@@ -65,10 +65,9 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Muse uses mandatory hidden reasoning at the pinned minimal effort. Keep the
-// acknowledgement budget comfortably above its 8-48-word visible target while
-// avoiding a needlessly long startup generation.
-const PLANNER_ACK_MAX_TOKENS = 192
+// GLM uses hidden reasoning at the pinned medium effort. Leave enough output
+// room for its reasoning plus the short, task-specific acknowledgement.
+const PLANNER_ACK_MAX_TOKENS = 256
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
@@ -82,9 +81,9 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-// Keep both planning and acknowledgement turns at the minimum requested effort.
-const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_CONTROL_REASONING = { effort: 'medium' as const, exclude: true }
+// Keep planning and acknowledgement turns aligned with the pinned model effort.
+const PLANNER_ACK_REASONING = { effort: 'medium' as const, exclude: true }
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 

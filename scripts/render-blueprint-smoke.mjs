@@ -125,7 +125,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'AUTH_TRUST_HOST', 'true')
   requireValue(service, 'AGENT_TRUST_PROXY_HEADERS', 'true')
   requireValue(service, 'LLM_PROVIDER', 'openrouter')
-  requireValue(service, 'OPENROUTER_MODEL', 'meta/muse-spark-1.2-contributor')
+  requireValue(service, 'OPENROUTER_MODEL', 'z-ai/glm-5.3-flash')
   assert.equal(service.env.has('OPENROUTER_REASONING_EFFORT'), false, `${service.name} must use the code-pinned minimal reasoning level instead of a stale effort label`)
   assert.equal(service.env.has('OPENROUTER_REASONING_EXCLUDE'), false, `${service.name} must pin hidden reasoning per turn instead of through stale environment state`)
   assert.equal(service.env.has('DEEPSEEK_API_KEY'), false, `${service.name} must not define a DeepSeek credential`)
