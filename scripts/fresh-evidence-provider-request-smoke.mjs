@@ -17,7 +17,7 @@ export const ASSISTANT_SUPPORTS_FILE_INPUT = true
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
 export const ASSISTANT_PROVIDER = 'openrouter'
-export const DEFAULT_MODEL = 'google/gemini-3.7-flash'
+export const DEFAULT_MODEL = 'meta/muse-spark-1.2-contributor'
 export function resolveModel() { return DEFAULT_MODEL }
 export async function createCompletion() { return { choices: [{ message: { content: '{}' } }] } }
 export async function createStreamingCompletion(params: unknown) {
@@ -63,7 +63,7 @@ const emitter = {
 }
 const loop = new AgentLoop(emitter as any, {
   messages: [{ role: 'user', content: request }],
-  model: 'google/gemini-3.7-flash',
+  model: 'meta/muse-spark-1.2-contributor',
   conversationId: 'fresh-evidence-provider-request-smoke',
 })
 const registry = new ToolRegistry().registerFromDefinitions(toolDefinitions)
@@ -93,7 +93,7 @@ const sourceMessages = [
 ] as any[]
 
 await (loop as any).callLLMWithRetry(
-  'google/gemini-3.7-flash',
+  'meta/muse-spark-1.2-contributor',
   sourceMessages,
   makeState(),
   strategy,
@@ -124,7 +124,7 @@ const visualMessages = [
 ] as any[]
 
 await (loop as any).callLLMWithRetry(
-  'google/gemini-3.7-flash',
+  'meta/muse-spark-1.2-contributor',
   visualMessages,
   makeState(),
   strategy,
@@ -156,7 +156,7 @@ const exactMatchMessages = [
 ] as any[]
 
 await (loop as any).callLLMWithRetry(
-  'google/gemini-3.7-flash',
+  'meta/muse-spark-1.2-contributor',
   exactMatchMessages,
   makeState(),
   strategy,

@@ -65,10 +65,10 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Gemini uses hidden reasoning at the pinned minimal effort. Leave enough room
-// for that reasoning plus the short visible paragraph when an otherwise valid
-// planner acknowledgement needs a model-authored repair.
-const PLANNER_ACK_MAX_TOKENS = 256
+// Muse uses mandatory hidden reasoning at the pinned minimal effort. Keep the
+// acknowledgement budget comfortably above its 8-48-word visible target while
+// avoiding a needlessly long startup generation.
+const PLANNER_ACK_MAX_TOKENS = 192
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
