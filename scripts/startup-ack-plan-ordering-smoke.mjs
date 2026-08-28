@@ -89,22 +89,54 @@ export async function run() {
   ])
   assert.deepEqual(fastPlannerEvents.map(event => event.type), ['text', 'plan'])
 
-  // Normal startup is a single billable planner request. It must not launch a
-  // second stream that could be aborted before OpenRouter's final usage chunk.
-  const singleCallEvents: VisibleEvent[] = []
-  const singleCallManager = new PlanManager(emitterFor(singleCallEvents) as any, [{ role: 'user', content: request }], 2)
-  const singleCallState = state()
+  // Normal startup runs a small independently metered acknowledgement beside
+  // the planner. Both calls finish, usage is preserved, and acknowledgement
+  // text must become visible before the plan.
+  const parallelStartupEvents: VisibleEvent[] = []
+  const parallelStartupManager = new PlanManager(emitterFor(parallelStartupEvents) as any, [{ role: 'user', content: request }], 2)
+  const parallelStartupState = state()
   providerCallCount = 0
-  completionResponder = async () => ({
-    id: 'gen-normal-startup',
-    choices: [{ message: { content: JSON.stringify(plan) } }],
-    usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
-  })
-  ;(singleCallManager as any).setStateRef(singleCallState)
-  singleCallManager.startPlanCall()
-  await singleCallManager.awaitPlan(singleCallState)
-  assert.equal(providerCallCount, 1)
-  assert.deepEqual(singleCallEvents.map(event => event.type), ['text', 'plan'])
+  completionResponder = async (params: any) => params.response_format
+    ? {
+        id: 'gen-normal-plan',
+        choices: [{ message: { content: JSON.stringify(plan) } }],
+        usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
+      }
+    : {
+        id: 'gen-normal-ack',
+        choices: [{ message: { content: validAck } }],
+        usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
+      }
+  ;(parallelStartupManager as any).setStateRef(parallelStartupState)
+  parallelStartupManager.startPlanCall()
+  await parallelStartupManager.awaitPlan(parallelStartupState)
+  assert.equal(providerCallCount, 2)
+  assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text', 'plan'])
+
+  // If both planner drafts are malformed, the successful fast acknowledgement
+  // must survive so AgentLoop can recover into a task-specific execution plan
+  // instead of showing the planner-repair error to the user.
+  const recoveryEvents: VisibleEvent[] = []
+  const recoveryManager = new PlanManager(emitterFor(recoveryEvents) as any, [{ role: 'user', content: request }], 2)
+  const recoveryState = state()
+  providerCallCount = 0
+  completionResponder = async (params: any) => params.response_format
+    ? {
+        id: 'gen-invalid-plan',
+        choices: [{ message: { content: '{}' } }],
+        usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
+      }
+    : {
+        id: 'gen-recovery-ack',
+        choices: [{ message: { content: validAck } }],
+        usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
+      }
+  ;(recoveryManager as any).setStateRef(recoveryState)
+  recoveryManager.startPlanCall()
+  await assert.rejects(recoveryManager.awaitPlan(recoveryState), /usable task-specific plan after repair/)
+  assert.equal(recoveryManager.recoverFromPlannerFailure(recoveryState), true)
+  assert.equal(providerCallCount, 4)
+  assert.deepEqual(recoveryEvents.map(event => event.type), ['text', 'plan'])
 
   // The one acknowledgement request used with a precomputed plan must remain
   // invisible until its exact usage debit has committed.

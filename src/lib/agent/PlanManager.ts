@@ -65,9 +65,9 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// GLM uses hidden reasoning at the pinned medium effort. Leave enough output
-// room for its reasoning plus the short, task-specific acknowledgement.
-const PLANNER_ACK_MAX_TOKENS = 256
+// Startup control turns use GLM's fast minimal mode. Keep the acknowledgement
+// short enough to paint promptly while leaving ample room for its 8-48 words.
+const PLANNER_ACK_MAX_TOKENS = 128
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
@@ -81,9 +81,8 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'medium' as const, exclude: true }
-// Keep planning and acknowledgement turns aligned with the pinned model effort.
-const PLANNER_ACK_REASONING = { effort: 'medium' as const, exclude: true }
+const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 
@@ -757,10 +756,11 @@ export class PlanManager {
       hasCustomInstructions: !!this.customInstructions,
     })
     const plannerAbortController = this.resetPlannerAbortController()
-    // The planner response owns both the opening and the plan on ordinary
-    // starts. Do not launch a parallel acknowledgement stream here: streamed
-    // provider usage arrives at the terminal chunk, so cancelling a losing
-    // duplicate could leave real upstream cost without an exact ledger debit.
+    // Start the small, independently metered acknowledgement alongside the
+    // larger planner JSON request. Both non-streaming calls always finish and
+    // record exact usage; neither is cancelled merely because the other wins.
+    // This lets the opening paint promptly without waiting for plan parsing.
+    this.scheduleAcknowledgementCall()
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
         await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
@@ -1479,6 +1479,15 @@ Rules:
 
     const mappedTaskType = this.applyPlannerMetadata(state, obj)
 
+    // Ordinary startup owns an independent fast acknowledgement. Let it settle
+    // before exposing the plan so UI ordering remains acknowledgement -> plan.
+    // If its wording was unusable, the planner's own acknowledgement remains a
+    // valid model-authored fallback below.
+    if (this.acknowledgementPromise && !this.acknowledgementEmitted) {
+      await this.acknowledgementPromise
+      if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
+    }
+
     if (arrays.titles.length === 0) {
       if (
         mappedTaskType !== 'general' ||
@@ -1640,6 +1649,15 @@ Rules:
         const emitted = await this.emitParsedPlanWithModelRepair(state, raw, parsedPlan)
         if (emitted) return null
 
+        // A malformed planner must not race its faster acknowledgement. Let the
+        // opening finish so AgentLoop can retain it and recover into a minimal
+        // task-specific execution plan instead of exposing a terminal planner
+        // error after several paid retries.
+        if (this.acknowledgementPromise && !this.acknowledgementEmitted) {
+          await this.acknowledgementPromise
+          if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
+        }
+
         throw plannerRepairExhaustedError()
       }
       return null
@@ -1649,12 +1667,6 @@ Rules:
       if (status === 429 && attempt < PLAN_MAX_RETRIES) {
         const backoff = PLAN_RETRY_BASE_MS * (attempt + 1) + Math.random() * 500
         console.log(`[Plan] 429 on attempt ${attempt + 1}, retrying in ${Math.round(backoff)}ms`)
-        await this.waitForPlannerDelay(backoff)
-        return this.attemptPlanCall(attempt + 1)
-      }
-      if (e instanceof Error && e.message === PLANNER_REPAIR_EXHAUSTED_ERROR && attempt < PLAN_MAX_RETRIES) {
-        const backoff = PLAN_RETRY_BASE_MS * (attempt + 1)
-        console.log(`[Plan] Planner quality repair exhausted on attempt ${attempt + 1}, retrying fresh planner call in ${Math.round(backoff)}ms`)
         await this.waitForPlannerDelay(backoff)
         return this.attemptPlanCall(attempt + 1)
       }

@@ -121,7 +121,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /await this\.assertCreditRunway\('replan'\)[\s\S]*createCompletion/, 'planner replans must preflight credits before provider work')
   assert.match(planManager, /BILLABLE_USAGE_ERROR/, 'planning must fail closed when provider cost is missing')
   const normalPlannerStartup = planManager.match(/startPlanCall\(\): void \{[\s\S]*?\n  dispose\(\): void \{/)?.[0] || ''
-  assert.doesNotMatch(normalPlannerStartup, /scheduleAcknowledgementCall|emitModelGeneratedAcknowledgement/, 'normal startup must not make a redundant acknowledgement request that can be billed without a terminal usage chunk')
+  assert.match(normalPlannerStartup, /scheduleAcknowledgementCall/, 'normal startup must launch its independently metered acknowledgement without waiting for planner JSON')
   assert.match(planManager, /startAcknowledgementCall\(\): void \{[\s\S]*scheduleAcknowledgementCall\(\)/, 'precomputed plans must use exactly one separately metered acknowledgement request')
   assert.doesNotMatch(planManager, /acknowledgementAbortController|cancelRedundantAcknowledgementCall|acknowledgementCallSuperseded/, 'accounting must not depend on aborting a possibly billable OpenRouter stream before final usage')
   assert.match(planManager, /const response = await createCompletion[\s\S]*await this\.recordCompletionUsage\(response\.usage, 'ack'\)[\s\S]*this\.emitter\.textDelta\(sanitizedAck \+ '\\n\\n'\)/, 'the separate acknowledgement request must recover and commit exact usage before its text becomes visible')

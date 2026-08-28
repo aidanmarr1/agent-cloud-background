@@ -24,6 +24,7 @@ export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 export const PINNED_OPENROUTER_PROVIDER = 'z-ai/fp8' as const
 export const ASSISTANT_REASONING_EFFORT = 'medium' as const
+export const ASSISTANT_FAST_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -527,20 +528,22 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 }
 
 function providerReasoningPayload(
-  _reasoning: ChatCompletionParams['reasoning'],
+  reasoning: ChatCompletionParams['reasoning'],
   _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // GLM 5.3 Flash supports OpenRouter's medium reasoning effort. Clamp at the
-  // provider boundary so stale callers, saved settings, or max-token heuristics
-  // cannot silently change the requested reasoning level. Keep traces
-  // excluded from user-visible output while still preserving native tool use.
-  void _reasoning
+  // Actual agent work stays on medium. The latency-sensitive acknowledgement
+  // and planner may explicitly opt into GLM's minimal effort; every other
+  // caller value (including stale `none` or `xhigh` settings) is clamped back
+  // to medium. The exact Z.AI endpoint rejects disabled reasoning entirely.
+  const effort = reasoning?.effort === ASSISTANT_FAST_REASONING_EFFORT
+    ? ASSISTANT_FAST_REASONING_EFFORT
+    : ASSISTANT_REASONING_EFFORT
   void _maxOutputTokens
   void _toolChoice
   return {
     reasoning: {
-      effort: ASSISTANT_REASONING_EFFORT,
+      effort,
       exclude: true,
     },
   }

@@ -88,6 +88,7 @@ await llm.createCompletion({
   ...common,
   messages: [{ role: 'user', content: multimodalParts }],
   max_tokens: 256,
+  reasoning: { effort: 'minimal', exclude: false },
 })
 await llm.createCompletion({
   ...common,
@@ -173,7 +174,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
     { type: 'video_url', video_url: { url: 'data:video/mp4;base64,dmlkZW8=' } },
   ])
-  assert.deepEqual(requests[1].body.reasoning, { effort: 'medium', exclude: true })
+  assert.deepEqual(requests[1].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(requests[2].body.reasoning, { effort: 'medium', exclude: true })
   assert.equal(requests[2].body.tool_choice, 'auto')
   assert.deepEqual(requests[3].body.reasoning, { effort: 'medium', exclude: true })
