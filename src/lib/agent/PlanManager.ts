@@ -698,6 +698,8 @@ export class PlanManager {
   private acknowledgementEmitted = false
   private acknowledgementStreamStarted = false
   private acknowledgementPromise: Promise<boolean> | null = null
+  private acknowledgementRequestStartedPromise: Promise<void> | null = null
+  private resolveAcknowledgementRequestStarted: (() => void) | null = null
   private suppressFurtherAcknowledgementDeltas = false
   private acknowledgementUsageError: unknown = null
   private lastAcknowledgementCandidate = ''
@@ -748,6 +750,9 @@ export class PlanManager {
 
   private scheduleAcknowledgementCall(): void {
     if (!this.skipAcknowledgement && !this.acknowledgementPromise) {
+      this.acknowledgementRequestStartedPromise = new Promise((resolve) => {
+        this.resolveAcknowledgementRequestStarted = resolve
+      })
       this.acknowledgementPromise = this.emitModelGeneratedAcknowledgement('task')
         .catch((error) => {
           if (this.plannerWasAborted()) {
@@ -762,7 +767,13 @@ export class PlanManager {
           })
           return false
         })
+        .finally(() => this.markAcknowledgementRequestStarted())
     }
+  }
+
+  private markAcknowledgementRequestStarted(): void {
+    this.resolveAcknowledgementRequestStarted?.()
+    this.resolveAcknowledgementRequestStarted = null
   }
 
   /**
@@ -793,6 +804,12 @@ export class PlanManager {
     // and remains ordered behind acknowledgement completion and exact usage.
     this.scheduleAcknowledgementCall()
     const start = async (): Promise<null> => {
+      // The acknowledgement is the first user-facing model output. Wait only
+      // until its provider request has actually been dispatched before sending
+      // the larger planner request. This preserves real acknowledgement-first
+      // generation without a fixed timer or a display gate; both calls continue
+      // in parallel once the opening request is in flight.
+      await this.acknowledgementRequestStartedPromise
       if (PLAN_STARTUP_DELAY_MS > 0) {
         await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
       }
@@ -815,6 +832,7 @@ export class PlanManager {
   }
 
   dispose(): void {
+    this.markAcknowledgementRequestStarted()
     this.removeExternalAbortListener?.()
     this.removeExternalAbortListener = null
     this.plannerAbortController?.abort()
@@ -999,6 +1017,7 @@ export class PlanManager {
     })
     await this.assertCreditRunway('ack')
     const afterCreditAt = Date.now()
+    this.markAcknowledgementRequestStarted()
     const stream = await createStreamingCompletion({
       model: DEFAULT_MODEL,
       messages: [

@@ -33,11 +33,13 @@ import { computeTimeouts } from ${JSON.stringify(join(root, 'src/lib/agent/TaskS
 type VisibleEvent = { type: 'text'; content: string } | { type: 'plan'; items: string[] }
 
 let providerCallCount = 0
+let providerCallOrder: string[] = []
 let completionResponder: (params: unknown) => Promise<unknown> = async () => {
   throw new Error('Unexpected provider call')
 }
 ;(globalThis as any).__startupAckCompletion = async (params: unknown) => {
   providerCallCount += 1
+  providerCallOrder.push('planner')
   return completionResponder(params)
 }
 
@@ -65,6 +67,7 @@ const defaultStreamingResponder = async (params: unknown) => streamFromResponse(
 let streamingResponder: (params: unknown) => Promise<any> = defaultStreamingResponder
 ;(globalThis as any).__startupAckStream = async (params: unknown) => {
   providerCallCount += 1
+  providerCallOrder.push('ack')
   return streamingResponder(params)
 }
 ;(globalThis as any).__startupAckGenerationUsage = async () => null
@@ -124,6 +127,7 @@ export async function run() {
   const parallelStartupManager = new PlanManager(emitterFor(parallelStartupEvents) as any, [{ role: 'user', content: request }], 2)
   const parallelStartupState = state()
   providerCallCount = 0
+  providerCallOrder = []
   completionResponder = async (params: any) => params.response_format
     ? {
         id: 'gen-normal-plan',
@@ -166,6 +170,7 @@ export async function run() {
   releaseAckRemainder()
   await parallelAwait
   assert.equal(providerCallCount, 2)
+  assert.deepEqual(providerCallOrder, ['ack', 'planner'], 'the acknowledgement request must be dispatched before the planner request without a fixed delay')
   assert.equal(parallelStartupEvents.at(-1)?.type, 'plan')
   assert.ok(parallelStartupEvents.slice(0, -1).every(event => event.type === 'text'))
   assert.ok(parallelStartupEvents.filter(event => event.type === 'text').length >= 2)

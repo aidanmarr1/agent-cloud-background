@@ -545,6 +545,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
   let remoteSandboxReadyPromise: Promise<void> | null = null
   let remoteSandboxBillingSegmentId: string | null = null
   let taskStartCreditPromise: Promise<void> | null = null
+  let taskStartCreditRecord: ServerCreditRecord | null | undefined = null
   let startupReadyPromise: Promise<unknown> | null = null
   let releaseStartupBrowserFence: (() => void) | null = null
   let agentMessages = messages
@@ -743,6 +744,26 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
 
   try {
     if (conversationId) {
+      // Start the durable spend fence as soon as the claimed task begins. It is
+      // independent of directive cleanup, sandbox reset, and attachment
+      // hydration, so running it beside that bootstrap removes a multi-second
+      // serial wait without allowing any paid model or sandbox work through
+      // before the debit settles below. Keep the visible credit event ordered
+      // at the original fence point rather than exposing bootstrap timing.
+      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
+        .then((record) => {
+          taskStartCreditRecord = record
+          meteredTaskStarted = true
+        })
+        .catch((error) => {
+          console.error('[AgentDiagnostics] Task-start credit charge failed', {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          throw error
+        })
+      void taskStartCreditPromise.catch(() => undefined)
+
       if (!directChat) {
         // A worker retry reopens a run that may have been sealed by the prior
         // attempt immediately before it lost its lease. In-process runs use
@@ -810,22 +831,10 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       }
 
       // The accepted task-start debit is the spend fence for model and paid
-      // sandbox work. It is a quick database operation and must settle before
-      // E2B activation, while local preparation above remains parallel.
-      taskStartCreditPromise = chargeServerTaskStart(userId, conversationId, creditRunId)
-        .then((record) => {
-          emitCreditRecord(record)
-          meteredTaskStarted = true
-        })
-        .catch((error) => {
-          console.error('[AgentDiagnostics] Task-start credit charge failed', {
-            conversationId,
-            error: error instanceof Error ? error.message : String(error),
-          })
-          throw error
-        })
-      void taskStartCreditPromise.catch(() => undefined)
+      // sandbox work. It must settle before E2B activation, while the local
+      // preparation above remains parallel.
       await taskStartCreditPromise
+      emitCreditRecord(taskStartCreditRecord)
 
       if (ACTIVE_CREDITS_PER_MINUTE > 0) {
         activeCreditTimer = setInterval(() => {
