@@ -117,9 +117,9 @@ export async function run() {
   ])
   assert.deepEqual(fastPlannerEvents.map(event => event.type), ['text', 'plan'])
 
-  // Normal startup runs a streaming acknowledgement beside the planner. A safe
-  // task-specific prefix must paint while the acknowledgement is still being
-  // generated, while the completed plan remains hidden until it finishes.
+  // Normal startup runs a streaming acknowledgement beside the planner. An
+  // incomplete fragment remains hidden; the first complete task-specific
+  // sentence paints before the completed plan.
   const parallelStartupEvents: VisibleEvent[] = []
   const parallelStartupManager = new PlanManager(emitterFor(parallelStartupEvents) as any, [{ role: 'user', content: request }], 2)
   const parallelStartupState = state()
@@ -162,14 +162,58 @@ export async function run() {
   parallelStartupManager.startPlanCall()
   const parallelAwait = parallelStartupManager.awaitPlan(parallelStartupState)
   await firstAckChunkProcessedPromise
-  assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text'])
-  assert.equal((parallelStartupEvents[0] as { type: 'text'; content: string }).content, 'I’ll research Warmwind OS AI')
+  assert.deepEqual(parallelStartupEvents, [], 'an acknowledgement fragment must never paint before it is complete')
   releaseAckRemainder()
   await parallelAwait
   assert.equal(providerCallCount, 2)
   assert.equal(parallelStartupEvents.at(-1)?.type, 'plan')
   assert.ok(parallelStartupEvents.slice(0, -1).every(event => event.type === 'text'))
   assert.ok(parallelStartupEvents.filter(event => event.type === 'text').length >= 2)
+  streamingResponder = defaultStreamingResponder
+
+  // Regression: Muse can spend its entire output budget on hidden reasoning
+  // and end with only a short visible fragment. That fragment must not block a
+  // valid acknowledgement and plan already returned by the parallel planner.
+  const truncatedAckEvents: VisibleEvent[] = []
+  const truncatedAckManager = new PlanManager(emitterFor(truncatedAckEvents) as any, [{ role: 'user', content: request }], 2)
+  const truncatedAckState = state()
+  providerCallCount = 0
+  completionResponder = async (params: any) => {
+    assert.ok(params.response_format, 'the valid planner should satisfy startup without an acknowledgement repair call')
+    return {
+      id: 'gen-truncated-ack-plan',
+      choices: [{ message: { content: JSON.stringify(plan) } }],
+      usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
+    }
+  }
+  streamingResponder = async () => ({
+    async *[Symbol.asyncIterator]() {
+      yield {
+        id: 'gen-truncated-ack',
+        choices: [{ delta: { content: 'I’ll research Warmwind OS AI with' } }],
+      }
+      yield {
+        id: 'gen-truncated-ack',
+        choices: [{ delta: {}, finish_reason: 'length' }],
+        usage: { prompt_tokens: 50, completion_tokens: 320, total_tokens: 370, cost: 0.0003 },
+      }
+    },
+  })
+  ;(truncatedAckManager as any).setStateRef(truncatedAckState)
+  truncatedAckManager.startPlanCall()
+  await truncatedAckManager.awaitPlan(truncatedAckState)
+  assert.equal(providerCallCount, 2)
+  assert.deepEqual(truncatedAckEvents.map(event => event.type), ['text', 'plan'])
+  assert.equal(
+    (truncatedAckEvents[0] as { type: 'text'; content: string }).content,
+    validAck + '\\n\\n',
+    'the planner-authored complete acknowledgement must replace the hidden truncated draft',
+  )
+  assert.equal(
+    truncatedAckEvents.some(event => event.type === 'text' && event.content.includes('with\\n\\n')),
+    false,
+    'the incomplete provider fragment must never become visible',
+  )
   streamingResponder = defaultStreamingResponder
 
   // Short subjects can be expanded semantically by the model. "AI" becoming

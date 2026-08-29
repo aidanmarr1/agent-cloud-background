@@ -708,18 +708,28 @@ export async function createStreamingCompletion(
     const { controller, cleanup } = createLinkedAbortController(params.abortSignal)
     const timeoutMs = getRequestTimeoutMs(params)
     const timeout = setTimeout(() => controller.abort(), timeoutMs)
+    let streamHandedOff = false
 
     try {
       const response = await postChatCompletion(params, true, controller.signal)
-      return createSseIterable(response, controller, cleanup)
+      streamHandedOff = true
+      // A streaming response is not complete when its headers arrive. Keep the
+      // request deadline alive until the SSE body finishes so a provider that
+      // opens the connection and then stalls cannot hold startup indefinitely.
+      return createSseIterable(response, controller, () => {
+        clearTimeout(timeout)
+        cleanup()
+      })
     } catch (error) {
-      cleanup()
       if (isAbortError(error) && !params.abortSignal?.aborted) {
         throw createTimeoutError(timeoutMs)
       }
       throw error
     } finally {
-      clearTimeout(timeout)
+      if (!streamHandedOff) {
+        clearTimeout(timeout)
+        cleanup()
+      }
     }
   }, params.abortSignal, {
     maxAttempts: params.retryMaxAttempts,

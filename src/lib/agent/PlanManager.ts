@@ -67,12 +67,12 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Muse reasoning is mandatory. Its minimal reasoning can consume roughly
-// 80-100 output tokens before the short visible sentence begins, so a 96-token
-// ceiling can return reasoning-only content. The model normally stops around
-// 120 total tokens; this ceiling provides room without asking it to write more.
-const PLANNER_ACK_MAX_TOKENS = 256
-const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
+// Muse reasoning is mandatory. A concise prompt normally finishes well below
+// this ceiling, while 320 tokens leaves enough room for hidden reasoning plus
+// one short visible sentence. Bound the entire stream so a slow acknowledgement
+// yields promptly to the planner-authored acknowledgement already in flight.
+const PLANNER_ACK_MAX_TOKENS = 320
+const PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
 const PLANNER_MEDIUM_JSON_MAX_TOKENS = 820
@@ -359,17 +359,11 @@ function streamingPlannerAckContent(delta: Record<string, unknown> | undefined):
 }
 
 function isSafeStreamingPlannerAckDraft(ack: string, request: string): boolean {
-  const candidate = sanitizePlannerAck(ack)
-  const normalized = candidate.toLowerCase()
-  if (candidate.length < 16 || candidate.length > 320) return false
-  if (containsPromptInstructionLeak(candidate)) return false
-  const words = ackWordCount(candidate)
-  if (words < 3 || words > 48) return false
-  if (!/^i(?:'|’)?ll\b|^i will\b/.test(normalized)) return false
-  if (/\n|```|^\s*[-*#>]/.test(candidate)) return false
-  if (/\b(?:handle|take care of|work on|do|complete|research)\s+(?:this|it|the task|the request)\b/.test(normalized)) return false
-  if (!acknowledgementReferencesRequest(candidate, request)) return false
-  return true
+  // Never paint a fragment that cannot be retracted. The dedicated request is
+  // streamed for low latency, but its first visible draft must already be a
+  // complete, task-specific sentence. A truncated provider response can then
+  // fall back cleanly to the acknowledgement returned by the parallel planner.
+  return isUsablePlannerAck(ack, request)
 }
 
 function ackWordCount(text: string): number {
@@ -1010,21 +1004,12 @@ export class PlanManager {
       messages: [
         {
           role: 'system' as const,
-          content: `Write exactly one short, direct acknowledgement paragraph for Agent before it starts a ${taskShape} task.
-Requirements:
-- One natural, very brief paragraph, roughly 8-48 words. Do not force or mention a sentence count.
-- Begin with "I'll" or "I will" and state a concrete commitment across the complete request. Never output a gerund status headline such as "Clarifying...", "Mapping...", or "Researching...".
-- Begin with standard sentence capitalization and finish the paragraph cleanly.
-- Use plain words. Avoid fancy, inflated or formal phrasing.
-- Specific to the user's concrete target/topic/artifact and requested output.
-- Cover the whole request, including both sides of a comparison; do not acknowledge only the first planned phase.
-- Say what Agent will actually do for this task and the final answer/artifact shape.
-- Before writing, silently identify the real target, requested deliverable, likely work areas, and any important constraints. Output only the final paragraph.
-- Extract the real topic/artifact first. Do not echo command wrappers such as "research about", "conduct the deepest possible research on", "write a report on", or "produce a concise report".
-- Use direct first-person future phrasing. Do not start with "Let me", "Next", or "Now", and do not end with a promise to do something "next".
-- No generic lines such as "I'll open the site", "I'll keep the steps updated", "I'll research this", or "I'll work through this".
-- Example shape: "I'll compare the GPT-5 lineup with Claude, Gemini and other frontier models using benchmarks, developer reports and technical evidence, then deliver a sourced explanation of the frontend-design gap."
-- No markdown, no bullets, no refusal, no mention of being an AI.`,
+          content: `Write one brief, plain acknowledgement sentence for Agent before it starts a ${taskShape} task.
+- Output only the sentence. Use roughly 8-36 words.
+- Begin with "I'll" or "I will" and end with punctuation.
+- Name the user's concrete topic or artifact, state the main work across the complete request, and name the final answer or artifact.
+- Include every side of a comparison and any important requested constraint.
+- Do not use markdown, a canned opener, a gerund status headline, generic "I'll research this" wording, or the word "next".`,
         },
         ...plannerTaskMessages(
           this.messages,
