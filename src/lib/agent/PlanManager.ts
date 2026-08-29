@@ -69,8 +69,8 @@ const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable t
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
 // Muse reasoning is mandatory. A concise prompt normally finishes well below
 // this ceiling, while 320 tokens leaves enough room for hidden reasoning plus
-// one short visible sentence. Bound the entire stream so a slow acknowledgement
-// yields promptly to the planner-authored acknowledgement already in flight.
+// one short visible sentence. This dedicated call is used only when a persisted
+// precomputed plan still needs its worker-authored opening.
 const PLANNER_ACK_MAX_TOKENS = 320
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
@@ -358,11 +358,38 @@ function streamingPlannerAckContent(delta: Record<string, unknown> | undefined):
   }).join('')
 }
 
+function completedPlannerAckFromJson(raw: string): string | null {
+  const property = /"ack"\s*:\s*/g.exec(raw)
+  if (!property) return null
+  const openingQuote = property.index + property[0].length
+  if (raw[openingQuote] !== '"') return null
+
+  let escaped = false
+  for (let index = openingQuote + 1; index < raw.length; index += 1) {
+    const character = raw[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (character === '\\') {
+      escaped = true
+      continue
+    }
+    if (character !== '"') continue
+    try {
+      const parsed = JSON.parse(raw.slice(openingQuote, index + 1))
+      return typeof parsed === 'string' ? parsed : null
+    } catch {
+      return null
+    }
+  }
+  return null
+}
+
 function isSafeStreamingPlannerAckDraft(ack: string, request: string): boolean {
-  // Never paint a fragment that cannot be retracted. The dedicated request is
-  // streamed for low latency, but its first visible draft must already be a
-  // complete, task-specific sentence. A truncated provider response can then
-  // fall back cleanly to the acknowledgement returned by the parallel planner.
+  // Never paint a fragment that cannot be retracted. The precomputed-plan
+  // acknowledgement is streamed for low latency, but its first visible draft
+  // must already be a complete, task-specific sentence.
   return isUsablePlannerAck(ack, request)
 }
 
@@ -698,8 +725,6 @@ export class PlanManager {
   private acknowledgementEmitted = false
   private acknowledgementStreamStarted = false
   private acknowledgementPromise: Promise<boolean> | null = null
-  private acknowledgementRequestStartedPromise: Promise<void> | null = null
-  private resolveAcknowledgementRequestStarted: (() => void) | null = null
   private suppressFurtherAcknowledgementDeltas = false
   private acknowledgementUsageError: unknown = null
   private lastAcknowledgementCandidate = ''
@@ -750,9 +775,6 @@ export class PlanManager {
 
   private scheduleAcknowledgementCall(): void {
     if (!this.skipAcknowledgement && !this.acknowledgementPromise) {
-      this.acknowledgementRequestStartedPromise = new Promise((resolve) => {
-        this.resolveAcknowledgementRequestStarted = resolve
-      })
       this.acknowledgementPromise = this.emitModelGeneratedAcknowledgement('task')
         .catch((error) => {
           if (this.plannerWasAborted()) {
@@ -767,13 +789,7 @@ export class PlanManager {
           })
           return false
         })
-        .finally(() => this.markAcknowledgementRequestStarted())
     }
-  }
-
-  private markAcknowledgementRequestStarted(): void {
-    this.resolveAcknowledgementRequestStarted?.()
-    this.resolveAcknowledgementRequestStarted = null
   }
 
   /**
@@ -798,18 +814,11 @@ export class PlanManager {
       hasCustomInstructions: !!this.customInstructions,
     })
     const plannerAbortController = this.resetPlannerAbortController()
-    // Start the small, independently metered acknowledgement alongside the
-    // larger planner JSON request. The acknowledgement streams visibly as soon
-    // as its safe task-specific prefix arrives; planning continues in parallel
-    // and remains ordered behind acknowledgement completion and exact usage.
-    this.scheduleAcknowledgementCall()
+    // One streamed planner request owns both the opening acknowledgement and
+    // the visible plan. Its completed `ack` field is released while the rest of
+    // the JSON is still arriving, avoiding two competing Muse requests and any
+    // timer/display gate between acknowledgement and planning.
     const start = async (): Promise<null> => {
-      // The acknowledgement is the first user-facing model output. Wait only
-      // until its provider request has actually been dispatched before sending
-      // the larger planner request. This preserves real acknowledgement-first
-      // generation without a fixed timer or a display gate; both calls continue
-      // in parallel once the opening request is in flight.
-      await this.acknowledgementRequestStartedPromise
       if (PLAN_STARTUP_DELAY_MS > 0) {
         await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
       }
@@ -832,7 +841,6 @@ export class PlanManager {
   }
 
   dispose(): void {
-    this.markAcknowledgementRequestStarted()
     this.removeExternalAbortListener?.()
     this.removeExternalAbortListener = null
     this.plannerAbortController?.abort()
@@ -1017,7 +1025,6 @@ export class PlanManager {
     })
     await this.assertCreditRunway('ack')
     const afterCreditAt = Date.now()
-    this.markAcknowledgementRequestStarted()
     const stream = await createStreamingCompletion({
       model: DEFAULT_MODEL,
       messages: [
@@ -1593,20 +1600,65 @@ Rules:
     return PLANNER_JSON_MAX_TOKENS
   }
 
+  private emitAcknowledgementFromStreamingPlan(raw: string): void {
+    if (
+      this.skipAcknowledgement ||
+      this.acknowledgementEmitted ||
+      this.acknowledgementStreamStarted ||
+      this.suppressFurtherAcknowledgementDeltas ||
+      this.emitter.isClosed
+    ) return
+
+    const extracted = completedPlannerAckFromJson(raw)
+    if (extracted === null) return
+    const candidate = sanitizePlannerAck(extracted)
+    this.lastAcknowledgementCandidate = candidate
+    if (!isUsablePlannerAck(candidate, effectiveTaskRequest(this.messages))) return
+
+    this.emitter.textDelta(candidate + '\n\n')
+    this.acknowledgementStreamStarted = true
+    this.acknowledgementEmitted = true
+    console.log('[AgentDiagnostics] Planner acknowledgement emitted while plan JSON was streaming', {
+      chars: candidate.length,
+    })
+  }
+
+  private async streamInitialPlannerResponse(
+    params: Parameters<typeof createStreamingCompletion>[0],
+    jsonMode: boolean,
+  ): Promise<{ raw: string; usage: RawCompletionUsage; finishReason: string | null }> {
+    const stream = await createStreamingCompletion({
+      ...params,
+      ...(jsonMode ? { response_format: { type: 'json_object' as const } } : {}),
+      stream_options: { include_usage: true },
+    })
+    let raw = ''
+    let usage: RawCompletionUsage
+    let generationId = ''
+    let finishReason: string | null = null
+
+    for await (const chunk of stream) {
+      if (typeof chunk.id === 'string' && chunk.id.trim()) generationId = chunk.id.trim()
+      if (chunk.usage) usage = chunk.usage
+      const chunkFinishReason = chunk.choices[0]?.finish_reason
+      if (typeof chunkFinishReason === 'string') finishReason = chunkFinishReason
+      const content = streamingPlannerAckContent(chunk.choices[0]?.delta)
+      if (!content) continue
+      if (raw.length < 64_000) raw = (raw + content).slice(0, 64_000)
+      this.emitAcknowledgementFromStreamingPlan(raw)
+    }
+
+    if (!normalizeCompletionUsage(usage)) {
+      usage = await fetchGenerationUsage(generationId, this.plannerAbortController?.signal) || undefined
+    }
+    return { raw: raw.trim(), usage, finishReason }
+  }
+
   private async emitParsedPlan(state: AgentStateData, obj: PlannerResponseObject): Promise<boolean> {
     const arrays = this.plannerStepArrays(obj.steps)
     if (!arrays) return false
 
     const mappedTaskType = this.applyPlannerMetadata(state, obj)
-
-    // Ordinary startup owns an independent fast acknowledgement. Let it settle
-    // before exposing the plan so UI ordering remains acknowledgement -> plan.
-    // If its wording was unusable, the planner's own acknowledgement remains a
-    // valid model-authored fallback below.
-    if (this.acknowledgementPromise) {
-      await this.acknowledgementPromise
-      if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
-    }
 
     if (arrays.titles.length === 0) {
       if (
@@ -1734,49 +1786,69 @@ Rules:
         retryMaxAttempts: 0,
         abortSignal: this.plannerAbortController?.signal,
       }
-      let res
-      try {
-        await this.assertCreditRunway('initial')
-        res = await createCompletion({
-          ...params,
-          response_format: { type: 'json_object' },
-        })
-      } catch (e) {
-        const status = (e as { status?: number })?.status
-        console.error('[AgentDiagnostics] Planner JSON-mode call failed', {
-          attempt: attempt + 1,
-          status,
-          error: sanitizePlannerError(e),
-        })
-        if (status !== 400 && status !== 422) throw e
-        console.warn('[Plan] Planner JSON mode rejected; retrying planner without response_format')
-        await this.assertCreditRunway('initial-retry')
-        res = await createCompletion(params)
+      let raw = ''
+      let usage: RawCompletionUsage
+      let finishReason: string | null = null
+      if (fastPlannerMode) {
+        try {
+          await this.assertCreditRunway('initial')
+          const streamed = await this.streamInitialPlannerResponse(params, true)
+          raw = streamed.raw
+          usage = streamed.usage
+          finishReason = streamed.finishReason
+        } catch (e) {
+          const status = (e as { status?: number })?.status
+          console.error('[AgentDiagnostics] Planner JSON-mode call failed', {
+            attempt: attempt + 1,
+            status,
+            error: sanitizePlannerError(e),
+          })
+          if (status !== 400 && status !== 422) throw e
+          console.warn('[Plan] Planner JSON mode rejected; retrying streamed planner without response_format')
+          await this.assertCreditRunway('initial-retry')
+          const streamed = await this.streamInitialPlannerResponse(params, false)
+          raw = streamed.raw
+          usage = streamed.usage
+          finishReason = streamed.finishReason
+        }
+      } else {
+        let res
+        try {
+          await this.assertCreditRunway('initial')
+          res = await createCompletion({
+            ...params,
+            response_format: { type: 'json_object' },
+          })
+        } catch (e) {
+          const status = (e as { status?: number })?.status
+          console.error('[AgentDiagnostics] Planner JSON-mode call failed', {
+            attempt: attempt + 1,
+            status,
+            error: sanitizePlannerError(e),
+          })
+          if (status !== 400 && status !== 422) throw e
+          console.warn('[Plan] Planner JSON mode rejected; retrying planner without response_format')
+          await this.assertCreditRunway('initial-retry')
+          res = await createCompletion(params)
+        }
+        raw = res.choices[0]?.message?.content?.trim() || ''
+        usage = res.usage
       }
       console.log('[AgentDiagnostics] Planner call returned', {
         attempt: attempt + 1,
-        hasUsage: !!res.usage,
-        choices: res.choices?.length || 0,
+        hasUsage: !!usage,
+        streamed: fastPlannerMode,
+        finishReason,
         emitterClosed: this.emitter.isClosed,
       })
-      await this.recordCompletionUsage(res.usage, 'initial')
+      await this.recordCompletionUsage(usage, 'initial')
       this.throwIfPlannerAborted()
-      const raw = res.choices[0]?.message?.content?.trim() || ''
       console.log(`[Plan] Planner response received (${raw.length} chars)`)
       if (state && !state.planEmitted && !this.emitter.isClosed) {
         const parsedPlan = parsePlannerResponse(raw)
         if (fastPlannerMode && !parsedPlan) throw new Error(PLANNER_FAST_PARSE_MISS)
         const emitted = await this.emitParsedPlanWithModelRepair(state, raw, parsedPlan)
         if (emitted) return null
-
-        // A malformed planner must not race its faster acknowledgement. Let the
-        // opening finish so AgentLoop can retain it and recover into a minimal
-        // task-specific execution plan instead of exposing a terminal planner
-        // error after several paid retries.
-        if (this.acknowledgementPromise) {
-          await this.acknowledgementPromise
-          if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
-        }
 
         throw plannerRepairExhaustedError()
       }
