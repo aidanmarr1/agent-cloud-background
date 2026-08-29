@@ -390,11 +390,15 @@ function acknowledgementReferencesRequest(ack: string, request: string): boolean
     : namedCandidates
   const namedRequestWords = [...new Set(namedTargetCandidates.map(({ word }) => word))]
   const distinctiveWords = requestWords.filter((word) => word.length >= 4)
+  // Very short subjects such as AI, UK, US, TV, 3D, or an initialism are often
+  // expanded or paraphrased correctly by the model. There is no reliable
+  // lexical stem to compare in that case, so let the acknowledgement's other
+  // quality checks and the model-authored plan establish specificity instead
+  // of forcing repeated paid repairs for a valid semantic expansion.
+  if (namedRequestWords.length === 0 && distinctiveWords.length === 0) return true
   const wordsToMatch = namedRequestWords.length > 0
     ? namedRequestWords
-    : distinctiveWords.length > 0
-      ? distinctiveWords
-      : requestWords
+    : distinctiveWords
   return wordsToMatch.some((requestWord) => ackWords.some((ackWord) => {
     if (requestWord === ackWord) return true
     if (requestWord.length < 4 || ackWord.length < 4) return false

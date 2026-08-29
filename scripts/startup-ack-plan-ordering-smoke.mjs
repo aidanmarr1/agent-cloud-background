@@ -113,6 +113,41 @@ export async function run() {
   assert.equal(providerCallCount, 2)
   assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text', 'plan'])
 
+  // Short subjects can be expanded semantically by the model. "AI" becoming
+  // "artificial intelligence" must not trigger acknowledgement or plan repair.
+  const shortTopicRequest = 'research about ai'
+  const expandedShortTopicAck = 'I’ll research artificial intelligence, examine its current applications and deliver a concise overview of the field.'
+  const shortTopicPlan = {
+    ack: expandedShortTopicAck,
+    taskType: 'research',
+    complexity: 2,
+    steps: [
+      { title: 'Research artificial intelligence foundations', scope: 'Gather reliable evidence on the field and its core branches.' },
+      { title: 'Assess current artificial intelligence applications', scope: 'Compare representative uses, capabilities and limitations.' },
+      { title: 'Deliver the artificial intelligence overview', scope: 'Synthesize the findings into a concise, sourced report.' },
+    ],
+  }
+  const shortTopicEvents: VisibleEvent[] = []
+  const shortTopicManager = new PlanManager(emitterFor(shortTopicEvents) as any, [{ role: 'user', content: shortTopicRequest }], 2)
+  const shortTopicState = state()
+  providerCallCount = 0
+  completionResponder = async (params: any) => params.response_format
+    ? {
+        id: 'gen-short-topic-plan',
+        choices: [{ message: { content: JSON.stringify(shortTopicPlan) } }],
+        usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
+      }
+    : {
+        id: 'gen-short-topic-ack',
+        choices: [{ message: { content: expandedShortTopicAck } }],
+        usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
+      }
+  ;(shortTopicManager as any).setStateRef(shortTopicState)
+  shortTopicManager.startPlanCall()
+  await shortTopicManager.awaitPlan(shortTopicState)
+  assert.equal(providerCallCount, 2, 'semantic expansion must complete without paid repair calls')
+  assert.deepEqual(shortTopicEvents.map(event => event.type), ['text', 'plan'])
+
   // If both planner drafts are malformed, the successful fast acknowledgement
   // must survive so AgentLoop can recover into a task-specific execution plan
   // instead of showing the planner-repair error to the user.

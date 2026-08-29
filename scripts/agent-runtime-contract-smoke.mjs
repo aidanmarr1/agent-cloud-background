@@ -2481,6 +2481,14 @@ export async function runLedgerSmoke() {
   assert.equal(isUsablePlannerAck('I’ll create Acme’s landing page, verify responsive behaviour and deliver the finished site.', 'Design a homepage for Acme.'), true)
   assert.equal(isUsablePlannerAck('I’ll investigate the parrotlet habitat, care needs and behaviour, then deliver a sourced overview.', 'Research parrotlets.'), true)
   assert.equal(
+    isUsablePlannerAck(
+      'I’ll research artificial intelligence, examine its current applications and deliver a concise overview of the field.',
+      'research about ai',
+    ),
+    true,
+    'short subjects may be semantically expanded instead of triggering paid acknowledgement-repair loops',
+  )
+  assert.equal(
     isUsablePlannerAck('I’ll research gözleme’s origins, regional forms and preparation, then deliver a sourced overview.', 'research about gozleme'),
     true,
     'canonical accents restored by the model must match an otherwise identical unaccented user topic',
