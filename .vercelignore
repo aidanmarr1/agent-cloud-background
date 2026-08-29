@@ -2,6 +2,8 @@
 .agent-storage/
 .codex-qa/
 .pnpm-store/
+pnpm-lock.yaml
+pnpm-workspace.yaml
 outputs/
 design-qa.md
 scripts/.agent-loop-debug-*/
