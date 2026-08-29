@@ -165,6 +165,7 @@ export const TOOL_TYPE_RATE_LIMITS: Record<string, number> = {
   browser_find_text: 24,      // Allow targeted in-page evidence checks
   browser_scroll: 40,         // Long pages and mobile flows need repeated reveals
   create_file: 24,            // Enough for multi-part manuscripts/apps
+  create_website: 4,          // Whole-site rewrites must not become an unbounded regeneration loop
   append_file: 100,           // Book/manuscript tasks can still use intentional chunks
   export_pdf: 16,             // Allow re-export after revisions
   edit_file: 60,              // Revisions across large manuscripts are expected

@@ -123,7 +123,11 @@ import {
   shouldDefaultFrontendToStandaloneHtml,
 } from './frontendDefaults'
 import { analyzeTaskIntent } from './TaskIntent'
-import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
+import {
+  artifactPathSatisfiesFinalOutputContract,
+  requestedFinalArtifactFormat,
+  taskRequiresSavedFinalArtifact,
+} from './DeliverableContract'
 import { getNextWebsiteProjectStatus } from '@/lib/tsxWebsitePreview'
 import { OUT_OF_CREDITS_MESSAGE, type CreditTokenUsage } from '@/lib/creditPolicy'
 import { assertServerCreditsAvailable, chargeServerTokenUsage, isOutOfCreditsError } from '@/lib/serverCredits'
@@ -340,6 +344,14 @@ function supportsProviderRequiredToolChoice(model: string): boolean {
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
   return FINAL_DELIVERABLE_WRITE_TOOLS.has(result.tc.name) && !result.isError
+}
+
+function isSuccessfulContractDeliverableWrite(
+  result: ToolExecutionResult,
+  state: AgentStateData,
+): boolean {
+  return isSuccessfulFinalDeliverableWrite(result) &&
+    artifactPathSatisfiesFinalOutputContract(state, toolResultPath(result))
 }
 
 function toolResultPath(result: ToolExecutionResult): string {
@@ -1334,12 +1346,19 @@ function shouldUseTextSavedFinalDeliverable(
 }
 
 function hasSavedFinalDeliverableCandidate(state: AgentStateData): boolean {
-  return state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable')
+  return state.workLedger.deliverableCandidates.some(item => (
+    item.purpose === 'deliverable' &&
+    artifactPathSatisfiesFinalOutputContract(state, item.path)
+  ))
 }
 
 function latestSavedFinalDeliverablePath(state: AgentStateData): string | null {
   return state.workLedger.deliverableCandidates
-    .filter(item => item.purpose === 'deliverable' && item.path)
+    .filter(item => (
+      item.purpose === 'deliverable' &&
+      item.path &&
+      artifactPathSatisfiesFinalOutputContract(state, item.path)
+    ))
     .slice(-1)[0]?.path || null
 }
 
@@ -1545,8 +1564,10 @@ function finalDeliverableHandoffLooksUseful(
   const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
   const lastLine = lines.at(-1) || ''
   if (/^(?:#{1,6}\s+|[-+*]|\d+[.)]?)$/.test(lastLine)) return false
+  if (/^(?:all|done|ready|complete|completed|finished)\.?$/i.test(lastLine)) return false
   if (/[,;:\-–—/]$/.test(lastLine)) return false
-  if (/\b(?:and|or|of|the|with|to|for|in|on|at|from|key)$/i.test(lastLine)) return false
+  if (/\b(?:and|or|of|the|with|to|for|in|on|at|from|key|all|including|such\s+as|following|these|those)$/i.test(lastLine)) return false
+  if (!/[.!?]["')\]]?$/.test(lastLine)) return false
   if ((text.match(/```/g) || []).length % 2 !== 0) return false
   return true
 }
@@ -1556,13 +1577,8 @@ function shouldAcceptFinalDeliverableHandoff(
   attemptNumber: number,
   state: AgentStateData,
 ): boolean {
-  const text = content.trim()
-  return finalDeliverableHandoffLooksUseful(text, state) ||
-    (
-      text.length >= 16 &&
-      attemptNumber >= 2 &&
-      !finalDeliverableHandoffHasInvalidForm(text, state)
-    )
+  void attemptNumber
+  return finalDeliverableHandoffLooksUseful(content, state)
 }
 
 function verifiedFinalPhaseNaturalHandoffPath(
@@ -3662,7 +3678,11 @@ export class AgentLoop {
 
     state.createdFiles.add(path)
     trackFileCreate(state, path)
-    recordWorkLedgerDeliverable(state, { path, purpose: isLastStep ? 'deliverable' : 'support' })
+    const savedDraftMatchesFinalContract = artifactPathSatisfiesFinalOutputContract(state, path)
+    recordWorkLedgerDeliverable(state, {
+      path,
+      purpose: isLastStep && savedDraftMatchesFinalContract ? 'deliverable' : 'support',
+    })
     logWork(state, `Autosaved text-only draft: ${path}`)
     workingMemory.recordFileCreated(path, state.currentStepIdx)
 
@@ -3672,6 +3692,15 @@ export class AgentLoop {
     } as ChatMessageParam)
 
     if (isLastStep && state.currentPlanItems) {
+      if (!savedDraftMatchesFinalContract) {
+        const requestedFormat = requestedFinalArtifactFormat(state)
+        state.deliverableVerificationDone = false
+        contextManager.push({
+          role: 'system',
+          content: `The saved draft at "${path}" is only an intermediate source. The user requested a final ${requestedFormat?.label || 'artifact in another format'}; produce that actual output now and do not claim completion from the source file alone.`,
+        } as ChatMessageParam)
+        return 'STREAMING'
+      }
       if (
         shouldContinueSavedFinalDeliverableChunk(
           state,
@@ -4550,14 +4579,10 @@ export class AgentLoop {
                   phase = 'STREAMING'
                   break
                 }
-                const stepBeforeComplete = state.currentStepIdx
                 state.finalDeliverableHandoffPending = null
-                if (state.currentPlanItems) state.currentStepIdx = state.currentPlanItems.length
-                for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
-                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-                }
-                terminalReason = 'deliverable_handoff_fallback'
-                phase = 'COMPLETE'
+                terminalReason = 'deliverable_handoff_failed'
+                state.lastModelErrorForUser = 'The completed artifact was saved, but the final response did not start after two attempts. Please retry the handoff.'
+                phase = 'ERROR'
                 break
               }
               if (cadenceNarrationForRequestedStream) {
@@ -5230,18 +5255,10 @@ export class AgentLoop {
                 break
               }
 
-              // Never turn a successfully completed artifact into a failed task
-              // solely because the optional handoff prose failed to stream.
-              const stepBeforeComplete = state.currentStepIdx
               state.finalDeliverableHandoffPending = null
-              if (state.currentPlanItems) {
-                state.currentStepIdx = state.currentPlanItems.length
-              }
-              terminalReason = 'deliverable_handoff_fallback'
-              for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
-                this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-              }
-              phase = 'COMPLETE'
+              terminalReason = 'deliverable_handoff_failed'
+              state.lastModelErrorForUser = 'The completed artifact was saved, but the final response was unfinished after two attempts. Please retry the handoff.'
+              phase = 'ERROR'
               break
             }
 
@@ -5822,7 +5839,11 @@ export class AgentLoop {
             if (
               successfulStandaloneWebsiteCreate &&
               shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
-              !standaloneWebsiteRequiresPostBuildAction(state.originalUserRequest || '')
+              !standaloneWebsiteRequiresPostBuildAction(state.originalUserRequest || '') &&
+              artifactPathSatisfiesFinalOutputContract(
+                state,
+                toolResultPath(successfulStandaloneWebsiteCreate) || 'index.html',
+              )
             ) {
               const finalPath = toolResultPath(successfulStandaloneWebsiteCreate) || 'index.html'
               state.deliverableVerificationDone = true
@@ -5841,7 +5862,10 @@ export class AgentLoop {
 
             // Check deliverable on last step
             const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
-            const deliverableCreated = lastToolResults.some(isSuccessfulFinalDeliverableWrite)
+            const successfulFinalWrites = lastToolResults.filter(isSuccessfulFinalDeliverableWrite)
+            const deliverableCreated = successfulFinalWrites.some(result => (
+              isSuccessfulContractDeliverableWrite(result, state)
+            ))
             const imageDeliverableCreated = lastToolResults.some(r => {
               if (r.tc.name !== 'image_search' || r.isError) return false
               const downloaded = (r.result as { downloaded?: string[] })?.downloaded
@@ -5851,6 +5875,27 @@ export class AgentLoop {
             const imageDeliverableRequested = /\b(image|images|photo|photos|picture|pictures|asset|assets)\b/i.test(
               `${currentRequestText} ${state.currentPlanItems?.[state.currentStepIdx] || ''}`,
             )
+
+            if (isLastStep && successfulFinalWrites.length > 0 && !deliverableCreated) {
+              const requestedFormat = requestedFinalArtifactFormat(state)
+              if (requestedFormat) {
+                const savedSources = successfulFinalWrites
+                  .map(toolResultPath)
+                  .filter(Boolean)
+                state.deliverableVerificationDone = false
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    `FINAL OUTPUT FORMAT REQUIRED: the user requested a ${requestedFormat.label}, but the successful write produced ${savedSources.length > 0 ? savedSources.join(', ') : 'only an intermediate source file'}.`,
+                    `Treat that file as source/support, not the final deliverable. Produce the actual ${requestedFormat.label} now using the appropriate native tool and return a path ending in ${requestedFormat.extensions.join(' or ')}.`,
+                    'Do not use or inspect an unrelated external webpage as proof that the local output is valid, and do not claim completion until the requested-format artifact succeeds.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+            }
 
             if (
               isLastStep &&
@@ -5931,7 +5976,9 @@ export class AgentLoop {
 
             // Last-step deliverable created → verify quality before terminating
             if (isLastStep && deliverableCreated) {
-              const deliverableResult = lastToolResults.find(isSuccessfulFinalDeliverableWrite)
+              const deliverableResult = lastToolResults.find(result => (
+                isSuccessfulContractDeliverableWrite(result, state)
+              ))
               const partialRecoveryResult = deliverableResult?.result as {
                 partialWriteIncomplete?: boolean
                 partialWriteRecoveryLimitReached?: boolean
@@ -7828,13 +7875,9 @@ export class AgentLoop {
           state.lastIterationEnd = Date.now()
           return 'STREAMING'
         }
-        const stepBeforeComplete = state.currentStepIdx
         state.finalDeliverableHandoffPending = null
-        if (state.currentPlanItems) state.currentStepIdx = state.currentPlanItems.length
-        for (let i = stepBeforeComplete; i < state.currentStepIdx; i++) {
-          this.emitter.stepAdvance(stepAdvanceStatusFor(state, i))
-        }
-        return 'COMPLETE'
+        state.lastModelErrorForUser = 'The completed artifact was saved, but the final response timed out twice. Please retry the handoff.'
+        return 'ERROR'
       }
 
       if (finalInlineAnswerTurn(state, this.options.messages)) {

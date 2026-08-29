@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 
 const args = process.argv.slice(2)
 const target = readArg('--target') || 'production'
@@ -100,6 +100,14 @@ function loadLocalEnv() {
   }
 }
 
+function subprocessEnv() {
+  const nodeDirectory = dirname(process.execPath)
+  const path = [nodeDirectory, process.env.PATH || '']
+    .filter(Boolean)
+    .join(delimiter)
+  return { ...process.env, PATH: path }
+}
+
 function parseEnvFile(text) {
   const values = new Map()
   for (const line of text.split(/\r?\n/)) {
@@ -129,7 +137,7 @@ function runVercel(commandArgs, input) {
     const child = spawn(vercelCommand.bin, fullArgs, {
       cwd: process.cwd(),
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: process.env,
+      env: subprocessEnv(),
     })
     let stdout = ''
     let stderr = ''

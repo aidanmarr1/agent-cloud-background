@@ -116,7 +116,12 @@ function runStep(label, command, commandArgs) {
     console.log(`$ ${[command, ...commandArgs].join(' ')}`)
     const child = spawn(command, commandArgs, {
       cwd: root,
-      env: process.env,
+      env: {
+        ...process.env,
+        PATH: [dirname(process.execPath), process.env.PATH || '']
+          .filter(Boolean)
+          .join(delimiter),
+      },
       stdio: 'inherit',
     })
     child.on('error', reject)

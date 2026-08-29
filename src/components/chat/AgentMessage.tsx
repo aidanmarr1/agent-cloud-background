@@ -99,7 +99,16 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
     if (!hasGroups) return undefined
     const firstStart = taskGroups.find((g) => g.startedAt)?.startedAt
     if (!firstStart) return undefined
-    return Date.now() - firstStart
+    const settledTimes = taskGroups.flatMap((group) => [
+      group.completedAt || 0,
+      group.startedAt || 0,
+      ...(Array.isArray(group.subtasks)
+        ? group.subtasks.flatMap(subtask => [subtask.completedAt || 0, subtask.startedAt || 0])
+        : []),
+    ])
+    const lastSettled = Math.max(0, ...settledTimes)
+    const end = isStreaming ? Date.now() : (lastSettled || firstStart)
+    return Math.max(0, end - firstStart)
   })()
 
   // Count sources (browse + search subtasks)

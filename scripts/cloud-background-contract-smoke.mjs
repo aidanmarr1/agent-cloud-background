@@ -320,6 +320,8 @@ assert.match(vercelCloudEnvScript, /E2B_API_KEY/, 'Vercel env helper must requir
 assert.match(vercelCloudEnvScript, /Values are intentionally not printed/, 'Vercel env helper must not print secret values')
 assert.match(vercelCloudEnvScript, /--apply/, 'Vercel env helper must be dry-run by default and require --apply for mutation')
 assert.match(vercelCloudEnvScript, /--apply-available/, 'Vercel env helper must support applying safe available defaults while required provider secrets are still missing')
+assert.match(vercelCloudEnvScript, /dirname\(process\.execPath\)[\s\S]*PATH: path/, 'Vercel env checks must expose the current Node runtime to package-manager child commands')
+assert.match(cloudFinishSetupScript, /PATH: \[dirname\(process\.execPath\), process\.env\.PATH \|\| ''\]/, 'the deployment orchestrator must expose the current Node runtime to Vercel child commands')
 assert.match(e2bTemplateSmokeScript, /getOrCreateE2BSandbox/, 'E2B template smoke must create a real E2B sandbox')
 assert.match(e2bTemplateSmokeScript, /executeCommandInE2B/, 'E2B template smoke must verify terminal command execution')
 assert.match(e2bTemplateSmokeScript, /ensureE2BRemoteBrowser/, 'E2B template smoke must verify remote browser startup')

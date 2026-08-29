@@ -257,7 +257,7 @@ function assertBrowserStepPolicyFixtures() {
 
   state.browserTaskCompleted = true
   state.browserTaskCompletionEvidence = ['Search results/listing page is visible.', 'Search terms visible: led lights.']
-  const advanced = policy.evaluate(state, new Map([[0, { id: 'tool1', name: 'browser_type', arguments: '{"index":1,"text":"led lights"}' }]]), '', false, 20)
+  const advanced = policy.evaluate(state, new Map([[0, { id: 'tool1', name: 'browser_type', arguments: '{"action_label":"Search Amazon for LED lights","plan_step_index":1,"index":1,"text":"led lights"}' }]]), 'Amazon search results for LED lights are visible and ready for product selection.', false, 20)
   assert.equal(state.currentStepIdx, 1, 'browser completion evidence should advance exactly one step')
   assert.ok(advanced.some(action => action.type === 'step_advance'), 'verified browser completion should emit step advance')
 
@@ -278,7 +278,8 @@ function assertBrowserStepPolicyFixtures() {
   noToolState.consecutiveNoToolCalls = 2
   noToolState.browserTaskCompleted = true
   noToolState.browserTaskCompletionEvidence = ['Current URL host is ablis.business.gov.au.', 'Step 1 of 5 Business type form is visible.']
-  const noToolAdvanced = policy.evaluate(noToolState, new Map(), '', false, 20)
+  noToolState.phaseNarrationEmittedThisStep = true
+  const noToolAdvanced = policy.evaluate(noToolState, new Map(), 'The ABLIS Business type form is open and ready for the cafe activity input.', false, 20)
   assert.equal(noToolState.currentStepIdx, 1, 'browser completion evidence must advance before no-tool browser blocking')
   assert.ok(noToolAdvanced.some(action => action.type === 'step_advance'), 'no-tool browser completion should emit step advance')
 
@@ -388,6 +389,7 @@ export async function runSmoke() {
     platform: 'node',
     format: 'esm',
     target: ['node20'],
+    packages: 'external',
     external: ['@sparticuz/chromium', 'playwright'],
     logLevel: 'silent',
   })

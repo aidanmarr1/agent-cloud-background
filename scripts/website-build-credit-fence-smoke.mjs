@@ -74,8 +74,13 @@ const modelRequestBlock = sourceBlock(
 )
 assert.match(
   modelRequestBlock,
-  /standaloneWebsiteNeedsInitialCreate[\s\S]*\{ type: 'function', function: \{ name: 'create_website' \} \}/,
-  'initial website generation must pin the exact native create_website tool',
+  /const useRequiredToolCall = \(standaloneWebsiteNeedsInitialCreate \|\| requiredToolIntent\)[\s\S]*\? 'required'/,
+  'initial website generation must require a native action without hard-pinning one function',
+)
+assert.doesNotMatch(
+  modelRequestBlock,
+  /\{ type: 'function', function: \{ name: 'create_website' \} \}/,
+  'initial website generation must preserve the model\'s access to the healthy tool set',
 )
 assert.match(
   modelRequestBlock,

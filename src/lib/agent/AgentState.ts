@@ -130,6 +130,9 @@ export interface AgentStateData {
   searchQueries: Set<string>
   visitedUrls: Set<string>
   createdFiles: Set<string>
+  // Existing workspace inputs successfully read during this run. Files created
+  // by the agent in the same run are deliberately excluded.
+  inputArtifactPathsRead: Set<string>
   researchActivity: ResearchActivityIndex
 
   // Semantic search tracking
@@ -481,6 +484,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     searchQueries: new Set(),
     visitedUrls: new Set(),
     createdFiles: new Set(),
+    inputArtifactPathsRead: new Set(),
     researchActivity: createResearchActivityIndex(),
     searchQueryTokens: [],
     distinctSourceDomains: new Set(),

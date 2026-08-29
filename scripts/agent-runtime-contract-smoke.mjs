@@ -798,8 +798,8 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /function shouldPreserveVisibleInternalToolResult/, 'visible recovery results must be eligible to finish existing action pills')
   assert.match(
     eventDispatcher,
-    /visibleStartedRecovery[\s\S]*isHiddenInternalToolResult\(event\.name,\s*event\.result\) && visibleStartedRecovery[\s\S]*status: 'done'[\s\S]*settleHiddenComputerPanelItem\(event\)[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/,
-    'internal recovery results must complete already-visible action pills while settling their computer-panel state',
+    /visibleStartedRecovery[\s\S]*isHiddenInternalToolResult\(event\.name,\s*event\.result\) && visibleStartedRecovery[\s\S]*status: 'error'[\s\S]*errorMessage[\s\S]*settleHiddenComputerPanelItem\(event\)[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/,
+    'internal recovery results must truthfully fail already-visible action pills while settling their computer-panel state',
   )
   assert.match(eventDispatcher, /labelSource:\s*'model'/, 'visible task pills must retain model authorship')
   assert.doesNotMatch(eventDispatcher, /describeActivity\(event\.name,\s*event\.args\)/, 'visible task pills must not use locally generated action text')

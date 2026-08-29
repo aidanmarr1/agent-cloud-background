@@ -126,7 +126,7 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'export_pdf',
-      description: 'Export an existing Markdown or HTML workspace file to PDF.',
+      description: 'Export an existing Markdown or HTML workspace file to a validated PDF. The successful tool result verifies the PDF itself, so do not open an unrelated browser page first. When the user refers to an existing/attached source and it cannot be found, report that blocker instead of inventing replacement content.',
       parameters: {
         type: 'object',
         properties: {

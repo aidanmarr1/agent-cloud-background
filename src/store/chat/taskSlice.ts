@@ -131,6 +131,7 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
                 ...g,
                 status,
                 ...(status === 'running' && !g.startedAt ? { startedAt: Date.now() } : {}),
+                ...(status !== 'running' ? { completedAt: Date.now() } : {}),
               }
             : g
         )
@@ -161,7 +162,13 @@ export const createTaskSlice: SliceCreator<TaskSlice> = (set) => ({
                 ...g,
                 subtasks: taskSubtasks(g).map((s) =>
                   s.id === subtaskId
-                    ? { ...s, ...(patch || {}), status, ...(result !== undefined ? { result: truncateResult(result) as Subtask['result'] } : {}) }
+                    ? {
+                        ...s,
+                        ...(patch || {}),
+                        status,
+                        ...(status !== 'running' ? { completedAt: Date.now() } : {}),
+                        ...(result !== undefined ? { result: truncateResult(result) as Subtask['result'] } : {}),
+                      }
                     : s
                 ),
               }

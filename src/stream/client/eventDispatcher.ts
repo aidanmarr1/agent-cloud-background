@@ -209,6 +209,14 @@ function isSupersededToolResult(result: unknown): boolean {
   return !!result && typeof result === 'object' && (result as { superseded?: unknown }).superseded === true
 }
 
+function toolResultFailureMessage(result: unknown): string | null {
+  if (!result || typeof result !== 'object') return null
+  const record = result as { error?: unknown; success?: unknown }
+  if (typeof record.error === 'string' && record.error.trim()) return record.error.trim()
+  if (record.success === false) return 'The action did not complete successfully.'
+  return null
+}
+
 function shouldPreserveVisibleInternalToolResult(name: string): boolean {
   if (isInternalActivityTool(name)) return false
   return true
@@ -889,10 +897,10 @@ export class EventDispatcher {
         this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: updatedSubtasks }
         this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       } else {
-        const closedSubtasks = grpSubtasks.map((s) =>
-          s.status === 'running' ? { ...s, status: 'done' as const } : s
-        )
-        this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: [...closedSubtasks, subtask] }
+        // Multiple source actions may be in flight together. A later start is
+        // not proof that an earlier action completed; only its tool_result may
+        // settle it.
+        this.parsedGroups[this.currentGroupIdx] = { ...grp, subtasks: [...grpSubtasks, subtask] }
         this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
       }
     }
@@ -1125,8 +1133,11 @@ export class EventDispatcher {
 
     if (isHiddenInternalToolResult(event.name, event.result) && visibleStartedRecovery) {
       const group = this.parsedGroups[this.currentGroupIdx]
+      const errorMessage = toolResultFailureMessage(event.result) || 'The action was rejected before execution.'
       const updatedSubtasks = safeSubtasks(group).map((subtask) =>
-        subtask.id === event.id ? { ...subtask, status: 'done' as const } : subtask
+        subtask.id === event.id
+          ? { ...subtask, status: 'error' as const, errorMessage, completedAt: Date.now() }
+          : subtask
       )
       this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
       this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
@@ -1224,10 +1235,28 @@ export class EventDispatcher {
           : null
 
         let updatedSubtasks = groupSubtasks
+        const failureMessage = toolResultFailureMessage(effectiveResult)
+        const resultStatus: Subtask['status'] = failureMessage ? 'error' : 'done'
+        const resultPatch = failureMessage ? { errorMessage: failureMessage } : undefined
         if (existingSubtask) {
-          this.actions.updateSubtaskInGroup(this.conversationId, this.currentGroupIdx, event.id, 'done', effectiveResult as Subtask['result'])
+          this.actions.updateSubtaskInGroup(
+            this.conversationId,
+            this.currentGroupIdx,
+            event.id,
+            resultStatus,
+            effectiveResult as Subtask['result'],
+            resultPatch,
+          )
           updatedSubtasks = groupSubtasks.map(s =>
-            s.id === event.id ? { ...s, status: 'done' as const, result: effectiveResult as Subtask['result'] } : s
+            s.id === event.id
+              ? {
+                  ...s,
+                  status: resultStatus,
+                  result: effectiveResult as Subtask['result'],
+                  completedAt: Date.now(),
+                  ...(failureMessage ? { errorMessage: failureMessage } : {}),
+                }
+              : s
           )
         } else if (deferredLabel) {
           const subtask: Subtask = {
@@ -1240,12 +1269,14 @@ export class EventDispatcher {
             command: startedEvent?.args.command as string | undefined,
             filePath: (startedEvent?.args.path || startedEvent?.args.output_path || startedEvent?.args.source_path || startedEvent?.args.directory) as string | undefined,
             labelSource: 'model',
-            status: 'done',
+            status: resultStatus,
             startedAt: Date.now(),
+            completedAt: Date.now(),
+            ...(failureMessage ? { errorMessage: failureMessage } : {}),
             result: effectiveResult as Subtask['result'],
           }
           updatedSubtasks = [
-            ...groupSubtasks.map((s) => s.status === 'running' ? { ...s, status: 'done' as const } : s),
+            ...groupSubtasks,
             subtask,
           ]
           this.actions.setTaskGroups(this.conversationId, [
@@ -1419,7 +1450,11 @@ export class EventDispatcher {
 
     const status = 'done'
     if (this.currentGroupIdx >= 0 && this.currentGroupIdx < this.parsedGroups.length) {
-      this.parsedGroups[this.currentGroupIdx] = { ...this.parsedGroups[this.currentGroupIdx], status }
+      this.parsedGroups[this.currentGroupIdx] = {
+        ...this.parsedGroups[this.currentGroupIdx],
+        status,
+        completedAt: Date.now(),
+      }
       this.actions.updateTaskGroupStatus(this.conversationId, this.currentGroupIdx, status)
       if (this.currentGroupIdx + 1 < this.parsedGroups.length) {
         this.currentGroupIdx++
@@ -1459,10 +1494,15 @@ export class EventDispatcher {
       if (group.status === 'running') {
         const subtasks = safeSubtasks(group).map((subtask) =>
           subtask.status === 'running'
-            ? { ...subtask, status, ...(status === 'error' ? { errorMessage } : {}) }
+            ? {
+                ...subtask,
+                status,
+                completedAt: Date.now(),
+                ...(status === 'error' ? { errorMessage } : {}),
+              }
             : subtask
         )
-        this.parsedGroups[gi] = { ...group, status, subtasks }
+        this.parsedGroups[gi] = { ...group, status, subtasks, completedAt: Date.now() }
         changed = true
       }
     }
@@ -1473,14 +1513,36 @@ export class EventDispatcher {
     if (this.parsedGroups.length === 0) return
     this.deferredBrowseToolStarts.clear()
     this.toolStartsById.clear()
-    this.parsedGroups = this.parsedGroups.map((group) => ({
-      ...group,
-      status: 'done',
-      subtasks: safeSubtasks(group).map((subtask) => (
-        subtask.status === 'running' ? { ...subtask, status: 'done' } : subtask
-      )),
-    }))
-    this.parsedSteps = this.parsedSteps.map((step) => ({ ...step, status: 'done' }))
+    const completedAt = Date.now()
+    this.parsedGroups = this.parsedGroups.map((group) => {
+      const hadUnsettledAction = safeSubtasks(group).some(subtask => subtask.status === 'running')
+      const subtasks = safeSubtasks(group).map((subtask) => (
+        subtask.status === 'running'
+          ? {
+              ...subtask,
+              status: 'error' as const,
+              errorMessage: 'The task ended before this action returned a result.',
+              completedAt,
+            }
+          : subtask
+      ))
+      if (group.status === 'done' && !hadUnsettledAction) {
+        return { ...group, subtasks, completedAt: group.completedAt || completedAt }
+      }
+      return {
+        ...group,
+        subtasks,
+        status: hadUnsettledAction || group.status === 'running' || group.status === 'pending'
+          ? 'incomplete' as const
+          : group.status,
+        completedAt,
+      }
+    })
+    this.parsedSteps = this.parsedSteps.map((step) => (
+      step.status === 'done'
+        ? { ...step, completedAt: step.completedAt || completedAt }
+        : { ...step, status: 'incomplete' as const, completedAt }
+    ))
     this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
     this.actions.setSteps(this.conversationId, [...this.parsedSteps])
   }

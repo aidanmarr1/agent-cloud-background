@@ -84,15 +84,15 @@ assert.doesNotMatch(
   /await Promise\.race\(\[[\s\S]*acknowledgementDisplayPromise/,
   'planner request must not wait behind an acknowledgement display timer',
 )
-assert.doesNotMatch(
+assert.match(
   planStart,
-  /scheduleAcknowledgementCall|emitModelGeneratedAcknowledgement|acknowledgementPromise/,
-  'normal startup must avoid a duplicate acknowledgement request and its usage-settlement latency',
+  /this\.scheduleAcknowledgementCall\(\)[\s\S]*this\.planPromise = start\(\)/,
+  'the compact acknowledgement must begin in parallel before the larger planner request settles',
 )
 assert.match(
   planStart,
   /this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/,
-  'normal startup must use the single planner response for acknowledgement and plan',
+  'normal startup must begin planning without waiting for the parallel acknowledgement call',
 )
 
 assert.match(

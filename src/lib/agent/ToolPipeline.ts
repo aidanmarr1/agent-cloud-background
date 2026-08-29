@@ -109,6 +109,12 @@ import {
   type ResearchActivityKind,
 } from './ResearchActivityLog'
 import { releaseSearchAfterDistinctSourceFailures } from './ResearchPreflightRecovery'
+import {
+  artifactPathSatisfiesFinalOutputContract,
+  hasExistingInputArtifactEvidence,
+  requestedFinalArtifactFormat,
+  taskRequiresExistingInputArtifact,
+} from './DeliverableContract'
 
 export interface ToolExecutionResult {
   tc: ToolCallData
@@ -1002,6 +1008,7 @@ function userRequestedMarkdownDeliverable(state: AgentStateData, filePath: strin
 }
 
 function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', explicitDeliverable = false): WorkLedgerArtifactPurpose {
+  if (filePath && !artifactPathSatisfiesFinalOutputContract(state, filePath)) return 'support'
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return 'deliverable'
   if (explicitDeliverable || isCurrentPlanDeliverableStep(state)) return 'deliverable'
   if (
@@ -1011,6 +1018,39 @@ function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', exp
   ) return 'deliverable'
   if (userRequestedMarkdownDeliverable(state, filePath)) return 'support'
   return 'support'
+}
+
+function existingInputFabricationBlockReason(
+  toolName: string,
+  state: AgentStateData,
+): string | null {
+  if (toolName !== 'create_file' && toolName !== 'create_website') return null
+  if (!taskRequiresExistingInputArtifact(state)) return null
+  if (hasExistingInputArtifactEvidence(state)) return null
+  const format = requestedFinalArtifactFormat(state)?.label || 'requested output format'
+  return [
+    `SOURCE_REQUIRED: The user asked to convert an existing item to ${format}, but no existing workspace or attached source has been successfully read.`,
+    'Do not invent a replacement source.',
+    'Locate and read the real source first; if it is absent, report that concrete blocker instead of creating unrelated content.',
+  ].join(' ')
+}
+
+function browserCannotVerifyLocalArtifactReason(
+  args: Record<string, unknown>,
+  result: BrowserActionResult,
+  state: AgentStateData,
+): string | null {
+  if (state.createdFiles.size === 0 && state.workLedger.deliverableCandidates.length === 0) return null
+  const objective = [
+    typeof args.action_label === 'string' ? args.action_label : '',
+    currentStepText(state),
+  ].join(' ')
+  const isLocalArtifactCheck = /\b(?:verify|validate|preview|inspect|review|render|test|confirm|check)\b/i.test(objective) &&
+    /\b(?:local|workspace|generated|created|saved|artifact|file|html|pdf|cover|layout|website|webpage|page)\b/i.test(objective)
+  if (!isLocalArtifactCheck) return null
+  if (/\b(?:deploy|deployed|deployment|production|public\s+url|live\s+site)\b/i.test(state.originalUserRequest || '')) return null
+  if (isManagedLocalBrowserUrl(result.url)) return null
+  return 'BROWSER_TARGET_MISMATCH: An unrelated external webpage cannot verify a local generated artifact. Open the managed local preview for the actual saved file, or rely on the native export result when it already validates the output.'
 }
 
 function maybeSatisfyWebsiteStructureRequirement(state: AgentStateData): void {
@@ -2948,6 +2988,21 @@ export class ToolPipeline {
     if (!tc.name.startsWith('browser_') || !result || typeof result !== 'object') return result
 
     const resultObj = result as BrowserActionResult
+    const localArtifactMismatch = browserCannotVerifyLocalArtifactReason(args, resultObj, state)
+    if (localArtifactMismatch) {
+      return {
+        ...resultObj,
+        success: false,
+        error: localArtifactMismatch,
+        content: [localArtifactMismatch, resultObj.content].filter(Boolean).join('\n\n'),
+        taskCompletion: {
+          completed: false,
+          confidence: 0,
+          reason: 'The browser is not showing the artifact being verified.',
+          evidence: [],
+        },
+      } satisfies BrowserActionResult
+    }
     const { snapshot, hints } = await this.getBrowserTargetHints(state)
     const targetKey = getBrowserActionTargetKey(tc.name, args, snapshot?.elements)
     const progressResult = snapshot?.content
@@ -3741,6 +3796,20 @@ export class ToolPipeline {
     if (modelActionLabel) {
       args.action_label = modelActionLabel
       tc.arguments = JSON.stringify(args)
+    }
+
+    const existingInputReason = existingInputFabricationBlockReason(tc.name, state)
+    if (existingInputReason) {
+      const errorResult = { error: existingInputReason }
+      recordWorkLedgerFailure(state, {
+        tool: tc.name,
+        target: toolTargetFromArgs(args),
+        error: existingInputReason,
+      })
+      trackToolCall(state, tc.name, JSON.stringify(args))
+      state.stepToolCallCount++
+      state.stepFailureCount++
+      return preflightResult(errorResult)
     }
     const restoredNavigationUrl = restoreKnownAbbreviatedNavigationUrl(tc.name, args, state)
     if (restoredNavigationUrl) {
@@ -4686,6 +4755,12 @@ export class ToolPipeline {
     } else if (!isError && tc.name === 'read_file') {
       const path = (args.path as string) || (args.source as string) || ''
       const normalizedPath = path ? normalizeSandboxFilePath(path) : ''
+      const wasCreatedThisRun = normalizedPath && [...state.createdFiles].some(
+        createdPath => normalizeSandboxFilePath(createdPath) === normalizedPath,
+      )
+      if (normalizedPath && !wasCreatedThisRun) {
+        state.inputArtifactPathsRead.add(normalizedPath)
+      }
       if (normalizedPath && state.fileWriteRepairPending?.path === normalizedPath) {
         // Reading is the first half of recovery, not the end of it. Keep the
         // exact-path lock until a targeted edit/append actually succeeds.

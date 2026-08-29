@@ -8,6 +8,7 @@ export interface TaskStep {
   status: 'pending' | 'running' | 'done' | 'incomplete' | 'error'
   items: StepItem[]
   startedAt?: number
+  completedAt?: number
 }
 
 export interface StepAction {
@@ -43,6 +44,7 @@ export interface TaskGroup {
   narrations: GroupNarration[]
   synthesis: string
   startedAt?: number
+  completedAt?: number
 }
 
 export type SubtaskType = 'search' | 'image_search' | 'browse' | 'terminal' | 'create_file' | 'read_file' | 'read_skill' | 'delete_file' | 'list_files' | 'edit_file' | 'append_file' | 'export_pdf' | 'read_document' | 'http_request' | 'run_code' | 'browser'
@@ -61,4 +63,5 @@ export interface Subtask {
   errorMessage?: string
   result?: SearchResult[] | BrowseResult | TerminalResult | FileResult | BrowserResult
   startedAt: number
+  completedAt?: number
 }

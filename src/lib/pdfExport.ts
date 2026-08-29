@@ -93,7 +93,7 @@ function wrapHtml(content: string, title?: string): string {
 
   const styles = `
     <style>
-      @page { margin: 0.75in; }
+      @page { size: A4; margin: 0.75in; }
       body {
         color: #191919;
         background: #f5f5f5;
@@ -224,10 +224,20 @@ export async function exportPdfFromSandbox(
     })
     await page.setContent(html, { waitUntil: 'load', timeout: 10_000 })
     const pdfBuffer = await page.pdf({
-      format: 'Letter',
+      format: 'A4',
+      preferCSSPageSize: true,
       printBackground: true,
       margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' },
     })
+
+    if (pdfBuffer.length < 512 || pdfBuffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
+      return {
+        action: 'exported',
+        path: normalizedOutput,
+        content: 'Error: PDF renderer returned an invalid or empty document',
+        error: 'PDF renderer returned an invalid or empty document',
+      }
+    }
 
     await mkdir(/* turbopackIgnore: true */ dirname(outputResolved), { recursive: true })
     let fd: Awaited<ReturnType<typeof open>>

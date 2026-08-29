@@ -1,0 +1,113 @@
+import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { build } from 'esbuild'
+
+const root = process.cwd()
+const workDir = await mkdtemp(join(root, 'scripts/.artifact-completion-integrity-smoke-'))
+const runnerPath = join(workDir, 'runner.ts')
+const bundlePath = join(workDir, 'runner.mjs')
+
+try {
+  const [agentLoop, toolPipeline, dispatcher, pdfExport, config] = await Promise.all([
+    readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
+    readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/pdfExport.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
+  ])
+
+  assert.match(agentLoop, /all\|done\|ready\|complete\|completed\|finished/, 'one-word handoff tails must be rejected')
+  assert.doesNotMatch(agentLoop, /attemptNumber\s*>=\s*2[\s\S]{0,180}!finalDeliverableHandoffHasInvalidForm/, 'a second handoff attempt must not bypass completeness checks')
+  assert.match(agentLoop, /deliverable_handoff_failed[\s\S]{0,240}phase = 'ERROR'/, 'failed handoff prose must not produce a false done event')
+  assert.match(toolPipeline, /BROWSER_TARGET_MISMATCH:[\s\S]*unrelated external webpage cannot verify a local generated artifact/, 'external pages must not verify local artifacts')
+  assert.match(toolPipeline, /SOURCE_REQUIRED:[\s\S]*Do not invent a replacement source/, 'existing-file conversions must block fabricated source writes')
+  assert.match(dispatcher, /toolResultFailureMessage[\s\S]*resultStatus[\s\S]*'error'\s*:\s*'done'/, 'failed tool results must remain failed in the task stream')
+  assert.match(dispatcher, /The task ended before this action returned a result/, 'a terminal done event must expose unresolved actions')
+  assert.match(pdfExport, /format: 'A4'[\s\S]*preferCSSPageSize: true[\s\S]*%PDF-/, 'PDF export must validate a real A4/CSS-sized PDF payload')
+  assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
+
+  await writeFile(runnerPath, `
+import assert from 'node:assert/strict'
+import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
+import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
+import {
+  artifactPathSatisfiesFinalOutputContract,
+  hasExistingInputArtifactEvidence,
+  requestedFinalArtifactFormat,
+  taskRequiresExistingInputArtifact,
+} from ${JSON.stringify(join(root, 'src/lib/agent/DeliverableContract.ts'))}
+
+const timeouts = {
+  iterationTimeoutMs: 30000,
+  inactivityTimeoutMs: 30000,
+  contentOnlyTimeoutMs: null,
+  contentOnlyMinChars: 0,
+  checkIntervalMs: 100,
+}
+
+const conversion = createInitialState(true, timeouts)
+conversion.originalUserRequest = 'Cover to PDF, return it here.'
+conversion.currentPlanItems = ['Convert the existing cover and deliver the PDF']
+conversion.currentPlanScopes = [null]
+conversion.currentStepIdx = 1
+conversion.taskStrategy = 'build'
+conversion.deliverableVerificationDone = true
+
+assert.equal(requestedFinalArtifactFormat(conversion)?.label, 'PDF')
+assert.equal(taskRequiresExistingInputArtifact(conversion), true)
+assert.equal(artifactPathSatisfiesFinalOutputContract(conversion, 'cover.html'), false)
+assert.equal(artifactPathSatisfiesFinalOutputContract(conversion, 'deliverables/cover.pdf'), true)
+
+recordWorkLedgerDeliverable(conversion, { path: 'cover.html', purpose: 'deliverable' })
+let audit = auditAgentCompletion(conversion, 'complete')
+assert.equal(audit.complete, false)
+assert.ok(audit.missing.some(item => /final PDF artifact/i.test(item)))
+assert.ok(audit.missing.some(item => /source artifact was not found and read/i.test(item)))
+
+conversion.inputArtifactPathsRead.add('cover.html')
+recordWorkLedgerDeliverable(conversion, { path: 'deliverables/cover.pdf', purpose: 'deliverable' })
+audit = auditAgentCompletion(conversion, 'complete')
+assert.equal(audit.complete, true)
+
+const createThenExport = createInitialState(true, timeouts)
+createThenExport.originalUserRequest = 'Create a new cover and export it as a PDF.'
+assert.equal(taskRequiresExistingInputArtifact(createThenExport), false)
+
+const createAndExport = createInitialState(true, timeouts)
+createAndExport.originalUserRequest = 'Create and export a new cover as PDF.'
+assert.equal(taskRequiresExistingInputArtifact(createAndExport), false)
+
+const readPdfWriteSummary = createInitialState(false, timeouts)
+readPdfWriteSummary.originalUserRequest = 'Read the attached PDF and write a concise summary in chat.'
+assert.equal(requestedFinalArtifactFormat(readPdfWriteSummary), null)
+
+const readPdfFileWriteSummary = createInitialState(false, timeouts)
+readPdfFileWriteSummary.originalUserRequest = 'Read this PDF file and summarize it in chat.'
+assert.equal(requestedFinalArtifactFormat(readPdfFileWriteSummary), null)
+
+const namedOnlyAttachment = createInitialState(true, timeouts)
+namedOnlyAttachment.uploadedAttachmentContextAvailable = true
+namedOnlyAttachment.uploadedAttachmentNames = ['cover.html']
+assert.equal(hasExistingInputArtifactEvidence(namedOnlyAttachment), false)
+namedOnlyAttachment.uploadedAttachmentContentAvailable = true
+assert.equal(hasExistingInputArtifactEvidence(namedOnlyAttachment), true)
+
+console.log('artifact completion integrity runtime checks passed')
+`)
+
+  await build({
+    entryPoints: [runnerPath],
+    outfile: bundlePath,
+    bundle: true,
+    platform: 'node',
+    format: 'esm',
+    packages: 'external',
+    logLevel: 'silent',
+  })
+  await import(`${pathToFileURL(bundlePath).href}?t=${Date.now()}`)
+  console.log('artifact completion integrity smoke checks passed')
+} finally {
+  await rm(workDir, { recursive: true, force: true })
+}

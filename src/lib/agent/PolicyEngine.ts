@@ -988,6 +988,20 @@ export class PolicyEngine {
         if (stepActions.length > 0) return stepActions
       }
 
+      // Browser intelligence can prove an action step complete on the tool
+      // result immediately before a narration-only turn. Process that proof
+      // before generic no-tool recovery so the completed live action is not
+      // mistaken for a stalled model response.
+      if (isBrowserActionTask(state) && state.browserTaskCompleted) {
+        const browserCompletionActions = this.checkStepAdvancement(
+          state,
+          false,
+          iterationLimit,
+          assistantContent,
+        )
+        if (browserCompletionActions.length > 0) return browserCompletionActions
+      }
+
       console.log(`[Policy] No tool calls. Step ${state.currentStepIdx}/${state.currentPlanItems?.length || 0}, consecutiveNoTool=${state.consecutiveNoToolCalls}, stepToolCalls=${state.stepToolCallCount}`)
       const noToolActions = this.checkNoToolCalls(state, assistantContent)
       if (noToolActions.some(a => a.type === 'terminate')) {

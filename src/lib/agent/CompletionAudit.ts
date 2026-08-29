@@ -1,5 +1,11 @@
 import type { AgentStateData } from './AgentState'
-import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
+import {
+  artifactPathSatisfiesFinalOutputContract,
+  hasExistingInputArtifactEvidence,
+  requestedFinalArtifactFormat,
+  taskRequiresExistingInputArtifact,
+  taskRequiresSavedFinalArtifact,
+} from './DeliverableContract'
 
 export interface CompletionAuditResult {
   complete: boolean
@@ -11,8 +17,12 @@ export interface CompletionAuditResult {
 export const MISSING_FINAL_INLINE_ANSWER = 'no substantive final inline answer was delivered'
 
 function hasFinalDeliverable(state: AgentStateData): boolean {
-  return state.workLedger.deliverableCandidates.some(item => item.purpose === 'deliverable') ||
-    state.emittedImageArtifacts.size > 0
+  return state.workLedger.deliverableCandidates.some(item => (
+    item.purpose === 'deliverable' &&
+    artifactPathSatisfiesFinalOutputContract(state, item.path)
+  )) || [...state.emittedImageArtifacts].some(path => (
+    artifactPathSatisfiesFinalOutputContract(state, path)
+  ))
 }
 
 function requiresFinalDeliverable(state: AgentStateData): boolean {
@@ -56,7 +66,17 @@ export function auditAgentCompletion(
   }
 
   if (requiresFinalDeliverable(state) && !hasFinalDeliverable(state)) {
-    missing.push('no successful final deliverable artifact was saved')
+    const requestedFormat = requestedFinalArtifactFormat(state)
+    missing.push(requestedFormat
+      ? `no successful final ${requestedFormat.label} artifact was saved`
+      : 'no successful final deliverable artifact was saved')
+  }
+
+  if (
+    taskRequiresExistingInputArtifact(state) &&
+    !hasExistingInputArtifactEvidence(state)
+  ) {
+    missing.push('the requested existing source artifact was not found and read')
   }
 
   if (requiresFinalInlineAnswer(state) && !completedInlineAnswer) {
