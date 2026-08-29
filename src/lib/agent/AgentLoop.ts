@@ -22,7 +22,10 @@ import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/l
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
-import { compactToolDefinitionsForModel } from './ModelToolSchemas'
+import {
+  boundFileWriteChunksForModel,
+  compactToolDefinitionsForModel,
+} from './ModelToolSchemas'
 
 import { sanitizeAgentEventEmitter, type AgentEventEmitter } from './SSEEmitter'
 import {
@@ -3450,8 +3453,17 @@ const FINAL_SAVED_DELIVERABLE_TEXT_INACTIVITY_TIMEOUT_MS = 15_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_TIMEOUT_MS = 14_000
 const FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS = 1_000
 const FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
-const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
-const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
+// Native function arguments are a transport envelope, not the artifact-size
+// limit. Keep one report chunk bounded so a provider cannot spend the entire
+// minute streaming an unfinished JSON string; verification and append_file can
+// continue the same artifact without reducing its eventual depth.
+const FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 8_192
+const FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 6_144
+const FINAL_SAVED_DELIVERABLE_JSON_RECOVERY_MAX_TOKENS = 3_072
+const FINAL_SAVED_DELIVERABLE_JSON_LAST_REPAIR_MAX_TOKENS = 1_024
+const FINAL_SAVED_DELIVERABLE_WRITE_MAX_CHARS = 24_000
+const FINAL_SAVED_DELIVERABLE_RECOVERY_WRITE_MAX_CHARS = 8_000
+const FINAL_SAVED_DELIVERABLE_LAST_REPAIR_WRITE_MAX_CHARS = 2_000
 const FINAL_DELIVERABLE_HANDOFF_REQUEST_TIMEOUT_MS = 15_000
 const FINAL_DELIVERABLE_HANDOFF_ITERATION_TIMEOUT_MS = 20_000
 const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
@@ -3460,7 +3472,7 @@ const FINAL_DELIVERABLE_HANDOFF_INACTIVITY_TIMEOUT_MS = 8_000
 // handoff prompt determine their natural length. The former 420-token cap
 // persisted visibly clipped headings and list markers as completed messages.
 const FINAL_DELIVERABLE_HANDOFF_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
-const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
+const PARTIAL_RECOVERY_CLOSING_APPEND_MAX_TOKENS = 2_048
 const FORCED_NARRATION_REQUEST_TIMEOUT_MS = 6_000
 const FORCED_NARRATION_ITERATION_TIMEOUT_MS = 6_000
 const FORCED_NARRATION_INACTIVITY_TIMEOUT_MS = 2_000
@@ -5577,6 +5589,32 @@ export class AgentLoop {
               state.forceTextNextIteration = false
               state.iterationDelayMs = MIN_ITERATION_DELAY_MS
 
+              const malformedFileWriteTool = malformedToolResults
+                .map(result => result.tc.name)
+                .find(name => name === 'create_file' || name === 'append_file' || name === 'edit_file')
+              if (malformedFileWriteTool && state.toolJsonRecoveryCount <= 2) {
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    'FILE WRITE ENVELOPE RECOVERY: the previous native file call ended before its strict JSON object was complete.',
+                    'Do not expose this transport repair to the user and do not regenerate the full report in one call.',
+                    state.toolJsonRecoveryCount === 1
+                      ? 'Make one shorter complete file call now. Put action_label, plan_step_index, and path before content; save a coherent opening chunk, then continue the same file with append_file only if more material remains.'
+                      : 'This is the final same-route repair. Make one very small complete create_file call now with the topic-specific path plus only the title and opening section. Put path before content. The remaining report will be continued with append_file after this seed succeeds.',
+                    'Do not search, browse, narrate, emit <next_step/>, or request any already gathered evidence again.',
+                  ].join(' '),
+                } as ChatMessageParam)
+                console.warn('[AgentDiagnostics] Reissued a bounded final-file envelope after malformed streamed arguments', {
+                  step: state.currentStepIdx,
+                  totalSteps: state.currentPlanItems?.length || 0,
+                  recoveryAttempt: state.toolJsonRecoveryCount,
+                  malformedFileWriteTool,
+                })
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+
               if (state.toolJsonRecoveryCount === 1) {
                 contextManager.push({
                   role: 'system',
@@ -7374,10 +7412,6 @@ export class AgentLoop {
         }, 0)
         console.log(`[Agent] iter=${state.iterations} msgs=${requestMessages.length} ~${Math.round(approxChars / 4)}tok tools=${activeTools.length} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0}`)
 
-        const modelTools = withCadenceProgressUpdateSchemas(
-          compactToolDefinitionsForModel(activeTools),
-          effectiveCadenceNarrationInMainTurn,
-        )
         const isFinalInlineAnswerTurn = finalInlineAnswerTurn(state, this.options.messages)
         const isFinalSavedDeliverableTurn = finalSavedDeliverableTurn(state, this.options.messages)
         const isFinalDeliverableHandoffTurn = !!state.finalDeliverableHandoffPending
@@ -7387,6 +7421,25 @@ export class AgentLoop {
         const isBoundedPartialRecoveryClosingAppend =
           isFinalSavedDeliverableTurn &&
           isPartialRecoveryClosingAppendTurn(state)
+        const isFinalSavedDeliverableJsonRecovery =
+          isInitialFinalSavedDeliverableTurn &&
+          state.finalSavedDeliverableRecoveryAttempts > 0 &&
+          state.toolJsonRecoveryCount > 0
+        const compactModelTools = compactToolDefinitionsForModel(activeTools)
+        const boundedModelTools = isFinalSavedDeliverableTurn
+          ? boundFileWriteChunksForModel(
+              compactModelTools,
+              isFinalSavedDeliverableJsonRecovery && state.toolJsonRecoveryCount >= 2
+                ? FINAL_SAVED_DELIVERABLE_LAST_REPAIR_WRITE_MAX_CHARS
+                : state.partialFileWriteRecoveryPending || state.finalSavedDeliverableRecoveryAttempts > 0
+                ? FINAL_SAVED_DELIVERABLE_RECOVERY_WRITE_MAX_CHARS
+                : FINAL_SAVED_DELIVERABLE_WRITE_MAX_CHARS,
+            )
+          : compactModelTools
+        const modelTools = withCadenceProgressUpdateSchemas(
+          boundedModelTools,
+          effectiveCadenceNarrationInMainTurn,
+        )
         const maxTokens = useCompactNarration
           ? Math.min(maxTokensForIteration(state), FORCED_NARRATION_MAX_TOKENS)
           : isFinalDeliverableHandoffTurn
@@ -7397,6 +7450,13 @@ export class AgentLoop {
           ? Math.min(maxTokensForIteration(state), finalInlineAnswerMaxTokens(state, this.options.messages))
           : useTextFinalDeliverable
           ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_TEXT_MAX_TOKENS)
+          : isFinalSavedDeliverableJsonRecovery
+          ? Math.min(
+              maxTokensForIteration(state),
+              state.toolJsonRecoveryCount >= 2
+                ? FINAL_SAVED_DELIVERABLE_JSON_LAST_REPAIR_MAX_TOKENS
+                : FINAL_SAVED_DELIVERABLE_JSON_RECOVERY_MAX_TOKENS,
+            )
           : isInitialFinalSavedDeliverableTurn
           ? Math.min(maxTokensForIteration(state), FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS)
           : isFinalSavedDeliverableTurn

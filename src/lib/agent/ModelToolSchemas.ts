@@ -8,6 +8,8 @@ type ModelToolDefinition = {
   [key: string]: unknown
 }
 
+const BOUNDED_FILE_CONTENT_TOOLS = new Set(['create_file', 'append_file'])
+
 // The full operating policy already lives once in the agent system/turn
 // guidance. Keep native schemas focused on selection and argument shape so
 // every tool remains available without paying for the same prose 29 times.
@@ -87,6 +89,53 @@ export function compactToolDefinitionsForModel<T extends ModelToolDefinition>(to
         ...tool.function,
         description: compactDescription,
         ...(schema ? { parameters: schema } : {}),
+      },
+    } as T
+  })
+}
+
+/**
+ * Bound one native file-write chunk without limiting the finished artifact.
+ *
+ * Some providers stream a function's large `content` value before `path`, so
+ * a request timeout can leave no filename with which to salvage the otherwise
+ * useful partial body. A schema-level string bound makes each native envelope
+ * complete promptly; the agent can still grow the same file with append_file.
+ */
+export function boundFileWriteChunksForModel<T extends ModelToolDefinition>(
+  tools: T[],
+  maxContentChars: number,
+): T[] {
+  const boundedMaxLength = Math.max(1, Math.floor(maxContentChars))
+
+  return tools.map((tool) => {
+    if (!BOUNDED_FILE_CONTENT_TOOLS.has(tool.function?.name || '')) return tool
+
+    const parameters = tool.function?.parameters
+    if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return tool
+
+    const schema = parameters as {
+      properties?: Record<string, unknown>
+      [key: string]: unknown
+    }
+    const content = schema.properties?.content
+    if (!content || typeof content !== 'object' || Array.isArray(content)) return tool
+
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: {
+          ...schema,
+          properties: {
+            ...schema.properties,
+            content: {
+              ...(content as Record<string, unknown>),
+              maxLength: boundedMaxLength,
+              description: `One complete file chunk, at most ${boundedMaxLength} characters. Continue the same file with append_file when more material is needed.`,
+            },
+          },
+        },
       },
     } as T
   })

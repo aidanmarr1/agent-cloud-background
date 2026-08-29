@@ -5,9 +5,10 @@ import { pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
 
 const root = process.cwd()
-const [agentLoopSource, taskJobsSource] = await Promise.all([
+const [agentLoopSource, taskJobsSource, modelToolSchemasSource] = await Promise.all([
   readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf-8'),
   readFile(join(root, 'src/lib/agent/taskJobs.ts'), 'utf-8'),
+  readFile(join(root, 'src/lib/agent/ModelToolSchemas.ts'), 'utf-8'),
 ])
 assert.match(
   agentLoopSource,
@@ -29,6 +30,16 @@ assert.match(
   /event_json like '%"type":"text_delta"%'[\s\S]{0,160}event_json like '%"type":"progress_update"%'/,
   'task recovery assessment must include persisted LLM narration events',
 )
+assert.match(
+  agentLoopSource,
+  /FINAL_SAVED_DELIVERABLE_INITIAL_MAX_TOKENS = 8_192[\s\S]*FINAL_SAVED_DELIVERABLE_MAX_TOKENS = 6_144/,
+  'native report chunks must have a bounded completion envelope rather than the global 131k allowance',
+)
+assert.match(
+  modelToolSchemasSource,
+  /boundFileWriteChunksForModel[\s\S]*maxLength: boundedMaxLength/,
+  'native create/append schemas must carry a provider-visible content bound',
+)
 const fileAppendSource = await readFile(join(root, 'src/lib/fileAppend.ts'), 'utf-8')
 assert.match(
   fileAppendSource,
@@ -47,6 +58,8 @@ import { getSandboxDirPath, readFileInSandbox } from ${JSON.stringify(join(root,
 import { trimReplayedAppendOverlap } from ${JSON.stringify(join(root, 'src/lib/fileAppend.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { ToolPipeline } from ${JSON.stringify(join(root, 'src/lib/agent/ToolPipeline.ts'))}
+import { toolDefinitions } from ${JSON.stringify(join(root, 'src/lib/tools.ts'))}
+import { boundFileWriteChunksForModel, compactToolDefinitionsForModel } from ${JSON.stringify(join(root, 'src/lib/agent/ModelToolSchemas.ts'))}
 
 const timeouts = {
   iterationTimeoutMs: 30000,
@@ -77,6 +90,17 @@ async function call(pipeline: ToolPipeline, state: ReturnType<typeof createIniti
 }
 
 export async function runSmoke() {
+  const boundedTools = boundFileWriteChunksForModel(
+    compactToolDefinitionsForModel(toolDefinitions),
+    8_000,
+  )
+  const boundedCreate = boundedTools.find(tool => tool.function?.name === 'create_file')
+  const boundedAppend = boundedTools.find(tool => tool.function?.name === 'append_file')
+  const untouchedRead = boundedTools.find(tool => tool.function?.name === 'read_file')
+  assert.equal((boundedCreate?.function?.parameters as any)?.properties?.content?.maxLength, 8_000)
+  assert.equal((boundedAppend?.function?.parameters as any)?.properties?.content?.maxLength, 8_000)
+  assert.equal((untouchedRead?.function?.parameters as any)?.properties?.path?.maxLength, undefined)
+
   const repeatedTail = 'A'.repeat(140) + ' retained continuation'
   assert.equal(
     trimReplayedAppendOverlap('existing prefix\\n' + repeatedTail, repeatedTail + '\\nnew material'),
@@ -97,6 +121,29 @@ export async function runSmoke() {
   const pipeline = new ToolPipeline(emitter as any, conversationId)
 
   try {
+    const contentFirstState = createInitialState(true, timeouts)
+    contentFirstState.currentPlanItems = ['Write the report']
+    contentFirstState.currentStepIdx = 0
+    const contentFirstClipped = await call(
+      pipeline,
+      contentFirstState,
+      'content-first-clipped',
+      'create_file',
+      '{\"content\":\"' + 'A'.repeat(500),
+    )
+    assert.equal(contentFirstClipped.isError, true)
+    assert.equal(
+      contentFirstState.finalSavedDeliverableRecoveryAttempts,
+      1,
+      'an unsalvageable content-first write must enter compact report recovery immediately',
+    )
+    assert.equal(
+      contentFirstClipped.internalRecovery,
+      'malformed_tool_arguments',
+      'the clipped transport envelope must be classified as internal recovery',
+    )
+    assert.match(String((contentFirstClipped.result as any).error), /shorter, complete create_file chunk/)
+
     const initialAppendState = createInitialState(true, timeouts)
     initialAppendState.currentPlanItems = ['Write the report']
     initialAppendState.currentStepIdx = 0
@@ -108,6 +155,8 @@ export async function runSmoke() {
       JSON.stringify({
         path: 'new-report.md',
         content: '# This must not become an implicit first write\\\\n\\\\nThe initial report write belongs to create_file.',
+        action_label: 'Start the new research report',
+        plan_step_index: 1,
       }),
     )
     assert.equal(initialAppend.isError, true, 'append_file must not create the first saved report')

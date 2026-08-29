@@ -3705,11 +3705,32 @@ export class ToolPipeline {
       // Truncated create_file — do NOT track as created since the file was never written.
       // The agent needs to retry with a shorter version.
       if (tc.name === 'create_file') {
+        // Enter the compact final-write route immediately. Previously this was
+        // only armed after the generic paid-no-progress cap, allowing several
+        // identical minute-long report generations before the prompt and
+        // output envelope were reduced.
+        state.finalSavedDeliverableRecoveryAttempts = Math.max(
+          1,
+          state.finalSavedDeliverableRecoveryAttempts,
+        )
+        state.iterationDelayMs = 0
+        console.warn('[ToolPipeline] Native create_file arguments were clipped before a recoverable path/body pair', {
+          step: state.currentStepIdx + 1,
+          argumentChars: tc.arguments.length,
+          hasPath: /"path"\s*:/.test(tc.arguments),
+          hasContent: /"content"\s*:/.test(tc.arguments),
+        })
         const errorResult = {
-          error: `BLOCKED: Your file content was too long and got truncated (the JSON was cut off mid-generation). Do NOT retry with the same large content. Instead: (1) create the file with a shorter initial version covering the first few sections, then (2) use append_file to add remaining sections one chunk at a time.`,
+          error: `INTERNAL_RECOVERY: The file-write envelope was clipped before it contained a safely recoverable filename and body. Retry immediately with one shorter, complete create_file chunk, then continue the same file with append_file if more material is needed. Do not expose this recovery message to the user.`,
         }
         this.emitter.toolResult(tc.id, tc.name, errorResult as never)
-        return { tc, result: errorResult, isError: true, durationMs: Date.now() - startTime }
+        return {
+          tc,
+          result: errorResult,
+          isError: true,
+          durationMs: Date.now() - startTime,
+          internalRecovery: 'malformed_tool_arguments',
+        }
       }
 
       // Detect truncated edit_file/append_file calls — same problem as create_file
