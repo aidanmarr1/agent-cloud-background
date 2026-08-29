@@ -134,7 +134,7 @@ export interface ToolExecutionResult {
 import {
   TOOL_TIMEOUT_MS, FILE_WRITE_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS, MAX_BROWSE_RESULT_CHARS,
   MAX_SOURCE_RESULT_CHARS,
-  WEB_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
+  WEB_SEARCH_TOOL_TIMEOUT_MS, IMAGE_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
   TOOL_TIMEOUT_SETTLE_GRACE_MS,
   URL_NORMALIZE_STRIP_PARAMS,
   SEARCH_STOPWORDS,
@@ -221,7 +221,8 @@ const BROWSER_SEQUENCE_ACTION_BY_TOOL: Record<string, 'click_at' | 'type' | 'sel
 
 function timeoutMsForTool(toolName: string): number {
   if (FILE_WRITE_TOOLS.has(toolName)) return FILE_WRITE_TOOL_TIMEOUT_MS
-  if (toolName === 'web_search' || toolName === 'image_search') return WEB_SEARCH_TOOL_TIMEOUT_MS
+  if (toolName === 'web_search') return WEB_SEARCH_TOOL_TIMEOUT_MS
+  if (toolName === 'image_search') return IMAGE_SEARCH_TOOL_TIMEOUT_MS
   if (toolName.startsWith('browser_') || toolName === 'browse_page') return BROWSER_TOOL_TIMEOUT_MS
   if (toolName === 'read_document' || toolName === 'http_request') return DOCUMENT_TOOL_TIMEOUT_MS
   return TOOL_TIMEOUT_MS

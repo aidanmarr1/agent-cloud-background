@@ -94,6 +94,10 @@ export const TIER_TIMEOUTS = {
 // --- Tool execution ---
 export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
 export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
+// Image search includes both Serper discovery and concurrent retrieval of up
+// to eight real assets. It must not inherit the text-search watchdog, which
+// aborted healthy image downloads after 3.5 seconds.
+export const IMAGE_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 25_000
 export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 20_000
 export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 15_000
 export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
