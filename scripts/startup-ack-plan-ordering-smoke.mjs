@@ -41,6 +41,34 @@ let completionResponder: (params: unknown) => Promise<unknown> = async () => {
   return completionResponder(params)
 }
 
+function streamFromResponse(response: any) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const content = response?.choices?.[0]?.message?.content || ''
+      const splitAt = Math.max(1, Math.min(content.length, Math.ceil(content.length / 2)))
+      if (content) {
+        yield { id: response.id, choices: [{ delta: { content: content.slice(0, splitAt) } }] }
+        if (splitAt < content.length) {
+          yield { id: response.id, choices: [{ delta: { content: content.slice(splitAt) } }] }
+        }
+      }
+      yield {
+        id: response.id,
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        usage: response.usage,
+      }
+    },
+  }
+}
+
+const defaultStreamingResponder = async (params: unknown) => streamFromResponse(await completionResponder(params))
+let streamingResponder: (params: unknown) => Promise<any> = defaultStreamingResponder
+;(globalThis as any).__startupAckStream = async (params: unknown) => {
+  providerCallCount += 1
+  return streamingResponder(params)
+}
+;(globalThis as any).__startupAckGenerationUsage = async () => null
+
 function emitterFor(events: VisibleEvent[]) {
   return {
     get isClosed() { return false },
@@ -89,9 +117,9 @@ export async function run() {
   ])
   assert.deepEqual(fastPlannerEvents.map(event => event.type), ['text', 'plan'])
 
-  // Normal startup runs a small independently metered acknowledgement beside
-  // the planner. Both calls finish, usage is preserved, and acknowledgement
-  // text must become visible before the plan.
+  // Normal startup runs a streaming acknowledgement beside the planner. A safe
+  // task-specific prefix must paint while the acknowledgement is still being
+  // generated, while the completed plan remains hidden until it finishes.
   const parallelStartupEvents: VisibleEvent[] = []
   const parallelStartupManager = new PlanManager(emitterFor(parallelStartupEvents) as any, [{ role: 'user', content: request }], 2)
   const parallelStartupState = state()
@@ -107,11 +135,42 @@ export async function run() {
         choices: [{ message: { content: validAck } }],
         usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
       }
+  let releaseAckRemainder!: () => void
+  let firstAckChunkProcessed!: () => void
+  const ackRemainderGate = new Promise<void>(resolve => { releaseAckRemainder = resolve })
+  const firstAckChunkProcessedPromise = new Promise<void>(resolve => { firstAckChunkProcessed = resolve })
+  streamingResponder = async () => ({
+    async *[Symbol.asyncIterator]() {
+      yield {
+        id: 'gen-normal-ack',
+        choices: [{ delta: { content: 'I’ll research Warmwind OS AI' } }],
+      }
+      firstAckChunkProcessed()
+      await ackRemainderGate
+      yield {
+        id: 'gen-normal-ack',
+        choices: [{ delta: { content: ' across primary and independent sources, then deliver a sourced report on its capabilities and limitations.' } }],
+      }
+      yield {
+        id: 'gen-normal-ack',
+        choices: [{ delta: {}, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
+      }
+    },
+  })
   ;(parallelStartupManager as any).setStateRef(parallelStartupState)
   parallelStartupManager.startPlanCall()
-  await parallelStartupManager.awaitPlan(parallelStartupState)
+  const parallelAwait = parallelStartupManager.awaitPlan(parallelStartupState)
+  await firstAckChunkProcessedPromise
+  assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text'])
+  assert.equal((parallelStartupEvents[0] as { type: 'text'; content: string }).content, 'I’ll research Warmwind OS AI')
+  releaseAckRemainder()
+  await parallelAwait
   assert.equal(providerCallCount, 2)
-  assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text', 'plan'])
+  assert.equal(parallelStartupEvents.at(-1)?.type, 'plan')
+  assert.ok(parallelStartupEvents.slice(0, -1).every(event => event.type === 'text'))
+  assert.ok(parallelStartupEvents.filter(event => event.type === 'text').length >= 2)
+  streamingResponder = defaultStreamingResponder
 
   // Short subjects can be expanded semantically by the model. "AI" becoming
   // "artificial intelligence" must not trigger acknowledgement or plan repair.
@@ -146,7 +205,8 @@ export async function run() {
   shortTopicManager.startPlanCall()
   await shortTopicManager.awaitPlan(shortTopicState)
   assert.equal(providerCallCount, 2, 'semantic expansion must complete without paid repair calls')
-  assert.deepEqual(shortTopicEvents.map(event => event.type), ['text', 'plan'])
+  assert.equal(shortTopicEvents.at(-1)?.type, 'plan')
+  assert.ok(shortTopicEvents.slice(0, -1).every(event => event.type === 'text'))
 
   // If both planner drafts are malformed, the successful fast acknowledgement
   // must survive so AgentLoop can recover into a task-specific execution plan
@@ -171,10 +231,11 @@ export async function run() {
   await assert.rejects(recoveryManager.awaitPlan(recoveryState), /usable task-specific plan after repair/)
   assert.equal(recoveryManager.recoverFromPlannerFailure(recoveryState), true)
   assert.equal(providerCallCount, 4)
-  assert.deepEqual(recoveryEvents.map(event => event.type), ['text', 'plan'])
+  assert.equal(recoveryEvents.at(-1)?.type, 'plan')
+  assert.ok(recoveryEvents.slice(0, -1).every(event => event.type === 'text'))
 
-  // The one acknowledgement request used with a precomputed plan must remain
-  // invisible until its exact usage debit has committed.
+  // The one acknowledgement request used with a precomputed plan should paint
+  // before its exact usage debit settles, while first-step work remains fenced.
   const usageFencedEvents: VisibleEvent[] = []
   let releaseUsage!: () => void
   let usageStarted!: () => void
@@ -207,14 +268,15 @@ export async function run() {
   const fencedAwait = usageFencedManager.awaitPlan(usageFencedState)
   await usageStartedPromise
   assert.equal(providerCallCount, 1)
-  assert.deepEqual(usageFencedEvents, [])
+  assert.ok(usageFencedEvents.length >= 1)
+  assert.ok(usageFencedEvents.every(event => event.type === 'text'))
   let fencedSettled = false
   void fencedAwait.then(() => { fencedSettled = true })
   await Promise.resolve()
   assert.equal(fencedSettled, false)
   releaseUsage()
   await fencedAwait
-  assert.deepEqual(usageFencedEvents.map(event => event.type), ['text'])
+  assert.ok(usageFencedEvents.every(event => event.type === 'text'))
 
   // If every model acknowledgement candidate is unusable, no plan can leak.
   const rejectedEvents: VisibleEvent[] = []
@@ -293,6 +355,12 @@ export async function run() {
             export const DEFAULT_MODEL = 'test/startup-model'
             export async function createCompletion(params) {
               return globalThis.__startupAckCompletion(params)
+            }
+            export async function createStreamingCompletion(params) {
+              return globalThis.__startupAckStream(params)
+            }
+            export async function fetchGenerationUsage(id, signal) {
+              return globalThis.__startupAckGenerationUsage(id, signal)
             }
           `,
         }))

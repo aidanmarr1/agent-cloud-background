@@ -1,6 +1,8 @@
 import {
   createCompletion,
+  createStreamingCompletion,
   DEFAULT_MODEL,
+  fetchGenerationUsage,
   type ChatContentPart,
   type ChatMessageParam,
 } from '@/lib/llm'
@@ -342,6 +344,34 @@ function sanitizePlannerAck(ack: string): string {
   ))
 }
 
+function streamingPlannerAckContent(delta: Record<string, unknown> | undefined): string {
+  const content = delta?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content.map((part) => {
+    if (typeof part === 'string') return part
+    if (!part || typeof part !== 'object') return ''
+    const record = part as { text?: unknown; content?: unknown }
+    if (typeof record.text === 'string') return record.text
+    if (typeof record.content === 'string') return record.content
+    return ''
+  }).join('')
+}
+
+function isSafeStreamingPlannerAckDraft(ack: string, request: string): boolean {
+  const candidate = sanitizePlannerAck(ack)
+  const normalized = candidate.toLowerCase()
+  if (candidate.length < 16 || candidate.length > 320) return false
+  if (containsPromptInstructionLeak(candidate)) return false
+  const words = ackWordCount(candidate)
+  if (words < 3 || words > 48) return false
+  if (!/^i(?:'|’)?ll\b|^i will\b/.test(normalized)) return false
+  if (/\n|```|^\s*[-*#>]/.test(candidate)) return false
+  if (/\b(?:handle|take care of|work on|do|complete|research)\s+(?:this|it|the task|the request)\b/.test(normalized)) return false
+  if (!acknowledgementReferencesRequest(candidate, request)) return false
+  return true
+}
+
 function ackWordCount(text: string): number {
   return text.trim().split(/\s+/).filter(Boolean).length
 }
@@ -672,6 +702,7 @@ export class PlanManager {
   private skipAcknowledgement: boolean
   private usageSequence = 0
   private acknowledgementEmitted = false
+  private acknowledgementStreamStarted = false
   private acknowledgementPromise: Promise<boolean> | null = null
   private suppressFurtherAcknowledgementDeltas = false
   private acknowledgementUsageError: unknown = null
@@ -763,9 +794,9 @@ export class PlanManager {
     })
     const plannerAbortController = this.resetPlannerAbortController()
     // Start the small, independently metered acknowledgement alongside the
-    // larger planner JSON request. Both non-streaming calls always finish and
-    // record exact usage; neither is cancelled merely because the other wins.
-    // This lets the opening paint promptly without waiting for plan parsing.
+    // larger planner JSON request. The acknowledgement streams visibly as soon
+    // as its safe task-specific prefix arrives; planning continues in parallel
+    // and remains ordered behind acknowledgement completion and exact usage.
     this.scheduleAcknowledgementCall()
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
@@ -974,7 +1005,7 @@ export class PlanManager {
     })
     await this.assertCreditRunway('ack')
     const afterCreditAt = Date.now()
-    const response = await createCompletion({
+    const stream = await createStreamingCompletion({
       model: DEFAULT_MODEL,
       messages: [
         {
@@ -1005,40 +1036,108 @@ Requirements:
       ],
       temperature: 0.2,
       max_tokens: PLANNER_ACK_MAX_TOKENS,
+      stream_options: { include_usage: true },
       reasoning: PLANNER_ACK_REASONING,
       includeTemporalContext: false,
       requestTimeoutMs: PLANNER_ACK_REQUEST_TIMEOUT_MS,
       retryMaxAttempts: 0,
       abortSignal: this.plannerAbortController?.signal,
     })
-    console.log('[AgentDiagnostics] Startup acknowledgement response received', {
-      elapsedMs: Date.now() - ackStartedAt,
-      creditPreflightMs: afterCreditAt - ackStartedAt,
-      finishReason: response.choices[0]?.finish_reason || null,
-      completionTokens: response.usage?.completion_tokens ?? null,
-      reasoningTokens: response.usage?.completion_tokens_details?.reasoning_tokens ?? null,
-    })
+    let rawAck = ''
+    let visibleAck = ''
+    let generationId = ''
+    let streamedUsage: RawCompletionUsage
+    let finishReason: string | null = null
+    let firstVisibleAtMs = 0
 
-    // A provider response is one acknowledgement candidate, not a sequence of
-    // independently displayable messages. Validate the complete candidate
-    // before exposing it so provider repetition/degeneration cannot leak seven
-    // greeting variants or a partial clause into the conversation.
-    const sanitizedAck = sanitizePlannerAck(response.choices[0]?.message?.content || '')
+    for await (const chunk of stream) {
+      if (typeof chunk.id === 'string' && chunk.id.trim()) generationId = chunk.id.trim()
+      if (chunk.usage) streamedUsage = chunk.usage
+      const chunkFinishReason = chunk.choices[0]?.finish_reason
+      if (typeof chunkFinishReason === 'string') finishReason = chunkFinishReason
+
+      const content = streamingPlannerAckContent(chunk.choices[0]?.delta)
+      if (!content) continue
+      if (rawAck.length < 4_096) rawAck = (rawAck + content).slice(0, 4_096)
+
+      const draft = sanitizePlannerAck(rawAck)
+      this.lastAcknowledgementCandidate = draft
+      if (
+        this.emitter.isClosed ||
+        this.suppressFurtherAcknowledgementDeltas ||
+        this.acknowledgementEmitted
+      ) continue
+
+      if (!this.acknowledgementStreamStarted) {
+        if (!isSafeStreamingPlannerAckDraft(draft, request)) continue
+        this.emitter.textDelta(draft)
+        visibleAck = draft
+        this.acknowledgementStreamStarted = true
+        firstVisibleAtMs = Date.now() - ackStartedAt
+        console.log('[AgentDiagnostics] Startup acknowledgement first text emitted', {
+          elapsedMs: firstVisibleAtMs,
+          chars: draft.length,
+        })
+        continue
+      }
+
+      if (
+        draft.length <= 320 &&
+        ackWordCount(draft) <= 48 &&
+        draft.startsWith(visibleAck) &&
+        draft.length > visibleAck.length
+      ) {
+        this.emitter.textDelta(draft.slice(visibleAck.length))
+        visibleAck = draft
+      }
+    }
+
+    const sanitizedAck = sanitizePlannerAck(rawAck)
     this.lastAcknowledgementCandidate = sanitizedAck
-    // This separate request exists only for precomputed plans. Debit its exact
-    // non-streaming usage before any acknowledgement or first-step work becomes
-    // visible. createCompletion also recovers missing inline usage by generation
-    // ID, which a cancelled streaming loser could not guarantee.
-    await this.recordCompletionUsage(response.usage, 'ack')
-    this.throwIfPlannerAborted()
+    const usableAck = isUsablePlannerAck(sanitizedAck, request)
+    const visiblePrefixMatches = !this.acknowledgementStreamStarted || sanitizedAck.startsWith(visibleAck)
 
+    // Finish the visible paragraph immediately when the provider is done. Its
+    // exact usage still gates plan emission and first-step work, not the user's
+    // ability to see model text that has already arrived.
     if (
-      isUsablePlannerAck(sanitizedAck, request) &&
+      usableAck &&
+      visiblePrefixMatches &&
       !this.emitter.isClosed &&
       !this.suppressFurtherAcknowledgementDeltas &&
       !this.acknowledgementEmitted
     ) {
-      this.emitter.textDelta(sanitizedAck + '\n\n')
+      if (!this.acknowledgementStreamStarted) {
+        this.emitter.textDelta(sanitizedAck)
+        this.acknowledgementStreamStarted = true
+        firstVisibleAtMs = Date.now() - ackStartedAt
+      } else if (sanitizedAck.length > visibleAck.length) {
+        this.emitter.textDelta(sanitizedAck.slice(visibleAck.length))
+      }
+      this.emitter.textDelta('\n\n')
+    }
+
+    if (!normalizeCompletionUsage(streamedUsage)) {
+      streamedUsage = await fetchGenerationUsage(generationId, this.plannerAbortController?.signal) || undefined
+    }
+    await this.recordCompletionUsage(streamedUsage, 'ack')
+    this.throwIfPlannerAborted()
+
+    console.log('[AgentDiagnostics] Startup acknowledgement response received', {
+      elapsedMs: Date.now() - ackStartedAt,
+      creditPreflightMs: afterCreditAt - ackStartedAt,
+      firstVisibleAtMs: this.acknowledgementStreamStarted ? firstVisibleAtMs : null,
+      finishReason,
+      completionTokens: streamedUsage?.completion_tokens ?? null,
+    })
+
+    if (
+      usableAck &&
+      visiblePrefixMatches &&
+      !this.emitter.isClosed &&
+      !this.suppressFurtherAcknowledgementDeltas &&
+      !this.acknowledgementEmitted
+    ) {
       this.acknowledgementEmitted = true
       console.log('[AgentDiagnostics] Startup acknowledgement complete', {
         elapsedMs: Date.now() - ackStartedAt,
@@ -1099,6 +1198,14 @@ Use plain, specific language. Example shape: "I'll inspect the current checkout 
     if (this.acknowledgementEmitted) {
       this.suppressFurtherAcknowledgementDeltas = true
       return true
+    }
+
+    // Once streamed acknowledgement text is visible it cannot be retracted.
+    // Never append a second planner acknowledgement after a provider stream
+    // failed or ended malformed; fail startup cleanly instead of duplicating it.
+    if (this.acknowledgementStreamStarted) {
+      this.suppressFurtherAcknowledgementDeltas = true
+      return false
     }
 
     const sanitized = typeof ack === 'string' ? sanitizePlannerAck(ack) : ''
@@ -1492,7 +1599,7 @@ Rules:
     // before exposing the plan so UI ordering remains acknowledgement -> plan.
     // If its wording was unusable, the planner's own acknowledgement remains a
     // valid model-authored fallback below.
-    if (this.acknowledgementPromise && !this.acknowledgementEmitted) {
+    if (this.acknowledgementPromise) {
       await this.acknowledgementPromise
       if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
     }
@@ -1662,7 +1769,7 @@ Rules:
         // opening finish so AgentLoop can retain it and recover into a minimal
         // task-specific execution plan instead of exposing a terminal planner
         // error after several paid retries.
-        if (this.acknowledgementPromise && !this.acknowledgementEmitted) {
+        if (this.acknowledgementPromise) {
           await this.acknowledgementPromise
           if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
         }
