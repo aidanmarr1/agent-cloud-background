@@ -23,6 +23,7 @@ import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversation
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
 import { defaultFileActionLabel } from '@/lib/stream/ActivityDescriber'
+import { compactToolDefinitionsForModel } from './ModelToolSchemas'
 
 import { sanitizeAgentEventEmitter, type AgentEventEmitter } from './SSEEmitter'
 import {
@@ -989,14 +990,6 @@ const MAX_PLANNING_ATTACHMENT_CHARS = 12_000
 const MAX_PRELOADED_ATTACHMENT_PANEL_CHARS = 5_000
 type AgentAttachment = NonNullable<AgentLoopOptions['messages'][number]['attachments']>[number]
 type ToolDefinitionLike = { function?: { name?: string } }
-type ModelToolDefinition = ToolDefinitionLike & {
-  function?: {
-    name?: string
-    parameters?: unknown
-    [key: string]: unknown
-  }
-  [key: string]: unknown
-}
 
 function cleanDraftContent(content: string): string {
   return content
@@ -2005,41 +1998,6 @@ function pruneExhaustedStepToolsForCurrentTurn(
     tools: filtered,
     exhausted: [...exhausted],
   }
-}
-
-function compactToolDefinitionsForModel(tools: ToolDefinitionLike[]): ToolDefinitionLike[] {
-  return tools.map((tool) => {
-    const modelTool = tool as ModelToolDefinition
-    const parameters = modelTool.function?.parameters
-    if (!parameters || typeof parameters !== 'object' || Array.isArray(parameters)) return tool
-    const schema = parameters as { properties?: Record<string, unknown>; [key: string]: unknown }
-    if (!schema.properties?.action_label && !schema.properties?.plan_step_index) return tool
-
-    const compactProperties = { ...schema.properties }
-    const actionLabelProperty = compactProperties.action_label
-    if (actionLabelProperty && typeof actionLabelProperty === 'object' && !Array.isArray(actionLabelProperty)) {
-      compactProperties.action_label = {
-        ...(actionLabelProperty as Record<string, unknown>),
-        description: 'Specific mini-objective: verb + named target + intended evidence/output; never only page, article, source, query, or details.',
-      }
-    }
-    const planStepProperty = compactProperties.plan_step_index
-    if (planStepProperty && typeof planStepProperty === 'object' && !Array.isArray(planStepProperty)) {
-      const { description: _description, ...rest } = planStepProperty as Record<string, unknown>
-      compactProperties.plan_step_index = rest
-    }
-
-    return {
-      ...modelTool,
-      function: {
-        ...modelTool.function,
-        parameters: {
-          ...schema,
-          properties: compactProperties,
-        },
-      },
-    } as ToolDefinitionLike
-  })
 }
 
 function shouldUseCompactResearchRecoveryTools(state: AgentStateData): boolean {

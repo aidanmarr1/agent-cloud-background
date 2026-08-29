@@ -41,6 +41,7 @@
     "cloud:worker-supervisor-smoke": "node scripts/task-worker-supervisor-smoke.mjs",
     "test:on-demand": "node scripts/on-demand-task-executor-smoke.mjs",
     "agent:orchestration-smoke": "node scripts/agent-orchestration-smoke.mjs",
+    "agent:schema-smoke": "node scripts/model-tool-schema-smoke.mjs",
     "agent:latest-regression-smoke": "node scripts/latest-agent-regression-smoke.mjs",
     "agent:website-credit-smoke": "node scripts/website-build-credit-fence-smoke.mjs",
     "agent:start-protocol-smoke": "node scripts/task-start-protocol-smoke.mjs",

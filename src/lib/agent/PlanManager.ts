@@ -65,9 +65,11 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Startup control turns use Muse's lowest supported reasoning mode. Keep the acknowledgement
-// short enough to paint promptly while leaving ample room for its 8-48 words.
-const PLANNER_ACK_MAX_TOKENS = 96
+// Muse reasoning is mandatory. Its minimal reasoning can consume roughly
+// 80-100 output tokens before the short visible sentence begins, so a 96-token
+// ceiling can return reasoning-only content. The model normally stops around
+// 120 total tokens; this ceiling provides room without asking it to write more.
+const PLANNER_ACK_MAX_TOKENS = 256
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 20_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
 const PLANNER_SIMPLE_JSON_MAX_TOKENS = 620
@@ -1001,7 +1003,7 @@ Requirements:
             : request,
         ),
       ],
-      temperature: 0.4,
+      temperature: 0.2,
       max_tokens: PLANNER_ACK_MAX_TOKENS,
       reasoning: PLANNER_ACK_REASONING,
       includeTemporalContext: false,
@@ -1012,6 +1014,9 @@ Requirements:
     console.log('[AgentDiagnostics] Startup acknowledgement response received', {
       elapsedMs: Date.now() - ackStartedAt,
       creditPreflightMs: afterCreditAt - ackStartedAt,
+      finishReason: response.choices[0]?.finish_reason || null,
+      completionTokens: response.usage?.completion_tokens ?? null,
+      reasoningTokens: response.usage?.completion_tokens_details?.reasoning_tokens ?? null,
     })
 
     // A provider response is one acknowledgement candidate, not a sequence of

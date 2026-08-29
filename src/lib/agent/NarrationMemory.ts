@@ -93,7 +93,10 @@ export function withCadenceProgressUpdateSchemas<T extends NativeToolSchema>(
           properties: {
             [CADENCE_PROGRESS_UPDATE_FIELD]: {
               type: 'string',
-              description: 'Required cadence field. Summarize the newest useful outcome from already-completed actions: a factual finding, meaningful comparison or implication, verified artifact/UI state, completed change, or real blocker. Lead with a fact-dense outcome and make it read as a natural continuation of the completed work, carrying forward only context needed to understand what changed. State uncertainty, disagreement, or an evidence gap when it materially affects the result. If work is continuing, an immediate useful direction may follow; omit it when the phase is ending, the direction is obvious, or none is concrete. Vary the syntax to fit the work: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural. Do not copy a fixed opening or transition. Action pills already show operations, but a source-action lead is valid when it immediately carries the concrete finding or important provenance; never make the operation itself the outcome. References to prior, previous, or earlier sources, sources reviewed so far, or research so far do not count as findings by themselves. Be neutral and evidence-led, avoid hype and unsupported judgement, and name a source when provenance, disagreement, or access failure matters. The current action has not returned and is not evidence; never invent its result. Do not repeat recent claims or expose providers, APIs, retries, quotas, rate limits, backend/runtime mechanics, raw tool failures, or tool accounting. This field is display-only and removed before execution.',
+              // Detailed narration rules are injected once in the turn prompt.
+              // Repeating them in every one of the 29 schemas inflated the
+              // request while adding no new model guidance.
+              description: 'Required neutral result from completed actions; never claim the pending action\'s result.',
               minLength: 1,
               maxLength: 360,
             },
