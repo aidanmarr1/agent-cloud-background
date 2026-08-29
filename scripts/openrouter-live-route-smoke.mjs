@@ -28,6 +28,7 @@ try {
   })
 
   const llm = await import(`${pathToFileURL(bundlePath).href}?t=${Date.now()}`)
+  const startedAt = Date.now()
   const response = await llm.createCompletion({
     model: 'ignored/stale-model',
     includeTemporalContext: false,
@@ -53,12 +54,13 @@ try {
     parallel_tool_calls: false,
     temperature: 0.3,
     max_tokens: 512,
-    reasoning: { effort: 'medium', exclude: true },
+    reasoning: { effort: 'minimal', exclude: true },
   })
+  const elapsedMs = Date.now() - startedAt
 
-  assert.match(String(response.model || ''), /^z-ai\/glm-5\.3-flash(?:-\d+)?$/)
-  assert.match(String(response.provider || ''), /^Z\.AI$/i, 'OpenRouter must use the exact Z.AI provider')
-  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'GLM 5.3 Flash must return the required native tool call')
+  assert.match(String(response.model || ''), /^meta\/muse-spark-1\.2-contributor(?:-\d+)?$/)
+  assert.match(String(response.provider || ''), /^Meta$/i, 'OpenRouter must use the exact Meta provider')
+  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Muse Spark 1.2 Contributor must return the required native tool call')
 
   const reasoningTokens = Number(response.usage?.completion_tokens_details?.reasoning_tokens || 0)
   assert.ok(reasoningTokens >= 0, 'reasoning usage must be a non-negative token count')
@@ -66,6 +68,7 @@ try {
   console.log(JSON.stringify({
     model: response.model,
     provider: response.provider,
+    elapsedMs,
     reasoningTokens,
     toolCall: response.choices[0].message.tool_calls[0]?.function?.name || 'route_probe',
   }))

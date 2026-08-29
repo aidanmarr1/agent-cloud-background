@@ -184,8 +184,8 @@ try {
   const progressUpdate = String(narration?.progress_update || '').trim()
   const nextActionLabel = String(narration?.action_label || '').trim()
 
-  assert.match(String(result.planner?.model || ''), /^google\/gemini-3\.7-flash(?:-\d+)?$/)
-  assert.match(String(result.planner?.provider || ''), /^Google$/i)
+  assert.match(String(result.planner?.model || ''), /^meta\/muse-spark-1\.2-contributor(?:-\d+)?$/)
+  assert.match(String(result.planner?.provider || ''), /^Meta$/i)
   assert.match(ack, /^(?:I(?:'|’)?ll|I will)\b/, 'planner acknowledgement must begin with a first-person commitment')
   assert.ok(planTitles.length >= 2, 'non-trivial research should expose more than one meaningful visible module')
   assert.doesNotMatch(firstTitle, /^(?:Clarify|Define|Scope|Map|Frame)\b/i, 'first plan phase must begin actual task work')

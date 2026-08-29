@@ -1,14 +1,14 @@
-// The assistant is pinned to GLM 5.3 Flash through OpenRouter's exact Z.AI
-// endpoint. Provider routing is fenced separately at the request
+// The assistant is pinned to Muse Spark 1.2 Contributor through OpenRouter's
+// exact Meta endpoint. Provider routing is fenced separately at the request
 // boundary.
-export const DEFAULT_OPENROUTER_MODEL = 'z-ai/glm-5.3-flash'
+export const DEFAULT_OPENROUTER_MODEL = 'meta/muse-spark-1.2-contributor'
 
 export const OPENROUTER_MODEL_PRICING = {
   model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.075,
-  cacheHitInputUsdPer1M: 0.015,
-  outputUsdPer1M: 0.25,
-  internalReasoningUsdPer1M: 0.25,
+  inputUsdPer1M: 0.1,
+  cacheHitInputUsdPer1M: 0.002,
+  outputUsdPer1M: 0.2,
+  internalReasoningUsdPer1M: 0.2,
   contextPriceTiers: [] as Array<{
     minPromptTokens: number
     inputUsdPer1M: number
@@ -16,12 +16,12 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.075,
-  longContextCacheHitInputUsdPer1M: 0.015,
-  longContextOutputUsdPer1M: 0.25,
+  longContextInputUsdPer1M: 0.1,
+  longContextCacheHitInputUsdPer1M: 0.002,
+  longContextOutputUsdPer1M: 0.2,
   contextTokens: 1_048_576,
-  maxCompletionTokens: 131_072,
-  source: 'OpenRouter (Z.AI GLM 5.3 Flash)',
+  maxCompletionTokens: 943_718,
+  source: 'OpenRouter (Meta Muse Spark 1.2 Contributor)',
 } as const
 
 export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING

@@ -19,12 +19,11 @@ function trimmedEnv(value: string | undefined): string | undefined {
 export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
-export const ASSISTANT_SUPPORTS_FILE_INPUT = false
-export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
+export const ASSISTANT_SUPPORTS_FILE_INPUT = true
+export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
 export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
-export const PINNED_OPENROUTER_PROVIDER = 'z-ai/fp8' as const
-export const ASSISTANT_REASONING_EFFORT = 'medium' as const
-export const ASSISTANT_FAST_REASONING_EFFORT = 'minimal' as const
+export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
+export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -528,22 +527,20 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 }
 
 function providerReasoningPayload(
-  reasoning: ChatCompletionParams['reasoning'],
+  _reasoning: ChatCompletionParams['reasoning'],
   _maxOutputTokens: number | undefined,
   _toolChoice: unknown,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Actual agent work stays on medium. The latency-sensitive acknowledgement
-  // and planner may explicitly opt into GLM's minimal effort; every other
-  // caller value (including stale `none` or `xhigh` settings) is clamped back
-  // to medium. The exact Z.AI endpoint rejects disabled reasoning entirely.
-  const effort = reasoning?.effort === ASSISTANT_FAST_REASONING_EFFORT
-    ? ASSISTANT_FAST_REASONING_EFFORT
-    : ASSISTANT_REASONING_EFFORT
+  // Muse requires reasoning and exposes minimal as its lowest supported
+  // effort. Clamp every request lane to that exact setting so acknowledgements,
+  // planning, tool selection, narration, and synthesis all avoid unnecessary
+  // hidden-token latency without shrinking task or output budgets.
+  void _reasoning
   void _maxOutputTokens
   void _toolChoice
   return {
     reasoning: {
-      effort,
+      effort: ASSISTANT_REASONING_EFFORT,
       exclude: true,
     },
   }
@@ -593,8 +590,9 @@ function withPinnedModel(
     stream,
     usage: { include: true },
     provider: exactOpenRouterProviderRoute(),
-    // The exact Z.AI endpoint accepts automatic tool choice. Keep every healthy
-    // tool available and let GLM choose autonomously with `auto`.
+    // Meta's live Muse endpoint currently accepts only automatic tool choice,
+    // despite broader values appearing in route metadata. Keep every healthy
+    // tool available and use the one request form the endpoint accepts.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
     // The exact endpoint does not advertise OpenAI's parallel_tool_calls request
     // parameter. AgentLoop still controls whether it exposes one tool or a safe

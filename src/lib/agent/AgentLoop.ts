@@ -287,7 +287,7 @@ const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 320
 const INITIAL_STANDALONE_WEBSITE_ITERATION_TIMEOUT_MS = 180_000
 const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
-// Routed models may spend part of this allowance on hidden reasoning before
+// Muse may spend part of this allowance on mandatory minimal reasoning before
 // emitting a native tool call. A 260-token ceiling repeatedly cut otherwise
 // tiny search JSON at the stream boundary, making the runtime pay for a full
 // repair turn. Keep this far below synthesis budgets while leaving enough room
@@ -305,10 +305,10 @@ const FAST_ACTION_MAX_TOKENS = 1_024
 // while retaining a firm latency/cost boundary.
 const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const PRESENTATION_REASONING = { effort: 'medium' as const, exclude: true }
-const FAST_ACTION_REASONING = { effort: 'medium' as const, exclude: true }
-const TASK_REASONING = { effort: 'medium' as const, exclude: true }
-const DEEP_TASK_REASONING = { effort: 'medium' as const, exclude: true }
+const PRESENTATION_REASONING = { effort: 'minimal' as const, exclude: true }
+const FAST_ACTION_REASONING = { effort: 'minimal' as const, exclude: true }
+const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const DEEP_TASK_REASONING = { effort: 'minimal' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
