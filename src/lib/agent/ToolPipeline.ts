@@ -92,7 +92,7 @@ import {
   isNextWebsiteProjectPath,
 } from '@/lib/tsxWebsitePreview'
 import { analyzeScreenshotQuality } from '@/lib/visualQuality'
-import { defaultFileActionLabel, formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { visibleNarrationActionHeadroom } from './NarrationMemory'
 import { isNonIdempotentToolCall, type InflightToolDrain, type InflightToolDrainResult } from './toolSafety'
 import { redactTerminalOutputSecrets, sanitizeToolResultForEvent, sanitizeToolStartArgs } from './toolEventSanitizer'
@@ -699,14 +699,6 @@ function actionLabelBlockReason(args: Record<string, unknown>, state: AgentState
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (strictActionLabelFromArgs(args)) return null
   return 'INTERNAL_RECOVERY: this tool call was skipped because action_label must be visible action pill text. Retry the same intended tool only if it still belongs to the active step. Write a fresh, usually 3-24 word purpose label from the task context. Start with a capital letter and do not end with a period. Name the concrete subject plus the evidence, artifact, state, or verification sought; do not use generic wording such as Open article or Find details on page. No first person, tool names, raw URL, raw JSON, or past-tense summary.'
-}
-
-function repairFileActionLabel(toolName: string, args: Record<string, unknown>): boolean {
-  if (toolName !== 'create_file' && toolName !== 'append_file' && toolName !== 'edit_file') return false
-  const path = typeof args.path === 'string' ? args.path.trim() : ''
-  if (!path || strictActionLabelFromArgs(args)) return false
-  args.action_label = defaultFileActionLabel(toolName, path)
-  return true
 }
 
 function narrationCadenceBlockReason(
@@ -3726,16 +3718,7 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
-    const repairedFileActionLabel = repairFileActionLabel(tc.name, args)
-    if (repairedFileActionLabel) {
-      tc.arguments = JSON.stringify(args)
-      console.log('[ToolPipeline] Repaired missing file action label', {
-        tool: tc.name,
-        path: args.path,
-        step: state.currentStepIdx + 1,
-      })
-    }
-    const actionLabelReason = repairedFileActionLabel ? null : actionLabelBlockReason(args, state)
+    const actionLabelReason = actionLabelBlockReason(args, state)
     if (actionLabelReason) {
       state.displayContractRepairAttempts = (state.displayContractRepairAttempts || 0) + 1
       const rawLabel = typeof args.action_label === 'string' ? args.action_label.replace(/\s+/g, ' ').trim() : ''

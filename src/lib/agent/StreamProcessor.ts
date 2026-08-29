@@ -3,7 +3,7 @@ import type { AgentStateData } from './AgentState'
 import type { TierTimeouts } from './guards'
 import { stripThinkingTags, stripStepMarkers, stripPlanMarkers, stripSpecialTokens, stripTextModeToolCallBlocks, stripInternalPolicyScaffolding, checkForLeakage, unescapeJsonChunk } from './guards'
 import { IterationTimeoutError, InactivityTimeoutError, ContentOnlyTimeoutError } from './errors'
-import { defaultFileActionLabel, formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
+import { formatVisibleActionLabel, strictActionLabelFromArgs } from '@/lib/stream/ActivityDescriber'
 import { NARRATION_MAX_VISIBLE_ACTION_GAP, NARRATION_THRESHOLD_DEFAULT } from './config'
 import { sanitizeToolStartArgs } from './toolEventSanitizer'
 import {
@@ -87,6 +87,7 @@ export interface StreamToolCallPolicy {
   textSavedDeliverable?: {
     id: string
     path: string
+    actionLabel: string
     started?: boolean
   }
 }
@@ -400,18 +401,6 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       }
   }
 
-  // Providers sometimes place action_label after a large file body (or omit
-  // it on a recovery turn). The path is enough to open a truthful live action
-  // and preview immediately; execution applies the same fallback contract.
-  if (
-    (toolName === 'create_file' || toolName === 'create_website' || toolName === 'append_file' || toolName === 'edit_file') &&
-    typeof args.path === 'string' &&
-    args.path.length > 0 &&
-    !strictActionLabelFromArgs(args)
-  ) {
-    args.action_label = defaultFileActionLabel(toolName, args.path)
-  }
-
   return sanitizeToolStartArgs(toolName, args)
 }
 
@@ -425,8 +414,10 @@ function searchWouldBePreflightBlocked(toolName: string, args: Record<string, un
 }
 
 function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, unknown>, state: AgentStateData): boolean {
-  const isFileWrite = toolName === 'create_file' || toolName === 'create_website' || toolName === 'append_file' || toolName === 'edit_file'
-  if (!strictActionLabelFromArgs(args) && !isFileWrite) return false
+  // Every visible action title comes from the model-authored action_label.
+  // A known file path is useful preview metadata, but must never be promoted
+  // into a generic path-derived title while the real label is still streaming.
+  if (!strictActionLabelFromArgs(args)) return false
 
   if (toolName === 'web_search' || toolName === 'image_search') {
     if (searchWouldBePreflightBlocked(toolName, args, state)) return false
@@ -795,7 +786,7 @@ export class StreamProcessor {
             'create_file',
             {
               path: textSavedDeliverable.path,
-              action_label: defaultFileActionLabel('create_file', textSavedDeliverable.path),
+              action_label: textSavedDeliverable.actionLabel,
               plan_step_index: state.currentStepIdx + 1,
             },
             { provisional: true },

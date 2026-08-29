@@ -22,7 +22,6 @@ import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/l
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { subscribeToBrowserFrames } from '@/lib/browser'
-import { defaultFileActionLabel } from '@/lib/stream/ActivityDescriber'
 import { compactToolDefinitionsForModel } from './ModelToolSchemas'
 
 import { sanitizeAgentEventEmitter, type AgentEventEmitter } from './SSEEmitter'
@@ -3591,7 +3590,7 @@ export class AgentLoop {
       target.started = true
       this.emitter.toolStart(id, 'create_file', {
         path,
-        action_label: defaultFileActionLabel('create_file', path),
+        action_label: target.actionLabel,
         plan_step_index: state.currentStepIdx + 1,
       }, { provisional: true })
       this.emitter.fileContentStart(id, path, 'create_file')

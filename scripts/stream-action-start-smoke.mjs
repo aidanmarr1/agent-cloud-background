@@ -59,6 +59,11 @@ async function* missingDisplayFileChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'The opening section is already visible while the report body continues streaming.\\"}' } }] } }] }
 }
 
+async function* lateLabelWebsiteChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_website_late_label', function: { name: 'create_website', arguments: '{\\"output_path\\":\\"index.html\\",\\"html\\":\\"<!doctype html><main>Warm' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ' earthy cafe</main>\\",\\"css\\":\\"body { color: #33251d; }\\",\\"javascript\\":\\"\\",\\"action_label\\":\\"Build warm earthy cafe landing experience\\",\\"plan_step_index\\":1}' } }] } }] }
+}
+
 async function* bufferedFinalReportChunks(gate: Promise<void>) {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_final_report', function: { name: 'create_file', arguments: '{\\"action_label\\":\\"Write final research report\\",\\"plan_step_index\\":2,\\"path\\":\\"deliverables/final-report.md\\",\\"content\\":\\"# Final report\\\\n\\\\nThe evidence from three independent sources now supports the opening conclusion and makes this preview visibly live.\\\\n' } }] } }] }
   await gate
@@ -302,9 +307,36 @@ export async function runSmoke() {
   const missingDisplayResult = await new StreamProcessor(missingDisplayEmitter as any, timeouts)
     .processStream(missingDisplayFileChunks() as any, missingDisplayState)
   assert.equal(missingDisplayResult.toolCalls.size, 1)
-  const missingDisplayStart = missingDisplayEmitter.events.find(e => e.type === 'tool_start')
-  assert.equal((missingDisplayStart?.args as any)?.action_label, 'Create report.md', 'file starts should get a concise path-derived label when the provider omits display metadata')
-  assert.ok(missingDisplayEmitter.events.findIndex(e => e.type === 'tool_start') < missingDisplayEmitter.events.findIndex(e => e.type === 'file_content_delta'), 'a missing-label file action must still appear before content is written')
+  assert.equal(
+    missingDisplayEmitter.events.filter(e => e.type === 'tool_start').length,
+    0,
+    'a file call without model-authored display metadata must stay hidden for model repair',
+  )
+  assert.equal(
+    missingDisplayEmitter.events.filter(e => e.type === 'file_content_delta').length,
+    0,
+    'file preview content must not appear under a runtime-invented title',
+  )
+
+  const websiteEmitter = makeEmitter()
+  const websiteState = createInitialState(true, timeouts)
+  websiteState.currentPlanItems = ['Build the cafe website']
+  websiteState.currentStepIdx = 0
+  const websiteResult = await new StreamProcessor(websiteEmitter as any, timeouts)
+    .processStream(lateLabelWebsiteChunks() as any, websiteState)
+  assert.equal(websiteResult.toolCalls.size, 1)
+  const websiteStarts = websiteEmitter.events.filter(e => e.type === 'tool_start')
+  assert.equal(websiteStarts.length, 1, 'the website action must appear once its model-authored title is available')
+  assert.equal(
+    (websiteStarts[0].args as any).action_label,
+    'Build warm earthy cafe landing experience',
+    'the visible website action must use the model-authored contextual title',
+  )
+  assert.doesNotMatch(
+    String((websiteStarts[0].args as any).action_label),
+    /index\.html/i,
+    'the output path must never become the visible website action title',
+  )
 
   let releaseFinalReport: () => void = () => {}
   const finalReportGate = new Promise<void>(resolve => {
@@ -419,9 +451,10 @@ export async function runSmoke() {
   const recoveredTextState = createInitialState(true, timeouts)
   recoveredTextState.currentPlanItems = ['Gather evidence', 'Write concise note']
   recoveredTextState.currentStepIdx = 1
-  const recoveredTextTarget: { id: string; path: string; started?: boolean } = {
+  const recoveredTextTarget: { id: string; path: string; actionLabel: string; started?: boolean } = {
     id: 'autosave_recovered_text',
     path: 'deliverables/live-recovery.md',
+    actionLabel: 'Write concise evidence note',
   }
   const recoveredTextProcessor = new StreamProcessor(recoveredTextEmitter as any, timeouts)
   recoveredTextProcessor.beginBufferedEmission()
