@@ -75,6 +75,12 @@ function panelItem(conversationId: string, eventId: string): ComputerPanelItem |
   return assistant?.computerPanelData?.find(item => item.id === eventId)
 }
 
+function taskSubtask(conversationId: string, eventId: string) {
+  const conversation = useChatStore.getState().conversations.find(item => item.id === conversationId)
+  const assistant = [...(conversation?.messages || [])].reverse().find(message => message.role === 'assistant')
+  return assistant?.taskGroups?.flatMap(group => group.subtasks || []).find(subtask => subtask.id === eventId)
+}
+
 {
   const conversationId = 'discarded-preview'
   const dispatcher = reset(conversationId)
@@ -105,6 +111,48 @@ function panelItem(conversationId: string, eventId: string): ComputerPanelItem |
 
   assert.equal(useUIStore.getState().webIdeStreamingFile, null, 'discarded previews must clear LIVE editor state')
   assert.equal(panelItem(conversationId, 'create-1'), undefined, 'discarded previews must not leave a ghost file panel')
+  assert.equal(taskSubtask(conversationId, 'create-1'), undefined, 'internal file repair calls must disappear instead of rendering as failed actions')
+}
+
+{
+  const conversationId = 'recoverable-source-availability'
+  const dispatcher = reset(conversationId)
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'read-1',
+    name: 'read_document',
+    args: {
+      url: 'https://example.com/restricted-source',
+      action_label: 'Extract access terms from the restricted primary source',
+      plan_step_index: 1,
+    },
+    provisional: true,
+  })
+  dispatcher.flushPendingUpdates()
+  assert.equal(taskSubtask(conversationId, 'read-1')?.status, 'running', 'the source action must be visible before its result settles')
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'read-1',
+    name: 'read_document',
+    result: {
+      type: 'text',
+      title: 'Source extraction unavailable',
+      content: 'INTERNAL_RECOVERY: source extraction unavailable (HTTP 403 Forbidden).',
+      source: 'https://example.com/restricted-source',
+      wordCount: 7,
+      error: 'INTERNAL_RECOVERY: direct text extraction did not return readable evidence for this URL.',
+      status: 403,
+      statusText: 'Forbidden',
+      recoverable: true,
+      unavailable: true,
+    },
+  })
+  dispatcher.flushPendingUpdates()
+
+  const subtask = taskSubtask(conversationId, 'read-1')
+  assert.equal(subtask?.status, 'done', 'third-party access refusal must settle neutrally instead of turning the action red')
+  assert.equal(subtask?.errorMessage, undefined)
+  assert.equal(panelItem(conversationId, 'read-1')?.streaming, false, 'the unavailable source panel must settle instead of remaining a skeleton')
 }
 
 {

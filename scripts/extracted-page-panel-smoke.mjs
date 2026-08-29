@@ -85,6 +85,24 @@ assert.match(
 
 assert.match(
   documentReader,
+  /PUBLIC_READER_BASE_URL[\s\S]*readThroughPublicReader[\s\S]*parsePublicReaderDocument/,
+  'blocked direct page reads must get one reader-assisted extraction attempt inside the same read_document action',
+)
+
+assert.match(
+  documentReader,
+  /recoverable:\s*true[\s\S]*unavailable:\s*true/,
+  'an ultimately inaccessible source must be identified as a recoverable availability outcome',
+)
+
+assert.match(
+  documentReader,
+  /publicReaderEligibleSource[\s\S]*access\[_-\]\?token[\s\S]*if \(!publicReaderEligibleSource\(source\)\) return null/,
+  'signed or credential-bearing URLs must never be relayed through the public reader route',
+)
+
+assert.match(
+  documentReader,
   /source:\s*resolvedSource/,
   'read_document results must keep the resolved source URL for Computer panel display',
 )
@@ -129,6 +147,18 @@ assert.match(
   dispatcher,
   /previousBrowse\?\.url && !nextBrowse\.url/,
   'final cheap-extraction results must preserve the live placeholder URL when needed',
+)
+
+assert.match(
+  dispatcher,
+  /isRecoverableSourceAvailabilityResult[\s\S]*status:\s*'done'[\s\S]*errorMessage:\s*undefined[\s\S]*preserveVisibleSourceRecoveryPanel/,
+  'an inaccessible third-party page must settle as a neutral completed source attempt instead of a red failed action',
+)
+
+assert.match(
+  dispatcher,
+  /recoverableSourceAvailability[\s\S]*settleHiddenComputerPanelItem\(event\)[\s\S]*removeHiddenTool\(event\.id\)/,
+  'non-source internal repair calls must disappear from the visible task list instead of turning red',
 )
 
 assert.match(

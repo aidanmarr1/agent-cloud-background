@@ -17,12 +17,18 @@ export interface DocumentResult {
   status?: number
   statusText?: string
   recoveryHint?: string
+  recoverable?: boolean
+  unavailable?: boolean
 }
 
 const MAX_CONTENT_CHARS = MAX_READABLE_PAGE_CHARS
 const MAX_FILE_BYTES = 50 * 1024 * 1024 // 50MB
 const MAX_REDIRECTS = 5
 const URL_FETCH_TIMEOUT_MS = 10_000
+const READER_FETCH_TIMEOUT_MS = 12_000
+const READER_MAX_BYTES = 4 * 1024 * 1024
+const PUBLIC_READER_BASE_URL = (process.env.WEB_READER_BASE_URL || 'https://r.jina.ai').replace(/\/+$/, '')
+const DIRECT_PAGE_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0 Safari/537.36'
 
 function detectType(pathOrUrl: string, contentType?: string): 'pdf' | 'docx' | 'text' {
   if (contentType) {
@@ -71,6 +77,96 @@ function extractionBlockedResult(input: {
     status: input.status,
     statusText: input.statusText,
     recoveryHint,
+    recoverable: true,
+    unavailable: true,
+  }
+}
+
+function readerFallbackEligibleStatus(status: number): boolean {
+  return status === 401 || status === 403 || status === 408 || status === 429 || status >= 500
+}
+
+function publicReaderEligibleSource(source: string): boolean {
+  try {
+    const parsed = validateHttpUrl(source)
+    if (parsed.username || parsed.password) return false
+    for (const key of parsed.searchParams.keys()) {
+      if (/^(?:access[_-]?token|api[_-]?key|auth|authorization|code|credential|jwt|key|password|secret|signature|sig|token|x-amz-)/i.test(key)) {
+        return false
+      }
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readerUrlForSource(source: string): string {
+  return `${PUBLIC_READER_BASE_URL}/${source}`
+}
+
+/**
+ * Convert the reader endpoint's LLM-friendly response into the same ordinary
+ * document result returned by direct extraction. Exported for a fixture-level
+ * regression test; callers should normally use readDocument().
+ */
+export function parsePublicReaderDocument(
+  raw: string,
+  source: string,
+  fallbackTitle: string,
+): DocumentResult | null {
+  const normalized = raw.replace(/\r\n?/g, '\n').trim()
+  if (!normalized || /^(?:AbuseAlleviationError|SecurityCompromiseError|RateLimitError|Too Many Requests)\b/i.test(normalized)) {
+    return null
+  }
+
+  const readerTitle = normalized.match(/^Title:\s*(.+)$/im)?.[1]?.trim() || fallbackTitle
+  const contentMarker = normalized.match(/(?:^|\n)Markdown Content:\s*\n/i)
+  const contentStart = contentMarker?.index === undefined
+    ? 0
+    : contentMarker.index + contentMarker[0].length
+  const content = truncateContent(normalized.slice(contentStart).trim())
+  const words = wordCount(content)
+  if (words < 8) return null
+
+  return {
+    type: 'text',
+    title: readerTitle || fallbackTitle,
+    content,
+    wordCount: words,
+    source,
+  }
+}
+
+async function readThroughPublicReader(
+  source: string,
+  fallbackTitle: string,
+  signal?: AbortSignal,
+): Promise<DocumentResult | null> {
+  if (!publicReaderEligibleSource(source)) return null
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), READER_FETCH_TIMEOUT_MS)
+  const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
+
+  try {
+    const readerUrl = validateHttpUrl(readerUrlForSource(source))
+    await checkHost(readerUrl.hostname)
+    const response = await guardedFetch(readerUrl, {
+      signal: requestSignal,
+      headers: {
+        Accept: 'text/plain, text/markdown;q=0.9, */*;q=0.1',
+        'User-Agent': DIRECT_PAGE_USER_AGENT,
+        'X-Return-Format': 'markdown',
+      },
+      redirect: 'manual',
+      maxBytes: READER_MAX_BYTES,
+    })
+    if (!response.ok) return null
+    return parsePublicReaderDocument(await response.text(), source, fallbackTitle)
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -117,7 +213,10 @@ export async function readDocument(source: string, conversationId?: string, sign
         for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
           res = await guardedFetch(currentUrl, {
             signal: requestSignal,
-            headers: { 'User-Agent': 'Mozilla/5.0' },
+            headers: {
+              'User-Agent': DIRECT_PAGE_USER_AGENT,
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf;q=0.8,*/*;q=0.7',
+            },
             redirect: 'manual',
             maxBytes: MAX_FILE_BYTES,
           })
@@ -135,6 +234,8 @@ export async function readDocument(source: string, conversationId?: string, sign
         resolvedSource = currentUrl
         if (!res) {
           clearTimeout(timeout)
+          const readerResult = await readThroughPublicReader(source, title, signal)
+          if (readerResult) return readerResult
           return extractionBlockedResult({ source, title, error: 'no response' })
         }
         if (!res.ok) {
@@ -142,6 +243,10 @@ export async function readDocument(source: string, conversationId?: string, sign
           contentType = res.headers.get('content-type') || ''
           const failedDocType = detectType(resolvedSource, contentType)
           clearTimeout(timeout)
+          if (readerFallbackEligibleStatus(res.status)) {
+            const readerResult = await readThroughPublicReader(resolvedSource, title, signal)
+            if (readerResult) return readerResult
+          }
           return extractionBlockedResult({
             source: resolvedSource,
             title: 'Source extraction unavailable',
@@ -177,6 +282,8 @@ export async function readDocument(source: string, conversationId?: string, sign
         buffer = Buffer.from(arrayBuf)
       } catch (err) {
         clearTimeout(timeout)
+        const readerResult = await readThroughPublicReader(source, title, signal)
+        if (readerResult) return readerResult
         return extractionBlockedResult({ source, title, error: (err as Error).message })
       }
     } else {
@@ -236,6 +343,8 @@ export async function readDocument(source: string, conversationId?: string, sign
     const words = wordCount(content)
 
     if (isUrl(resolvedSource) && docType === 'text' && words < 8) {
+      const readerResult = await readThroughPublicReader(resolvedSource, title, signal)
+      if (readerResult) return readerResult
       return extractionBlockedResult({
         source: resolvedSource,
         title: 'Source extraction unavailable',

@@ -798,8 +798,8 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /function shouldPreserveVisibleInternalToolResult/, 'visible recovery results must be eligible to finish existing action pills')
   assert.match(
     eventDispatcher,
-    /visibleStartedRecovery[\s\S]*isHiddenInternalToolResult\(event\.name,\s*event\.result\) && visibleStartedRecovery[\s\S]*status: 'error'[\s\S]*errorMessage[\s\S]*settleHiddenComputerPanelItem\(event\)[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/,
-    'internal recovery results must truthfully fail already-visible action pills while settling their computer-panel state',
+    /visibleStartedRecovery[\s\S]*isRecoverableSourceAvailabilityResult[\s\S]*status: 'done'[\s\S]*errorMessage: undefined[\s\S]*removeHiddenTool\(event\.id\)[\s\S]*return[\s\S]*if \(isHiddenInternalToolResult\(event\.name,\s*event\.result\)\)/,
+    'expected source availability outcomes must settle neutrally while internal repair calls are removed instead of rendered red',
   )
   assert.match(eventDispatcher, /labelSource:\s*'model'/, 'visible task pills must retain model authorship')
   assert.doesNotMatch(eventDispatcher, /describeActivity\(event\.name,\s*event\.args\)/, 'visible task pills must not use locally generated action text')
@@ -1378,6 +1378,8 @@ async function assertSourceContracts() {
   assert.match(agentState, /canTripCircuitBreaker = !CIRCUIT_BREAKER_EXEMPT_TOOLS\.has\(toolName\)[\s\S]*if \(canTripCircuitBreaker && health\.consecutiveFailures >= CIRCUIT_BREAKER_FAILURE_THRESHOLD/, 'circuit breaker must ignore exempt per-source extraction tools')
   assert.match(documentReader, /INTERNAL_RECOVERY: direct text extraction did not return readable evidence for this URL/, 'blocked direct extraction must be returned as an internal recovery result')
   assert.match(documentReader, /Source extraction unavailable/, 'blocked direct extraction must use a neutral internal source title')
+  assert.match(documentReader, /readThroughPublicReader[\s\S]*parsePublicReaderDocument/, 'blocked direct extraction must attempt the full-page reader route before becoming unavailable')
+  assert.match(documentReader, /recoverable:\s*true[\s\S]*unavailable:\s*true/, 'an inaccessible source must remain a recoverable source outcome rather than a fatal tool failure')
   assert.match(documentReader, /URL_FETCH_TIMEOUT_MS = 10_000/, 'normal webpage extraction must have enough time to return readable text')
   assert.doesNotMatch(documentReader, /browsePage\(resolvedSource\)/, 'direct extraction failure must return structured evidence to the model instead of forcing a hidden browser route')
   assert.doesNotMatch(documentReader, /Direct text extraction was blocked for this URL\. Use browser_navigate\/browser_get_content/, 'blocked extraction must not carry the old user-facing recovery instruction')

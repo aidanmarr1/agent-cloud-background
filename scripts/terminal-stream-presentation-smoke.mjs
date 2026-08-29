@@ -137,8 +137,14 @@ function message(contentLength: number, finalGroupStatus: TaskGroup['status']): 
   const dispatcher = new EventDispatcher('task', actions, noop, initial)
   dispatcher.dispatch({ type: 'done' })
   dispatcher.flushPendingUpdates()
-  assert.ok(latestGroups.every((group) => group.status === 'done'), 'done event must close every plan group')
-  assert.ok(latestSteps?.every((step) => step.status === 'done'), 'done event must close every legacy step')
+  assert.ok(
+    latestGroups.slice(0, -1).every((group) => group.status === 'done') && latestGroups.at(-1)?.status === 'incomplete',
+    'done event must preserve completed plan groups and truthfully close unfinished work as incomplete',
+  )
+  assert.ok(
+    latestSteps?.slice(0, -1).every((step) => step.status === 'done') && latestSteps?.at(-1)?.status === 'incomplete',
+    'done event must preserve completed legacy steps and truthfully close unfinished work as incomplete',
+  )
 }
 
 function storeBackedActions(): StoreActions {

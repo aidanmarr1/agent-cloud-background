@@ -222,6 +222,22 @@ function shouldPreserveVisibleInternalToolResult(name: string): boolean {
   return true
 }
 
+function isRecoverableSourceAvailabilityResult(name: string, result: unknown): boolean {
+  if (name !== 'read_document' && name !== 'http_request') return false
+  if (!result || typeof result !== 'object') return false
+  const record = result as {
+    recoverable?: unknown
+    unavailable?: unknown
+    error?: unknown
+    content?: unknown
+    body?: unknown
+  }
+  if (record.recoverable === true || record.unavailable === true) return true
+  return [record.error, record.content, record.body].some(value =>
+    typeof value === 'string' && /^\s*INTERNAL_RECOVERY:\s*(?:source extraction unavailable|direct text extraction did not return|(?:read_document|http_request) timed out)/i.test(value),
+  )
+}
+
 function panelFocusIdForTool(name: string, id: string): string {
   if (BROWSER_TOOLS.includes(name)) return 'browser_live'
   if (name === 'execute_command' || name === 'run_code') return id + '_live'
@@ -1132,18 +1148,29 @@ export class EventDispatcher {
       safeSubtasks(this.parsedGroups[this.currentGroupIdx]).some((subtask) => subtask.id === event.id)
 
     if (isHiddenInternalToolResult(event.name, event.result) && visibleStartedRecovery) {
+      const recoverableSourceAvailability = isRecoverableSourceAvailabilityResult(event.name, event.result)
       const group = this.parsedGroups[this.currentGroupIdx]
-      const errorMessage = toolResultFailureMessage(event.result) || 'The action was rejected before execution.'
-      const updatedSubtasks = safeSubtasks(group).map((subtask) =>
-        subtask.id === event.id
-          ? { ...subtask, status: 'error' as const, errorMessage, completedAt: Date.now() }
-          : subtask
-      )
-      this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
-      this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+      if (recoverableSourceAvailability) {
+        const updatedSubtasks = safeSubtasks(group).map((subtask) =>
+          subtask.id === event.id
+            ? {
+                ...subtask,
+                status: 'done' as const,
+                errorMessage: undefined,
+                result: event.result as Subtask['result'],
+                completedAt: Date.now(),
+              }
+            : subtask
+        )
+        this.parsedGroups[this.currentGroupIdx] = { ...group, subtasks: updatedSubtasks }
+        this.actions.setTaskGroups(this.conversationId, [...this.parsedGroups])
+      }
       this.settleWebIdeTool(event)
-      if (!this.preserveVisibleSourceRecoveryPanel(event)) {
+      if (recoverableSourceAvailability) {
+        this.preserveVisibleSourceRecoveryPanel(event)
+      } else {
         this.settleHiddenComputerPanelItem(event)
+        this.removeHiddenTool(event.id)
       }
       this.toolStartsById.delete(event.id)
       this.setThinkingIfNoVisibleActionRunning()

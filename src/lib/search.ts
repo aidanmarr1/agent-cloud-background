@@ -4,7 +4,12 @@ import { normalizeSearchQuery } from './searchQuery'
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
 const WEB_SEARCH_RESULT_COUNT = 15
-const WEB_SEARCH_REQUEST_TIMEOUT_MS = 2_500
+// Serper is usually fast, but a 2.5s client deadline caused otherwise healthy
+// first searches to be abandoned during brief provider/network jitter. Keep one
+// paid request per accepted web_search while giving that request enough time to
+// finish; retrying would cost another search credit and is intentionally not
+// done here.
+const WEB_SEARCH_REQUEST_TIMEOUT_MS = 8_000
 
 interface SerperOrganicResult {
   title?: string
