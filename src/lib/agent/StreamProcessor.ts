@@ -317,8 +317,17 @@ function buildEarlyToolArgs(toolName: string, rawArgs: string): Record<string, u
       break
     case 'create_website':
       addString('output_path')
-      args.path = typeof args.output_path === 'string' && args.output_path ? args.output_path : 'index.html'
       addStringMetrics(args, rawArgs, 'html')
+      // A streamed action_label only describes intent; it is not evidence that
+      // website content has started arriving. Do not invent index.html early,
+      // because that made clipped label-only calls flash as live file writes.
+      // Once real HTML is present, the preview path can truthfully mirror the
+      // runtime's optional output_path default.
+      if (typeof args.output_path === 'string' && args.output_path) {
+        args.path = args.output_path
+      } else if (typeof args.htmlCharCount === 'number' && args.htmlCharCount > 0) {
+        args.path = 'index.html'
+      }
       break
     case 'list_files':
       addString('directory')
@@ -429,7 +438,8 @@ function shouldEmitProvisionalToolStart(toolName: string, args: Record<string, u
   }
 
   if (toolName === 'create_website') {
-    return typeof args.path === 'string' && args.path.length > 0
+    return typeof args.path === 'string' && args.path.length > 0 &&
+      typeof args.htmlCharCount === 'number' && args.htmlCharCount > 0
   }
 
   if (toolName === 'edit_file') {
@@ -484,6 +494,8 @@ function provisionalToolStartSignature(toolCall: ToolCallData, args: Record<stri
   delete stableArgs.new_stringLineCount
   delete stableArgs.codeCharCount
   delete stableArgs.codeLineCount
+  delete stableArgs.htmlCharCount
+  delete stableArgs.htmlLineCount
   return `${toolCall.id}:${toolCall.name}:${JSON.stringify(stableArgs)}`
 }
 

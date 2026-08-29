@@ -53,6 +53,7 @@ assert.match(toolPipeline, /toolName\.startsWith\('browser_'\) \|\| toolName ===
 assert.match(toolPipeline, /read_document[\s\S]*http_request[\s\S]*DOCUMENT_TOOL_TIMEOUT_MS/, 'document-like tools must use the document timeout')
 assert.match(toolPipeline, /function documentTimeoutRecoveryResult[\s\S]*INTERNAL_RECOVERY:[\s\S]*timed out while extracting/, 'document extraction timeouts must become internal recovery results instead of visible tool failures')
 assert.match(toolPipeline, /function searchExecutionRecoveryResult[\s\S]*INTERNAL_RECOVERY:[\s\S]*search provider call failed or timed out/, 'search provider failures must become internal recovery results instead of visible search-unavailable panels')
+assert.match(toolPipeline, /function searchExecutionRecoveryResult[\s\S]*executionAttempted:\s*true[\s\S]*preserveVisibleAttempt:\s*true/, 'accepted search-provider attempts must remain visible as settled unavailable actions')
 
 assert.match(agentLoop, /requestTimeoutMs,/, 'agent loop must pass the computed streaming request timeout into the LLM client')
 assert.match(agentLoop, /const FAST_SOURCE_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'source action turns must tolerate routed provider startup without stacked retries')
@@ -79,6 +80,10 @@ assert.match(toolPipeline, /Selecting a source batch is the decision boundary[\s
 assert.match(agentLoop, /workingMemory\?\.render\(\{ stepIdx: state\.currentStepIdx, maxFacts: 10, maxChars: 1000 \}\)/, 'compact research turns must keep memory payload lean')
 assert.match(agentLoop, /researchActivity\.entries[\s\S]*?\.slice\(-5\)/, 'compact research turns must not replay too many recent source records')
 assert.match(streamProcessor, /toolName === 'web_search' \|\| toolName === 'image_search'[\s\S]*typeof args\.query === 'string'/, 'search action pills must show from safe provisional tool-call args instead of waiting for the whole tool stream')
+assert.match(streamProcessor, /case 'create_website':[\s\S]*htmlCharCount[\s\S]*if \(toolName === 'create_website'\)[\s\S]*args\.htmlCharCount/, 'website actions must wait for real streamed HTML instead of showing from a label-only envelope')
+assert.doesNotMatch(streamProcessor, /case 'create_website':\s*[\s\S]{0,180}args\.path\s*=\s*typeof args\.output_path[^\n]+:\s*'index\.html'/, 'website preview paths must not be invented before real HTML begins streaming')
+assert.match(agentLoop, /const isLastStep =[\s\S]*if \(\s*isLastStep &&\s*successfulStandaloneWebsiteCreate/, 'successful non-final website builds must advance instead of entering final handoff mode early')
+assert.match(agentLoop, /malformedWebsiteCall[\s\S]*existingStandaloneWebsitePath[\s\S]*Ignored malformed website rebuild after a durable site already existed and advanced the plan/, 'a clipped website retry must preserve an already-saved site and leave the completed build phase')
 assert.match(streamProcessor, /PARALLEL_STREAM_SOURCE_EXTRACTION_TOOLS[\s\S]*read_document[\s\S]*http_request/, 'streamed parallel calls must be restricted to the same source-only tool family as execution')
 assert.doesNotMatch(streamProcessor, /youtube_transcript/, 'removed YouTube tooling must not remain eligible for streamed execution')
 assert.match(streamProcessor, /maxStreamedToolCalls[\s\S]*sourceOnlyBatch[\s\S]*toolCalls\.clear\(\)[\s\S]*primaryToolCall/, 'mixed or unsafe streamed batches must keep only their first call')

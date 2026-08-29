@@ -156,6 +156,45 @@ function taskSubtask(conversationId: string, eventId: string) {
 }
 
 {
+  const conversationId = 'accepted-image-search-unavailable'
+  const dispatcher = reset(conversationId)
+  dispatcher.dispatch({
+    type: 'tool_start',
+    id: 'image-search-1',
+    name: 'image_search',
+    args: {
+      query: 'commercial-use macaw photography',
+      action_label: 'Find commercial-use macaw photography',
+      plan_step_index: 1,
+    },
+    provisional: true,
+  })
+  dispatcher.flushPendingUpdates()
+  assert.equal(taskSubtask(conversationId, 'image-search-1')?.status, 'running')
+  dispatcher.dispatch({
+    type: 'tool_result',
+    id: 'image-search-1',
+    name: 'image_search',
+    result: {
+      query: 'commercial-use macaw photography',
+      results: [],
+      error: 'INTERNAL_RECOVERY: image_search did not return results because the search provider call timed out.',
+      recoverable: true,
+      unavailable: true,
+      executionAttempted: true,
+      preserveVisibleAttempt: true,
+    },
+  })
+  dispatcher.flushPendingUpdates()
+
+  const subtask = taskSubtask(conversationId, 'image-search-1')
+  assert.equal(subtask?.status, 'done', 'an accepted provider attempt must settle neutrally instead of disappearing or turning red')
+  assert.equal(subtask?.errorMessage, undefined)
+  assert.equal(panelItem(conversationId, 'image-search-1')?.title, 'Image search unavailable')
+  assert.equal(panelItem(conversationId, 'image-search-1')?.streaming, false)
+}
+
+{
   const conversationId = 'superseded-preview'
   const dispatcher = reset(conversationId)
   dispatcher.dispatch({

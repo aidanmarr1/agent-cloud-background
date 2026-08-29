@@ -274,6 +274,13 @@ function searchExecutionRecoveryResult(toolName: string, args: Record<string, un
     error: recoveryHint,
     recoveryHint,
     providerError: errMsg,
+    // This call passed preflight and reached the provider. The client should
+    // settle the visible attempt as unavailable, not retract it like a
+    // malformed/preflight-only action or paint it as a user-facing failure.
+    recoverable: true,
+    unavailable: true,
+    executionAttempted: true,
+    preserveVisibleAttempt: true,
   }
 }
 

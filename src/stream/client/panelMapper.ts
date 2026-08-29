@@ -132,6 +132,10 @@ function transformPanelData(
   result: unknown,
   conversationId: string,
 ): SearchResult[] | BrowseResult | TerminalResult | FileResult | ImageSearchPanelItem[] | BrowserResult {
+  if (name === 'web_search' && !Array.isArray(result)) {
+    return [] as SearchResult[]
+  }
+
   if (name === 'image_search') {
     const imgResult = asRecord(result)
     const rawImages = imgResult?.images

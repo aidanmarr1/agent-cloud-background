@@ -223,15 +223,22 @@ function shouldPreserveVisibleInternalToolResult(name: string): boolean {
 }
 
 function isRecoverableSourceAvailabilityResult(name: string, result: unknown): boolean {
-  if (name !== 'read_document' && name !== 'http_request') return false
+  if (name !== 'read_document' && name !== 'http_request' && name !== 'web_search' && name !== 'image_search') return false
   if (!result || typeof result !== 'object') return false
   const record = result as {
     recoverable?: unknown
     unavailable?: unknown
+    executionAttempted?: unknown
+    preserveVisibleAttempt?: unknown
     error?: unknown
     content?: unknown
     body?: unknown
   }
+  if (
+    (name === 'web_search' || name === 'image_search') &&
+    record.executionAttempted !== true &&
+    record.preserveVisibleAttempt !== true
+  ) return false
   if (record.recoverable === true || record.unavailable === true) return true
   return [record.error, record.content, record.body].some(value =>
     typeof value === 'string' && /^\s*INTERNAL_RECOVERY:\s*(?:source extraction unavailable|direct text extraction did not return|(?:read_document|http_request) timed out)/i.test(value),
@@ -553,7 +560,12 @@ export class EventDispatcher {
   private preserveVisibleSourceRecoveryPanel(
     event: { id: string; name: string; result: unknown },
   ): boolean {
-    if (event.name !== 'read_document' && event.name !== 'http_request') return false
+    if (
+      event.name !== 'read_document' &&
+      event.name !== 'http_request' &&
+      event.name !== 'web_search' &&
+      event.name !== 'image_search'
+    ) return false
 
     const panelId = panelFocusIdForTool(event.name, event.id)
     const existingItems = useChatStore.getState().conversations
@@ -577,6 +589,8 @@ export class EventDispatcher {
         }
       }
     }
+    if (event.name === 'web_search') panelItem = { ...panelItem, title: 'Search unavailable' }
+    if (event.name === 'image_search') panelItem = { ...panelItem, title: 'Image search unavailable' }
 
     // A visible source action must leave a truthful visible result. Removing
     // the blocked extraction placeholder made the panel jump backwards to an

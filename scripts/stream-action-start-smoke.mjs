@@ -64,6 +64,10 @@ async function* lateLabelWebsiteChunks() {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: ' earthy cafe</main>\\",\\"css\\":\\"body { color: #33251d; }\\",\\"javascript\\":\\"\\",\\"action_label\\":\\"Build warm earthy cafe landing experience\\",\\"plan_step_index\\":1}' } }] } }] }
 }
 
+async function* labelOnlyClippedWebsiteChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_website_label_only', function: { name: 'create_website', arguments: '{\\"action_label\\":\\"Build complete Feather and Flight bird shop website\\"' } }] } }] }
+}
+
 async function* bufferedFinalReportChunks(gate: Promise<void>) {
   yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_final_report', function: { name: 'create_file', arguments: '{\\"action_label\\":\\"Write final research report\\",\\"plan_step_index\\":2,\\"path\\":\\"deliverables/final-report.md\\",\\"content\\":\\"# Final report\\\\n\\\\nThe evidence from three independent sources now supports the opening conclusion and makes this preview visibly live.\\\\n' } }] } }] }
   await gate
@@ -336,6 +340,24 @@ export async function runSmoke() {
     String((websiteStarts[0].args as any).action_label),
     /index\.html/i,
     'the output path must never become the visible website action title',
+  )
+
+  const clippedWebsiteEmitter = makeEmitter()
+  const clippedWebsiteState = createInitialState(true, timeouts)
+  clippedWebsiteState.currentPlanItems = ['Build the bird shop website']
+  clippedWebsiteState.currentStepIdx = 0
+  const clippedWebsiteResult = await new StreamProcessor(clippedWebsiteEmitter as any, timeouts)
+    .processStream(labelOnlyClippedWebsiteChunks() as any, clippedWebsiteState)
+  assert.equal(clippedWebsiteResult.toolCalls.size, 1, 'the malformed call must remain available to backend recovery')
+  assert.equal(
+    clippedWebsiteEmitter.events.filter(e => e.type === 'tool_start').length,
+    0,
+    'a label-only website envelope must not masquerade as an executing HTML write',
+  )
+  assert.equal(
+    clippedWebsiteEmitter.events.filter(e => e.type === 'file_content_start' || e.type === 'file_content_delta').length,
+    0,
+    'a label-only website envelope must not open or stream a phantom index.html preview',
   )
 
   let releaseFinalReport: () => void = () => {}

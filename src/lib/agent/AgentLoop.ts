@@ -5580,6 +5580,66 @@ export class AgentLoop {
                 contextManager.push(assistantHistoryMessageForStreamResult(lastStreamResult))
               }
 
+              const malformedWebsiteCall = malformedToolResults.some(
+                result => result.tc.name === 'create_website',
+              )
+              const existingStandaloneWebsitePath = malformedWebsiteCall
+                ? [...state.createdFiles].find(path => (
+                    /(?:^|\/)index\.html$/i.test(path) &&
+                    !/(?:^|\/)website-src\/index\.html$/i.test(path)
+                  )) || null
+                : null
+              if (malformedWebsiteCall && existingStandaloneWebsitePath) {
+                // A clipped follow-up create_website envelope cannot invalidate
+                // the site that was already accepted and durably saved. The old
+                // loop kept asking for a full rebuild, while each label-only
+                // retry was hidden by the client. Continue from the real
+                // artifact instead.
+                state.toolJsonRecoveryCount = 0
+                state.consecutiveNoToolCalls = 0
+                state.consecutiveNullStreams = 0
+                state.forceTextNextIteration = false
+                state.recentToolCalls = []
+                state.recentToolSequence = []
+                const planLength = state.currentPlanItems?.length || 0
+                if (planLength > 0 && state.currentStepIdx < planLength - 1) {
+                  const stepBeforeAdvance = state.currentStepIdx
+                  const advanceMsg = planManager.handleStepAdvance(state)
+                  if (state.currentStepIdx > stepBeforeAdvance) {
+                    contextManager.compactForStepTransition(state)
+                    if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+                    if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+                    this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                  }
+                  log.warn('Ignored malformed website rebuild after a durable site already existed and advanced the plan', {
+                    path: existingStandaloneWebsitePath,
+                    step: stepBeforeAdvance,
+                    nextStep: state.currentStepIdx,
+                  })
+                } else if (!standaloneWebsiteRequiresPostBuildAction(state.originalUserRequest || '')) {
+                  state.deliverableVerificationDone = true
+                  state.pendingDeliverableRevision = null
+                  state.standaloneWebsiteHandoffReady = true
+                  continueFinalPhaseAfterVerifiedArtifact(
+                    state,
+                    existingStandaloneWebsitePath,
+                    contextManager,
+                  )
+                  log.warn('Ignored malformed final website rebuild after a durable site already existed', {
+                    path: existingStandaloneWebsitePath,
+                    step: state.currentStepIdx,
+                  })
+                } else {
+                  contextManager.push({
+                    role: 'system',
+                    content: `EXISTING WEBSITE PRESERVED: "${existingStandaloneWebsitePath}" already exists from a successful create_website action. Do not recreate it. Continue with the model-authored post-build action using the most suitable available tool, or advance when that action is already satisfied.`,
+                  } as ChatMessageParam)
+                }
+                state.lastIterationEnd = Date.now()
+                phase = 'STREAMING'
+                break
+              }
+
               state.toolJsonRecoveryCount += 1
               if (currentPaidTurnProgress) {
                 currentPaidTurnProgress.internalRecoveryScheduled = 'malformed_tool_arguments'
@@ -5871,10 +5931,17 @@ export class AgentLoop {
             // Update session health summary for context injection
             state.sessionHealthSummary = errorRecovery.getSessionHealthSummary()
 
+            // Check deliverable position before deciding how a successful
+            // website write should affect the plan. A complete website saved
+            // during an implementation phase must advance to the next
+            // model-authored phase; final handoff behavior belongs only to the
+            // actual last step.
+            const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
             const successfulStandaloneWebsiteCreate = lastToolResults.find(result => (
               result.tc.name === 'create_website' && !result.isError
             ))
             if (
+              isLastStep &&
               successfulStandaloneWebsiteCreate &&
               shouldDefaultFrontendToStandaloneHtml(state.originalUserRequest || '') &&
               !standaloneWebsiteRequiresPostBuildAction(state.originalUserRequest || '') &&
@@ -5899,7 +5966,6 @@ export class AgentLoop {
             }
 
             // Check deliverable on last step
-            const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
             const successfulFinalWrites = lastToolResults.filter(isSuccessfulFinalDeliverableWrite)
             const deliverableCreated = successfulFinalWrites.some(result => (
               isSuccessfulContractDeliverableWrite(result, state)
