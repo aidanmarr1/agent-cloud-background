@@ -167,6 +167,8 @@ assert.match(taskJobs, /dedicated worker became unreachable[\s\S]*late external 
 assert.match(taskJobs, /status = 'idle'[\s\S]*current_run_id is null[\s\S]*orchestration_protocol_version = \?/, 'only a fresh protocol-compatible idle worker heartbeat may claim a queued task')
 assert.doesNotMatch(taskJobs, /process\.exit\(/, 'in-process task cancellation must never terminate the shared web process')
 assert.match(taskWorker, /void sendHeartbeat\('stopping'\)[\s\S]*Cancellation deadline exceeded; terminating process to stop late side effects[\s\S]*process\.exit\(1\)/, 'the dedicated worker must publish cancellation observation before its process hard-stop backstop')
+assert.match(taskWorker, /onCancellationExecutionSettled: disarmCancellationHardExit/, 'the cancellation hard-stop must be disarmed once execution is settled so ordinary sandbox cleanup cannot masquerade as worker loss')
+assert.match(taskJobs, /initialDrain\.settled[\s\S]*onCancellationExecutionSettled\?\.\(\)/, 'the cancellation execution-settled proof must be driven by the tracked in-flight tool drain')
 assert.match(taskWorker, /AGENT_TASK_WORKER_STALE_MS must exceed heartbeat \+ cancellation hard-exit \+ jitter/, 'worker startup must reject cancellation proof windows that can expire before its hard stop')
 assert.match(taskWorkerSupervisor, /spawn\(process\.execPath, \[workerEntry, \.\.\.workerArgs\]/, 'the supervisor must run the fenced worker in a replaceable child process')
 assert.match(taskWorkerSupervisor, /Worker exited unexpectedly; restarting/, 'the supervisor must replace a worker after a deliberate hard exit')

@@ -465,8 +465,9 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
         process.exit(1)
       }, hardTaskExitMs)
       let cancellationHardExitTimer: ReturnType<typeof setTimeout> | null = null
+      let cancellationExecutionSettled = false
       const armCancellationHardExit = () => {
-        if (cancellationHardExitTimer) return
+        if (cancellationHardExitTimer || cancellationExecutionSettled) return
         // Publish observation before arming the dedicated-process kill. Remote
         // finalizers treat this exact boot/run heartbeat as live until it goes
         // stale, so a DB terminal can never race ahead of the worker hard stop.
@@ -480,6 +481,17 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
           })
           process.exit(1)
         }, cancelHardExitMs)
+      }
+      const disarmCancellationHardExit = () => {
+        cancellationExecutionSettled = true
+        if (!cancellationHardExitTimer) return
+        clearTimeout(cancellationHardExitTimer)
+        cancellationHardExitTimer = null
+        console.log('[TaskWorker] Cancellation execution settled; continuing fenced cleanup', {
+          runId: claim.runId,
+          conversationId: claim.conversationId,
+          attempts: claim.attempts,
+        })
       }
 
       let taskResult: Awaited<ReturnType<typeof runClaimedTaskJob>>
@@ -532,6 +544,7 @@ export async function runTaskWorker(options: TaskWorkerOptions = {}): Promise<vo
         }, {
           shutdownSignal: shutdownController.signal,
           onCancellationObserved: armCancellationHardExit,
+          onCancellationExecutionSettled: disarmCancellationHardExit,
         })
       } finally {
         clearTimeout(hardExitTimer)

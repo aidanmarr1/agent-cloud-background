@@ -5172,7 +5172,11 @@ export async function runClaimedTaskJob(
       requestInfrastructureRetry: (reason: string) => boolean
     },
   ) => Promise<void>,
-  options: { shutdownSignal?: AbortSignal; onCancellationObserved?: () => void } = {},
+  options: {
+    shutdownSignal?: AbortSignal
+    onCancellationObserved?: () => void
+    onCancellationExecutionSettled?: () => void
+  } = {},
 ): Promise<'completed' | 'requeued' | 'retryable_failure' | 'lease_lost' | 'unsafe_handoff'> {
   const startedAt = claim.startedAt || nowMs()
   const job: TaskJob = {
@@ -5246,6 +5250,9 @@ export async function runClaimedTaskJob(
     if (!ownedBeforeCleanup) throw new TaskJobClaimLostError(claim.runId)
 
     const initialDrain = await drainInflightTools(TASK_JOB_INFLIGHT_DRAIN_TIMEOUT_MS)
+    if (job.cancelRequested && initialDrain.settled) {
+      options.onCancellationExecutionSettled?.()
+    }
     const runCleanups = async () => {
       if (
         (job.cancelRequested || job.requeueReason === 'infrastructure_failure') &&
@@ -5266,6 +5273,7 @@ export async function runClaimedTaskJob(
       if (!finalDrain.settled) {
         throw new Error(`Task execution fence could not settle ${finalDrain.pendingCount} in-flight operation(s): ${finalDrain.pendingToolNames.join(', ')}`)
       }
+      if (job.cancelRequested) options.onCancellationExecutionSettled?.()
       await runCleanups()
     }
 
@@ -5366,7 +5374,12 @@ export async function runClaimedTaskJob(
       cancelTimer = null
       if (cancelPollingStopped) return
       void taskJobControlState(claim.runId, claim.workerId, claim.attempts).then((controlState) => {
-        if (controlState === 'cancelled' && !job.requeueRequested && !job.terminalCommitted) {
+        if (
+          controlState === 'cancelled' &&
+          !job.cancelRequested &&
+          !job.requeueRequested &&
+          !job.terminalCommitted
+        ) {
           job.cancelRequested = true
           job.abortController.abort()
           options.onCancellationObserved?.()

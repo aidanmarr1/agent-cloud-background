@@ -283,9 +283,19 @@ assert.match(
   'claimed-task cancellation observation must arm the worker hard-exit callback',
 )
 assert.match(
+  worker,
+  /const disarmCancellationHardExit[\s\S]*Cancellation execution settled; continuing fenced cleanup[\s\S]*onCancellationExecutionSettled: disarmCancellationHardExit/,
+  'settled task execution must disarm the short side-effect watchdog while fenced sandbox cleanup completes',
+)
+assert.match(
   taskJobs,
-  /controlState === 'cancelled'[\s\S]*job\.abortController\.abort\(\)[\s\S]*options\.onCancellationObserved\?\.\(\)/,
-  'worker cancellation polling must arm the process-level escalation when it observes the durable stop',
+  /controlState === 'cancelled'[\s\S]*!job\.cancelRequested[\s\S]*job\.abortController\.abort\(\)[\s\S]*options\.onCancellationObserved\?\.\(\)/,
+  'worker cancellation polling must arm the process-level escalation exactly once when it observes the durable stop',
+)
+assert.match(
+  taskJobs,
+  /initialDrain\.settled[\s\S]*onCancellationExecutionSettled\?\.\(\)[\s\S]*finalDrain[\s\S]*onCancellationExecutionSettled\?\.\(\)/,
+  'the worker must acknowledge settled side-effect execution before potentially slow terminal cleanup',
 )
 assert.doesNotMatch(
   taskJobs,

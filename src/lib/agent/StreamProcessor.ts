@@ -653,9 +653,9 @@ export class StreamProcessor {
     let cadenceProgressToolCallId: string | null = null
     let cadenceProgressViolation: CadenceProgressViolation | null = null
     const rejectedCadenceProgressToolCalls = new Set<number>()
-    // Once three visible actions exist, the next action is a hard cadence
-    // boundary. Its model-authored update is released before that action so
-    // result -> next direction -> action remains temporally truthful.
+    // Once three visible actions exist, the next action is the preferred
+    // cadence boundary. A valid model-authored update is released before that
+    // action, but narration is display-only and must never block useful work.
     const hardCadenceBoundary = cadenceProgressUpdateEnabled &&
       state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
 
@@ -685,22 +685,15 @@ export class StreamProcessor {
     ): boolean => {
       if (!cadenceProgressUpdateEnabled) return true
       if (cadenceProgressUpdate) return true
-      if (rejectedCadenceProgressToolCalls.has(index)) return false
+      if (rejectedCadenceProgressToolCalls.has(index)) return allowMissing
 
       const rawUpdate = extractCadenceProgressUpdate(toolCall.arguments)
       if (rawUpdate === undefined) {
-        // Keep holding the action while the required field is still streaming.
-        // At the active cadence boundary, reject a missing display contract
-        // before execution so the model can repair the same action envelope.
+        // Keep holding the provisional action while the optional display field
+        // may still be streaming. Once the tool envelope is complete, fail
+        // open: the model's concrete action is more important than narration.
         if (allowMissing) {
           rejectedCadenceProgressToolCalls.add(index)
-          if (hardCadenceBoundary) {
-            markCadenceProgressViolation(
-              'missing_progress_update',
-              'the next-action cadence boundary requires a non-empty progress_update on the native tool call',
-            )
-            return false
-          }
           return true
         }
         return false
@@ -708,17 +701,9 @@ export class StreamProcessor {
       const review = reviewProgressNarration(state, rawUpdate, { requireSignal: false })
       if (review.status !== 'accepted') {
         rejectedCadenceProgressToolCalls.add(index)
-        if (hardCadenceBoundary) {
-          markCadenceProgressViolation(
-            review.status === 'duplicate' ? 'duplicate_progress_update' : 'invalid_progress_update',
-            review.status === 'duplicate'
-              ? 'the next-action cadence boundary requires a genuinely new progress_update'
-              : 'the next-action cadence boundary requires a valid completed-work progress_update',
-          )
-          return false
-        }
-        // Non-boundary callers may still fail open, though normal cadence is
-        // armed only once the hard frontier has been reached.
+        // Invalid or duplicate narration stays invisible. The native tool call
+        // remains executable, and cadence gets another natural opportunity on
+        // a later action instead of paying for a repair loop.
         return allowMissing
       }
 
@@ -1350,8 +1335,8 @@ export class StreamProcessor {
     }
 
     // Stage valid narration for release immediately before the buffered next
-    // action. At the cadence boundary, reject an invalid turn before execution
-    // so another silent action cannot slip past.
+    // action. Missing/invalid narration stays invisible but cannot suppress the
+    // model-selected action.
     for (const [index, toolCall] of toolCalls) {
       const cadenceReady = prepareCadenceProgressUpdate(index, toolCall, true)
       if (!hardCadenceBoundary || cadenceReady) emitProvisionalToolStart(index, toolCall)
@@ -1381,8 +1366,8 @@ export class StreamProcessor {
     for (const toolCall of toolCalls.values()) {
       toolCall.arguments = stripCadenceProgressUpdateFromArguments(toolCall.arguments)
     }
-    // At the hard boundary an invalid display contract rejects the unexecuted
-    // action and asks the model to repair the same action envelope.
+    // Text-only cadence turns can still be repaired. Native tool calls always
+    // fail open because the cadence lane is display-only.
     if (cadenceProgressViolation && (toolCalls.size === 0 || hardCadenceBoundary)) toolCalls.clear()
 
     // Preserve all generated output in a missing-provider-usage estimate even
