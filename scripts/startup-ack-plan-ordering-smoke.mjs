@@ -277,6 +277,81 @@ export async function run() {
   assert.ok(recoveryEvents.slice(0, -1).every(event => event.type === 'text'))
   streamingResponder = defaultStreamingResponder
 
+  // Regression: a native image task must not terminate merely because both
+  // planner drafts fail the JSON/quality contract. If no usable model-authored
+  // acknowledgement exists, recover with an internal task-specific plan and
+  // allow the substantive multimodal agent turn to continue without leaking a
+  // plan-only startup UI.
+  const imageRecoveryEvents: VisibleEvent[] = []
+  const imageRequest = 'Research all about this bird.'
+  const imageDataUrl = 'data:image/jpeg;base64,ZmFrZS1iaXJkLWltYWdl'
+  const imageNativeMessages = [{
+    role: 'user',
+    content: [
+      { type: 'text', text: imageRequest },
+      { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } },
+    ],
+  }]
+  const imageRecoveryManager = new PlanManager(
+    emitterFor(imageRecoveryEvents) as any,
+    [{ role: 'user', content: imageRequest }],
+    2,
+    [],
+    undefined,
+    undefined,
+    undefined,
+    false,
+    undefined,
+    imageNativeMessages as any,
+  )
+  const imageRecoveryState = state()
+  let imagePlannerParams: any = null
+  providerCallCount = 0
+  completionResponder = async () => ({
+    id: 'gen-invalid-image-plan-repair',
+    choices: [{ message: { content: '{}' } }],
+    usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
+  })
+  streamingResponder = async (params: any) => {
+    imagePlannerParams = params
+    return {
+      async *[Symbol.asyncIterator]() {
+        yield {
+          id: 'gen-invalid-image-plan',
+          choices: [{ delta: { content: '{}' } }],
+        }
+        yield {
+          id: 'gen-invalid-image-plan',
+          choices: [{ delta: {}, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
+        }
+      },
+    }
+  }
+  ;(imageRecoveryManager as any).setStateRef(imageRecoveryState)
+  imageRecoveryManager.startPlanCall()
+  await assert.rejects(imageRecoveryManager.awaitPlan(imageRecoveryState), /usable task-specific plan after repair/)
+  assert.equal(imageRecoveryManager.recoverFromPlannerFailure(imageRecoveryState), true)
+  assert.equal(
+    providerCallCount,
+    3,
+    'image recovery must stay bounded to fast planning, strict fallback and one repair',
+  )
+  assert.deepEqual(imageRecoveryEvents, [], 'recovery without an acknowledgement must remain internal')
+  assert.equal(imageRecoveryState.planEmitted, true)
+  assert.ok(Array.isArray(imageRecoveryState.planItems) && imageRecoveryState.planItems.length === 1)
+  assert.ok(
+    imagePlannerParams.messages.at(-1).content.some((part: any) =>
+      part?.type === 'image_url' && part.image_url?.url === imageDataUrl
+    ),
+    'the planner request must preserve the native uploaded image',
+  )
+  assert.ok(
+    imageRecoveryManager.getStepInjection(imageRecoveryState, imageRecoveryState.dynamicIterationLimit),
+    'the recovered internal plan must release substantive agent execution',
+  )
+  streamingResponder = defaultStreamingResponder
+
   // The one acknowledgement request used with a precomputed plan should paint
   // before its exact usage debit settles, while first-step work remains fenced.
   const usageFencedEvents: VisibleEvent[] = []

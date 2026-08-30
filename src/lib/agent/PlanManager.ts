@@ -926,14 +926,6 @@ export class PlanManager {
   recoverFromPlannerFailure(state: AgentStateData): boolean {
     if (state.planEmitted || this.emitter.isClosed) return state.planEmitted
 
-    // Never recover into a visible plan with a canned opening. Recovery may
-    // retain a model acknowledgement that was already emitted before the
-    // planner failed, but otherwise the caller must surface the startup error.
-    if (!this.skipAcknowledgement && !this.acknowledgementEmitted) {
-      this.suppressFurtherAcknowledgementDeltas = true
-      return false
-    }
-
     const target = conciseTopicLabel(requestedTargetLabel(this.messages))
     const recoveryTitle = `Complete ${target}`
     const recoveryScope = [
@@ -942,14 +934,22 @@ export class PlanManager {
     ].join(' ')
     this.suppressFurtherAcknowledgementDeltas = true
 
+    // A planner-format failure must never prevent the substantive model turn
+    // from receiving the original request or its native multimodal content.
+    // Keep the recovery plan internal when every model-authored acknowledgement
+    // candidate was unusable: this preserves the acknowledgement-before-plan UI
+    // contract without turning a control-plane formatting miss into a task error.
+    const emitVisiblePlan = this.skipAcknowledgement || this.acknowledgementEmitted
+
     const recovered = this.usePrecomputedPlan(
       state,
       { items: [recoveryTitle], scopes: [recoveryScope] },
-      { emitPlan: true },
+      { emitPlan: emitVisiblePlan },
     )
     if (recovered) {
       console.warn('[AgentDiagnostics] Recovered from planner failure with a minimal task-specific execution plan', {
         target,
+        visible: emitVisiblePlan,
       })
     }
     return recovered
