@@ -1263,6 +1263,28 @@ function shouldCompleteFinalInlineAnswerTurn(
   return explicitlyRequestsShortLiteralAnswer || finalAssistantResponseEndsCleanly(text)
 }
 
+function shouldWithholdPreFinalInlineDraft(
+  state: AgentStateData,
+  messages: Array<{ role: string; content: string }>,
+  content: string,
+  toolCallCount: number,
+): boolean {
+  if (toolCallCount > 0 || state.buildTask) return false
+  if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length - 1) return false
+  if (!isBriefInlineDirectAnswerTask(state, messages)) return false
+  if (
+    state.taskStrategy === 'research' ||
+    state.taskStrategy === 'analysis' ||
+    state.taskStrategy === 'browse' ||
+    state.taskStrategy === 'build' ||
+    state.taskStrategy === 'code'
+  ) return false
+
+  const text = content.trim()
+  return text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS &&
+    finalAssistantResponseEndsCleanly(text)
+}
+
 function finalAssistantResponseEndsCleanly(content: string): boolean {
   const text = content.trim()
   if (!text) return false
@@ -5010,6 +5032,12 @@ export class AgentLoop {
             const rejectedInitialWebsiteCreateEmission =
               isInitialStandaloneWebsiteCreateTurn(state) &&
               !hasCompleteInitialStandaloneWebsiteCreateCall(lastStreamResult)
+            const withheldPreFinalInlineDraft = shouldWithholdPreFinalInlineDraft(
+              state,
+              this.options.messages,
+              lastStreamResult.assistantContent,
+              lastStreamResult.toolCalls.size,
+            )
             const rejectedModelEmission =
               truncatedFinalResponse ||
               rejectedCompactNarrationEmission ||
@@ -5084,7 +5112,16 @@ export class AgentLoop {
                   // buffered action. Never retain it for a post-result path.
                   lastStreamResult.cadenceProgressUpdate = undefined
                 }
-                streamProcessor.commitBufferedEmission()
+                if (withheldPreFinalInlineDraft) {
+                  // A direct-in-chat task may use an early plan phase to draft
+                  // the entire response before the final delivery phase. Keep
+                  // that useful draft in model context, but do not append it
+                  // to the conversation and then replay the same deliverable
+                  // during verification and final delivery.
+                  streamProcessor.discardBufferedEmission()
+                } else {
+                  streamProcessor.commitBufferedEmission()
+                }
               }
               console.log(
                 nonBillableInternalTurn
@@ -5095,7 +5132,9 @@ export class AgentLoop {
                       ? '[AgentDiagnostics] Held back a text-only website build drift'
                       : rejectedUnsavedFinalDeliverableDraft
                         ? '[AgentDiagnostics] Held back an unsaved final-deliverable draft'
-                        : '[AgentDiagnostics] Released billed model-turn emissions',
+                        : withheldPreFinalInlineDraft
+                          ? '[AgentDiagnostics] Held back a pre-final inline deliverable draft'
+                          : '[AgentDiagnostics] Released billed model-turn emissions',
                 {
                   iteration: state.iterations,
                   usageDebitMs: Date.now() - usageDebitStartedAt,
@@ -5109,6 +5148,7 @@ export class AgentLoop {
                   rejectedBuildTextOnlyEmission,
                   rejectedUnsavedFinalDeliverableDraft,
                   rejectedInitialWebsiteCreateEmission,
+                  withheldPreFinalInlineDraft,
                   userDebitSkipped: nonBillableInternalTurn,
                 },
               )
@@ -5117,6 +5157,7 @@ export class AgentLoop {
                 stepIdxBefore: modelTurnStartStepIdx,
                 visibleText: !lastStreamResult.cadenceProgressViolation &&
                   !rejectedModelEmission &&
+                  !withheldPreFinalInlineDraft &&
                   lastStreamResult.assistantContent.trim().length > 0,
                 acceptedToolCall: false,
                 ...(nonBillableInternalTurn

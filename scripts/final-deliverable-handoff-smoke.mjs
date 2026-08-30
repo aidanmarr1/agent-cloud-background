@@ -128,5 +128,15 @@ assert.match(
   /allowLongAssistantText:[\s\S]*isFinalDeliveryStep\(state\)[\s\S]*isFinalDeliverableHandoffTurn[\s\S]*useTextFinalDeliverable/,
   'final delivery streams must bypass the generic non-action prose cap',
 )
+assert.match(
+  source,
+  /function shouldWithholdPreFinalInlineDraft\([\s\S]*currentStepIdx >= state\.currentPlanItems\.length - 1[\s\S]*isBriefInlineDirectAnswerTask[\s\S]*finalAssistantResponseEndsCleanly/,
+  'a complete direct-chat draft from a pre-final plan phase must be recognized before it can duplicate the final response',
+)
+assert.match(
+  modelEmissionBlock,
+  /withheldPreFinalInlineDraft[\s\S]*streamProcessor\.discardBufferedEmission\(\)[\s\S]*Held back a pre-final inline deliverable draft[\s\S]*!withheldPreFinalInlineDraft/,
+  'pre-final inline drafts must remain in model context without being released or counted as visible terminal prose',
+)
 
 console.log('final deliverable handoff smoke checks passed')
