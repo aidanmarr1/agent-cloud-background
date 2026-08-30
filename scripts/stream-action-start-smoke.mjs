@@ -127,6 +127,12 @@ async function* longTextThenUsageChunks() {
   }
 }
 
+async function* longFinalTextChunks() {
+  yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
+  yield { choices: [{ delta: { content: 'x'.repeat(500) } }] }
+  yield { choices: [{ delta: { content: 'y'.repeat(500) } }] }
+}
+
 async function* overflowThenMixedToolChunk() {
   yield { choices: [{ delta: { content: 'n'.repeat(1000) } }] }
   yield { choices: [{ delta: {
@@ -645,12 +651,32 @@ export async function runSmoke() {
 
   const textEmitter = makeEmitter()
   const textState = createInitialState(true, timeouts)
+  textState.forceTextNextIteration = true
   const textProcessor = new StreamProcessor(textEmitter as any, timeouts)
   const textResult = await textProcessor.processStream(longTextThenUsageChunks() as any, textState)
 
   assert.deepEqual(textResult.usage, { promptTokens: 12, completionTokens: 34, totalTokens: 46, cost: 0.00012 })
-  assert.ok(textResult.assistantContent.length > 800, 'text cap should trip after the initial visible content')
+  assert.ok(textResult.assistantContent.length >= 420, 'explicit progress narration should retain its initial visible content')
   assert.doesNotMatch(textResult.assistantContent, /overflow should be drained/, 'overflow text should not leak after the cap')
+  assert.equal(textResult.textOverflowSuppressed, true, 'a locally capped progress update must be marked as incomplete')
+
+  const finalTextEmitter = makeEmitter()
+  const finalTextState = createInitialState(true, timeouts)
+  finalTextState.currentPlanItems = ['Gather cafe images', 'Deliver all ten cafe images']
+  finalTextState.currentStepIdx = 1
+  const finalTextResult = await new StreamProcessor(finalTextEmitter as any, timeouts).processStream(
+    longFinalTextChunks() as any,
+    finalTextState,
+    false,
+    undefined,
+    {
+      allowParallelSourceExtractionCalls: false,
+      maxParallelSourceExtractionCalls: 1,
+      allowLongAssistantText: true,
+    },
+  )
+  assert.equal(finalTextResult.assistantContent.length, 1500, 'final responses must stream through their natural end')
+  assert.equal(finalTextResult.textOverflowSuppressed, false, 'a complete final response must not be marked as locally truncated')
 
   const mixedEmitter = makeEmitter()
   const mixedState = createInitialState(false, timeouts)

@@ -42,6 +42,7 @@ export interface StreamResult {
   reasoningContent: string
   toolCalls: Map<number, ToolCallData>
   finishReason?: string | null
+  textOverflowSuppressed?: boolean
   stepAdvancedThisIteration: boolean
   leakageDetected: boolean
   timedOut: boolean
@@ -84,6 +85,7 @@ export interface StreamToolCallPolicy {
   allowParallelSourceExtractionCalls: boolean
   maxParallelSourceExtractionCalls: number
   cadenceProgressUpdateEnabled?: boolean
+  allowLongAssistantText?: boolean
   textSavedDeliverable?: {
     id: string
     path: string
@@ -104,7 +106,6 @@ type StreamingResponseChunk = {
 // opening characters instead of appearing after a large buffered block.
 const FILE_PREVIEW_MIN_DELTA_CHARS = 1
 const PROGRESS_NARRATION_TEXT_STREAM_CAP = 420
-const DEFAULT_TEXT_ONLY_STREAM_CAP = 800
 const FILE_TOOL_ARGUMENT_ITERATION_TIMEOUT_MS = 30_000
 const FILE_TOOL_ARGUMENT_INACTIVITY_TIMEOUT_MS = 3_000
 // create_website streams the complete HTML, CSS, and JavaScript through one
@@ -1114,11 +1115,12 @@ export class StreamProcessor {
               // Keep draining the provider stream so it can still emit a later
               // tool call or final usage chunk; aborting here turns a clipped
               // progress paragraph into a terminal task error.
-              const TEXT_ONLY_CAP: number | null = progressNarrationTextCap !== null
-                ? progressNarrationTextCap
-                : textSavedDeliverable || inlineFinalAnswerAllowsLongText(state)
+              const allowLongAssistantText = !!textSavedDeliverable ||
+                toolCallPolicy?.allowLongAssistantText === true ||
+                inlineFinalAnswerAllowsLongText(state)
+              const TEXT_ONLY_CAP: number | null = allowLongAssistantText
                 ? null
-                : DEFAULT_TEXT_ONLY_STREAM_CAP
+                : progressNarrationTextCap
                 if (TEXT_ONLY_CAP !== null && toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
                   suppressTextOnlyOverflow = true
                   contentBuffer = ''
@@ -1402,6 +1404,7 @@ export class StreamProcessor {
       reasoningContent,
       toolCalls,
       finishReason,
+      textOverflowSuppressed: suppressTextOnlyOverflow,
       stepAdvancedThisIteration,
       leakageDetected: false,
       timedOut: streamTimedOut,

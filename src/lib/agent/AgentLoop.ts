@@ -1260,9 +1260,20 @@ function shouldCompleteFinalInlineAnswerTurn(
     /\b(?:i|we)\s+(?:found|checked|searched|gathered|looked|reviewed)\b.{0,180}\b(?:but|so|next|instead)\b/i.test(text.slice(0, 260)) ||
     /\b(?:will|going to)\s+(?:research|gather|compare|summari[sz]e|investigate|check|look up|write|produce)\b/i.test(text.slice(0, 220))
   if (startsLikeStatus) return false
-  return explicitlyRequestsShortLiteralAnswer ||
-    /[.!?)]\s*$/.test(text) ||
-    text.length >= FINAL_INLINE_ANSWER_MIN_CONTENT_CHARS
+  return explicitlyRequestsShortLiteralAnswer || finalAssistantResponseEndsCleanly(text)
+}
+
+function finalAssistantResponseEndsCleanly(content: string): boolean {
+  const text = content.trim()
+  if (!text) return false
+  if ((text.match(/```/g) || []).length % 2 !== 0) return false
+  if ((text.match(/(?<!`)`(?!`)/g) || []).length % 2 !== 0) return false
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  const lastLine = lines.at(-1) || ''
+  if (/^(?:#{1,6}\s+|[-+*]|\d+[.)]?)$/.test(lastLine)) return false
+  if (/[,;:\-–—/]$/.test(lastLine)) return false
+  if (/\b(?:and|or|of|the|with|to|for|in|on|at|from|key|all|including|such\s+as|following|these|those)$/i.test(lastLine)) return false
+  return /[.!?]["')\]]?$/.test(lastLine) || /^`[^`]+`$/.test(lastLine)
 }
 
 const MAX_FINAL_INLINE_ANSWER_RECOVERY_ATTEMPTS = 2
@@ -1566,13 +1577,8 @@ function finalDeliverableHandoffLooksUseful(
   if (finalDeliverableHandoffHasInvalidForm(text, state)) return false
   const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
   const lastLine = lines.at(-1) || ''
-  if (/^(?:#{1,6}\s+|[-+*]|\d+[.)]?)$/.test(lastLine)) return false
   if (/^(?:all|done|ready|complete|completed|finished)\.?$/i.test(lastLine)) return false
-  if (/[,;:\-–—/]$/.test(lastLine)) return false
-  if (/\b(?:and|or|of|the|with|to|for|in|on|at|from|key|all|including|such\s+as|following|these|those)$/i.test(lastLine)) return false
-  if (!/[.!?]["')\]]?$/.test(lastLine)) return false
-  if ((text.match(/```/g) || []).length % 2 !== 0) return false
-  return true
+  return finalAssistantResponseEndsCleanly(text)
 }
 
 function shouldAcceptFinalDeliverableHandoff(
@@ -4960,7 +4966,10 @@ export class AgentLoop {
                 ? lastStreamResult.assistantContent.trim()
                 : null
             const truncatedFinalResponse =
-              lastStreamResult.finishReason === 'length' &&
+              (
+                lastStreamResult.finishReason === 'length' ||
+                lastStreamResult.textOverflowSuppressed === true
+              ) &&
               lastStreamResult.toolCalls.size === 0 &&
               (
                 !!state.finalDeliverableHandoffPending ||
@@ -7619,6 +7628,14 @@ export class AgentLoop {
           allowParallelSourceExtractionCalls: allowParallelSourceToolCalls,
           maxParallelSourceExtractionCalls,
           cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn,
+          // The generic prose cap is only a guard against non-action narration
+          // loops. A final delivery or handoff must be allowed to reach the
+          // provider's real stop marker; clipping it locally can turn half a
+          // list or path into a falsely successful task.
+          allowLongAssistantText:
+            isFinalDeliveryStep(state) ||
+            isFinalDeliverableHandoffTurn ||
+            useTextFinalDeliverable,
         }
         // Capture the exact request policy before awaiting provider response
         // headers. If the request itself times out, the outer loop can still

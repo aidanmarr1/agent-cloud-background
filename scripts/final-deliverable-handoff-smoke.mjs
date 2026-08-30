@@ -105,8 +105,8 @@ assert.match(
 )
 assert.match(
   source,
-  /truncatedFinalResponse[\s\S]*finishReason === 'length'[\s\S]*rejectedModelEmission[\s\S]*Retrying a provider-truncated final response/,
-  'provider length truncation must be withheld and retried instead of persisted as completion',
+  /truncatedFinalResponse[\s\S]*finishReason === 'length'[\s\S]*textOverflowSuppressed[\s\S]*rejectedModelEmission[\s\S]*Retrying a provider-truncated final response/,
+  'provider and local text truncation must be withheld and retried instead of persisted as completion',
 )
 assert.match(
   source,
@@ -122,6 +122,11 @@ assert.match(
   streamSource,
   /finish_reason\?: string \| null[\s\S]*finishReason: string \| null[\s\S]*chunkFinishReason[\s\S]*finishReason,/,
   'the stream processor must retain the provider finish reason for completion validation',
+)
+assert.match(
+  source,
+  /allowLongAssistantText:[\s\S]*isFinalDeliveryStep\(state\)[\s\S]*isFinalDeliverableHandoffTurn[\s\S]*useTextFinalDeliverable/,
+  'final delivery streams must bypass the generic non-action prose cap',
 )
 
 console.log('final deliverable handoff smoke checks passed')
