@@ -10,7 +10,11 @@
  */
 
 import type { TierTimeouts } from '@/agent/guards/timeouts'
-import { effectiveTaskRequest } from '@/lib/conversationContext'
+import {
+  effectiveTaskRequest,
+  isContextualTaskUpdate,
+  latestUserText,
+} from '@/lib/conversationContext'
 import { analyzeTaskIntent } from './TaskIntent'
 import {
   TEMPERATURE_CODE, TEMPERATURE_RESEARCH, TEMPERATURE_DEFAULT, TEMPERATURE_CREATIVE,
@@ -216,6 +220,20 @@ export function resolveStrategy(
 ): TaskStrategyConfig {
   const content = effectiveTaskRequest(messages)
   const intent = analyzeTaskIntent(messages)
+  const latest = latestUserText(messages)
+  const latestIntent = analyzeTaskIntent([{ role: 'user', content: latest }])
+
+  // A terse conversion/export follow-up acts on the completed task artifact;
+  // it is implementation work, not a request to repeat the earlier research.
+  // Keep the prior request as semantic context while letting the current verb
+  // choose the tool strategy.
+  if (
+    isContextualTaskUpdate(messages) &&
+    latestIntent.requiresSavedArtifact &&
+    /\b(?:export|convert|save|download|package|put|generate|create|make)\b/i.test(latest)
+  ) {
+    return STRATEGIES.build
+  }
 
   for (const { type, patterns } of TASK_PATTERNS) {
     if (!['build', 'code', 'analysis', 'creative'].includes(type)) continue

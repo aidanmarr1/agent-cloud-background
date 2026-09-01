@@ -266,7 +266,7 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /PLANNER_START_AFTER_ACK_WAIT_MS/, 'planner startup must not carry a fixed acknowledgement display delay')
   assert.match(planManager, /PLANNER_TIMEOUT_RECOVERY_RETRIES = 0/, 'planner startup timeouts must not stack short retries into long invisible waits')
   assert.doesNotMatch(planManager, /continueAfterPlannerTimeout|timeoutFallbackPlan|Planner timed out inside startup deadline|state\.planEmitted = true[\s\S]{0,240}fallback\.titles/, 'planner startup timeout exhaustion must not fabricate visible local fallback plans')
-  assert.match(planManager, /function plannerTaskMessages[\s\S]*effectiveTaskRequest\(messages\)\.slice\(0,\s*6000\)/, 'planner must use the compact effective task request instead of replaying full chat history')
+  assert.match(planManager, /function plannerTaskMessages[\s\S]*planningTaskRequest\(messages\)\.slice\(0,\s*6000\)/, 'planner must use compact resolved task context, including the prior hand-off for artifact follow-ups, instead of replaying full chat history')
   assert.match(planManager, /fastPlannerMode[\s\S]*getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*getPlanningPrompt\(this\.customInstructions\)/, 'initial planner call must use the compact prompt before the full strict prompt')
   assert.match(planManager, /fastPlannerMode[\s\S]*streamInitialPlannerResponse\(params,\s*true\)/, 'fast planner startup must request the structured plan without blocking the separately streamed acknowledgement')
   assert.match(planManager, /res = await createCompletion\(\{[\s\S]*response_format:\s*\{\s*type:\s*'json_object'\s*\}/, 'strict planner fallback calls must still request structured JSON on the first provider attempt')
@@ -1750,6 +1750,7 @@ import {
   effectiveTaskRequest,
   hasPriorTaskTurn,
   isContextualTaskUpdate,
+  planningTaskRequest,
 } from ${JSON.stringify(join(root, 'src/lib/conversationContext.ts'))}
 import {
   resolveStrategy,
@@ -1810,6 +1811,15 @@ export async function runLedgerSmoke() {
     false,
     'workspace continuity must not force unrelated follow-ups to inherit the earlier semantic request',
   )
+  const exportFollowUpMessages = [
+    { role: 'user', content: 'Research the current state of AI' },
+    { role: 'assistant', content: 'The report is ready at deliverables/ai-state-of-the-art-report.md.' },
+    { role: 'user', content: 'Put it in a pdf' },
+  ]
+  assert.equal(isContextualTaskUpdate(exportFollowUpMessages), true, 'artifact conversion wording must retain prior task context')
+  assert.ok(planningTaskRequest(exportFollowUpMessages).includes('deliverables/ai-state-of-the-art-report.md'), 'planning must receive the compact prior artifact hand-off')
+  assert.ok(planningTaskRequest(exportFollowUpMessages).includes('Latest user interruption/correction: Put it in a pdf'), 'planning must retain the exact current conversion instruction')
+  assert.equal(resolveStrategy(exportFollowUpMessages).type, 'build', 'artifact conversion follow-ups must use file/export tools instead of repeating earlier research')
 
   const registry = new ToolRegistry()
   for (const name of ['create_file', 'web_search', 'browser_navigate']) {

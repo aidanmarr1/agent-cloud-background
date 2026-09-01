@@ -448,9 +448,17 @@ async function claimPersistedSandboxCandidate(
       on conflict(conversation_id) do update set
         provider = 'e2b',
         provider_sandbox_id = excluded.provider_sandbox_id,
-        lifecycle_generation = agent_cloud_sandboxes.lifecycle_generation + 1,
+        lifecycle_generation = case
+          when agent_cloud_sandboxes.provider_sandbox_id = excluded.provider_sandbox_id
+            then agent_cloud_sandboxes.lifecycle_generation
+          else agent_cloud_sandboxes.lifecycle_generation + 1
+        end,
         lifecycle_state = 'active',
-        lifecycle_source_generation = agent_cloud_sandboxes.lifecycle_generation,
+        lifecycle_source_generation = case
+          when agent_cloud_sandboxes.provider_sandbox_id = excluded.provider_sandbox_id
+            then agent_cloud_sandboxes.lifecycle_source_generation
+          else agent_cloud_sandboxes.lifecycle_generation
+        end,
         updated_at_ms = excluded.updated_at_ms,
         last_used_at_ms = excluded.last_used_at_ms
       where agent_cloud_sandboxes.provider = 'e2b'
@@ -851,7 +859,16 @@ export async function getE2BSandboxBillingDescriptor(
       state.sandboxId === cached.sandboxId &&
       state.generation > cached.generation
     ) {
-      throw new E2BLifecycleSupersededError(safeId)
+      // Reconnecting another process to the same provider sandbox is not a
+      // destructive lifecycle change. Adopt its durable generation so a
+      // viewer, restored worker, or rolling deployment cannot abort healthy
+      // work in the same task computer.
+      cached.generation = state.generation
+      return {
+        providerSandboxId: cached.sandboxId,
+        lifecycleGeneration: state.generation,
+        startedAtMs: cached.billingStartedAtMs,
+      }
     }
     if (attempt < 3) {
       await new Promise((resolve) => setTimeout(resolve, 75 * (attempt + 1)))
@@ -926,6 +943,7 @@ async function commitSandboxCandidate(
   billingStartedAtMs: number,
   expectedEpoch: number,
   expectedDurableGeneration: number,
+  expectedDurableSandboxId: string | null,
 ): Promise<E2BSandboxInstance> {
   if (e2bLifecycleEpoch(conversationId) !== expectedEpoch) {
     return discardSupersededSandbox(conversationId, sandbox)
@@ -952,7 +970,9 @@ async function commitSandboxCandidate(
     return authoritative.sandbox
   }
 
-  let committedGeneration = expectedDurableGeneration + 1
+  let committedGeneration = expectedDurableGeneration + (
+    expectedDurableSandboxId === sandbox.sandboxId ? 0 : 1
+  )
   try {
     const claimed = await claimPersistedSandboxCandidate(
       conversationId,
@@ -1021,8 +1041,13 @@ export async function getOrCreateE2BSandbox(conversationId: string): Promise<E2B
           await new Promise((resolve) => setTimeout(resolve, 75))
           continue
         }
-        e2bCache.delete(safeId)
-        throw new E2BLifecycleSupersededError(safeId)
+        // A different process reconnected to the same provider sandbox. That
+        // is still the same task computer, so adopt the durable generation
+        // instead of turning a harmless observer/worker handoff into failure.
+        cached.generation = durableState.generation
+        cached.lastUsed = Date.now()
+        cached.lastValidatedAtMs = Date.now()
+        return cached.sandbox
       }
       if (
         !tursoConfigured() ||
@@ -1108,6 +1133,7 @@ export async function getOrCreateE2BSandbox(conversationId: string): Promise<E2B
         billingStartedAtMs,
         expectedEpoch,
         expectedDurableGeneration,
+        persistedId,
       )
     })()
     e2bCreationPromises.set(safeId, creation)

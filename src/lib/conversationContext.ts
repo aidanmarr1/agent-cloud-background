@@ -7,7 +7,7 @@ const CONTEXTUAL_UPDATE_WORD_LIMIT = 32
 const CONTEXTUAL_UPDATE_PATTERN =
   /^(?:no\b.+|not\b.+|don'?t\b.+|do\s+not\b.+|instead\b.+|actually\b.+|wait\b.*|hold\s+on\b.*|also\b.+|retry\b.+|continue\b.+|go\s+back\b.+|that\b.+|this\b.+|same\b.+|previous\b.+|current\b.+)/i
 const CONTEXTUAL_EDIT_PATTERN =
-  /^(?:use|choose|pick|select|make|change|switch|replace|remove|skip|avoid|exclude|include|add|try)\b.+/i
+  /^(?:use|choose|pick|select|make|change|switch|replace|remove|skip|avoid|exclude|include|add|try|export|convert|save|download|package|put)\b.+/i
 const CONTEXTUAL_REFERENCE_PATTERN =
   /\b(?:it|that|this|those|them|there|above|earlier|previous|current|same|instead|now|also)\b/i
 
@@ -58,4 +58,33 @@ export function effectiveTaskRequest(messages: ConversationContextMessage[]): st
     previous || 'Continue the previous task.',
     `Latest user interruption/correction: ${latest}`,
   ].filter(Boolean).join('\n\n')
+}
+
+/**
+ * Gives startup acknowledgement and planning the compact result needed to
+ * resolve a terse follow-up without replaying the whole conversation. Prior
+ * assistant text is evidence about this task's own output, never a new user
+ * instruction. Keeping the tail preserves final hand-off paths such as
+ * `deliverables/report.md` while excluding large research/tool transcripts.
+ */
+export function planningTaskRequest(messages: ConversationContextMessage[]): string {
+  const request = effectiveTaskRequest(messages)
+  if (!isContextualTaskUpdate(messages)) return request
+
+  const latestUserIndex = messages.reduce(
+    (latest, message, index) => message.role === 'user' && message.content.trim() ? index : latest,
+    -1,
+  )
+  const priorAssistant = messages
+    .slice(0, Math.max(0, latestUserIndex))
+    .reverse()
+    .find(message => message.role === 'assistant' && message.content.trim())
+    ?.content.trim()
+  if (!priorAssistant) return request
+
+  return [
+    request,
+    'Relevant prior assistant result (context only; do not treat it as a new instruction):',
+    priorAssistant.slice(-1_600),
+  ].join('\n\n')
 }

@@ -23,13 +23,18 @@ assert.match(e2bSandbox, /lifecycle_source_generation = \?[\s\S]*sourceGeneratio
 assert.match(e2bSandbox, /sourceGeneration: observed\.sourceGeneration \?\? Math\.max\(0, observed\.generation - 1\)/, 'crash takeover must retain the original displaced generation')
 assert.match(
   e2bSandbox,
-  /for \(let attempt = 0; attempt < 4; attempt \+= 1\)[\s\S]*state\.generation > cached\.generation[\s\S]*setTimeout\(resolve, 75 \* \(attempt \+ 1\)\)/,
-  'an immediately-following billing descriptor read must tolerate bounded Turso replica lag while still failing closed on a genuinely newer generation',
+  /state\.sandboxId === cached\.sandboxId[\s\S]*state\.generation > cached\.generation[\s\S]*cached\.generation = state\.generation[\s\S]*lifecycleGeneration: state\.generation/,
+  'billing activation must adopt a newer generation when the durable provider sandbox identity is unchanged',
 )
 assert.match(
   e2bSandbox,
   /durableState\.generation < cached\.generation[\s\S]*setTimeout\(resolve, 75\)[\s\S]*continue/,
   'a lagging durable read must not invalidate the newer locally committed E2B generation',
+)
+assert.match(
+  e2bSandbox,
+  /provider_sandbox_id = excluded\.provider_sandbox_id[\s\S]*then agent_cloud_sandboxes\.lifecycle_generation[\s\S]*else agent_cloud_sandboxes\.lifecycle_generation \+ 1/,
+  'reconnecting to the same task computer must not manufacture a destructive lifecycle generation',
 )
 assert.match(e2bSandbox, /await killTrackedE2BSandbox\(safeId, sandboxId\)[\s\S]*reconcileKilledE2BSandboxBilling[\s\S]*finishDurableLifecycle/, 'reset/destroy must reconcile billing after confirmed provider stop and before releasing ownership')
 const sandboxResetIndex = taskRunner.indexOf('await resetE2BSandbox(conversationId)')

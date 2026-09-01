@@ -8,7 +8,7 @@ import {
 } from '@/lib/llm'
 import type { FileResult } from '@/types'
 import { getFastPlanningPrompt, getPlanningPrompt } from '@/lib/prompts'
-import { effectiveTaskRequest } from '@/lib/conversationContext'
+import { effectiveTaskRequest, planningTaskRequest } from '@/lib/conversationContext'
 import type { AgentEventEmitter } from './SSEEmitter'
 import {
   AgentStateData,
@@ -259,7 +259,7 @@ function plannerTaskMessages(
   nativeMessages?: ChatMessageParam[],
   requestOverride?: string,
 ): ChatMessageParam[] {
-  const request = effectiveTaskRequest(messages).slice(0, 6000).trim() || 'Continue the current task.'
+  const request = planningTaskRequest(messages).slice(0, 6000).trim() || 'Continue the current task.'
   const userText = requestOverride?.trim() || request
   const media = nativePlannerMediaParts(nativeMessages)
   return [{
@@ -1034,7 +1034,7 @@ export class PlanManager {
     // stopped at 1,000 characters while later quality checks saw the full
     // request, so requirements appearing near the end made a good opening look
     // invalid and forced unnecessary repair calls.
-    const request = effectiveTaskRequest(this.messages).slice(0, 6000)
+    const request = planningTaskRequest(this.messages).slice(0, 6000)
     console.log('[AgentDiagnostics] Startup acknowledgement call starting', {
       taskShape,
       requestChars: request.length,
@@ -1182,7 +1182,7 @@ export class PlanManager {
   }
 
   private async repairAcknowledgementCandidate(plannerAck: string): Promise<string> {
-    const request = effectiveTaskRequest(this.messages).slice(0, 6000)
+    const request = planningTaskRequest(this.messages).slice(0, 6000)
     await this.assertCreditRunway('ack-repair')
     const response = await createCompletion({
       model: DEFAULT_MODEL,
