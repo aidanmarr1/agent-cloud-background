@@ -44,6 +44,10 @@ interface WorkingMemoryLike {
 }
 
 export const PARTIAL_APPEND_RECOVERY_LIMIT_PER_PATH = 2
+const TERMINAL_DELIVERABLE_EXTENSIONS = new Set([
+  'pdf', 'docx', 'pptx', 'xlsx', 'csv', 'md', 'txt', 'rtf', 'html', 'htm',
+  'zip', 'odt', 'ods', 'odp',
+])
 
 export function partialAppendRecoveryCountForPath(
   state: Pick<AgentStateData, 'partialFileWriteRecoveries'>,
@@ -4915,8 +4919,11 @@ export class ToolPipeline {
       }
     }
 
-    // Scan for new images after execute_command or run_code
+    // Commands can produce first-class office/document artifacts that do not
+    // have a dedicated native writer. Persist and surface those files just as
+    // native file/export tools do, then scan image outputs as before.
     if (!isError && (tc.name === 'execute_command' || tc.name === 'run_code') && this.conversationId) {
+      await this.scanForCommandDeliverables(tc.id, state)
       await this.scanForNewImages(state)
     }
 
@@ -5217,7 +5224,7 @@ export class ToolPipeline {
       let contentStr = String(args.content ?? '')
       const shouldReadSavedText =
         (fileResult.action === 'appended' || fileResult.action === 'edited' || !contentStr) &&
-        !/\.(?:pdf|zip|png|jpe?g|gif|webp)$/i.test(pathStr)
+        !/\.(?:pdf|zip|docx|pptx|xlsx|odt|ods|odp|png|jpe?g|gif|webp)$/i.test(pathStr)
       if (shouldReadSavedText && this.conversationId && pathStr) {
         try {
           const diskFile = await readFileInSandbox(this.conversationId, pathStr)
@@ -5298,6 +5305,41 @@ export class ToolPipeline {
       }
     } catch {
       // Non-critical: image scanning failed
+    }
+  }
+
+  private async scanForCommandDeliverables(tcId: string, state: AgentStateData): Promise<void> {
+    if (!this.conversationId || !this.userId) return
+    try {
+      const listing = await listFilesInSandbox(this.conversationId)
+      for (const filePath of listing.files || []) {
+        const extension = filePath.split('.').pop()?.toLowerCase() || ''
+        if (!TERMINAL_DELIVERABLE_EXTENSIONS.has(extension)) continue
+        if (state.createdFiles.has(filePath)) continue
+        if (artifactPurposeForCurrentStep(state, filePath) !== 'deliverable') continue
+
+        const persisted = await persistSandboxTaskFile({
+          userId: this.userId,
+          conversationId: this.conversationId,
+          path: filePath,
+        })
+        if (!persisted) continue
+
+        state.createdFiles.add(filePath)
+        trackFileCreate(state, filePath)
+        recordWorkLedgerDeliverable(state, { path: filePath, purpose: 'deliverable' })
+        this.memory?.recordFileCreated(filePath, state.currentStepIdx)
+        await this.emitFileArtifact(
+          `${tcId}_${filePath.replace(/[^a-zA-Z0-9_-]+/g, '_')}`,
+          { path: filePath, content: '' },
+          { path: filePath, size: persisted.size, action: 'generated' },
+          state,
+        )
+      }
+    } catch (error) {
+      this.logger?.warn('Failed to surface command-generated deliverables', {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
   }
 

@@ -59,7 +59,7 @@ const CLOUD_ENV = [
   { name: 'AGENT_E2B_SANDBOX_TIMEOUT_MS', value: process.env.AGENT_E2B_SANDBOX_TIMEOUT_MS || '3600000' },
   { name: 'AGENT_E2B_COMMAND_TIMEOUT_MS', value: process.env.AGENT_E2B_COMMAND_TIMEOUT_MS || '120000' },
   { name: 'AGENT_E2B_ALLOW_INTERNET', value: process.env.AGENT_E2B_ALLOW_INTERNET || 'true' },
-  { name: 'AGENT_E2B_PAUSE_ON_TASK_END', value: 'false' },
+  { name: 'AGENT_E2B_PAUSE_ON_TASK_END', value: 'true' },
   { name: 'AGENT_E2B_KILL_ON_RESET', value: 'true' },
   { name: 'AGENT_E2B_BROWSER_PORT', value: process.env.AGENT_E2B_BROWSER_PORT || '9222' },
   { name: 'AGENT_E2B_BROWSER_START_TIMEOUT_MS', value: process.env.AGENT_E2B_BROWSER_START_TIMEOUT_MS || '30000' },

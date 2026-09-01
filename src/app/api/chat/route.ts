@@ -4,7 +4,7 @@ import { validateRequest } from '@/lib/validation/validate'
 import { checkRateLimit } from '@/lib/rateLimit'
 import { assertSameOriginRequest, getClientIp, rateLimitResponse, readJsonBody } from '@/lib/api'
 import { assertTaskAccess } from '@/lib/taskAccess'
-import { isContextualTaskUpdate } from '@/lib/conversationContext'
+import { hasPriorTaskTurn, isContextualTaskUpdate } from '@/lib/conversationContext'
 import {
   prepareUserConversationForTaskStartInsert,
   type TaskStartConversationInsert,
@@ -437,7 +437,7 @@ export async function POST(request: Request) {
     return validation.response
   }
 
-  const { model, conversationId, customInstructions, startFreshSandbox } = validation.data
+  const { model, conversationId, customInstructions } = validation.data
   const session = await sessionPromise
   markRouteTiming('sessionReadyMs')
   const userId = session?.user?.id
@@ -582,7 +582,10 @@ export async function POST(request: Request) {
     return Response.json({ error: message, code: 'TASK_START_FAILED' }, { status: 500 })
   }
 
-  const startIsolatedTaskSandbox = startFreshSandbox || (!directChat && !isContextualTaskUpdate(messages))
+  // The conversation, not the phrasing of the latest message, is the task
+  // boundary. Terse follow-ups such as "export as PDF" must retain the same
+  // workspace and computer state.
+  const startIsolatedTaskSandbox = !hasPriorTaskTurn(safeRawMessages)
   if (unavailableWorker) {
     const headers = new Headers(unavailableWorker.headers)
     headers.set('X-Agent-Route-Elapsed-Ms', String(Date.now() - postStartedAt))
@@ -635,7 +638,7 @@ export async function POST(request: Request) {
     messages,
     model,
     customInstructions,
-    startFreshSandbox,
+    startFreshSandbox: startIsolatedTaskSandbox,
     startIsolatedTaskSandbox,
     directChat,
     skipStartupAcknowledgement: false,
@@ -806,7 +809,7 @@ export async function POST(request: Request) {
             model,
             conversationId,
             customInstructions,
-            startFreshSandbox,
+            startFreshSandbox: startIsolatedTaskSandbox,
             startIsolatedTaskSandbox,
             directChat,
             userId,

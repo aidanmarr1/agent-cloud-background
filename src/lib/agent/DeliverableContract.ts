@@ -51,6 +51,14 @@ const OUTPUT_FORMAT_RULES: Array<{
     contract: { label: 'CSV file', extensions: ['.csv'] },
     pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\bcsv\b|\b(?:to|as|into)\s+(?:an?\s+)?csv\b)/i,
   },
+  {
+    contract: { label: 'Markdown file', extensions: ['.md', '.markdown'] },
+    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:markdown|md\s+file)\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:markdown|md\s+file)\b)/i,
+  },
+  {
+    contract: { label: 'text file', extensions: ['.txt'] },
+    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:text|txt)\s+file\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:text|txt)\s+file\b)/i,
+  },
 ]
 
 /**

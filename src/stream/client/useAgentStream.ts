@@ -12,7 +12,7 @@ import { parseSSEStream } from './SSEParser'
 import { EventDispatcher } from './eventDispatcher'
 import { useCreditStore } from '@/store/credits'
 import { OUT_OF_CREDITS_CODE, OUT_OF_CREDITS_MESSAGE } from '@/lib/creditPolicy'
-import { isContextualTaskUpdateText } from '@/lib/conversationContext'
+import { hasPriorTaskTurn } from '@/lib/conversationContext'
 import { bindAttachmentsToTask } from '@/lib/attachmentUpload'
 import { clampTaskInput, taskInputLimitMessage } from '@/lib/inputLimits'
 import { userErrorMessage } from '@/lib/errorMessages'
@@ -1017,7 +1017,7 @@ export async function startInitialAgentTask(conversationId: string): Promise<voi
   const conversationInstructions = conversation.customInstructions || ''
   const customInstructions = [globalInstructions, conversationInstructions].filter(Boolean).join('\n\n') || undefined
   const latestUserContent = clampTaskInput([...conversation.messages].reverse().find(m => m.role === 'user')?.content || '')
-  const startFreshSandbox = !isContextualTaskUpdateText(latestUserContent)
+  const startFreshSandbox = !hasPriorTaskTurn(allMessages)
   const currentModel = useSettingsStore.getState().model
   const controller = new AbortController()
   let dispatcher = createStoreDispatcher(conversationId, (message) => {
@@ -1620,7 +1620,7 @@ export function useAgentStream(conversationId: string): UseAgentStreamReturn {
         ? clampTaskInput([...conversation.messages].reverse().find(m => m.role === 'user')?.content || '')
         : boundedContent
       const isFirstTaskAutoStart = conversation.messages.length === 1 && conversation.messages[0]?.role === 'user'
-      const startFreshSandbox = isFirstTaskAutoStart || (!isAutoSend && !isContextualTaskUpdateText(latestUserContent))
+      const startFreshSandbox = isFirstTaskAutoStart || !hasPriorTaskTurn(messagesToSend)
 
       // Read model fresh from store to avoid stale closure
       const currentModel = useSettingsStore.getState().model

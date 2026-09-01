@@ -116,7 +116,7 @@ if (env('E2B_TEMPLATE_ID') || env('AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND')) {
 } else {
   fail('E2B_TEMPLATE_ID or AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND must be set')
 }
-requireExactBool('AGENT_E2B_PAUSE_ON_TASK_END', false, 'finished tasks must destroy their E2B sandbox instead of pausing it')
+requireExactBool('AGENT_E2B_PAUSE_ON_TASK_END', true, 'finished task turns must pause their E2B sandbox so same-task follow-ups reuse it')
 requireExactBool('AGENT_E2B_KILL_ON_RESET', true, 'each new task must start from a fresh E2B sandbox')
 requireExactBool('AGENT_E2B_WARM_POOL_ENABLED', false, 'tasks must not reuse a warm sandbox')
 requireExactBool('AGENT_E2B_VERIFY_ON_WORKER_STARTUP', true, 'hosted worker should prove E2B command execution before serving tasks')

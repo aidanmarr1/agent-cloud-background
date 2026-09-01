@@ -53,7 +53,7 @@ assert.ok(
 )
 assert.match(taskRunner, /setInterval\(\(\) => \{[\s\S]*checkpointRemoteSandboxCredit/, 'long E2B runs must checkpoint while executing')
 assert.match(taskRunner, /E2B_BILLING_CHECKPOINT_INTERVAL_MS\s*=\s*30_000/, 'live E2B checkpoints must be infrequent enough to avoid needless transaction contention')
-assert.match(taskRunner, /const transient = isTransientUsageAccountingError\(error\)[\s\S]*if \(finalize \|\| !transient\) throw error/, 'transient periodic E2B checkpoint failures must be deferred to durable cleanup instead of stopping the task')
+assert.match(taskRunner, /const transient = isTransientUsageAccountingError\(error\)[\s\S]*if \(emitOutOfCreditsStop\(error\)\)[\s\S]*if \(finalize\) throw error/, 'periodic E2B checkpoint failures must be deferred to durable cleanup unless credits are authoritatively exhausted')
 assert.doesNotMatch(taskRunner, /if \(transient\)[\s\S]{0,320}billingAbortController\.abort/, 'transient periodic accounting failures must not abort active tool execution')
 assert.match(taskRunner, /Exact remote-sandbox billing is finalized by the durable[\s\S]*pre-terminal cleanup fence/, 'normal completion must rely on the retryable pre-terminal cleanup fence for exact E2B reconciliation')
 assert.doesNotMatch(taskRunner, /chargeServerE2BRuntime\(/, 'the task runner must not rely on one process-finally E2B charge')

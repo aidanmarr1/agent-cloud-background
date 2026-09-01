@@ -463,7 +463,7 @@ const executionToolDefinitions: ChatCompletionTool[] = shouldExposeExecutionTool
         type: 'function',
         function: {
           name: 'execute_command',
-          description: 'Run a shell command inside the task cloud sandbox.',
+          description: 'Run a shell command inside the same persistent task workspace used by file tools. Use it for builds, conversions, verification, and deliverable formats without a dedicated native tool; files saved in the workspace can be returned to the user.',
           parameters: {
             type: 'object',
             properties: {

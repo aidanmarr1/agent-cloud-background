@@ -295,7 +295,7 @@ export function runCompletionAuditSmoke() {
   assert.equal(browseFileAudit.complete, false)
   assert.match(
     browseFileAudit.message,
-    /no successful final deliverable/,
+    /no successful final/,
     'browser-led tasks must not pass completion without their explicitly requested file',
   )
 
@@ -355,7 +355,7 @@ export function runCompletionAuditSmoke() {
   let audit = auditAgentCompletion(incompletePlan, 'loop_detected_on_last_step')
   assert.equal(audit.complete, false)
   assert.match(audit.message, /only 1 of 2 plan steps/)
-  assert.match(audit.message, /no successful final deliverable/)
+  assert.match(audit.message, /no successful final/)
 
   const missingDeliverable = createInitialState(true, timeouts)
   missingDeliverable.currentPlanItems = ['Build files', 'Deliver website']
@@ -365,7 +365,7 @@ export function runCompletionAuditSmoke() {
   missingDeliverable.originalUserRequest = 'Build a website.'
   audit = auditAgentCompletion(missingDeliverable, 'post_completion_max')
   assert.equal(audit.complete, false)
-  assert.match(audit.message, /no successful final deliverable/)
+  assert.match(audit.message, /no successful final/)
 
   const complete = createInitialState(true, timeouts)
   complete.currentPlanItems = ['Build files', 'Deliver website']

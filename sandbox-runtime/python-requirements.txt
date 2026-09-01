@@ -8,7 +8,9 @@ pandas>=2.2,<4
 pillow>=11,<13
 playwright>=1.52,<2
 pydantic>=2.10,<3
+openpyxl>=3.1,<4
+python-docx>=1.1,<2
+python-pptx>=1.0,<2
 python-multipart>=0.0.20,<1
 uv>=0.8,<1
 uvicorn>=0.34,<1
-

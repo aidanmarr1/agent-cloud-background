@@ -143,7 +143,7 @@ for (const service of [web, worker]) {
   requireValue(service, 'AGENT_E2B_SANDBOX_TIMEOUT_MS', '3600000')
   requireValue(service, 'AGENT_E2B_COMMAND_TIMEOUT_MS', '120000')
   requireValue(service, 'AGENT_E2B_ALLOW_INTERNET', 'true')
-  requireValue(service, 'AGENT_E2B_PAUSE_ON_TASK_END', 'false')
+  requireValue(service, 'AGENT_E2B_PAUSE_ON_TASK_END', 'true')
   requireValue(service, 'AGENT_E2B_KILL_ON_RESET', 'true')
   requireValue(service, 'AGENT_E2B_BROWSER_PORT', '9222')
   requireValue(service, 'AGENT_E2B_BROWSER_START_TIMEOUT_MS', '30000')

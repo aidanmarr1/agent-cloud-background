@@ -97,7 +97,7 @@ assert.match(dockerfile, /WEBDEV_TEMPLATES_PATH=\/opt\/agent\/webdev\/templates/
 assert.match(dockerfile, /COPY bin\//)
 assert.doesNotMatch(dockerfile, /\b(?:rustc|golang|ruby|docker\.io)\b/)
 
-for (const moduleName of ['beautifulsoup4', 'fastapi', 'matplotlib', 'numpy', 'openai', 'pandas', 'playwright', 'pydantic']) {
+for (const moduleName of ['beautifulsoup4', 'fastapi', 'matplotlib', 'numpy', 'openai', 'openpyxl', 'pandas', 'playwright', 'pydantic', 'python-docx', 'python-pptx']) {
   assert.match(requirements, new RegExp(`^${moduleName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'm'))
 }
 

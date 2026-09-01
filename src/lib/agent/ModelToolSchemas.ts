@@ -42,7 +42,7 @@ const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
   browser_click_and_hold: 'Hold a webpage element for a drag interaction.',
   browser_drag: 'Drag one webpage element to another position.',
   browser_action_sequence: 'Run 2–8 stable same-screen actions that need no intermediate observation.',
-  execute_command: 'Run a shell command in the task cloud sandbox.',
+  execute_command: 'Run a shell command in the same persistent task workspace for builds, conversions, checks, or generated deliverables.',
 }
 
 function stripSchemaDescriptions(value: unknown): unknown {

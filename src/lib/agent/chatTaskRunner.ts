@@ -5,6 +5,7 @@ import {
   ensureE2BRemoteBrowser,
   getOrCreateE2BSandbox,
   getE2BSandboxBillingDescriptor,
+  pauseE2BSandbox,
   resetE2BSandbox,
   shouldUseE2BSandbox,
 } from '@/lib/e2bSandbox'
@@ -20,7 +21,6 @@ import {
   openLiveDirectiveRun,
   sealLiveDirectiveRun,
 } from '@/lib/liveDirectives'
-import { clearResearchActivityForTask } from '@/lib/agent/ResearchActivityLog'
 import {
   assertServerCreditsAvailable,
   activateServerE2BRuntimeBilling,
@@ -279,6 +279,17 @@ async function destroyCloudSandboxAfterTask(
 ): Promise<void> {
   const destroy = async () => {
     if (preserveSandbox) return
+    const pauseOnTaskEnd = !['false', '0'].includes(
+      process.env.AGENT_E2B_PAUSE_ON_TASK_END?.trim().toLowerCase() || 'true',
+    )
+    if (shouldUseE2BSandbox() && pauseOnTaskEnd) {
+      // A conversation is one durable task computer. Pausing ends active
+      // compute billing while preserving its filesystem and browser state for
+      // the next message in the same task. Sandbox.connect resumes this exact
+      // provider instance on the next turn.
+      await pauseE2BSandbox(conversationId)
+      return
+    }
     await destroySandbox(conversationId)
   }
 
@@ -780,8 +791,8 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       }
       const startupTasks: Array<Promise<unknown>> = []
       if (!directChat) {
-        emitter.progressUpdate('Initializing new computer…')
-        if (startIsolatedTaskSandbox || staleLeaseRecovery) {
+        emitter.progressUpdate(startIsolatedTaskSandbox ? 'Initializing new computer…' : 'Thinking…')
+        if (staleLeaseRecovery) {
           releaseStartupBrowserFence = await runClaimedPreChargeBootstrap(
             'task_bootstrap',
             () => acquireBrowserSessionFence(conversationId),
@@ -793,19 +804,13 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
               { userId, exceptRunId: creditRunId },
             ),
           )
-          if (startIsolatedTaskSandbox) {
-            const staleResearchCutoff = Date.now()
-            void clearResearchActivityForTask(userId, conversationId, staleResearchCutoff).catch((error) => {
-              console.warn('[AgentDiagnostics] Fresh task research activity cleanup failed', {
-                conversationId,
-                error: error instanceof Error ? error.message : String(error),
-              })
-            })
-          }
           startupTasks.push(resetLocalSandboxDir(conversationId))
-          restorePersistedFiles = staleLeaseRecovery && !shouldUseE2BSandbox()
-          restorePersistedFilesAfterRemoteReset = staleLeaseRecovery && shouldUseE2BSandbox()
+          restorePersistedFiles = !shouldUseE2BSandbox()
+          restorePersistedFilesAfterRemoteReset = shouldUseE2BSandbox()
         } else {
+          // A conversation already owns its own isolated workspace. Creating or
+          // continuing it never needs a destructive reset; durable restoration
+          // also makes a replacement host process see every prior task file.
           startupTasks.push(getOrCreateLocalSandboxDir(conversationId))
           restorePersistedFiles = true
         }
@@ -851,7 +856,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
           'browser_navigate',
         )
         remoteSandboxReadyPromise = (async () => {
-          if (startIsolatedTaskSandbox || staleLeaseRecovery) {
+          if (staleLeaseRecovery) {
             await resetE2BSandbox(conversationId)
           }
           // Provider sandbox confirmation is the billing activation boundary.

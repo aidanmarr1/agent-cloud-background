@@ -15,6 +15,16 @@ function userMessages(messages: ConversationContextMessage[]): ConversationConte
   return messages.filter(message => message.role === 'user' && message.content.trim())
 }
 
+/**
+ * A conversation is the durable task boundary. Once a task has received a
+ * second user message, that message continues the same task even when its
+ * wording is terse (for example, "export as PDF") and contains no pronoun or
+ * explicit reference to earlier work.
+ */
+export function hasPriorTaskTurn(messages: ConversationContextMessage[]): boolean {
+  return userMessages(messages).length > 1
+}
+
 export function latestUserText(messages: ConversationContextMessage[]): string {
   return userMessages(messages).at(-1)?.content.trim() || ''
 }

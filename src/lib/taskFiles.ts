@@ -179,6 +179,18 @@ export function inferTaskFileMimeType(path: string): string {
       return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     case 'xlsx':
       return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    case 'pptx':
+      return 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+    case 'zip':
+      return 'application/zip'
+    case 'rtf':
+      return 'application/rtf'
+    case 'odt':
+      return 'application/vnd.oasis.opendocument.text'
+    case 'ods':
+      return 'application/vnd.oasis.opendocument.spreadsheet'
+    case 'odp':
+      return 'application/vnd.oasis.opendocument.presentation'
     default:
       return 'application/octet-stream'
   }

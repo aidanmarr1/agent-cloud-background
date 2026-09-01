@@ -98,6 +98,7 @@ try {
     'pnpm --version',
     'yarn --version',
     'python3 --version',
+    'python3 -c "import docx, openpyxl, pptx"',
     'command -v bash',
     'command -v git',
     'command -v gh',

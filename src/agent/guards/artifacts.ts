@@ -9,8 +9,8 @@ export function inferArtifactType(filePath: string): 'document' | 'code' | 'data
   const ext = filePath.split('.').pop()?.toLowerCase()
   if (IMAGE_EXTENSIONS.includes(ext || '')) return 'image'
   if (['html', 'htm'].includes(ext || '')) return 'website'
-  if (['md', 'txt', 'rtf', 'pdf'].includes(ext || '')) return 'document'
-  if (['csv', 'json', 'xml', 'yaml', 'yml'].includes(ext || '')) return 'data'
+  if (['md', 'txt', 'rtf', 'pdf', 'docx', 'pptx', 'odt', 'odp', 'zip'].includes(ext || '')) return 'document'
+  if (['csv', 'json', 'xml', 'yaml', 'yml', 'xlsx', 'ods'].includes(ext || '')) return 'data'
   return 'code'
 }
 

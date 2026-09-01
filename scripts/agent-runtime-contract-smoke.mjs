@@ -240,6 +240,9 @@ async function assertSourceContracts() {
 
   assert.match(prompts, /Custom Instruction Compliance/, 'custom instructions must be elevated to active runtime constraints')
   assert.match(prompts, /Default work standard: do not skim or do the bare minimum/, 'runtime prompt must counter shallow minimum-effort behavior')
+  assert.match(prompts, /create and deliver common professional formats including PDF, DOCX\/Word, PPTX\/PowerPoint, XLSX\/Excel, CSV, Markdown, text, HTML, images and ZIP archives/, 'runtime prompt must advertise the real multi-format deliverable capability')
+  assert.match(prompts, /terminal is the same task computer as the file tools/, 'runtime prompt must explain that terminal-generated files share the task workspace')
+  assert.match(prompts, /blank browser page is not a source file/, 'runtime prompt must keep local file conversion out of unrelated blank-browser flows')
   assert.match(prompts, /getPlanningPrompt\(customInstructions\?: string\)/, 'planner prompt must accept custom instructions')
   assert.match(prompts, /Custom Instructions That Apply To This Plan/, 'planning prompt must include custom instruction guidance')
   assert.match(prompts, /Custom instructions supersede.*including the visible number of plan phases\/steps.*except for safety, permissions, sandbox\/tool availability, and core runtime rules/s, 'custom instructions must supersede defaults including visible phase count except safety/core rules')
@@ -288,6 +291,8 @@ async function assertSourceContracts() {
   assert.ok((planManager.match(/final remaining module must name the concrete user-facing answer, action state, artifact, report, export, or handoff/g) || []).length >= 2, 'information and error replans must preserve the same explicit completion-module structure')
   assert.match(toolPipeline, /if \(BROWSER_VISION_TOOLS\.has\(toolName\)\) return true/, 'every visual browser action with a fresh frame must forward it to the model')
   assert.match(toolPipeline, /return BROWSER_VISION_TOOLS\.has\(toolName\) \|\|/, 'fresh visual browser actions must bypass the old per-step screenshot budget')
+  assert.match(toolPipeline, /scanForCommandDeliverables\(tc\.id, state\)/, 'successful terminal calls must scan for user-facing office and document artifacts')
+  assert.match(toolPipeline, /persistSandboxTaskFile[\s\S]*recordWorkLedgerDeliverable[\s\S]*emitFileArtifact/, 'terminal-generated deliverables must be persisted, tracked, and surfaced')
   assert.match(prompts, /Avoid repair loops/, 'planner prompt must directly request runtime-valid plan shapes to avoid extra repair calls')
   assert.doesNotMatch(prompts, /Minimum 3 steps except/, 'planner prompt must not impose a blanket 3-step minimum')
   assert.match(planManager, /if \(arrays\.titles\.length === 0\)[\s\S]*mappedTaskType !== 'general'[\s\S]*return false/, 'planner must not accept zero-step plans for tool/research/build tasks')
@@ -331,7 +336,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /const assertPlannerCreditRunway = async \(\) => this\.assertServerCreditRunwayCached\(\)/, 'planner control calls must share the cached credit runway instead of rechecking credits before acknowledgement')
   assert.match(agentLoop, /new PlanManager\([\s\S]{0,500}this\.options\.skipStartupAcknowledgement === true,[\s\S]{0,80}\bsignal\b/, 'AgentLoop must wire effective custom instructions, credit usage, credit preflight, startup acknowledgement control, and cancellation into PlanManager')
   assert.match(agentLoop, /shouldHydrateResearchActivity[\s\S]*this\.options\.startFreshSandbox !== true[\s\S]*loadResearchActivityEntries/, 'fresh tasks must not block startup acknowledgement on an already-cleared research activity read')
-  assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*void clearResearchActivityForTask\(userId,\s*conversationId,\s*staleResearchCutoff\)[\s\S]*resetLocalSandboxDir[\s\S]*startupReadyPromise = \(async \(\) => \{[\s\S]*await Promise\.all\(startupTasks\)/, 'background local computer preparation must begin in parallel')
+  assert.match(chatTaskRunner, /const startupTasks: Array<Promise<unknown>> = \[\][\s\S]*if \(staleLeaseRecovery\)[\s\S]*resetLocalSandboxDir[\s\S]*else \{[\s\S]*getOrCreateLocalSandboxDir[\s\S]*startupReadyPromise = \(async \(\) => \{[\s\S]*await Promise\.all\(startupTasks\)/, 'background local computer preparation must preserve normal task workspaces and reset only stale recovery state')
   assert.match(chatTaskRunner, /taskStartCreditPromise = chargeServerTaskStart[\s\S]*await taskStartCreditPromise[\s\S]*if \(!directChat && shouldUseE2BSandbox\(\)\)/, 'task-start billing must settle before paid sandbox activation without awaiting the full computer cold start')
   assert.match(chatTaskRunner, /taskStartCreditPromise = chargeServerTaskStart[\s\S]*openLiveDirectiveRun[\s\S]*await taskStartCreditPromise/, 'task-start billing must overlap independent worker bootstrap before its paid-work fence settles')
   assert.match(chatTaskRunner, /Computer initialization continues in parallel[\s\S]*startupReadyPromise = runClaimedPreChargeBootstrap\([\s\S]*taskStartCreditPromise = chargeServerTaskStart|taskStartCreditPromise = chargeServerTaskStart[\s\S]*Computer initialization continues in parallel[\s\S]*startupReadyPromise = runClaimedPreChargeBootstrap\(/, 'computer readiness must stay parallel and must not delay acknowledgement or planning')
@@ -365,7 +370,7 @@ async function assertSourceContracts() {
   assert.match(useAgentStream, /existingController && !isAutoSend/, 'active-stream user messages must take the live directive path')
   assert.match(useAgentStream, /addLiveDirectiveExchange/, 'live directives must split the visible assistant turn without starting a new run')
   assert.match(useAgentStream, /isFirstTaskAutoStart = conversation\.messages\.length === 1 && conversation\.messages\[0\]\?\.role === 'user'/, 'first prompt auto-starts must still use the fresh task startup path')
-  assert.match(useAgentStream, /startFreshSandbox = isFirstTaskAutoStart \|\| \(!isAutoSend && !isContextualTaskUpdateText\(latestUserContent\)\)/, 'auto-send must not skip initializing/creating-plan status for the first task')
+  assert.match(useAgentStream, /startFreshSandbox = isFirstTaskAutoStart \|\| !hasPriorTaskTurn\(messagesToSend\)/, 'auto-send must initialise only the first turn while every later message preserves the task computer')
   assert.match(useAgentStream, /setStreamingStatus\('thinking'\)/, 'new tasks must begin with a truthful thinking state before worker-emitted startup stages')
   assert.match(eventDispatcher, /getTerminalErrorMessage\(\)/, 'dispatcher must expose terminal error details to the client')
   assert.match(errorMessages, /OBJECT_STRING\s*=\s*'\[object Object\]'/, 'shared error helper must explicitly reject object-string leaks')
@@ -810,11 +815,12 @@ async function assertSourceContracts() {
   assert.match(eventDispatcher, /labelSource:\s*'model'/, 'visible task pills must retain model authorship')
   assert.doesNotMatch(eventDispatcher, /describeActivity\(event\.name,\s*event\.args\)/, 'visible task pills must not use locally generated action text')
   assert.doesNotMatch(actionFeed, /describeActivity\(/, 'rendered action pills must only show stored model-authored labels')
-  assert.match(useAgentStream, /isContextualTaskUpdateText/, 'client must only preserve sandbox state for contextual task updates')
-  assert.match(useAgentStream, /isFirstTaskAutoStart \|\| \(!isAutoSend && !isContextualTaskUpdateText\(latestUserContent\)\)/, 'new user tasks and first-prompt auto-starts should start with an isolated sandbox')
+  assert.match(useAgentStream, /hasPriorTaskTurn/, 'client must preserve sandbox state for every follow-up turn in the same task conversation')
+  assert.match(useAgentStream, /isFirstTaskAutoStart \|\| !hasPriorTaskTurn\(messagesToSend\)/, 'only the first prompt in a task conversation should initialise its isolated sandbox')
   assert.match(chatRoute, /startIsolatedTaskSandbox/, 'server must enforce per-task sandbox isolation')
-  assert.match(chatTaskRunner, /resetLocalSandboxDir\(conversationId\)/, 'isolated tasks must reset local task state before visible startup acknowledgement')
-  assert.match(chatTaskRunner, /resetE2BSandbox\(conversationId\)/, 'isolated E2B tasks must still reset the remote sandbox before tool execution')
+  assert.match(chatTaskRunner, /if \(staleLeaseRecovery\)[\s\S]*resetLocalSandboxDir\(conversationId\)/, 'only stale-lease recovery may reset local task state')
+  assert.match(chatTaskRunner, /if \(staleLeaseRecovery\)[\s\S]*resetE2BSandbox\(conversationId\)/, 'only stale-lease recovery may replace the remote sandbox')
+  assert.match(chatTaskRunner, /pauseE2BSandbox\(conversationId\)/, 'completed turns must pause rather than destroy the same task computer')
   assert.match(chatTaskRunner, /isTruncatedFinishReason/, 'direct chat must detect provider length stops before displaying a response')
   assert.match(chatTaskRunner, /isLikelyIncompleteDirectAnswer/, 'direct chat must detect mid-sentence answers even when the provider reports success')
   assert.match(chatTaskRunner, /Continue exactly from the next word/, 'direct chat must request a continuation instead of showing cut-off text')
@@ -1741,6 +1747,7 @@ import {
 } from ${JSON.stringify(join(root, 'src/lib/dynamicKnowledge.ts'))}
 import {
   effectiveTaskRequest,
+  hasPriorTaskTurn,
   isContextualTaskUpdate,
 } from ${JSON.stringify(join(root, 'src/lib/conversationContext.ts'))}
 import {
@@ -1779,6 +1786,30 @@ function markOpenedDomain(state, domain, count = 1) {
 }
 
 export async function runLedgerSmoke() {
+  assert.equal(
+    hasPriorTaskTurn([{ role: 'user', content: 'Research hiking trails' }]),
+    false,
+    'a task must initialise its computer on the first user turn',
+  )
+  assert.equal(
+    hasPriorTaskTurn([
+      { role: 'user', content: 'Research hiking trails' },
+      { role: 'assistant', content: 'Completed the report.' },
+      { role: 'user', content: 'export as pdf' },
+    ]),
+    true,
+    'every follow-up in the same task must reuse its existing computer regardless of wording',
+  )
+  assert.equal(
+    isContextualTaskUpdate([
+      { role: 'user', content: 'Research hiking trails' },
+      { role: 'assistant', content: 'Completed the report.' },
+      { role: 'user', content: 'Write a poem about the moon' },
+    ]),
+    false,
+    'workspace continuity must not force unrelated follow-ups to inherit the earlier semantic request',
+  )
+
   const registry = new ToolRegistry()
   for (const name of ['create_file', 'web_search', 'browser_navigate']) {
     registry.register({

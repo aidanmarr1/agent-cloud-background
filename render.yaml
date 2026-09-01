@@ -78,7 +78,7 @@ services:
       - key: AGENT_E2B_ALLOW_INTERNET
         value: "true"
       - key: AGENT_E2B_PAUSE_ON_TASK_END
-        value: "false"
+        value: "true"
       - key: AGENT_E2B_KILL_ON_RESET
         value: "true"
       - key: AGENT_E2B_BROWSER_PORT
@@ -173,7 +173,7 @@ services:
       - key: AGENT_E2B_ALLOW_INTERNET
         value: "true"
       - key: AGENT_E2B_PAUSE_ON_TASK_END
-        value: "false"
+        value: "true"
       - key: AGENT_E2B_KILL_ON_RESET
         value: "true"
       - key: AGENT_E2B_BROWSER_PORT

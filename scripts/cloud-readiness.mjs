@@ -233,10 +233,10 @@ function checkEnvironment() {
     pass('AGENT_REQUIRE_HOSTED_TASK_WORKER=false')
   }
 
-  if (!envBoolExact('AGENT_E2B_PAUSE_ON_TASK_END', false)) {
-    pass('AGENT_E2B_PAUSE_ON_TASK_END=false')
+  if (envBoolExact('AGENT_E2B_PAUSE_ON_TASK_END', true)) {
+    pass('AGENT_E2B_PAUSE_ON_TASK_END=true')
   } else {
-    fail('AGENT_E2B_PAUSE_ON_TASK_END must be false because completed tasks should destroy their E2B sandbox')
+    fail('AGENT_E2B_PAUSE_ON_TASK_END must be true so same-task follow-ups reuse the paused task computer')
   }
 
   if (envBoolExact('AGENT_E2B_KILL_ON_RESET', true)) {

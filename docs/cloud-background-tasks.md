@@ -45,7 +45,7 @@ Provider prices change, so check each provider before launch:
 
 - The Render background worker has a fixed continuous instance cost because it remains online and polls the queue.
 - Vercel serves web requests and task/event APIs.
-- E2B bills only while a task sandbox is running. Keep `AGENT_E2B_WARM_POOL_ENABLED=false`, `AGENT_E2B_PAUSE_ON_TASK_END=false`, and `AGENT_E2B_KILL_ON_RESET=true` to avoid idle warm-pool or completed-sandbox runtime.
+- E2B bills only while a task sandbox is running. Keep `AGENT_E2B_WARM_POOL_ENABLED=false`, `AGENT_E2B_PAUSE_ON_TASK_END=true`, and `AGENT_E2B_KILL_ON_RESET=true`: completed turns pause their task computer without losing files, while genuinely stale recovery may replace it behind durable-file restoration.
 - Turso usage grows with task state, heartbeats during active jobs, dispatch attempts, and persisted stream events.
 - OpenRouter and search-provider usage grows with actual model and research calls.
 - The deployed background smoke uses the already-running worker and does not call the LLM or start E2B. A real agent task can incur model, search, and E2B usage.
@@ -117,7 +117,7 @@ E2B_TEMPLATE_ID=agent-cloud-browser
 AGENT_E2B_SANDBOX_TIMEOUT_MS=3600000
 AGENT_E2B_COMMAND_TIMEOUT_MS=120000
 AGENT_E2B_ALLOW_INTERNET=true
-AGENT_E2B_PAUSE_ON_TASK_END=false
+AGENT_E2B_PAUSE_ON_TASK_END=true
 AGENT_E2B_KILL_ON_RESET=true
 AGENT_E2B_BROWSER_PORT=9222
 AGENT_E2B_BROWSER_START_TIMEOUT_MS=30000
@@ -140,7 +140,7 @@ When E2B is enabled:
 - Contextual follow-up tasks restore those durable task files into the active sandbox before the agent continues. If an E2B sandbox was recycled and a replacement is created, saved artifacts come back; temporary scratch files that were never persisted do not.
 - `execute_command` becomes available to the agent and runs inside the E2B sandbox workspace.
 - Browser tools start Chromium inside the E2B sandbox and connect over Chrome DevTools Protocol, so browsing/clicking/screenshot work is no longer tied to the user's tab.
-- Task completion follows the configured lifecycle. Production uses `AGENT_E2B_PAUSE_ON_TASK_END=false`, and task reset uses `AGENT_E2B_KILL_ON_RESET=true`, so completed or replaced sandboxes do not remain billable in the background.
+- Task completion follows the configured lifecycle. Production uses `AGENT_E2B_PAUSE_ON_TASK_END=true`, so the same conversation resumes the same paused task computer without active idle compute. A stale-worker recovery may replace a sandbox only after durable files are available for restoration.
 
 If the selected E2B template does not include Chromium, either set `E2B_TEMPLATE_ID` to a custom template with Chromium installed or provide a bootstrap command through `AGENT_E2B_BROWSER_BOOTSTRAP_COMMAND`. A custom template is better for production because installing Chromium at task runtime is slower and increases sandbox runtime cost.
 
@@ -439,4 +439,4 @@ Do not copy fixed dollar estimates from this document into a budget; provider pr
 
 The primary topology has no intended Render idle-worker compute charge: the base stays suspended and each task pays only for its finite one-off execution. Vercel Workflow usage, Turso reads/writes, OpenRouter/search calls, and E2B runtime remain usage-based. The diagnostic deployed smoke uses Workflow and a short Render job, but deliberately avoids LLM and E2B calls.
 
-The largest variable costs are normally model tokens, research calls, and E2B sandbox time. Keep E2B warm pooling disabled, destroy completed/reset sandboxes, bound command and task timeouts, cap claim attempts, and monitor provider dashboards. Resuming `npm run worker:cloud` for rollback changes Render back to fixed idle compute until the base is suspended again.
+The largest variable costs are normally model tokens, research calls, and E2B sandbox time. Keep E2B warm pooling disabled, pause completed task computers, bound command and task timeouts, cap claim attempts, and monitor provider dashboards. Resuming `npm run worker:cloud` for rollback changes Render back to fixed idle compute until the base is suspended again.

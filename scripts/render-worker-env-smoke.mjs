@@ -120,7 +120,7 @@ assert.equal(String(template.get('AGENT_TASK_QUEUE_NAME')), 'production', 'worke
 assert.equal(String(template.get('AGENT_TASK_WORKER_CONCURRENCY')), '2', 'one Render worker service should run two isolated task processes')
 assert.equal(String(template.get('AGENT_SANDBOX_PROVIDER')), 'e2b', 'worker template must use hosted E2B sandboxes')
 assert.equal(String(template.get('E2B_TEMPLATE_ID')), 'agent-cloud-browser', 'worker template must configure an E2B browser runtime')
-assert.equal(String(template.get('AGENT_E2B_PAUSE_ON_TASK_END')), 'false', 'worker template must destroy sandboxes after tasks')
+assert.equal(String(template.get('AGENT_E2B_PAUSE_ON_TASK_END')), 'true', 'worker template must pause sandboxes so same-task follow-ups reuse them')
 assert.equal(String(template.get('AGENT_E2B_KILL_ON_RESET')), 'true', 'worker template must force fresh sandboxes per task')
 assert.equal(String(template.get('AGENT_E2B_WARM_POOL_ENABLED')), 'false', 'worker template must not reuse warm sandboxes')
 assert.equal(String(template.get('AGENT_E2B_VERIFY_ON_WORKER_STARTUP')), 'true', 'worker template must verify E2B command execution at startup')
