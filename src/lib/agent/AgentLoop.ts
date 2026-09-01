@@ -4205,7 +4205,7 @@ export class AgentLoop {
               await planManager.awaitPlan(state)
             } catch (planningError) {
               if (isOutOfCreditsError(planningError) || signal?.aborted) throw planningError
-              const recovered = planManager.recoverFromPlannerFailure(state)
+              const recovered = await planManager.recoverFromPlannerFailure(state)
               if (!recovered) throw planningError
               this.options.diagnostics?.({
                 type: 'planner_route_recovery',

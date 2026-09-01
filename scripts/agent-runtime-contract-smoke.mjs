@@ -249,15 +249,15 @@ async function assertSourceContracts() {
   assert.match(prompts, /They do NOT supersede safety, permissions, sandbox\/tool availability, or core runtime rules/, 'planner prompt must preserve safety/core constraints above custom instructions')
   assert.match(prompts, /fixed number of visible phases, honor that count/, 'planner prompt must honor custom visible phase-count instructions')
   assert.match(planManager, /PLANNER_ACK_MAX_TOKENS = 320/, 'planner acknowledgement generation must leave room for a complete visible sentence')
-  assert.match(planManager, /PLANNER_SIMPLE_JSON_MAX_TOKENS = 620/, 'simple planner JSON calls must have room for task-specific internal checklists without delaying startup')
-  assert.match(planManager, /PLANNER_MEDIUM_JSON_MAX_TOKENS = 820/, 'medium planner JSON calls must have room for task-specific internal checklists')
-  assert.match(planManager, /PLANNER_JSON_MAX_TOKENS = 980/, 'complex planner JSON calls must preserve detailed task-specific planning headroom')
+  assert.match(planManager, /PLANNER_SIMPLE_JSON_MAX_TOKENS = 1_200/, 'simple planner JSON calls must have room for task-specific internal checklists without truncation')
+  assert.match(planManager, /PLANNER_MEDIUM_JSON_MAX_TOKENS = 2_000/, 'medium planner JSON calls must have room for task-specific internal checklists')
+  assert.match(planManager, /PLANNER_JSON_MAX_TOKENS = 2_800/, 'complex planner JSON calls must preserve detailed task-specific planning headroom')
   assert.match(planManager, /plannerJsonMaxTokens/, 'planner calls must use a task-sized token budget instead of one slow blanket cap')
   assert.match(planManager, /REPLAN_JSON_MAX_TOKENS = 520/, 'replanning JSON calls must use a compact output cap')
   assert.match(planManager, /PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000/, 'a slow dedicated acknowledgement must yield quickly to the planner-authored fallback')
   assert.doesNotMatch(planManager, /PLANNER_ACK_THOUGHTFUL_MIN_MS|waitForThoughtfulAcknowledgementWindow/, 'startup acknowledgement must show as soon as usable model text is available')
   assert.match(prompts, /getFastPlanningPrompt/, 'planner must expose a compact first-pass planning prompt')
-  assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 760/, 'fast planner should have enough output room to finish structured multi-step JSON with internal checklists')
+  assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 1_600/, 'fast planner should have enough output room to finish structured multi-step JSON with internal checklists')
   assert.match(planManager, /PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'fast planner must tolerate medium reasoning instead of stacking short retries')
   assert.match(planManager, /PLANNER_JSON_REQUEST_TIMEOUT_MS = 45_000/, 'strict planner JSON calls must tolerate medium reasoning')
   assert.match(planManager, /PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS = 30_000/, 'planner relaxed calls must tolerate medium reasoning')
@@ -268,12 +268,12 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /continueAfterPlannerTimeout|timeoutFallbackPlan|Planner timed out inside startup deadline|state\.planEmitted = true[\s\S]{0,240}fallback\.titles/, 'planner startup timeout exhaustion must not fabricate visible local fallback plans')
   assert.match(planManager, /function plannerTaskMessages[\s\S]*effectiveTaskRequest\(messages\)\.slice\(0,\s*6000\)/, 'planner must use the compact effective task request instead of replaying full chat history')
   assert.match(planManager, /fastPlannerMode[\s\S]*getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*getPlanningPrompt\(this\.customInstructions\)/, 'initial planner call must use the compact prompt before the full strict prompt')
-  assert.match(planManager, /fastPlannerMode[\s\S]*streamInitialPlannerResponse\(params,\s*true\)/, 'fast planner startup must request one streamed structured response so its acknowledgement can paint before the plan finishes')
+  assert.match(planManager, /fastPlannerMode[\s\S]*streamInitialPlannerResponse\(params,\s*true\)/, 'fast planner startup must request the structured plan without blocking the separately streamed acknowledgement')
   assert.match(planManager, /res = await createCompletion\(\{[\s\S]*response_format:\s*\{\s*type:\s*'json_object'\s*\}/, 'strict planner fallback calls must still request structured JSON on the first provider attempt')
   assert.match(planManager, /requestTimeoutMs:\s*this\.plannerRequestTimeoutMs\(fastPlannerMode[\s\S]*PLANNER_FAST_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_RELAXED_JSON_REQUEST_TIMEOUT_MS[\s\S]*PLANNER_JSON_REQUEST_TIMEOUT_MS/, 'initial planner calls must pass the fast bounded planner timeout and lean fallback timeouts')
   const normalPlannerStartup = planManager.match(/startPlanCall\(\): void \{[\s\S]*?\n  dispose\(\): void \{/)?.[0] || ''
-  assert.match(normalPlannerStartup, /plannerDeadlineAtMs = Date\.now\(\) \+ PLANNER_OVERALL_DEADLINE_MS[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/, 'normal startup must immediately begin its single planner stream inside the bounded deadline')
-  assert.doesNotMatch(normalPlannerStartup, /scheduleAcknowledgementCall|acknowledgementRequestStartedPromise/, 'normal startup must not issue a redundant acknowledgement request or wait behind a request-order gate')
+  assert.match(normalPlannerStartup, /this\.dedicatedAcknowledgementForPlan = true[\s\S]*this\.scheduleAcknowledgementCall\(\)[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/, 'normal startup must launch its model acknowledgement first and structured planning immediately afterward')
+  assert.doesNotMatch(normalPlannerStartup, /await\s+this\.acknowledgementPromise|setTimeout\([^\n]*acknowledgement/, 'planner request startup must not wait behind an acknowledgement timer or request-order gate')
   assert.match(planManager, /isPlannerRequestTimeout[\s\S]*attempt < PLANNER_TIMEOUT_RECOVERY_RETRIES/, 'planner startup timeout recovery must be centrally bounded')
   assert.match(planManager, /await this\.recordUsage\?\.\(normalized,/, 'planner usage recording must remain an exact durability fence before plan emission or first tool startup')
   assert.match(prompts, /Research method is a model decision, not a fixed browser workflow/, 'planner prompt must let the model select a targeted research route without broad sweep actions')
@@ -715,7 +715,8 @@ async function assertSourceContracts() {
   assert.doesNotMatch(agentLoop, /buildTaskStartAcknowledgement|I'll open the site, check what loads/, 'agent startup acknowledgement must not use a hardcoded generic sentence')
   assert.match(planManager, /function isSafeStreamingPlannerAckDraft\(ack: string, request: string\): boolean \{[\s\S]*isUsablePlannerAck\(ack, request\)/, 'startup must withhold incomplete acknowledgement fragments until the streamed draft is a usable task-specific sentence')
   assert.match(planManager, /function completedPlannerAckFromJson[\s\S]*JSON\.parse\(raw\.slice\(openingQuote, index \+ 1\)\)/, 'ordinary startup must extract only a complete JSON acknowledgement string, never an unretractable fragment')
-  assert.match(planManager, /streamInitialPlannerResponse[\s\S]*createStreamingCompletion[\s\S]*for await \(const chunk of stream\)[\s\S]*emitAcknowledgementFromStreamingPlan\(raw\)/, 'ordinary startup must release its complete task-specific acknowledgement while the single planner response is still streaming')
+  assert.match(planManager, /scheduleAcknowledgementCall[\s\S]*emitModelGeneratedAcknowledgement\('task'\)/, 'ordinary startup must stream a dedicated model-authored acknowledgement')
+  assert.match(planManager, /dedicatedAcknowledgementForPlan \|\|[\s\S]*emitAcknowledgementFromStreamingPlan/, 'the structured planner stream must not emit a competing acknowledgement when the dedicated opening owns startup text')
   assert.match(planManager, /emitModelGeneratedAcknowledgement[\s\S]*const stream = await createStreamingCompletion[\s\S]*for await \(const chunk of stream\)[\s\S]*isSafeStreamingPlannerAckDraft\(draft, request\)[\s\S]*this\.emitter\.textDelta\(draft\)/, 'a precomputed-plan acknowledgement must still release the first complete task-specific model draft while its provider stream is active')
   assert.match(planManager, /fetchGenerationUsage\(generationId[\s\S]*recordCompletionUsage\(streamedUsage, 'ack'\)/, 'the streamed acknowledgement must still recover and record exact provider usage before plan or first-step release')
   assert.doesNotMatch(planManager, /PLANNER_ACK_DISPLAY_WAIT_MS|acknowledgementDisplayPromise/, 'startup must not retain the old 150 ms acknowledgement races')
@@ -726,7 +727,7 @@ async function assertSourceContracts() {
   assert.match(planManager, /const acknowledged = await this\.emitAcknowledgement\(obj\.ack, mappedTaskType\)[\s\S]*!acknowledged \|\| \(!this\.skipAcknowledgement && !this\.acknowledgementEmitted\)[\s\S]*throw new Error\(PLANNER_QUALITY_ERROR\)[\s\S]*emitPlanAfterAcknowledgement\(modelPlan\.titles\)/, 'normal planner output must fail model repair rather than expose a plan without an acknowledgement')
   assert.match(streamProcessor, /toolCalls\.size === 0[\s\S]*this\.emitter\.textDelta\(`\\n\\n\$\{assistantContent\}`\)/, 'each accepted text-only model turn must begin at a paragraph boundary instead of concatenating with earlier narration')
   assert.match(streamProcessor, /toolCalls\.size > 0 && !cadenceProgressUpdate[\s\S]*assistantContent = ''/, 'ordinary prose must be suppressed when the completed native turn yields a tool call')
-  assert.match(planManager, /startPlanCall\(\): void \{[\s\S]*attemptPlanCall\(0,\s*true\)/, 'normal startup must start the streamed acknowledgement-and-plan call immediately')
+  assert.match(planManager, /startPlanCall\(\): void \{[\s\S]*scheduleAcknowledgementCall\(\)[\s\S]*attemptPlanCall\(0,\s*true\)/, 'normal startup must start acknowledgement first and planning immediately afterward')
   assert.doesNotMatch(planManager, /max_tokens:\s*80/, 'acknowledgement calls must not use a tiny token cap that high reasoning can consume before visible text')
   assert.match(planManager, /max_tokens:\s*PLANNER_ACK_MAX_TOKENS/, 'acknowledgement calls should stay bounded while leaving room for a task-specific paragraph')
   assert.doesNotMatch(planManager, /sentences\.length < 1 \|\| sentences\.length > \d+/, 'startup acknowledgements must not enforce a mechanical sentence count')
@@ -744,10 +745,10 @@ async function assertSourceContracts() {
   assert.match(planManager, /PLANNER_REPAIR_EXHAUSTED_ERROR/, 'planner quality failures must exhaust model repair before fallback')
   assert.match(planManager, /PLANNER_QUALITY_REPAIR_ATTEMPTS = 1/, 'planner repair must stay bounded so startup does not wait behind repeated repair loops')
   assert.match(planManager, /emitParsedPlanWithModelRepair/, 'planner quality failures must be repaired through the model before the task can fail')
-  assert.match(planManager, /recoverFromPlannerFailure[\s\S]*usePrecomputedPlan/, 'planner/provider failure must recover into a minimal task-specific execution plan instead of stopping the task')
+  assert.match(planManager, /async recoverFromPlannerFailure[\s\S]*repairPlannerResponse[\s\S]*emitParsedPlan/, 'planner/provider failure must recover through a bounded model-authored visible plan')
   const plannerRecoveryContract = planManager.match(/recoverFromPlannerFailure\([\s\S]*?\n  private async recordCompletionUsage/)?.[0] || ''
-  assert.doesNotMatch(plannerRecoveryContract, /textDelta\(/, 'planner recovery must not fabricate a visible acknowledgement when every model-written candidate failed')
-  assert.match(agentLoop, /planManager\.recoverFromPlannerFailure\(state\)/, 'the agent loop must invoke planner route recovery on non-credit internal planner failures')
+  assert.doesNotMatch(plannerRecoveryContract, /usePrecomputedPlan|Complete \$\{target\}/, 'planner recovery must not install a silent locally-authored execution plan')
+  assert.match(agentLoop, /await planManager\.recoverFromPlannerFailure\(state\)/, 'the agent loop must await model-authored planner recovery before any tool work')
   assert.doesNotMatch(planManager, /emitSyntheticPlan/, 'planner must not emit synthetic backup plans when model planning fails')
   assert.doesNotMatch(planManager, /buildEmergencyPlannerResponse|emergencyPlan|emergencyPlanner/, 'planner must not use local emergency fallback plans when model planning fails')
   assert.match(planManager, /repairPlannerResponse/, 'invalid planner JSON must be repaired before failing the task')
@@ -2546,10 +2547,19 @@ export async function runLedgerSmoke() {
     plan(items: string[]) { recoveredPlans.push(items) },
   } as any, [{ role: 'user', content: 'Research Warmwind OS AI' }], 2)
   ;(recoveryManager as any).acknowledgementEmitted = true
+  ;(recoveryManager as any).repairPlannerResponse = async () => ({
+    ack: 'I’ll research Warmwind OS AI and deliver a sourced assessment of its capabilities.',
+    taskType: 'research',
+    complexity: 2,
+    steps: [
+      { title: 'Research Warmwind OS AI evidence', scope: 'Gather authoritative evidence.' },
+      { title: 'Deliver the sourced Warmwind OS AI assessment', scope: 'Synthesize findings and limitations.' },
+    ],
+  })
   const recoveryState = createInitialState(false, timeouts)
-  assert.equal(recoveryManager.recoverFromPlannerFailure(recoveryState), true)
+  assert.equal(await recoveryManager.recoverFromPlannerFailure(recoveryState), true)
   assert.equal(recoveredAckEvents.length, 0, 'planner failure recovery must not duplicate an acknowledgement that already rendered')
-  assert.equal(recoveredPlans.length, 1, 'planner failure recovery must still emit its minimal execution plan')
+  assert.equal(recoveredPlans.length, 1, 'planner failure recovery must emit its model-authored visible plan')
   const longGoalTracker = new GoalTracker()
   longGoalTracker.initializeFromPlan(Array.from({ length: 12 }, (_, idx) => \`Step \${idx + 1} with a fairly specific objective\`))
   longGoalTracker.advanceToStep(6)

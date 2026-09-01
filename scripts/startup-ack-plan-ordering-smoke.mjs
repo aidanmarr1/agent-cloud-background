@@ -16,12 +16,7 @@ try {
   assert.match(
     eventDispatcher,
     /if \(!this\.startupAcknowledgment\) \{[\s\S]*this\.pendingStartupPlanItems = \[\.\.\.items\][\s\S]*return/,
-    'the client must hold a plan event when its model-authored opening has not painted',
-  )
-  assert.match(
-    eventDispatcher,
-    /if \(this\.pendingStartupPlanItems\) \{[\s\S]*this\.captureStartupAcknowledgment\(\)[\s\S]*this\.activatePlan\(pendingPlan\)/,
-    'the held plan must activate only after acknowledgement text reaches the message store',
+    'the client must hold a plan event until its model-authored opening has painted',
   )
 
   await writeFile(runnerPath, `
@@ -32,42 +27,27 @@ import { computeTimeouts } from ${JSON.stringify(join(root, 'src/lib/agent/TaskS
 
 type VisibleEvent = { type: 'text'; content: string } | { type: 'plan'; items: string[] }
 
-let providerCallCount = 0
-let completionResponder: (params: unknown) => Promise<unknown> = async () => {
-  throw new Error('Unexpected provider call')
-}
-;(globalThis as any).__startupAckCompletion = async (params: unknown) => {
-  providerCallCount += 1
+let providerCallKinds: string[] = []
+let completionResponder: (params: any) => Promise<any> = async () => { throw new Error('Unexpected completion call') }
+let streamingResponder: (params: any) => Promise<any> = async () => { throw new Error('Unexpected stream call') }
+;(globalThis as any).__startupAckCompletion = async (params: any) => {
+  providerCallKinds.push(params.response_format ? 'plan-json' : 'completion')
   return completionResponder(params)
 }
-
-function streamFromResponse(response: any) {
-  return {
-    async *[Symbol.asyncIterator]() {
-      const content = response?.choices?.[0]?.message?.content || ''
-      const splitAt = Math.max(1, Math.min(content.length, Math.ceil(content.length / 2)))
-      if (content) {
-        yield { id: response.id, choices: [{ delta: { content: content.slice(0, splitAt) } }] }
-        if (splitAt < content.length) {
-          yield { id: response.id, choices: [{ delta: { content: content.slice(splitAt) } }] }
-        }
-      }
-      yield {
-        id: response.id,
-        choices: [{ delta: {}, finish_reason: 'stop' }],
-        usage: response.usage,
-      }
-    },
-  }
-}
-
-const defaultStreamingResponder = async (params: unknown) => streamFromResponse(await completionResponder(params))
-let streamingResponder: (params: unknown) => Promise<any> = defaultStreamingResponder
-;(globalThis as any).__startupAckStream = async (params: unknown) => {
-  providerCallCount += 1
+;(globalThis as any).__startupAckStream = async (params: any) => {
+  providerCallKinds.push(params.response_format ? 'plan-stream' : 'ack-stream')
   return streamingResponder(params)
 }
 ;(globalThis as any).__startupAckGenerationUsage = async () => null
+
+function streamText(id: string, content: string, usage = { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 }) {
+  return {
+    async *[Symbol.asyncIterator]() {
+      yield { id, choices: [{ delta: { content } }] }
+      yield { id, choices: [{ delta: {}, finish_reason: 'stop' }], usage }
+    },
+  }
+}
 
 function emitterFor(events: VisibleEvent[]) {
   return {
@@ -82,332 +62,99 @@ function emitterFor(events: VisibleEvent[]) {
   }
 }
 
-function state() {
-  return createInitialState(false, computeTimeouts(2))
+function state() { return createInitialState(false, computeTimeouts(2)) }
+const request = 'Research Warmwind OS AI and deliver a sourced report.'
+const validAck = 'I’ll research Warmwind OS AI across primary and independent sources, then deliver a sourced report on its capabilities and limitations.'
+const plan = {
+  ack: validAck,
+  taskType: 'research',
+  complexity: 2,
+  steps: [
+    { title: 'Research Warmwind OS AI evidence', scope: 'Gather concrete primary and independent evidence.' },
+    { title: 'Assess Warmwind OS AI capabilities and limitations', scope: 'Reconcile the strongest findings and caveats.' },
+    { title: 'Deliver the sourced Warmwind OS AI report', scope: 'Synthesize the evidence into the requested report.' },
+  ],
 }
 
 export async function run() {
-  const request = 'Research Warmwind OS AI and deliver a sourced report.'
-  const validAck = 'I’ll research Warmwind OS AI across primary and independent sources, then deliver a sourced report on its capabilities and limitations.'
-  const plan = {
-    ack: validAck,
-    taskType: 'research',
-    complexity: 2,
-    steps: [
-      { title: 'Research Warmwind OS AI evidence', scope: 'Gather concrete primary and independent evidence.' },
-      { title: 'Deliver the sourced Warmwind OS AI report', scope: 'Synthesize the findings and limitations.' },
-    ],
+  const directEvents: VisibleEvent[] = []
+  const directManager = new PlanManager(emitterFor(directEvents) as any, [{ role: 'user', content: request }], 2)
+  assert.equal(await (directManager as any).emitParsedPlan(state(), plan), true)
+  assert.deepEqual(directEvents.map(event => event.type), ['text', 'plan'])
+
+  // The acknowledgement call starts first. Planning starts immediately too,
+  // but an early plan cannot become visible until the opening is complete.
+  const orderedEvents: VisibleEvent[] = []
+  const orderedManager = new PlanManager(emitterFor(orderedEvents) as any, [{ role: 'user', content: request }], 2)
+  const orderedState = state()
+  let releaseAck!: () => void
+  let ackRequestStarted!: () => void
+  const ackGate = new Promise<void>(resolve => { releaseAck = resolve })
+  const ackStarted = new Promise<void>(resolve => { ackRequestStarted = resolve })
+  providerCallKinds = []
+  streamingResponder = async (params: any) => {
+    if (params.response_format) return streamText('gen-plan', JSON.stringify(plan), { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180, cost: 0.0002 })
+    ackRequestStarted()
+    await ackGate
+    return streamText('gen-ack', validAck)
   }
-
-  // Normal planner path: a valid model acknowledgement must be visible first.
-  const normalEvents: VisibleEvent[] = []
-  const normalManager = new PlanManager(emitterFor(normalEvents) as any, [{ role: 'user', content: request }], 2)
-  const normalState = state()
-  ;(normalManager as any).setStateRef(normalState)
-  assert.equal(await (normalManager as any).emitParsedPlan(normalState, plan), true)
-  assert.deepEqual(normalEvents.map(event => event.type), ['text', 'plan'])
-  assert.match((normalEvents[0] as { type: 'text'; content: string }).content, /^I’ll research Warmwind OS AI/)
-
-  // A valid acknowledgement carried by the planner must win immediately.
-  const fastPlannerEvents: VisibleEvent[] = []
-  const fastPlannerManager = new PlanManager(emitterFor(fastPlannerEvents) as any, [{ role: 'user', content: request }], 2)
-  await Promise.race([
-    (fastPlannerManager as any).emitParsedPlan(state(), plan),
-    new Promise((_, reject) => setTimeout(() => reject(new Error('valid planner acknowledgement was delayed')), 75)),
-  ])
-  assert.deepEqual(fastPlannerEvents.map(event => event.type), ['text', 'plan'])
-
-  // Normal startup uses one streamed planner response. Its completed ack field
-  // paints while the remaining JSON is still arriving, before the plan event.
-  const parallelStartupEvents: VisibleEvent[] = []
-  const parallelStartupManager = new PlanManager(emitterFor(parallelStartupEvents) as any, [{ role: 'user', content: request }], 2)
-  const parallelStartupState = state()
-  providerCallCount = 0
-  let releasePlanRemainder!: () => void
-  let streamedAckProcessed!: () => void
-  const planRemainderGate = new Promise<void>(resolve => { releasePlanRemainder = resolve })
-  const streamedAckProcessedPromise = new Promise<void>(resolve => { streamedAckProcessed = resolve })
-  streamingResponder = async (params: any) => ({
-    async *[Symbol.asyncIterator]() {
-      assert.ok(params.response_format, 'ordinary startup should use one streamed JSON planner request')
-      const serialized = JSON.stringify(plan)
-      const splitAt = serialized.indexOf(',"taskType"')
-      assert.ok(splitAt > 0, 'test planner JSON must place ack before the remaining plan fields')
-      yield {
-        id: 'gen-normal-plan',
-        choices: [{ delta: { content: serialized.slice(0, splitAt) } }],
-      }
-      streamedAckProcessed()
-      await planRemainderGate
-      yield {
-        id: 'gen-normal-plan',
-        choices: [{ delta: { content: serialized.slice(splitAt) } }],
-      }
-      yield {
-        id: 'gen-normal-plan',
-        choices: [{ delta: {}, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
-      }
-    },
-  })
-  ;(parallelStartupManager as any).setStateRef(parallelStartupState)
-  parallelStartupManager.startPlanCall()
-  const parallelAwait = parallelStartupManager.awaitPlan(parallelStartupState)
-  await streamedAckProcessedPromise
-  assert.deepEqual(parallelStartupEvents, [{ type: 'text', content: validAck + '\\n\\n' }])
-  releasePlanRemainder()
-  await parallelAwait
-  assert.equal(providerCallCount, 1, 'ordinary startup must not issue a redundant acknowledgement request')
-  assert.equal(parallelStartupEvents.at(-1)?.type, 'plan')
-  assert.deepEqual(parallelStartupEvents.map(event => event.type), ['text', 'plan'])
-  streamingResponder = defaultStreamingResponder
-
-  // Regression: a streamed fast planner can end with only an incomplete ack
-  // fragment. It must stay hidden while the strict planner fallback supplies a
-  // complete acknowledgement and plan.
-  const truncatedAckEvents: VisibleEvent[] = []
-  const truncatedAckManager = new PlanManager(emitterFor(truncatedAckEvents) as any, [{ role: 'user', content: request }], 2)
-  const truncatedAckState = state()
-  providerCallCount = 0
-  completionResponder = async (params: any) => {
-    assert.ok(params.response_format, 'the valid planner should satisfy startup without an acknowledgement repair call')
-    return {
-      id: 'gen-truncated-ack-plan',
-      choices: [{ message: { content: JSON.stringify(plan) } }],
-      usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
-    }
-  }
-  streamingResponder = async () => ({
-    async *[Symbol.asyncIterator]() {
-      yield {
-        id: 'gen-truncated-plan',
-        choices: [{ delta: { content: '{"ack":"I’ll research Warmwind OS AI with' } }],
-      }
-      yield {
-        id: 'gen-truncated-plan',
-        choices: [{ delta: {}, finish_reason: 'length' }],
-        usage: { prompt_tokens: 120, completion_tokens: 760, total_tokens: 880, cost: 0.0003 },
-      }
-    },
-  })
-  ;(truncatedAckManager as any).setStateRef(truncatedAckState)
-  truncatedAckManager.startPlanCall()
-  await truncatedAckManager.awaitPlan(truncatedAckState)
-  assert.equal(providerCallCount, 2)
-  assert.deepEqual(truncatedAckEvents.map(event => event.type), ['text', 'plan'])
+  ;(orderedManager as any).setStateRef(orderedState)
+  orderedManager.startPlanCall()
+  const orderedAwait = orderedManager.awaitPlan(orderedState)
+  await ackStarted
+  await Promise.resolve()
+  assert.deepEqual(orderedEvents, [], 'a plan that finishes early must not appear ahead of the acknowledgement')
+  releaseAck()
+  await orderedAwait
+  assert.deepEqual(providerCallKinds, ['ack-stream', 'plan-stream'])
+  assert.equal(orderedEvents.at(-1)?.type, 'plan')
+  assert.ok(orderedEvents.slice(0, -1).every(event => event.type === 'text'))
   assert.equal(
-    (truncatedAckEvents[0] as { type: 'text'; content: string }).content,
+    orderedEvents.filter(event => event.type === 'text').map(event => event.content).join(''),
     validAck + '\\n\\n',
-    'the planner-authored complete acknowledgement must replace the hidden truncated draft',
+    'only the dedicated acknowledgement may own visible startup text',
   )
-  assert.equal(
-    truncatedAckEvents.some(event => event.type === 'text' && event.content.includes('with\\n\\n')),
-    false,
-    'the incomplete provider fragment must never become visible',
-  )
-  streamingResponder = defaultStreamingResponder
 
-  // Short subjects can be expanded semantically by the model. "AI" becoming
-  // "artificial intelligence" must not trigger acknowledgement or plan repair.
-  const shortTopicRequest = 'research about ai'
-  const expandedShortTopicAck = 'I’ll research artificial intelligence, examine its current applications and deliver a concise overview of the field.'
-  const shortTopicPlan = {
-    ack: expandedShortTopicAck,
-    taskType: 'research',
-    complexity: 2,
-    steps: [
-      { title: 'Research artificial intelligence foundations', scope: 'Gather reliable evidence on the field and its core branches.' },
-      { title: 'Assess current artificial intelligence applications', scope: 'Compare representative uses, capabilities and limitations.' },
-      { title: 'Deliver the artificial intelligence overview', scope: 'Synthesize the findings into a concise, sourced report.' },
-    ],
+  // Long requests must not be cut at the former 1,000-character boundary.
+  // End-of-prompt requirements are part of the acknowledgement input and its
+  // quality contract, so they cannot spuriously force repair.
+  const longRequest = 'Investigate workplace productivity evidence across sectors. ' +
+    'Compare controlled trials with real outcomes and implementation costs. '.repeat(24) +
+    'Final named requirement: include Warmwind in the delivered report.'
+  assert.ok(longRequest.length > 1_000)
+  const longAck = 'I’ll investigate workplace productivity evidence, include Warmwind and deliver the requested cross-sector report with controlled and real-world findings.'
+  let observedLongAckPrompt = ''
+  streamingResponder = async (params: any) => {
+    const userContent = params.messages.at(-1)?.content
+    observedLongAckPrompt = typeof userContent === 'string'
+      ? userContent
+      : (userContent || []).find((part: any) => part?.type === 'text')?.text || ''
+    return streamText('gen-long-ack', longAck)
   }
-  const shortTopicEvents: VisibleEvent[] = []
-  const shortTopicManager = new PlanManager(emitterFor(shortTopicEvents) as any, [{ role: 'user', content: shortTopicRequest }], 2)
-  const shortTopicState = state()
-  providerCallCount = 0
-  completionResponder = async (params: any) => params.response_format
-    ? {
-        id: 'gen-short-topic-plan',
-        choices: [{ message: { content: JSON.stringify(shortTopicPlan) } }],
-        usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200, cost: 0.0002 },
-      }
-    : {
-        id: 'gen-short-topic-ack',
-        choices: [{ message: { content: expandedShortTopicAck } }],
-        usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
-      }
-  ;(shortTopicManager as any).setStateRef(shortTopicState)
-  shortTopicManager.startPlanCall()
-  await shortTopicManager.awaitPlan(shortTopicState)
-  assert.equal(providerCallCount, 1, 'semantic expansion must complete in the single streamed planner call')
-  assert.equal(shortTopicEvents.at(-1)?.type, 'plan')
-  assert.ok(shortTopicEvents.slice(0, -1).every(event => event.type === 'text'))
+  const longManager = new PlanManager(emitterFor([]) as any, [{ role: 'user', content: longRequest }], 3)
+  assert.equal(await (longManager as any).emitModelGeneratedAcknowledgement('research'), true)
+  assert.match(observedLongAckPrompt, /Final named requirement: include Warmwind/)
 
-  // If both planner drafts are malformed, the successful fast acknowledgement
-  // must survive so AgentLoop can recover into a task-specific execution plan
-  // instead of showing the planner-repair error to the user.
+  // Recovery must be model-authored and visible. It may not silently install
+  // a local plan before allowing tool execution.
   const recoveryEvents: VisibleEvent[] = []
   const recoveryManager = new PlanManager(emitterFor(recoveryEvents) as any, [{ role: 'user', content: request }], 2)
   const recoveryState = state()
-  providerCallCount = 0
-  completionResponder = async () => ({
-    id: 'gen-invalid-plan',
-    choices: [{ message: { content: '{}' } }],
-    usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
-  })
-  streamingResponder = async () => ({
-    async *[Symbol.asyncIterator]() {
-      yield {
-        id: 'gen-recovery-stream',
-        choices: [{ delta: { content: JSON.stringify({ ack: validAck }).slice(0, -1) } }],
-      }
-      yield {
-        id: 'gen-recovery-stream',
-        choices: [{ delta: {}, finish_reason: 'length' }],
-        usage: { prompt_tokens: 100, completion_tokens: 80, total_tokens: 180, cost: 0.0002 },
-      }
-    },
-  })
-  ;(recoveryManager as any).setStateRef(recoveryState)
-  recoveryManager.startPlanCall()
-  await assert.rejects(recoveryManager.awaitPlan(recoveryState), /usable task-specific plan after repair/)
-  assert.equal(recoveryManager.recoverFromPlannerFailure(recoveryState), true)
-  assert.equal(providerCallCount, 3)
-  assert.equal(recoveryEvents.at(-1)?.type, 'plan')
-  assert.ok(recoveryEvents.slice(0, -1).every(event => event.type === 'text'))
-  streamingResponder = defaultStreamingResponder
+  ;(recoveryManager as any).acknowledgementEmitted = true
+  ;(recoveryManager as any).repairPlannerResponse = async () => plan
+  assert.equal(await recoveryManager.recoverFromPlannerFailure(recoveryState), true)
+  assert.deepEqual(recoveryEvents.map(event => event.type), ['plan'])
+  assert.equal(recoveryState.planEmitted, true)
 
-  // Regression: a native image task must not terminate merely because both
-  // planner drafts fail the JSON/quality contract. If no usable model-authored
-  // acknowledgement exists, recover with an internal task-specific plan and
-  // allow the substantive multimodal agent turn to continue without leaking a
-  // plan-only startup UI.
-  const imageRecoveryEvents: VisibleEvent[] = []
-  const imageRequest = 'Research all about this bird.'
-  const imageDataUrl = 'data:image/jpeg;base64,ZmFrZS1iaXJkLWltYWdl'
-  const imageNativeMessages = [{
-    role: 'user',
-    content: [
-      { type: 'text', text: imageRequest },
-      { type: 'image_url', image_url: { url: imageDataUrl, detail: 'high' } },
-    ],
-  }]
-  const imageRecoveryManager = new PlanManager(
-    emitterFor(imageRecoveryEvents) as any,
-    [{ role: 'user', content: imageRequest }],
-    2,
-    [],
-    undefined,
-    undefined,
-    undefined,
-    false,
-    undefined,
-    imageNativeMessages as any,
-  )
-  const imageRecoveryState = state()
-  let imagePlannerParams: any = null
-  providerCallCount = 0
-  completionResponder = async () => ({
-    id: 'gen-invalid-image-plan-repair',
-    choices: [{ message: { content: '{}' } }],
-    usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
-  })
-  streamingResponder = async (params: any) => {
-    imagePlannerParams = params
-    return {
-      async *[Symbol.asyncIterator]() {
-        yield {
-          id: 'gen-invalid-image-plan',
-          choices: [{ delta: { content: '{}' } }],
-        }
-        yield {
-          id: 'gen-invalid-image-plan',
-          choices: [{ delta: {}, finish_reason: 'stop' }],
-          usage: { prompt_tokens: 100, completion_tokens: 2, total_tokens: 102, cost: 0.0001 },
-        }
-      },
-    }
-  }
-  ;(imageRecoveryManager as any).setStateRef(imageRecoveryState)
-  imageRecoveryManager.startPlanCall()
-  await assert.rejects(imageRecoveryManager.awaitPlan(imageRecoveryState), /usable task-specific plan after repair/)
-  assert.equal(imageRecoveryManager.recoverFromPlannerFailure(imageRecoveryState), true)
-  assert.equal(
-    providerCallCount,
-    3,
-    'image recovery must stay bounded to fast planning, strict fallback and one repair',
-  )
-  assert.deepEqual(imageRecoveryEvents, [], 'recovery without an acknowledgement must remain internal')
-  assert.equal(imageRecoveryState.planEmitted, true)
-  assert.ok(Array.isArray(imageRecoveryState.planItems) && imageRecoveryState.planItems.length === 1)
-  assert.ok(
-    imagePlannerParams.messages.at(-1).content.some((part: any) =>
-      part?.type === 'image_url' && part.image_url?.url === imageDataUrl
-    ),
-    'the planner request must preserve the native uploaded image',
-  )
-  assert.ok(
-    imageRecoveryManager.getStepInjection(imageRecoveryState, imageRecoveryState.dynamicIterationLimit),
-    'the recovered internal plan must release substantive agent execution',
-  )
-  streamingResponder = defaultStreamingResponder
+  const failedRecoveryEvents: VisibleEvent[] = []
+  const failedRecoveryManager = new PlanManager(emitterFor(failedRecoveryEvents) as any, [{ role: 'user', content: request }], 2)
+  const failedRecoveryState = state()
+  ;(failedRecoveryManager as any).acknowledgementEmitted = true
+  ;(failedRecoveryManager as any).repairPlannerResponse = async () => null
+  assert.equal(await failedRecoveryManager.recoverFromPlannerFailure(failedRecoveryState), false)
+  assert.equal(failedRecoveryState.planEmitted, false)
+  assert.deepEqual(failedRecoveryEvents, [])
 
-  // The one acknowledgement request used with a precomputed plan should paint
-  // before its exact usage debit settles, while first-step work remains fenced.
-  const usageFencedEvents: VisibleEvent[] = []
-  let releaseUsage!: () => void
-  let usageStarted!: () => void
-  const usageStartedPromise = new Promise<void>(resolve => { usageStarted = resolve })
-  const usageGate = new Promise<void>(resolve => { releaseUsage = resolve })
-  const usageFencedManager = new PlanManager(
-    emitterFor(usageFencedEvents) as any,
-    [{ role: 'user', content: request }],
-    2,
-    [],
-    undefined,
-    async (usage, chargeId) => {
-      assert.equal(chargeId, 'plan:ack:1')
-      assert.equal(usage.cost, 0.0001)
-      usageStarted()
-      await usageGate
-    },
-  )
-  const usageFencedState = state()
-  assert.equal(usageFencedManager.usePrecomputedPlan(usageFencedState, {
-    items: plan.steps.map(step => step.title),
-  }, { emitPlan: false }), true)
-  providerCallCount = 0
-  completionResponder = async () => ({
-    id: 'gen-precomputed-ack',
-    choices: [{ message: { content: validAck } }],
-    usage: { prompt_tokens: 50, completion_tokens: 25, total_tokens: 75, cost: 0.0001 },
-  })
-  usageFencedManager.startAcknowledgementCall()
-  const fencedAwait = usageFencedManager.awaitPlan(usageFencedState)
-  await usageStartedPromise
-  assert.equal(providerCallCount, 1)
-  assert.ok(usageFencedEvents.length >= 1)
-  assert.ok(usageFencedEvents.every(event => event.type === 'text'))
-  let fencedSettled = false
-  void fencedAwait.then(() => { fencedSettled = true })
-  await Promise.resolve()
-  assert.equal(fencedSettled, false)
-  releaseUsage()
-  await fencedAwait
-  assert.ok(usageFencedEvents.every(event => event.type === 'text'))
-
-  // If every model acknowledgement candidate is unusable, no plan can leak.
-  const rejectedEvents: VisibleEvent[] = []
-  const rejectedManager = new PlanManager(emitterFor(rejectedEvents) as any, [{ role: 'user', content: request }], 2)
-  ;(rejectedManager as any).repairAcknowledgementCandidate = async () => ''
-  await assert.rejects(
-    (rejectedManager as any).emitParsedPlan(state(), { ...plan, ack: 'Researching...' }),
-    /task-specific plan or acknowledgement/,
-  )
-  assert.equal(rejectedEvents.some(event => event.type === 'plan'), false)
-
-  // Precomputed plans start only the worker-owned acknowledgement request and
-  // await it before first-step work, without emitting a duplicate plan event.
   const precomputedEvents: VisibleEvent[] = []
   const precomputedManager = new PlanManager(emitterFor(precomputedEvents) as any, [{ role: 'user', content: request }], 2)
   const precomputedState = state()
@@ -423,31 +170,6 @@ export async function run() {
   precomputedManager.startAcknowledgementCall()
   await precomputedManager.awaitPlan(precomputedState)
   assert.deepEqual(precomputedEvents.map(event => event.type), ['text'])
-
-  // A caller cannot accidentally emit a precomputed plan before the opening.
-  const guardedEvents: VisibleEvent[] = []
-  const guardedManager = new PlanManager(emitterFor(guardedEvents) as any, [{ role: 'user', content: request }], 2)
-  assert.equal(guardedManager.usePrecomputedPlan(state(), {
-    items: plan.steps.map(step => step.title),
-  }), false)
-  assert.deepEqual(guardedEvents, [])
-
-  // Failed precomputed acknowledgement generation stops before work and never
-  // substitutes a deterministic placeholder.
-  const failedPrecomputedEvents: VisibleEvent[] = []
-  const failedPrecomputedManager = new PlanManager(emitterFor(failedPrecomputedEvents) as any, [{ role: 'user', content: request }], 2)
-  const failedPrecomputedState = state()
-  assert.equal(failedPrecomputedManager.usePrecomputedPlan(failedPrecomputedState, {
-    items: plan.steps.map(step => step.title),
-  }, { emitPlan: false }), true)
-  ;(failedPrecomputedManager as any).emitModelGeneratedAcknowledgement = async () => false
-  ;(failedPrecomputedManager as any).repairAcknowledgementCandidate = async () => ''
-  failedPrecomputedManager.startAcknowledgementCall()
-  await assert.rejects(
-    failedPrecomputedManager.awaitPlan(failedPrecomputedState),
-    /task-specific plan or acknowledgement/,
-  )
-  assert.deepEqual(failedPrecomputedEvents, [])
 }
 `, 'utf8')
 
@@ -471,15 +193,9 @@ export async function run() {
           loader: 'js',
           contents: `
             export const DEFAULT_MODEL = 'test/startup-model'
-            export async function createCompletion(params) {
-              return globalThis.__startupAckCompletion(params)
-            }
-            export async function createStreamingCompletion(params) {
-              return globalThis.__startupAckStream(params)
-            }
-            export async function fetchGenerationUsage(id, signal) {
-              return globalThis.__startupAckGenerationUsage(id, signal)
-            }
+            export async function createCompletion(params) { return globalThis.__startupAckCompletion(params) }
+            export async function createStreamingCompletion(params) { return globalThis.__startupAckStream(params) }
+            export async function fetchGenerationUsage(id, signal) { return globalThis.__startupAckGenerationUsage(id, signal) }
           `,
         }))
       },

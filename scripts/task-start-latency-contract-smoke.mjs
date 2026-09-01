@@ -86,13 +86,13 @@ assert.doesNotMatch(
 )
 assert.match(
   planStart,
-  /this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/,
-  'normal startup must begin its single streamed acknowledgement-and-plan request immediately',
+  /this\.scheduleAcknowledgementCall\(\)[\s\S]*this\.planPromise = start\(\)[\s\S]*this\.attemptPlanCall\(0,\s*true\)/,
+  'normal startup must begin its acknowledgement first and structured planning immediately afterward',
 )
 assert.doesNotMatch(
   planStart,
-  /scheduleAcknowledgementCall|acknowledgementRequestStartedPromise/,
-  'normal startup must not spend latency on a second provider request or an artificial ordering gate',
+  /await\s+this\.acknowledgementPromise|setTimeout\([^\n]*acknowledgement/,
+  'normal startup must not wait behind an artificial acknowledgement timer or request-order gate',
 )
 
 assert.match(
