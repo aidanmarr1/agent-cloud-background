@@ -4335,6 +4335,39 @@ export class AgentLoop {
 
           // ── STREAMING ─────────────────────────────────────────────
           case 'STREAMING': {
+            const verifiedConversionPath =
+              state.deliverableVerified &&
+              taskRequiresExistingInputArtifact({ originalUserRequest: latestUserText(messages) })
+                ? latestSavedFinalDeliverablePath(state)
+                : null
+            if (verifiedConversionPath && !state.finalDeliverableHandoffPending && state.currentPlanItems) {
+              const pendingConversionAdvances = Math.max(
+                0,
+                state.currentPlanItems.length - 1 - state.currentStepIdx,
+              )
+              for (let advanceCount = 0; advanceCount < pendingConversionAdvances; advanceCount++) {
+                const stepBeforeAdvance = state.currentStepIdx
+                const advanceMsg = planManager.handleStepAdvance(state)
+                if (state.currentStepIdx <= stepBeforeAdvance) break
+                contextManager.compactForStepTransition(state)
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+                if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+              }
+              state.deliverableVerificationDone = true
+              state.pendingDeliverableRevision = null
+              state.finalDeliverableHandoffPending = {
+                path: verifiedConversionPath,
+                kind: 'file',
+              }
+              state.finalDeliverableHandoffAttempts = 0
+              continueFinalPhaseAfterVerifiedArtifact(state, verifiedConversionPath, contextManager)
+              log.info('Recovered verified existing-artifact conversion at the streaming boundary — entering final handoff', {
+                path: verifiedConversionPath,
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems.length,
+              })
+            }
             if (repairPrematureFinalStepJump(state)) {
               contextManager.push({
                 role: 'system',
