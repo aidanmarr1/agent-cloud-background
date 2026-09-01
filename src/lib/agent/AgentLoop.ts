@@ -6084,6 +6084,14 @@ export class AgentLoop {
                 if (state.currentStepIdx <= stepBeforeAdvance) break
               }
 
+              if (existingArtifactConversionFollowUp) {
+                state.finalDeliverableHandoffPending = {
+                  path: pdfPath,
+                  kind: 'file',
+                }
+                state.finalDeliverableHandoffAttempts = 0
+              }
+
               continueFinalPhaseAfterVerifiedArtifact(state, pdfPath, contextManager)
               state.lastIterationEnd = Date.now()
               log.info('Native PDF export completed and verified — advancing directly to the remaining handoff work', {
