@@ -4754,6 +4754,12 @@ export class ToolPipeline {
     } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string } | undefined
       const path = pdfResult?.path || (args.output_path as string) || ''
+      const sourcePath = normalizeSandboxFilePath(String(args.source_path || ''))
+      // Native export necessarily reads the source in the sandbox. Record that
+      // successful read as integrity evidence so completion audit does not
+      // reject a valid PDF merely because the model did not make a redundant
+      // read_file call before invoking the exporter.
+      if (sourcePath) state.inputArtifactPathsRead.add(sourcePath)
       if (path) state.createdFiles.add(path)
       state.deliverableVerified = true
       recordWorkLedgerVerification(state, {

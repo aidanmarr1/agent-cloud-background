@@ -5961,6 +5961,7 @@ export class AgentLoop {
 
             if (
               (lastToolResults.length === 0 || state.stepResearchCallCount === 0) &&
+              !lastToolResults.some(result => result.tc.name === 'export_pdf' && !result.isError) &&
               shouldUseCompactResearchTurn(state) &&
               state.currentPlanItems &&
               state.currentStepIdx < state.currentPlanItems.length - 1 &&
