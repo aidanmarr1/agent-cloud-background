@@ -36,6 +36,7 @@ try {
   assert.match(planManager, /getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*CURRENT TASK CONTEXT \(factual; plan only remaining work\)/, 'artifact inventory must be merged into the primary planner instruction so providers cannot ignore a later system message')
   assert.match(toolPipeline, /tc\.name === 'export_pdf'[\s\S]*state\.deliverableVerified = true[\s\S]*native-pdf-export/, 'native PDF export must satisfy deliverable verification without shell re-checks')
   assert.match(agentLoop, /successfulPdfExport[\s\S]*handleStepAdvance\(state\)[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful native PDF export must advance out of conversion and into its remaining handoff instead of re-verification')
+  assert.match(agentLoop, /isSuccessfulCompactFilePhaseWrite[\s\S]*partialWriteIncomplete[\s\S]*research-notes[\s\S]*successfulCompactFileWrite[\s\S]*handleStepAdvance\(state\)/, 'a complete compact user file must advance its creation phase while partial writes and internal notes remain open')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
 
   await writeFile(runnerPath, `

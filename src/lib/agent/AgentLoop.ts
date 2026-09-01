@@ -360,6 +360,31 @@ function isSuccessfulContractDeliverableWrite(
     artifactPathSatisfiesFinalOutputContract(state, toolResultPath(result))
 }
 
+function isSuccessfulCompactFilePhaseWrite(
+  result: ToolExecutionResult,
+  state: AgentStateData,
+): boolean {
+  if (result.tc.name !== 'create_file' || result.isError || state.taskComplexity > 2) return false
+  const resultShape = result.result as {
+    size?: unknown
+    partialWriteIncomplete?: unknown
+    partialWriteRecoveryLimitReached?: unknown
+  } | undefined
+  if (typeof resultShape?.size !== 'number' || resultShape.size <= 0) return false
+  if (resultShape.partialWriteIncomplete || resultShape.partialWriteRecoveryLimitReached) return false
+
+  const path = toolResultPath(result).replace(/\\/g, '/').replace(/^\.?\//, '')
+  if (!path || /^(?:research-notes|notes|_internal|\.agent)\//i.test(path)) return false
+  if (/(?:^|\/)(?:step-\d+|phase-\d+|research-notes?|notes?)\.md$/i.test(path)) return false
+
+  const phaseText = [
+    currentStepText(state),
+    state.currentPlanScopes?.[state.currentStepIdx] || '',
+  ].join(' ')
+  return /\b(?:create|write|draft|generate|prepare|save|compile)\b/i.test(phaseText) &&
+    /\b(?:file|document|markdown|report|source|html|text|txt|md)\b/i.test(`${phaseText} ${path}`)
+}
+
 function toolResultPath(result: ToolExecutionResult): string {
   try {
     const args = JSON.parse(result.tc.arguments) as { path?: string; output_path?: string; source_path?: string }
@@ -6055,6 +6080,31 @@ export class AgentLoop {
               state.lastIterationEnd = Date.now()
               log.info('Native PDF export completed and verified — advancing directly to the remaining handoff work', {
                 path: pdfPath,
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems.length,
+              })
+              phase = 'STREAMING'
+              break
+            }
+            const successfulCompactFileWrite = lastToolResults.find(result => (
+              isSuccessfulCompactFilePhaseWrite(result, state)
+            ))
+            if (successfulCompactFileWrite && state.currentPlanItems && !isLastStep) {
+              const savedPath = toolResultPath(successfulCompactFileWrite)
+              const stepBeforeAdvance = state.currentStepIdx
+              const advanceMsg = planManager.handleStepAdvance(state)
+              if (state.currentStepIdx > stepBeforeAdvance) {
+                contextManager.compactForStepTransition(state)
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+              }
+              if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+              if (artifactPathSatisfiesFinalOutputContract(state, savedPath)) {
+                continueFinalPhaseAfterVerifiedArtifact(state, savedPath, contextManager)
+              }
+              state.lastIterationEnd = Date.now()
+              log.info('Compact file creation completed its phase — advancing to remaining conversion or handoff work', {
+                path: savedPath,
                 step: state.currentStepIdx,
                 totalSteps: state.currentPlanItems.length,
               })
