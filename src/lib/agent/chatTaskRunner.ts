@@ -558,8 +558,19 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
   let taskStartCreditPromise: Promise<void> | null = null
   let taskStartCreditRecord: ServerCreditRecord | null | undefined = null
   let startupReadyPromise: Promise<unknown> | null = null
+  let cloudSandboxCleanupPromise: Promise<void> | null = null
   let releaseStartupBrowserFence: (() => void) | null = null
   let agentMessages = messages
+
+  const cleanupCloudSandboxOnce = (preserveSandbox: boolean): Promise<void> => {
+    if (cloudSandboxCleanupPromise) return cloudSandboxCleanupPromise
+    cloudSandboxCleanupPromise = destroyCloudSandboxAfterTask(
+      conversationId,
+      startupReadyPromise,
+      preserveSandbox,
+    )
+    return cloudSandboxCleanupPromise
+  }
 
   const runClaimedPreChargeBootstrap = async <T>(
     stage: Extract<TaskInfrastructureInitializationStage, 'task_bootstrap' | 'sandbox_startup'>,
@@ -1021,10 +1032,11 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
         beforeDone: async () => {
           await startupReadyPromise
           // Token/tool debits commit before their corresponding work becomes
-          // visible. Exact remote-sandbox billing is finalized by the durable
-          // pre-terminal cleanup fence, which can retry without converting a
-          // completed task into an error on a transient database failure.
-          await finalizeActiveCredit()
+          // visible. Settle remote runtime billing and pause the task computer
+          // before exposing terminal completion, so a follow-up can never race
+          // the prior turn's pause and inherit a changing lifecycle.
+          await finalizeUsageBilling()
+          await cleanupCloudSandboxOnce(false)
         },
         registerInflightToolDrain,
       })
@@ -1128,11 +1140,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     }
     if (conversationId && !directChat) {
       const preserveSandbox = isJobAbort() && !emitter.terminalStatus && preserveSandboxOnAbort?.() === true
-      const cleanup = () => destroyCloudSandboxAfterTask(
-          conversationId,
-          startupReadyPromise,
-          preserveSandbox,
-        )
+      const cleanup = () => cleanupCloudSandboxOnce(preserveSandbox)
       if (registerPreTerminalCleanup) {
         registerPreTerminalCleanup(cleanup)
       } else {

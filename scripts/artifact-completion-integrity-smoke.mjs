@@ -10,7 +10,7 @@ const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
 
 try {
-  const [agentLoop, planManager, toolPipeline, dispatcher, pdfExport, browser, config] = await Promise.all([
+  const [agentLoop, planManager, toolPipeline, dispatcher, pdfExport, browser, config, conversationContext, chatTaskRunner] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/PlanManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
@@ -18,6 +18,8 @@ try {
     readFile(join(root, 'src/lib/pdfExport.ts'), 'utf8'),
     readFile(join(root, 'src/lib/browser.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/conversationContext.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/chatTaskRunner.ts'), 'utf8'),
   ])
 
   assert.match(agentLoop, /all\|done\|ready\|complete\|completed\|finished/, 'one-word handoff tails must be rejected')
@@ -35,6 +37,8 @@ try {
   assert.match(planManager, /scheduleAcknowledgementCall\(\)[\s\S]*await this\.planningContextPromise[\s\S]*attemptPlanCall/, 'acknowledgement must start before optional artifact context is awaited by the planner')
   assert.match(planManager, /getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*CURRENT TASK CONTEXT \(factual; plan only remaining work\)/, 'artifact inventory must be merged into the primary planner instruction so providers cannot ignore a later system message')
   assert.match(planManager, /existingArtifactPlanQualityIssue[\s\S]*DURABLE TASK FILE INVENTORY:[\s\S]*taskRequiresExistingInputArtifact[\s\S]*Invalid source-recreation phase/, 'existing-artifact follow-up plans must repair source-recreation phases instead of executing them')
+  assert.match(conversationContext, /Latest user direction \(authoritative\):[\s\S]*Previous task request \(context only\):/, 'follow-up planning and acknowledgement must lead with the latest direction instead of letting the earlier long request dominate')
+  assert.match(chatTaskRunner, /beforeDone: async \(\) => \{[\s\S]*finalizeUsageBilling\(\)[\s\S]*cleanupCloudSandboxOnce\(false\)/, 'normal task completion must settle and pause the sandbox before exposing done so the next message cannot race its lifecycle')
   assert.match(toolPipeline, /tc\.name === 'export_pdf'[\s\S]*state\.deliverableVerified = true[\s\S]*native-pdf-export/, 'native PDF export must satisfy deliverable verification without shell re-checks')
   assert.match(toolPipeline, /tc\.name === 'export_pdf' \|\| tc\.name === 'package_files'[\s\S]*emitFileArtifact\(tc\.id, \{ path: pdfResult\.path, content: '' \}, result, state, true\)/, 'native PDF and ZIP exports must surface as explicit deliverables even when a planner places them before the final phase')
   assert.match(agentLoop, /successfulPdfExport[\s\S]*taskRequiresExistingInputArtifact\(\{[\s\S]*latestUserText\(messages\)[\s\S]*remainingAdvances[\s\S]*handleStepAdvance\(state\)[\s\S]*finalDeliverableHandoffPending = \{[\s\S]*path: pdfPath[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful existing-artifact PDF export must advance through redundant conversion phases directly into its bounded final handoff')

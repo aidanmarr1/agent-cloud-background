@@ -68,8 +68,14 @@ export function effectiveTaskRequest(messages: ConversationContextMessage[]): st
  * `deliverables/report.md` while excluding large research/tool transcripts.
  */
 export function planningTaskRequest(messages: ConversationContextMessage[]): string {
-  const request = effectiveTaskRequest(messages)
-  if (!isContextualTaskUpdate(messages)) return request
+  if (!isContextualTaskUpdate(messages)) return effectiveTaskRequest(messages)
+
+  const latest = latestUserText(messages)
+  const previous = previousUserText(messages)
+  const request = [
+    `Latest user direction (authoritative): ${latest}`,
+    `Previous task request (context only): ${previous || 'Continue the previous task.'}`,
+  ].join('\n\n')
 
   const latestUserIndex = messages.reduce(
     (latest, message, index) => message.role === 'user' && message.content.trim() ? index : latest,

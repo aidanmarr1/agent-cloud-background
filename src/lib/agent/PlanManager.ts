@@ -1803,9 +1803,12 @@ Rules:
     if (!taskRequiresExistingInputArtifact({ originalUserRequest: latestRequest })) return null
 
     const recreatesSource = titles.find((title, index) => {
-      const phase = `${title} ${scopes[index] || ''}`
-      if (/\b(?:pdf|zip|pptx|powerpoint|docx|xlsx|csv)\b/i.test(phase)) return false
-      return /\b(?:create|write|draft|research|compose|regenerate|rebuild)\b[\s\S]{0,140}\b(?:source|markdown|report|content|input|document|file)\b/i.test(phase)
+      const sourceRecreation = /\b(?:create|write|draft|research|compose|regenerate|rebuild)\b[\s\S]{0,140}\b(?:source|markdown|report|content|input|document|file)\b/i
+      if (sourceRecreation.test(title) && !/\b(?:pdf|zip|pptx|powerpoint|docx|xlsx|csv)\b/i.test(title)) {
+        return true
+      }
+      const scope = scopes[index] || ''
+      return sourceRecreation.test(scope) && !/\b(?:pdf|zip|pptx|powerpoint|docx|xlsx|csv)\b/i.test(scope)
     })
     if (!recreatesSource) return null
 

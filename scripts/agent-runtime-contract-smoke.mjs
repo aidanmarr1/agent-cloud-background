@@ -1818,7 +1818,7 @@ export async function runLedgerSmoke() {
   ]
   assert.equal(isContextualTaskUpdate(exportFollowUpMessages), true, 'artifact conversion wording must retain prior task context')
   assert.ok(planningTaskRequest(exportFollowUpMessages).includes('deliverables/ai-state-of-the-art-report.md'), 'planning must receive the compact prior artifact hand-off')
-  assert.ok(planningTaskRequest(exportFollowUpMessages).includes('Latest user interruption/correction: Put it in a pdf'), 'planning must retain the exact current conversion instruction')
+  assert.ok(planningTaskRequest(exportFollowUpMessages).includes('Latest user direction (authoritative): Put it in a pdf'), 'planning must lead with the exact current conversion instruction')
   assert.equal(resolveStrategy(exportFollowUpMessages).type, 'build', 'artifact conversion follow-ups must use file/export tools instead of repeating earlier research')
 
   const registry = new ToolRegistry()
