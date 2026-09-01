@@ -20,6 +20,7 @@ import { toolDefinitions } from '@/lib/tools'
 import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/lib/prompts'
 import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
+import { listTaskFilesForUser, type TaskFileRecord } from '@/lib/taskFiles'
 import { subscribeToBrowserFrames } from '@/lib/browser'
 import {
   boundFileWriteChunksForModel,
@@ -978,6 +979,28 @@ export interface AgentLoopOptions {
 // ── AgentLoop ───────────────────────────────────────────────────────────────
 
 type Phase = 'PLANNING' | 'STREAMING' | 'EXECUTING_TOOLS' | 'EVALUATING' | 'COMPLETE' | 'ERROR'
+
+function durableTaskFileContext(files: TaskFileRecord[]): ChatMessageParam | null {
+  if (files.length === 0) return null
+  const visibleFiles = files.slice(0, 80)
+  const rows = visibleFiles.map(file => {
+    const size = file.size >= 1024
+      ? `${Math.max(1, Math.round(file.size / 1024))} KB`
+      : `${file.size} B`
+    return `- ${file.path} (${file.mimeType || 'file'}, ${size})`
+  })
+  if (files.length > visibleFiles.length) {
+    rows.push(`- …and ${files.length - visibleFiles.length} more existing task files`)
+  }
+  return {
+    role: 'system',
+    content: [
+      'DURABLE TASK FILE INVENTORY: These files already exist in this task and are restored into the current workspace before a file, export, package, terminal, or browser action needs them.',
+      ...rows,
+      'Treat this inventory as factual workspace context. Resolve references such as “it”, “that report”, or “the file” against the prior conversation and these paths. Use the relevant existing source instead of recreating it; choose freely among all available tools based on the actual task, and inspect a file only when its identity or contents are genuinely uncertain.',
+    ].join('\n'),
+  } as ChatMessageParam
+}
 
 const AUTOSAVE_DRAFT_MIN_CHARS = 1200
 const FINAL_AUTOSAVE_DRAFT_MIN_CHARS = 600
@@ -3956,6 +3979,15 @@ export class AgentLoop {
     const log = createAgentLogger()
 
     const scopedMessages = scopeAgentTaskMessages(messages)
+    const durableTaskFilesPromise = this.options.userId && conversationId &&
+      this.options.startFreshSandbox !== true && isContextualTaskUpdate(scopedMessages)
+      ? listTaskFilesForUser(this.options.userId, conversationId).catch((error) => {
+          log.warn('Failed to load durable task file inventory', {
+            error: error instanceof Error ? error.message : String(error),
+          })
+          return []
+        })
+      : Promise.resolve([] as TaskFileRecord[])
     const strategy = resolveStrategy(scopedMessages)
     const complexity = estimateTaskComplexity(scopedMessages)
     const iterationLimit = computeIterationLimit(complexity)
@@ -4173,6 +4205,7 @@ export class AgentLoop {
 
     let phase = 'PLANNING' as Phase
     let startupReadyAwaited = false
+    let durableTaskFileContextInjected = false
 
     try {
       while (true) {
@@ -4217,6 +4250,13 @@ export class AgentLoop {
                   error: planningError instanceof Error ? planningError.message : String(planningError),
                 },
               })
+            }
+
+            if (!durableTaskFileContextInjected) {
+              durableTaskFileContextInjected = true
+              const durableFiles = await durableTaskFilesPromise
+              const durableContext = durableTaskFileContext(durableFiles)
+              if (durableContext) contextManager.push(durableContext, 9)
             }
 
             if (state.taskComplexity !== complexity) {

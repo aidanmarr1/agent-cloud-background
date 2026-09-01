@@ -10,11 +10,12 @@ const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
 
 try {
-  const [agentLoop, toolPipeline, dispatcher, pdfExport, config] = await Promise.all([
+  const [agentLoop, toolPipeline, dispatcher, pdfExport, browser, config] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
     readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
     readFile(join(root, 'src/lib/pdfExport.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/browser.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/config.ts'), 'utf8'),
   ])
 
@@ -25,7 +26,9 @@ try {
   assert.match(toolPipeline, /SOURCE_REQUIRED:[\s\S]*Do not invent a replacement source/, 'existing-file conversions must block fabricated source writes')
   assert.match(dispatcher, /toolResultFailureMessage[\s\S]*resultStatus[\s\S]*'error'\s*:\s*'done'/, 'failed tool results must remain failed in the task stream')
   assert.match(dispatcher, /The task ended before this action returned a result/, 'a terminal done event must expose unresolved actions')
-  assert.match(pdfExport, /format: 'A4'[\s\S]*preferCSSPageSize: true[\s\S]*%PDF-/, 'PDF export must validate a real A4/CSS-sized PDF payload')
+  assert.match(browser, /renderDocumentPdf[\s\S]*format: 'A4'[\s\S]*preferCSSPageSize: true/, 'PDF export must render on the provider-backed task browser')
+  assert.match(pdfExport, /readSandboxFileBytes[\s\S]*renderDocumentPdf[\s\S]*%PDF-[\s\S]*writeSandboxFileBytes/, 'PDF export must read and write through the active sandbox provider and validate a real PDF payload')
+  assert.match(agentLoop, /DURABLE TASK FILE INVENTORY:[\s\S]*choose freely among all available tools/, 'contextual follow-ups must receive the existing task artifact inventory without removing tool autonomy')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
 
   await writeFile(runnerPath, `

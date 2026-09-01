@@ -1528,6 +1528,48 @@ async function getOrCreateSession(conversationId: string): Promise<BrowserSessio
   }
 }
 
+/**
+ * Render trusted-in-memory document HTML to PDF on the task computer.
+ *
+ * PDF export must use the same provider-backed browser as the rest of the
+ * task. Launching Playwright against the worker filesystem breaks when the
+ * active workspace lives in E2B, because the worker has only a local shadow
+ * directory. A separate page keeps document rendering isolated from the
+ * user's live browser tab while preserving the task's sandbox lifecycle.
+ */
+export async function renderDocumentPdf(
+  conversationId: string,
+  html: string,
+): Promise<Uint8Array> {
+  const session = await getOrCreateSession(conversationId)
+  const page = await session.context.newPage()
+  let cdp: CDPSession | null = null
+
+  try {
+    cdp = await session.context.newCDPSession(page)
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true })
+    await page.route('**/*', async (route) => {
+      const requestUrl = route.request().url()
+      if (/^(about:|data:|blob:)/i.test(requestUrl)) {
+        await route.continue()
+        return
+      }
+      await route.abort('blockedbyclient')
+    })
+    await page.setContent(html, { waitUntil: 'load', timeout: 10_000 })
+    const pdf = await page.pdf({
+      format: 'A4',
+      preferCSSPageSize: true,
+      printBackground: true,
+      margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' },
+    })
+    return new Uint8Array(pdf)
+  } finally {
+    await cdp?.detach().catch(() => {})
+    await page.close().catch(() => {})
+  }
+}
+
 async function createSessionImpl(conversationId: string, expectedEpoch: number): Promise<BrowserSession> {
   let browser: Browser | undefined
   let context: BrowserContext | undefined

@@ -1,13 +1,15 @@
-import { constants } from 'fs'
-import { mkdir, open, stat, unlink } from 'fs/promises'
-import { dirname, extname, join } from 'path'
+import { extname } from 'path'
 import type { FileResult } from '@/types'
-import { getOrCreateSandboxDir, isInsideSandbox, resolveAndVerify } from './sandbox'
+import { readSandboxFileBytes, writeSandboxFileBytes } from './sandbox'
 
 type PdfExportResult = FileResult & { error?: string }
 
 function normalizeWorkspacePath(path: string): string {
   return path.replace(/^\.?\/+/, '').replace(/\/+/g, '/') || 'deliverables/output.pdf'
+}
+
+function isSafeWorkspacePath(path: string): boolean {
+  return !!path && !path.includes('\0') && !path.split('/').some(part => part === '..')
 }
 
 function defaultPdfPath(sourcePath: string): string {
@@ -130,34 +132,16 @@ function wrapHtml(content: string, title?: string): string {
   return body.replace(/<body[^>]*>/i, match => `${match}${styles}`)
 }
 
-async function ensureSafeParent(sandboxDir: string, resolved: string): Promise<boolean> {
-  let ancestor = dirname(resolved)
-  while (true) {
-    try {
-      await stat(/* turbopackIgnore: true */ ancestor)
-      break
-    } catch {
-      const parent = dirname(ancestor)
-      if (parent === ancestor) break
-      ancestor = parent
-    }
-  }
-  return resolveAndVerify(sandboxDir, ancestor)
-}
-
 export async function exportPdfFromSandbox(
   conversationId: string,
   sourcePath: string,
   outputPath?: string,
   title?: string,
 ): Promise<PdfExportResult> {
-  const sandboxDir = await getOrCreateSandboxDir(conversationId)
   const normalizedSource = normalizeWorkspacePath(sourcePath)
   const normalizedOutput = normalizeWorkspacePath(outputPath || defaultPdfPath(normalizedSource))
-  const sourceResolved = join(/*turbopackIgnore: true*/ sandboxDir, normalizedSource)
-  const outputResolved = join(/*turbopackIgnore: true*/ sandboxDir, normalizedOutput)
 
-  if (!isInsideSandbox(sandboxDir, sourceResolved) || !isInsideSandbox(sandboxDir, outputResolved)) {
+  if (!isSafeWorkspacePath(normalizedSource) || !isSafeWorkspacePath(normalizedOutput)) {
     return {
       action: 'exported',
       path: normalizedOutput,
@@ -166,24 +150,17 @@ export async function exportPdfFromSandbox(
     }
   }
 
-  if (!await resolveAndVerify(sandboxDir, sourceResolved)) {
+  if (!normalizedOutput.toLowerCase().endsWith('.pdf')) {
     return {
       action: 'exported',
       path: normalizedOutput,
-      content: 'Error: source path traversal not allowed',
-      error: 'source path traversal not allowed',
+      content: 'Error: output path must end in .pdf',
+      error: 'output path must end in .pdf',
     }
   }
 
-  let source: string
-  try {
-    const sourceFile = await open(/* turbopackIgnore: true */ sourceResolved, constants.O_RDONLY | constants.O_NOFOLLOW)
-    try {
-      source = await sourceFile.readFile('utf-8')
-    } finally {
-      await sourceFile.close()
-    }
-  } catch {
+  const sourceRead = await readSandboxFileBytes(conversationId, normalizedSource)
+  if (!sourceRead.ok) {
     return {
       action: 'exported',
       path: normalizedOutput,
@@ -192,45 +169,20 @@ export async function exportPdfFromSandbox(
     }
   }
 
-  if (!await ensureSafeParent(sandboxDir, outputResolved)) {
-    return {
-      action: 'exported',
-      path: normalizedOutput,
-      content: 'Error: output path traversal not allowed',
-      error: 'output path traversal not allowed',
-    }
-  }
+  const source = new TextDecoder().decode(sourceRead.body)
 
   const sourceExt = extname(normalizedSource).toLowerCase()
   const htmlBody = sourceExt === '.html' || sourceExt === '.htm'
     ? source
     : `<main>${markdownToHtml(source)}</main>`
   const html = wrapHtml(htmlBody, title || normalizedSource.split('/').pop())
-  let browser: import('playwright').Browser | null = null
-  let context: import('playwright').BrowserContext | null = null
 
   try {
-    const { chromium } = await import('playwright')
-    browser = await chromium.launch({ headless: true })
-    context = await browser.newContext({ javaScriptEnabled: false })
-    const page = await context.newPage()
-    await page.route('**/*', async (route) => {
-      const requestUrl = route.request().url()
-      if (/^(about:|data:|blob:)/i.test(requestUrl)) {
-        await route.continue()
-        return
-      }
-      await route.abort('blockedbyclient')
-    })
-    await page.setContent(html, { waitUntil: 'load', timeout: 10_000 })
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      preferCSSPageSize: true,
-      printBackground: true,
-      margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' },
-    })
+    const { renderDocumentPdf } = await import('./browser')
+    const pdfBuffer = await renderDocumentPdf(conversationId, html)
 
-    if (pdfBuffer.length < 512 || pdfBuffer.subarray(0, 5).toString('ascii') !== '%PDF-') {
+    const pdfHeader = String.fromCharCode(...pdfBuffer.subarray(0, 5))
+    if (pdfBuffer.length < 512 || pdfHeader !== '%PDF-') {
       return {
         action: 'exported',
         path: normalizedOutput,
@@ -239,45 +191,8 @@ export async function exportPdfFromSandbox(
       }
     }
 
-    await mkdir(/* turbopackIgnore: true */ dirname(outputResolved), { recursive: true })
-    let fd: Awaited<ReturnType<typeof open>>
-    try {
-      fd = await open(
-        /* turbopackIgnore: true */ outputResolved,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-        0o644,
-      )
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code
-      if (code === 'ELOOP' || code === 'EMLINK') {
-        return {
-          action: 'exported',
-          path: normalizedOutput,
-          content: 'Error: path traversal not allowed',
-          error: 'path traversal not allowed',
-        }
-      }
-      throw err
-    }
-
-    try {
-      await fd.writeFile(pdfBuffer)
-    } finally {
-      await fd.close()
-    }
-
-    if (!await resolveAndVerify(sandboxDir, outputResolved)) {
-      try { await unlink(/* turbopackIgnore: true */ outputResolved) } catch { /* best effort */ }
-      return {
-        action: 'exported',
-        path: normalizedOutput,
-        content: 'Error: output path traversal not allowed',
-        error: 'output path traversal not allowed',
-      }
-    }
-
-    const fileStat = await stat(/* turbopackIgnore: true */ outputResolved)
-    return { action: 'exported', path: normalizedOutput, size: fileStat.size }
+    await writeSandboxFileBytes(conversationId, normalizedOutput, pdfBuffer)
+    return { action: 'exported', path: normalizedOutput, size: pdfBuffer.byteLength }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return {
@@ -286,8 +201,5 @@ export async function exportPdfFromSandbox(
       content: `Error: PDF export failed: ${message}`,
       error: `PDF export failed: ${message}`,
     }
-  } finally {
-    await context?.close().catch(() => {})
-    await browser?.close().catch(() => {})
   }
 }
