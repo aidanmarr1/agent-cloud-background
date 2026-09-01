@@ -8,7 +8,7 @@ import {
 } from '@/lib/llm'
 import type { FileResult } from '@/types'
 import { getFastPlanningPrompt, getPlanningPrompt } from '@/lib/prompts'
-import { effectiveTaskRequest, planningTaskRequest } from '@/lib/conversationContext'
+import { effectiveTaskRequest, latestUserText, planningTaskRequest } from '@/lib/conversationContext'
 import type { AgentEventEmitter } from './SSEEmitter'
 import {
   AgentStateData,
@@ -30,7 +30,7 @@ import {
 } from './taskConstraints'
 import { humanTopicLabel, requestSubject } from './taskText'
 import { analyzeTaskIntent } from './TaskIntent'
-import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
+import { taskRequiresExistingInputArtifact, taskRequiresSavedFinalArtifact } from './DeliverableContract'
 import type { CreditTokenUsage } from '@/lib/creditPolicy'
 import { researchDepthProfileForState } from './ResearchDepth'
 
@@ -737,6 +737,7 @@ export class PlanManager {
   private removeExternalAbortListener: (() => void) | null = null
   private planningContextPromise?: Promise<string | null>
   private planningContext?: string
+  private lastPlanningQualityIssue?: string
   constructor(
     emitter: AgentEventEmitter,
     messages: Array<{ role: string; content: string }>,
@@ -1717,6 +1718,14 @@ Rules:
       ? arrays.scopes
       : enforcedTitles.map((_, index) => arrays.scopes[index] ?? null)
     const alignedScopes = this.alignScopesToTitles(enforcedTitles, enforcedScopes)
+    const existingArtifactIssue = this.existingArtifactPlanQualityIssue(
+      enforcedTitles,
+      alignedScopes,
+    )
+    if (existingArtifactIssue) {
+      this.lastPlanningQualityIssue = existingArtifactIssue
+      throw new Error(PLANNER_QUALITY_ERROR)
+    }
     // Inspect only the planner-authored phases. Attachment/skill/custom phases
     // are explicit requirements and must never be rejected by this repair gate.
     assertPlannerVisibleTextQuality(
@@ -1758,7 +1767,8 @@ Rules:
           if (emitted) return true
         } catch (qualityError) {
           if (!isPlannerQualityError(qualityError)) throw qualityError
-          qualityIssue = PLANNER_QUALITY_ERROR
+          qualityIssue = this.lastPlanningQualityIssue || PLANNER_QUALITY_ERROR
+          this.lastPlanningQualityIssue = undefined
         }
       } else {
         qualityIssue = qualityIssue || PLANNER_QUALITY_ERROR
@@ -1781,6 +1791,29 @@ Rules:
     }
 
     return false
+  }
+
+  private existingArtifactPlanQualityIssue(
+    titles: string[],
+    scopes: (string | null)[],
+  ): string | null {
+    if (!this.planningContext?.includes('DURABLE TASK FILE INVENTORY:')) return null
+
+    const latestRequest = latestUserText(this.messages)
+    if (!taskRequiresExistingInputArtifact({ originalUserRequest: latestRequest })) return null
+
+    const recreatesSource = titles.find((title, index) => {
+      const phase = `${title} ${scopes[index] || ''}`
+      if (/\b(?:pdf|zip|pptx|powerpoint|docx|xlsx|csv)\b/i.test(phase)) return false
+      return /\b(?:create|write|draft|research|compose|regenerate|rebuild)\b[\s\S]{0,140}\b(?:source|markdown|report|content|input|document|file)\b/i.test(phase)
+    })
+    if (!recreatesSource) return null
+
+    return [
+      'The durable task inventory already contains the source artifact and the latest user message asks to convert or export that existing work.',
+      'Plan only the remaining conversion and handoff. Do not create, draft, research, regenerate, or rebuild the source.',
+      `Invalid source-recreation phase: "${recreatesSource}".`,
+    ].join(' ')
   }
 
   private async attemptPlanCall(attempt = 0, relaxedJsonMode = false): Promise<null> {

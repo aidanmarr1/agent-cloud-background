@@ -4894,7 +4894,11 @@ export class ToolPipeline {
       if (savedPath) {
         recordWorkLedgerDeliverable(state, {
           path: savedPath,
-          purpose: artifactPurposeForCurrentStep(state, savedPath),
+          purpose: artifactPurposeForCurrentStep(
+            state,
+            savedPath,
+            tc.name === 'export_pdf' || tc.name === 'package_files',
+          ),
         })
       }
     }
@@ -4910,12 +4914,12 @@ export class ToolPipeline {
     } else if (!isError && tc.name === 'export_pdf') {
       const pdfResult = result as { path?: string; size?: number } | undefined
       if (pdfResult?.path && pdfResult.size !== undefined) {
-        await this.emitFileArtifact(tc.id, { path: pdfResult.path, content: '' }, result, state)
+        await this.emitFileArtifact(tc.id, { path: pdfResult.path, content: '' }, result, state, true)
       }
     } else if (!isError && tc.name === 'package_files') {
       const archiveResult = result as { path?: string; size?: number } | undefined
       if (archiveResult?.path && archiveResult.size !== undefined) {
-        await this.emitFileArtifact(tc.id, { path: archiveResult.path, content: '' }, result, state)
+        await this.emitFileArtifact(tc.id, { path: archiveResult.path, content: '' }, result, state, true)
       }
     } else if (!isError && tc.name === 'create_website') {
       const websiteResult = result as { path?: string; size?: number } | undefined
@@ -5215,6 +5219,7 @@ export class ToolPipeline {
     args: Record<string, unknown>,
     result: unknown,
     state: AgentStateData,
+    explicitDeliverable = false,
   ): Promise<void> {
     const fileResult = result as { size?: number; action?: string }
     const pathStr = String(args.path || '')
@@ -5223,7 +5228,7 @@ export class ToolPipeline {
     // in the deliverables UI — keeps the final output uncluttered.
     const hasPlan = !!state.currentPlanItems && state.currentPlanItems.length > 0
     const isDeliverableStep = hasPlan && state.currentStepIdx === state.currentPlanItems!.length - 1
-    const purpose = artifactPurposeForCurrentStep(state, pathStr)
+    const purpose = artifactPurposeForCurrentStep(state, pathStr, explicitDeliverable)
     if (fileResult.size !== undefined) {
       if (hasPlan && !isDeliverableStep && purpose !== 'deliverable') return
       let contentStr = String(args.content ?? '')

@@ -29,35 +29,35 @@ const OUTPUT_FORMAT_RULES: Array<{
 }> = [
   {
     contract: { label: 'PDF', extensions: ['.pdf'] },
-    pattern: /(?:\b(?:convert|export|render|turn|save|return|deliver|download|output|produce|generate|create|make)\b[^\n.!?]{0,100}\bpdf\b|\b(?:to|as|into)\s+(?:an?\s+)?pdf\b|\b(?:final|output|deliverable|downloadable)\s+pdf\b)/i,
+    pattern: /(?:\b(?:convert|export|render|turn|put|save|return|deliver|download|output|produce|generate|create|make)\b[^\n.!?]{0,100}\bpdf\b|\b(?:to|as|in|into)\s+(?:an?\s+)?pdf\b|\b(?:final|output|deliverable|downloadable)\s+pdf\b)/i,
   },
   {
     contract: { label: 'ZIP archive', extensions: ['.zip'] },
-    pattern: /(?:\b(?:package|archive|zip|save|return|deliver|download|output|produce|generate|create|make)\b[^\n.!?]{0,100}\b(?:zip|archive)\b|\b(?:to|as|into)\s+(?:an?\s+)?zip\b)/i,
+    pattern: /(?:\b(?:package|archive|zip|put|save|return|deliver|download|output|produce|generate|create|make)\b[^\n.!?]{0,100}\b(?:zip|archive)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?zip\b)/i,
   },
   {
     contract: { label: 'PowerPoint presentation', extensions: ['.pptx'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:pptx|powerpoint)\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:pptx|powerpoint)\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:pptx|powerpoint)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:pptx|powerpoint)\b)/i,
   },
   {
     contract: { label: 'Word document', extensions: ['.docx'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:docx|word\s+document)\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:docx|word\s+document)\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:docx|word\s+document)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:docx|word\s+document)\b)/i,
   },
   {
     contract: { label: 'Excel workbook', extensions: ['.xlsx'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:xlsx|excel\s+(?:file|workbook|spreadsheet))\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:xlsx|excel)\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:xlsx|excel\s+(?:file|workbook|spreadsheet))\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:xlsx|excel)\b)/i,
   },
   {
     contract: { label: 'CSV file', extensions: ['.csv'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\bcsv\b|\b(?:to|as|into)\s+(?:an?\s+)?csv\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\bcsv\b|\b(?:to|as|in|into)\s+(?:an?\s+)?csv\b)/i,
   },
   {
     contract: { label: 'Markdown file', extensions: ['.md', '.markdown'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:markdown|md\s+file)\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:markdown|md\s+file)\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:markdown|md\s+file)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:markdown|md\s+file)\b)/i,
   },
   {
     contract: { label: 'text file', extensions: ['.txt'] },
-    pattern: /(?:\b(?:save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:text|txt)\s+file\b|\b(?:to|as|into)\s+(?:an?\s+)?(?:text|txt)\s+file\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export|write)\b[^\n.!?]{0,100}\b(?:text|txt)\s+file\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:text|txt)\s+file\b)/i,
   },
 ]
 
@@ -102,11 +102,11 @@ export function taskRequiresExistingInputArtifact(
     return false
   }
 
-  const conversion = /\b(?:convert|export|render|turn)\b[^\n.!?]{0,140}\b(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request) ||
-    /\b(?:attached|uploaded|existing|current|this|that|it|my|the|cover|file|document|page|report|[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html?|md|txt|docx?|pptx|xlsx|csv))\b[^\n.!?]{0,80}\b(?:to|as|into)\s+(?:an?\s+)?(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request)
+  const conversion = /\b(?:convert|export|render|turn|put)\b[^\n.!?]{0,140}\b(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request) ||
+    /\b(?:attached|uploaded|existing|current|this|that|it|my|the|cover|file|document|page|report|[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html?|md|txt|docx?|pptx|xlsx|csv))\b[^\n.!?]{0,80}\b(?:to|as|in|into)\s+(?:an?\s+)?(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request)
   const existingReference = /\b(?:attached|uploaded|existing|current|this|that|it|my|return\s+it|send\s+it|the\s+(?:cover|file|document|page|report))\b/i.test(request) ||
     /\b[A-Za-z0-9][A-Za-z0-9._-]*\.(?:html?|md|txt|docx?|pptx|xlsx|csv)\b/i.test(request) ||
-    /\b(?:cover|file|document|page|report)\s+(?:to|as|into)\s+(?:an?\s+)?(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request)
+    /\b(?:cover|file|document|page|report)\s+(?:to|as|in|into)\s+(?:an?\s+)?(?:pdf|zip|pptx|powerpoint|docx|word\s+document|xlsx|excel|csv)\b/i.test(request)
   return conversion && existingReference
 }
 

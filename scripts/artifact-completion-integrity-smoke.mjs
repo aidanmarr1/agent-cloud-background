@@ -34,8 +34,10 @@ try {
   assert.match(agentLoop, /durableTaskPlanningContextPromise[\s\S]*new PlanManager\([\s\S]*durableTaskPlanningContextPromise/, 'follow-up planning must receive durable task artifacts without delaying the acknowledgement call')
   assert.match(planManager, /scheduleAcknowledgementCall\(\)[\s\S]*await this\.planningContextPromise[\s\S]*attemptPlanCall/, 'acknowledgement must start before optional artifact context is awaited by the planner')
   assert.match(planManager, /getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*CURRENT TASK CONTEXT \(factual; plan only remaining work\)/, 'artifact inventory must be merged into the primary planner instruction so providers cannot ignore a later system message')
+  assert.match(planManager, /existingArtifactPlanQualityIssue[\s\S]*DURABLE TASK FILE INVENTORY:[\s\S]*taskRequiresExistingInputArtifact[\s\S]*Invalid source-recreation phase/, 'existing-artifact follow-up plans must repair source-recreation phases instead of executing them')
   assert.match(toolPipeline, /tc\.name === 'export_pdf'[\s\S]*state\.deliverableVerified = true[\s\S]*native-pdf-export/, 'native PDF export must satisfy deliverable verification without shell re-checks')
-  assert.match(agentLoop, /successfulPdfExport[\s\S]*handleStepAdvance\(state\)[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful native PDF export must advance out of conversion and into its remaining handoff instead of re-verification')
+  assert.match(toolPipeline, /tc\.name === 'export_pdf' \|\| tc\.name === 'package_files'[\s\S]*emitFileArtifact\(tc\.id, \{ path: pdfResult\.path, content: '' \}, result, state, true\)/, 'native PDF and ZIP exports must surface as explicit deliverables even when a planner places them before the final phase')
+  assert.match(agentLoop, /successfulPdfExport[\s\S]*taskRequiresExistingInputArtifact\(\{[\s\S]*latestUserText\(messages\)[\s\S]*remainingAdvances[\s\S]*handleStepAdvance\(state\)[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful existing-artifact PDF export must advance through redundant conversion phases into its remaining handoff')
   assert.match(agentLoop, /isSuccessfulCompactFilePhaseWrite[\s\S]*partialWriteIncomplete[\s\S]*research-notes[\s\S]*successfulCompactFileWrite[\s\S]*handleStepAdvance\(state\)/, 'a complete compact user file must advance its creation phase while partial writes and internal notes remain open')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
 
@@ -70,6 +72,11 @@ assert.equal(requestedFinalArtifactFormat(conversion)?.label, 'PDF')
 assert.equal(taskRequiresExistingInputArtifact(conversion), true)
 assert.equal(artifactPathSatisfiesFinalOutputContract(conversion, 'cover.html'), false)
 assert.equal(artifactPathSatisfiesFinalOutputContract(conversion, 'deliverables/cover.pdf'), true)
+
+const naturalPutConversion = createInitialState(true, timeouts)
+naturalPutConversion.originalUserRequest = 'Put it in a PDF.'
+assert.equal(requestedFinalArtifactFormat(naturalPutConversion)?.label, 'PDF')
+assert.equal(taskRequiresExistingInputArtifact(naturalPutConversion), true)
 
 recordWorkLedgerDeliverable(conversion, { path: 'cover.html', purpose: 'deliverable' })
 let audit = auditAgentCompletion(conversion, 'complete')

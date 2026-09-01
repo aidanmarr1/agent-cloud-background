@@ -18,7 +18,7 @@ import {
 } from '@/lib/llm'
 import { toolDefinitions } from '@/lib/tools'
 import { getSystemPrompt, estimateTaskComplexity, type StrategyHints } from '@/lib/prompts'
-import { effectiveTaskRequest, isContextualTaskUpdate } from '@/lib/conversationContext'
+import { effectiveTaskRequest, isContextualTaskUpdate, latestUserText } from '@/lib/conversationContext'
 import { createFileInSandbox, readFileInSandbox } from '@/lib/sandbox'
 import { listTaskFilesForUser, type TaskFileRecord } from '@/lib/taskFiles'
 import { subscribeToBrowserFrames } from '@/lib/browser'
@@ -129,6 +129,7 @@ import { analyzeTaskIntent } from './TaskIntent'
 import {
   artifactPathSatisfiesFinalOutputContract,
   requestedFinalArtifactFormat,
+  taskRequiresExistingInputArtifact,
   taskRequiresSavedFinalArtifact,
 } from './DeliverableContract'
 import { getNextWebsiteProjectStatus } from '@/lib/tsxWebsitePreview'
@@ -6065,7 +6066,13 @@ export class AgentLoop {
               state.deliverableVerificationDone = true
               state.pendingDeliverableRevision = null
 
-              if (!isLastStep) {
+              const existingArtifactConversionFollowUp = taskRequiresExistingInputArtifact({
+                originalUserRequest: latestUserText(messages),
+              })
+              const remainingAdvances = existingArtifactConversionFollowUp
+                ? Math.max(0, state.currentPlanItems.length - 1 - state.currentStepIdx)
+                : isLastStep ? 0 : 1
+              for (let advanceCount = 0; advanceCount < remainingAdvances; advanceCount++) {
                 const stepBeforeAdvance = state.currentStepIdx
                 const advanceMsg = planManager.handleStepAdvance(state)
                 if (state.currentStepIdx > stepBeforeAdvance) {
@@ -6074,6 +6081,7 @@ export class AgentLoop {
                   if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
                 }
                 if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+                if (state.currentStepIdx <= stepBeforeAdvance) break
               }
 
               continueFinalPhaseAfterVerifiedArtifact(state, pdfPath, contextManager)
