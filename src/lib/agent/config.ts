@@ -10,11 +10,9 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// The exact Meta Muse Spark 1.2 Contributor endpoint exposes a 1,048,576-token
-// context window. Keep the product completion cap at 131,072 tokens, leaving
-// 917,504 prompt tokens for evidence. This intentionally preserves the prior
-// high-quality output ceiling even though Muse advertises a larger provider
-// completion maximum.
+// DeepSeek V4 Flash Vision Exp exposes a 1,048,576-token context window. Keep
+// the product completion cap at 131,072 tokens, leaving 917,504 prompt tokens
+// for evidence while preserving the existing high-quality output ceiling.
 // Keep the complete bounded agent run in model context instead of discarding
 // all but eight messages. ContextManager still removes redundant file bodies
 // and stale screenshots, which preserves usable evidence without repeatedly
@@ -125,7 +123,7 @@ export const PLAN_RETRY_BASE_MS = 350
 export const STREAM_MAX_RETRIES = 0
 export const STREAM_RETRY_BASE_MS = 650
 export const STREAM_RETRY_EXPONENT = 1.2
-// Muse Spark is usually quick, but provider startup and a large native
+// DeepSeek V4 Flash is usually quick, but provider startup and a large native
 // tool schema can occasionally take longer than five seconds before response
 // headers arrive. A realistic start window avoids converting healthy turns
 // into rapid null-stream loops while the shorter stream inactivity limits

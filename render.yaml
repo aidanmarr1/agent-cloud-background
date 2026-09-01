@@ -26,15 +26,15 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: openrouter
-      - key: OPENROUTER_API_KEY
+        value: deepseek
+      - key: DEEPSEEK_API_KEY
         sync: false
       - key: SERPER_API_KEY
         sync: false
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
-      - key: OPENROUTER_MODEL
-        value: meta/muse-spark-1.2-contributor
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash-vision-exp
       - key: AGENT_STORAGE_DRIVER
         value: turso
       - key: AGENT_PUBLIC_SIGNUP
@@ -115,15 +115,15 @@ services:
       - key: TURSO_AUTH_TOKEN
         sync: false
       - key: LLM_PROVIDER
-        value: openrouter
-      - key: OPENROUTER_API_KEY
+        value: deepseek
+      - key: DEEPSEEK_API_KEY
         sync: false
       - key: SERPER_API_KEY
         sync: false
       - key: SERPER_BASE_URL
         value: https://google.serper.dev
-      - key: OPENROUTER_MODEL
-        value: meta/muse-spark-1.2-contributor
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash-vision-exp
       - key: AGENT_STORAGE_DRIVER
         value: turso
       - key: AGENT_PUBLIC_SIGNUP

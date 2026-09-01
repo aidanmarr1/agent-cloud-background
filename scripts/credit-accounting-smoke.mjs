@@ -31,14 +31,14 @@ async function assertSourceContracts() {
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
   assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
-  assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'meta\/muse-spark-1\.2-contributor'/, 'default model must be Muse Spark 1.2 Contributor')
-  assert.match(modelPricing, /inputUsdPer1M:\s*0\.1/, 'Muse input pricing must match the exact Meta endpoint')
-  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.002/, 'Muse cache-read pricing must match the exact Meta endpoint')
-  assert.match(modelPricing, /outputUsdPer1M:\s*0\.2/, 'Muse output pricing must match the exact Meta endpoint')
-  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*0\.2/, 'Muse reasoning pricing must match output pricing')
-  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'Muse must not inherit unrelated long-context price tiers')
-  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'Muse Meta context window must match OpenRouter')
-  assert.match(modelPricing, /maxCompletionTokens:\s*943_718/, 'Muse provider output cap must match the exact Meta endpoint')
+  assert.match(modelPricing, /DEFAULT_ASSISTANT_MODEL = 'deepseek-v4-flash-vision-exp'/, 'default model must be DeepSeek V4 Flash Vision Exp')
+  assert.match(modelPricing, /inputUsdPer1M:\s*0\.44/, 'DeepSeek input pricing must conservatively match the peak direct rate')
+  assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.014/, 'DeepSeek cache-read pricing must conservatively match the peak direct rate')
+  assert.match(modelPricing, /outputUsdPer1M:\s*1\.32/, 'DeepSeek output pricing must conservatively match the peak direct rate')
+  assert.match(modelPricing, /internalReasoningUsdPer1M:\s*1\.32/, 'DeepSeek reasoning pricing must match output pricing')
+  assert.match(modelPricing, /contextPriceTiers:\s*\[\]/, 'DeepSeek must not inherit unrelated long-context price tiers')
+  assert.match(modelPricing, /contextTokens:\s*1_048_576/, 'DeepSeek context window must match the direct API')
+  assert.match(modelPricing, /maxCompletionTokens:\s*384_000/, 'DeepSeek provider output cap must match the direct API')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.inputUsdPer1M/, 'model input pricing must come from the active model pricing table')
   assert.match(creditPolicy, /DEFAULT_MODEL_PRICING\.outputUsdPer1M/, 'model output pricing must come from the active model pricing table')
   assert.match(creditPolicy, /SERPER_SEARCH_USD_PER_1K_REQUESTS\s*=\s*1\.00/, 'Serper search pricing must match the live Starter purchase rate')
@@ -107,9 +107,9 @@ async function assertSourceContracts() {
   assert.match(chatTaskRunner, /chargeServerTokenUsage/, 'direct chat must charge token usage on the server')
   assert.match(chatTaskRunner, /normalizeProviderUsage\(response\.usage\)/, 'direct chat must normalize provider usage before charging')
   assert.match(chatTaskRunner, /assistant provider did not return billable usage/i, 'direct chat must fail closed when provider cost is missing')
-  assert.match(llm, /usage:\s*\{\s*include:\s*true\s*\}/, 'OpenRouter requests must explicitly request usage data for compatibility')
-  assert.match(llm, /GENERATION_URL = `\$\{OPENROUTER_BASE_URL\}\/generation`/, 'OpenRouter generation metadata endpoint must be available for exact usage recovery')
-  assert.match(llm, /fetchGenerationUsage/, 'missing inline usage must be resolved through exact OpenRouter generation metadata')
+  assert.match(llm, /stream_options:\s*\{\s*include_usage:\s*true\s*\}/, 'DeepSeek requests must explicitly request terminal usage data')
+  assert.doesNotMatch(llm, /GENERATION_URL|\/generation/, 'direct DeepSeek requests must not call OpenRouter generation metadata')
+  assert.match(llm, /fetchGenerationUsage[\s\S]*return null/, 'missing direct-provider usage must fail closed instead of querying another provider')
   assert.doesNotMatch(streamProcessor, /fetchGenerationUsage/, 'streamed agent calls must never delay model-turn release on generation metadata polling')
   assert.match(streamProcessor, /estimateMissingUsage\(\{ assistantContent, reasoningContent, toolCalls \}\)/, 'missing streamed usage must be estimated synchronously before processStream returns')
   assert.match(agentLoop, /estimateConservativeMissingStreamUsage/, 'agent-loop turns must create a conservative nonzero debit when streamed usage is absent')
@@ -208,15 +208,15 @@ export async function runCreditPricingSmoke() {
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.0003) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.0052) < 1e-12)
-  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.0502) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 1000, completion_tokens: 1000 }) || 0) - 0.00176) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 50_000, completion_tokens: 1000 }) || 0) - 0.02332) < 1e-12)
+  assert.ok(Math.abs((estimateUsageCost({ prompt_tokens: 500_000, completion_tokens: 1000 }) || 0) - 0.22132) < 1e-12)
   assert.ok(Math.abs((estimateUsageCost({
     prompt_tokens: 500_000,
     completion_tokens: 1000,
     prompt_cache_hit_tokens: 100_000,
     prompt_cache_miss_tokens: 400_000,
-  }) || 0) - 0.0404) < 1e-12)
+  }) || 0) - 0.17872) < 1e-12)
 
   if (!process.env.TURSO_DATABASE_URL || !process.env.TURSO_AUTH_TOKEN) {
     return

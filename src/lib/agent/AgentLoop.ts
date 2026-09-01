@@ -10,7 +10,6 @@ import {
   ASSISTANT_SUPPORTS_FILE_INPUT,
   ASSISTANT_SUPPORTS_IMAGE_INPUT,
   ASSISTANT_SUPPORTS_VIDEO_INPUT,
-  ASSISTANT_PROVIDER,
   createStreamingCompletion,
   type ChatContentPart,
   type ChatCompletionTool,
@@ -294,8 +293,8 @@ const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 320
 const INITIAL_STANDALONE_WEBSITE_ITERATION_TIMEOUT_MS = 180_000
 const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
-// Muse may spend part of this allowance on mandatory minimal reasoning before
-// emitting a native tool call. A 260-token ceiling repeatedly cut otherwise
+// DeepSeek thinking is disabled, but one complete native tool envelope still
+// needs enough output room. A 260-token ceiling repeatedly cut otherwise
 // tiny search JSON at the stream boundary, making the runtime pay for a full
 // repair turn. Keep this far below synthesis budgets while leaving enough room
 // for one complete action envelope (or the bounded three-source read batch).
@@ -312,10 +311,10 @@ const FAST_ACTION_MAX_TOKENS = 1_024
 // while retaining a firm latency/cost boundary.
 const INITIAL_STANDALONE_WEBSITE_MAX_TOKENS = 12_288
 const FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP = 2
-const PRESENTATION_REASONING = { effort: 'minimal' as const, exclude: true }
-const FAST_ACTION_REASONING = { effort: 'minimal' as const, exclude: true }
-const TASK_REASONING = { effort: 'minimal' as const, exclude: true }
-const DEEP_TASK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PRESENTATION_REASONING = { effort: 'none' as const, exclude: true }
+const FAST_ACTION_REASONING = { effort: 'low' as const, exclude: true }
+const TASK_REASONING = { effort: 'low' as const, exclude: true }
+const DEEP_TASK_REASONING = { effort: 'low' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 function isAssistantRequestTimeout(error: unknown): boolean {
@@ -338,11 +337,11 @@ function isRetryableTaskInfrastructureInitializationError(error: unknown): boole
 }
 
 function supportsProviderRequiredToolChoice(model: string): boolean {
-  // The model ID is centrally pinned, including the balanced OpenRouter route.
-  // Keep native action turns required for every pinned OpenRouter variant so a
+  // The model ID and direct provider are centrally pinned. Keep native action
+  // turns required so a
   // provider route cannot silently return an empty prose turn instead of the
   // concrete tool call the active phase requires.
-  return ASSISTANT_PROVIDER !== 'openrouter' || model.trim().length > 0
+  return model.trim().length > 0
 }
 
 function isSuccessfulFinalDeliverableWrite(result: ToolExecutionResult): boolean {
@@ -3612,11 +3611,10 @@ export class AgentLoop {
 
     // A required native file turn that returned prose has not opened a genuine
     // live file lane. Keep that draft hidden and let the next bounded
-    // OpenRouter recovery turn stream its accepted text directly into the file
+    // provider recovery turn stream its accepted text directly into the file
     // preview from the first content chunk. The streamed recovery target below
     // then saves that exact body once, without replaying it in chat.
     if (
-      ASSISTANT_PROVIDER === 'openrouter' &&
       finalSavedDeliverableTurn(state, this.options.messages) &&
       !streamedTarget
     ) {

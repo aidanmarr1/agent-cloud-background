@@ -67,10 +67,9 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Muse reasoning is mandatory. A concise prompt normally finishes well below
-// this ceiling, while 320 tokens leaves enough room for hidden reasoning plus
-// one short visible sentence. This dedicated call is used only when a persisted
-// precomputed plan still needs its worker-authored opening.
+// DeepSeek thinking is disabled. This ceiling preserves one complete visible
+// sentence without adding hidden-token latency. This dedicated call is used
+// only when a persisted precomputed plan still needs its worker-authored opening.
 const PLANNER_ACK_MAX_TOKENS = 320
 const PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000
 const PLANNER_FAST_JSON_MAX_TOKENS = 760
@@ -85,8 +84,8 @@ const PLANNER_REPAIR_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_REPLAN_REQUEST_TIMEOUT_MS = 45_000
 const PLANNER_OVERALL_DEADLINE_MS = 90_000
 const PLANNER_TIMEOUT_RECOVERY_RETRIES = 0
-const PLANNER_CONTROL_REASONING = { effort: 'minimal' as const, exclude: true }
-const PLANNER_ACK_REASONING = { effort: 'minimal' as const, exclude: true }
+const PLANNER_CONTROL_REASONING = { effort: 'none' as const, exclude: true }
+const PLANNER_ACK_REASONING = { effort: 'none' as const, exclude: true }
 const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Let the exact task and completed context determine its length and structure rather than following a recurring template. Summarize the actual outcome in user-facing terms, not the internal step name. Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force headings or bullets. If files or artifacts are attached below, naturally tell the user they can open them and identify what they contain when useful. Include concrete results, caveats, or next steps only when they help.'
 const PLANNER_FAST_PARSE_MISS = 'Fast planner did not return parseable JSON.'
 
@@ -816,7 +815,7 @@ export class PlanManager {
     const plannerAbortController = this.resetPlannerAbortController()
     // One streamed planner request owns both the opening acknowledgement and
     // the visible plan. Its completed `ack` field is released while the rest of
-    // the JSON is still arriving, avoiding two competing Muse requests and any
+    // the JSON is still arriving, avoiding two competing provider requests and any
     // timer/display gate between acknowledgement and planning.
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
