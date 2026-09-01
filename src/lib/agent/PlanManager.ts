@@ -1799,14 +1799,15 @@ Rules:
         messages: [
           {
             role: 'system' as const,
-            content: fastPlannerMode
-              ? getFastPlanningPrompt(this.customInstructions)
-              : getPlanningPrompt(this.customInstructions),
+            content: [
+              fastPlannerMode
+                ? getFastPlanningPrompt(this.customInstructions)
+                : getPlanningPrompt(this.customInstructions),
+              this.planningContext
+                ? `CURRENT TASK CONTEXT (factual; plan only remaining work):\n${this.planningContext}`
+                : '',
+            ].filter(Boolean).join('\n\n'),
           },
-          ...(this.planningContext ? [{
-            role: 'system' as const,
-            content: this.planningContext,
-          }] : []),
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
         temperature: fastPlannerMode ? 0.2 : 0.3,

@@ -33,6 +33,7 @@ try {
   assert.match(agentLoop, /DURABLE TASK FILE INVENTORY:[\s\S]*Plan only the work that remains:[\s\S]*choose freely among all available tools/, 'follow-ups must receive the existing task artifact inventory without removing tool autonomy')
   assert.match(agentLoop, /durableTaskPlanningContextPromise[\s\S]*new PlanManager\([\s\S]*durableTaskPlanningContextPromise/, 'follow-up planning must receive durable task artifacts without delaying the acknowledgement call')
   assert.match(planManager, /scheduleAcknowledgementCall\(\)[\s\S]*await this\.planningContextPromise[\s\S]*attemptPlanCall/, 'acknowledgement must start before optional artifact context is awaited by the planner')
+  assert.match(planManager, /getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*CURRENT TASK CONTEXT \(factual; plan only remaining work\)/, 'artifact inventory must be merged into the primary planner instruction so providers cannot ignore a later system message')
   assert.match(toolPipeline, /tc\.name === 'export_pdf'[\s\S]*state\.deliverableVerified = true[\s\S]*native-pdf-export/, 'native PDF export must satisfy deliverable verification without shell re-checks')
   assert.match(agentLoop, /successfulPdfExport[\s\S]*handleStepAdvance\(state\)[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful native PDF export must advance out of conversion and into its remaining handoff instead of re-verification')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
