@@ -39,7 +39,7 @@ assert.match(
 )
 assert.match(
   recordCreditEvent,
-  /where user_id = \? and monthly_balance >= \?/,
+  /where user_id = \? and round\(monthly_balance, 0\) >= \?/,
   'batched credit writes must retain the atomic non-negative debit fence',
 )
 assert.match(

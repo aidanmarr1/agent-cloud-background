@@ -47,8 +47,7 @@ function formatCredits(value: number): string {
 
 function formatSpend(value: number): string {
   const safeValue = Math.max(0, finiteNumber(value))
-  if (safeValue >= 100) return Math.round(safeValue).toLocaleString()
-  return safeValue.toFixed(1)
+  return Math.round(safeValue).toLocaleString()
 }
 
 function formatDateTime(timestamp: number): string {

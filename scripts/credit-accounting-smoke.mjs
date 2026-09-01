@@ -29,8 +29,10 @@ async function assertSourceContracts() {
   ])
 
   assert.match(creditPolicy, /RETAIL_CREDITS_PER_USD\s*=\s*200/, 'credit policy must match the 200-credits-per-retail-dollar benchmark')
-  assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*27/, 'credit policy must preserve a substantial but reduced margin for hosted infrastructure and failed-task refunds')
+  assert.match(creditPolicy, /PROVIDER_COST_TO_RETAIL_MULTIPLIER\s*=\s*24/, 'credit policy must apply the balanced 11.1% reduction while preserving a substantial contribution margin')
   assert.match(creditPolicy, /CREDITS_PER_USD\s*=\s*RETAIL_CREDITS_PER_USD\s*\*\s*PROVIDER_COST_TO_RETAIL_MULTIPLIER/, 'billable credits must remain derived from exact provider cost')
+  assert.match(creditPolicy, /roundCreditAmount[\s\S]*Math\.round/, 'all credit balances and ledger entries must normalize to whole numbers')
+  assert.match(creditPolicy, /billableCreditAmount[\s\S]*Math\.max\(1,\s*roundCreditAmount\(safe\)\)/, 'real paid usage must retain a one-credit minimum after whole-number settlement')
   assert.match(modelPricing, /DEFAULT_OPENROUTER_MODEL = 'meta\/muse-spark-1\.2-contributor'/, 'default model must be Muse Spark 1.2 Contributor')
   assert.match(modelPricing, /inputUsdPer1M:\s*0\.1/, 'Muse input pricing must match the exact Meta endpoint')
   assert.match(modelPricing, /cacheHitInputUsdPer1M:\s*0\.002/, 'Muse cache-read pricing must match the exact Meta endpoint')
@@ -71,7 +73,7 @@ async function assertSourceContracts() {
   assert.match(serverCredits, /set monthly_balance = 0/, 'over-budget billable calls must clamp the server balance to exactly zero')
   assert.doesNotMatch(serverCredits, /currentBalance - amount/, 'server credit charges must not compute or persist a negative balance')
   assert.match(serverCredits, /requestedAmount > currentBalance/, 'server credit charges must detect over-budget calls and drain the remaining balance')
-  assert.match(serverCredits, /where user_id = \? and monthly_balance >= \?/, 'server credit debits must be guarded by an atomic non-negative DB update')
+  assert.match(serverCredits, /where user_id = \? and round\(monthly_balance, 0\) >= \?/, 'server credit debits must use a whole-number atomic non-negative DB update')
   assert.match(serverCredits, /credit_accounts_nonnegative_insert/, 'credit account inserts must be protected by a non-negative DB trigger')
   assert.match(serverCredits, /credit_accounts_nonnegative_update/, 'credit account updates must be protected by a non-negative DB trigger')
   assert.match(serverCredits, /credit_ledger_balance_after_nonnegative_insert/, 'credit ledger inserts must not record negative post-charge balances')
@@ -81,6 +83,8 @@ async function assertSourceContracts() {
   assert.match(serverCredits, /topUpServerCredits/, 'server must expose an explicit credit top-up helper')
   assert.match(usageTab, /\.filter\(\(entry\) => entry\.amount < 0\)/, 'Usage tab must include credit additions from negative adjustment ledger entries')
   assert.match(usageTab, /Agent Admin credited account/, 'Usage tab must plainly state when Agent Admin credited the account')
+  assert.doesNotMatch(usageTab, /safeValue\.toFixed\(1\)/, 'Usage must never render fractional credits')
+  assert.doesNotMatch(creditStore, /version:\s*3/, 'persisted decimal credit state must be migrated to the whole-number schema')
   assert.match(globalsCss, /--success-solid:\s*#[0-9a-f]{6};/i, 'global CSS must expose an official dark-green success solid token')
   assert.match(globalsCss, /--color-success-solid:\s*var\(--success-solid\)/, 'Tailwind theme must expose the official success token family')
   assert.match(usageTab, /bg-\[var\(--success-bg\)\][\s\S]*text-\[var\(--success-text\)\][\s\S]*\+\{formatSpend\(row\.amount\)\}/, 'Usage tab must render added credits as a positive amount with official dark-green success tokens')
@@ -149,6 +153,7 @@ async function assertPricingRuntime() {
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import {
+  billableCreditAmount,
   CREDIT_RATES,
   e2bSandboxRuntimeCreditCharge,
   roundCreditAmount,
@@ -173,38 +178,54 @@ import { rm } from 'node:fs/promises'
 
 export async function runCreditPricingSmoke() {
   assert.equal(CREDIT_RATES.retailCreditsPerUsd, 200)
-  assert.equal(CREDIT_RATES.providerCostToRetailMultiplier, 27)
-  assert.equal(CREDIT_RATES.creditsPerUsd, 5400)
-  assert.equal(CREDIT_RATES.webSearchCredits, 5.4)
-  assert.equal(CREDIT_RATES.imageSearchCredits, 5.4)
+  assert.equal(CREDIT_RATES.providerCostToRetailMultiplier, 24)
+  assert.equal(CREDIT_RATES.creditsPerUsd, 4800)
+  assert.ok(1 - (1 / CREDIT_RATES.providerCostToRetailMultiplier) >= 0.95, 'metered provider costs must retain at least a 95% direct-cost margin')
+  assert.equal(CREDIT_RATES.webSearchCredits, 5)
+  assert.equal(CREDIT_RATES.imageSearchCredits, 5)
   assert.equal(CREDIT_RATES.browserStepCredits, 0)
   assert.equal(CREDIT_RATES.e2bDefaultVcpuCount, 2)
   assert.equal(CREDIT_RATES.e2bDefaultMemoryGiB, 2)
   assert.equal(CREDIT_RATES.e2bSandboxUsdPerSecond, (2 * 0.000014) + (2 * 0.0000045))
   assert.equal(
     CREDIT_RATES.inputTokenCreditsPer1K,
-    roundCreditAmount((CREDIT_RATES.modelInputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
+    billableCreditAmount((CREDIT_RATES.modelInputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
   )
   assert.equal(
     CREDIT_RATES.outputTokenCreditsPer1K,
-    roundCreditAmount((CREDIT_RATES.modelOutputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
+    billableCreditAmount((CREDIT_RATES.modelOutputUsdPer1M / 1000) * CREDIT_RATES.creditsPerUsd),
   )
-  assert.equal(toolCreditCharge('web_search'), 5.4)
-  assert.equal(toolCreditCharge('image_search'), 5.4)
+  assert.equal(toolCreditCharge('web_search'), 5)
+  assert.equal(toolCreditCharge('image_search'), 5)
   assert.equal(toolCreditCharge('browser_navigate'), 0)
   assert.equal(toolCreditCharge('browser_click_at'), 0)
   assert.equal(toolCreditCharge('browser_screenshot'), 0)
   assert.equal(toolCreditCharge('create_file'), 0)
   assert.equal(toolCreditCharge('read_file'), 0)
   assert.equal(toolCreditCharge('unknown_local_tool'), 0)
-  const expectedTokenCharge = roundCreditAmount(0.00123 * CREDIT_RATES.creditsPerUsd)
-  const expectedE2BCharge = roundCreditAmount(CREDIT_RATES.e2bSandboxUsdPerSecond * CREDIT_RATES.creditsPerUsd * 120)
+  const expectedTokenCharge = billableCreditAmount(0.00123 * CREDIT_RATES.creditsPerUsd)
+  const expectedE2BCharge = billableCreditAmount(CREDIT_RATES.e2bSandboxUsdPerSecond * CREDIT_RATES.creditsPerUsd * 120)
   const standardAnalysisRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 15 * 60_000 })
   const standardWebsiteRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 25 * 60_000 })
   const complexAppRuntimeCharge = e2bSandboxRuntimeCreditCharge({ elapsedMs: 80 * 60_000 })
-  assert.ok(standardAnalysisRuntimeCharge >= 175 && standardAnalysisRuntimeCharge <= 185)
-  assert.ok(standardWebsiteRuntimeCharge >= 295 && standardWebsiteRuntimeCharge <= 305)
-  assert.ok(complexAppRuntimeCharge >= 955 && complexAppRuntimeCharge <= 965)
+  assert.equal(standardAnalysisRuntimeCharge, 160)
+  assert.equal(standardWebsiteRuntimeCharge, 266)
+  assert.equal(complexAppRuntimeCharge, 852)
+  assert.equal(roundCreditAmount(5.49), 5)
+  assert.equal(roundCreditAmount(5.5), 6)
+  assert.equal(roundCreditAmount(-5.5), -6)
+  assert.equal(billableCreditAmount(0.1), 1)
+  assert.ok([
+    CREDIT_RATES.webSearchCredits,
+    CREDIT_RATES.imageSearchCredits,
+    CREDIT_RATES.inputTokenCreditsPer1K,
+    CREDIT_RATES.outputTokenCreditsPer1K,
+    standardAnalysisRuntimeCharge,
+    standardWebsiteRuntimeCharge,
+    complexAppRuntimeCharge,
+    expectedTokenCharge,
+    expectedE2BCharge,
+  ].every(Number.isInteger), 'every customer-facing credit amount must be a whole number')
   assert.equal(e2bSandboxRuntimeCreditCharge({ elapsedMs: 120_000 }), expectedE2BCharge)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000 }), 0)
   assert.equal(tokenUsageCreditCharge({ promptTokens: 1000, completionTokens: 1000, cost: 0.00123 }), expectedTokenCharge)
@@ -295,14 +316,14 @@ export async function runCreditPricingSmoke() {
     assert.equal(exactSnapshot.balance.monthly, 0)
     assert.equal(exactSnapshot.ledger.filter((entry) => entry.id === \`credit:\${exactRunId}:tokens\`).length, 1)
 
-    await initializeAccountCredits(prepaidUserId, { monthlyAllowance: 0.1, monthlyBalance: 0.1 })
+    await initializeAccountCredits(prepaidUserId, { monthlyAllowance: 1, monthlyBalance: 1 })
     await assert.rejects(
       () => chargeServerTool(prepaidUserId, prepaidConversationId, 'web_search', 'tool-prepaid', prepaidRunId),
-      (error) => isOutOfCreditsError(error) && error.balanceAfter === 0.1,
+      (error) => isOutOfCreditsError(error) && error.balanceAfter === 1,
       'a billable side effect must not run on a partial prepayment',
     )
     const prepaidSnapshot = await getServerCreditSnapshot(prepaidUserId)
-    assert.equal(prepaidSnapshot.balance.monthly, 0.1)
+    assert.equal(prepaidSnapshot.balance.monthly, 1)
     assert.ok(!prepaidSnapshot.ledger.some((entry) => entry.id === \`credit:\${prepaidRunId}:tool-prepaid:tool:web_search\`))
   } catch (error) {
     testFailure = error

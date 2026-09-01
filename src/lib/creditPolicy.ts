@@ -32,9 +32,12 @@ export interface CreditLedgerEvent {
 // into billable product credits while leaving room for hosted-worker overhead,
 // payment fees, failed-task refunds, and product margin.
 export const RETAIL_CREDITS_PER_USD = 200
-// A modest reduction from the original 30x keeps a substantial contribution
-// margin while making longer agent runs noticeably less credit-intensive.
-export const PROVIDER_COST_TO_RETAIL_MULTIPLIER = 27
+// A second measured step down from 27x lowers the underlying rate for every
+// paid action by 11.1% without changing task depth or tool choice. At 24x, a
+// fully consumed 4,000-credit/$20 allowance maps to about $0.83 of metered
+// provider spend before whole-credit settlement, preserving substantial room
+// for fixed infrastructure, payment fees, support, and task remediation.
+export const PROVIDER_COST_TO_RETAIL_MULTIPLIER = 24
 export const CREDITS_PER_USD = RETAIL_CREDITS_PER_USD * PROVIDER_COST_TO_RETAIL_MULTIPLIER
 export const TASK_START_CREDITS = 0
 // Runtime wall-clock time and task startup are not billable. Credits are
@@ -68,11 +71,19 @@ export function finiteCreditNumber(value: unknown, fallback = 0): number {
 
 export function roundCreditAmount(value: number): number {
   const safe = finiteCreditNumber(value)
-  return Math.round(safe * 100) / 100
+  return safe < 0 ? -Math.round(Math.abs(safe)) : Math.round(safe)
+}
+
+// Every customer-visible debit is a whole number. Preserve a one-credit floor
+// for real paid usage so small provider calls cannot silently become free.
+export function billableCreditAmount(value: number): number {
+  const safe = Math.max(0, finiteCreditNumber(value))
+  if (safe <= 0) return 0
+  return Math.max(1, roundCreditAmount(safe))
 }
 
 function usdToCredits(amountUsd: number): number {
-  return roundCreditAmount(amountUsd * CREDITS_PER_USD)
+  return billableCreditAmount(amountUsd * CREDITS_PER_USD)
 }
 
 export const CREDIT_RATES = {
@@ -172,7 +183,7 @@ export function normalizeTokenUsage(usage: CreditTokenUsage | number): Required<
 
 export function tokenUsageCreditCharge(usage: CreditTokenUsage | number): number {
   if (typeof usage === 'object' && usage !== null && usage.cost !== undefined) {
-    return roundCreditAmount(Math.max(0, finiteCreditNumber(usage.cost)) * CREDITS_PER_USD)
+    return billableCreditAmount(Math.max(0, finiteCreditNumber(usage.cost)) * CREDITS_PER_USD)
   }
   return 0
 }

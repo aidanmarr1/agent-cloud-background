@@ -528,7 +528,7 @@ export const useCreditStore = create<CreditStore>()(
     }),
     {
       name: STORE_KEY,
-      version: 3,
+      version: 4,
       partialize: (state) => ({
         balance: state.balance,
         ledger: state.ledger,

@@ -378,23 +378,40 @@ export async function initializeAccountCredits(
 async function updateAccountPeriodIfNeeded(userId: string, row: CreditAccountRow): Promise<CreditAccountRow> {
   const currentPeriod = monthKey()
   const storedPeriod = typeof row.period_key === 'string' ? row.period_key : currentPeriod
-  if (storedPeriod === currentPeriod) return row
+  const normalizedAllowance = roundCreditAmount(Math.max(
+    0,
+    finiteCreditNumber(row.monthly_allowance, ACCOUNT_STARTING_CREDITS),
+  ))
+  const normalizedBalance = roundCreditAmount(Math.max(
+    0,
+    finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS),
+  ))
+  if (
+    storedPeriod === currentPeriod &&
+    finiteCreditNumber(row.monthly_allowance, ACCOUNT_STARTING_CREDITS) === normalizedAllowance &&
+    finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS) === normalizedBalance
+  ) return row
 
   const now = new Date().toISOString()
-  const preservedBalance = roundCreditAmount(Math.max(0, finiteCreditNumber(row.monthly_balance, ACCOUNT_STARTING_CREDITS)))
   await tursoExecute(
     `
       update credit_accounts
-      set monthly_allowance = ?, monthly_balance = ?, period_key = ?, updated_at = ?
+      set monthly_allowance = case
+            when period_key = ? then round(monthly_allowance, 0)
+            else ?
+          end,
+          monthly_balance = round(monthly_balance, 0),
+          period_key = ?,
+          updated_at = ?
       where user_id = ?
     `,
-    [ACCOUNT_STARTING_CREDITS, preservedBalance, currentPeriod, now, userId],
+    [currentPeriod, ACCOUNT_STARTING_CREDITS, currentPeriod, now, userId],
   )
 
-  return {
+  return (await readAccountRow(userId)) || {
     user_id: userId,
-    monthly_allowance: ACCOUNT_STARTING_CREDITS,
-    monthly_balance: preservedBalance,
+    monthly_allowance: storedPeriod === currentPeriod ? normalizedAllowance : ACCOUNT_STARTING_CREDITS,
+    monthly_balance: normalizedBalance,
     period_key: currentPeriod,
   }
 }
@@ -536,7 +553,7 @@ async function recordServerCreditEvent(
               update credit_accounts
               set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
                   monthly_balance = 0, period_key = ?, updated_at = ?
-              where user_id = ? and monthly_balance = ?
+              where user_id = ? and round(monthly_balance, 0) = ?
             `,
             args: [currentPeriod, ACCOUNT_STARTING_CREDITS, currentPeriod, now, userId, currentBalance],
           }
@@ -545,8 +562,8 @@ async function recordServerCreditEvent(
               sql: `
                 update credit_accounts
                 set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
-                    monthly_balance = round(monthly_balance - ?, 2), period_key = ?, updated_at = ?
-                where user_id = ? and monthly_balance >= ?
+                    monthly_balance = round(monthly_balance, 0) - ?, period_key = ?, updated_at = ?
+                where user_id = ? and round(monthly_balance, 0) >= ?
               `,
               args: [currentPeriod, ACCOUNT_STARTING_CREDITS, amount, currentPeriod, now, userId, amount],
             }
@@ -554,7 +571,7 @@ async function recordServerCreditEvent(
               sql: `
                 update credit_accounts
                 set monthly_allowance = case when period_key <> ? then ? else monthly_allowance end,
-                    monthly_balance = round(monthly_balance - ?, 2), period_key = ?, updated_at = ?
+                    monthly_balance = round(monthly_balance, 0) - ?, period_key = ?, updated_at = ?
                 where user_id = ?
               `,
               args: [currentPeriod, ACCOUNT_STARTING_CREDITS, amount, currentPeriod, now, userId],
@@ -1146,15 +1163,15 @@ export async function checkpointServerE2BRuntimeBilling(
                 sql: `
                   update credit_accounts
                   set monthly_balance = 0, updated_at = ?
-                  where user_id = ? and monthly_balance = ?
+                  where user_id = ? and round(monthly_balance, 0) = ?
                 `,
                 args: [now, userId, currentBalance],
               })
             : await transaction.execute({
                 sql: `
                   update credit_accounts
-                  set monthly_balance = round(monthly_balance - ?, 2), updated_at = ?
-                  where user_id = ? and monthly_balance >= ?
+                  set monthly_balance = round(monthly_balance, 0) - ?, updated_at = ?
+                  where user_id = ? and round(monthly_balance, 0) >= ?
                 `,
                 args: [paidAmount, now, userId, paidAmount],
               })

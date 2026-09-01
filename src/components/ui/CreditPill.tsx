@@ -13,14 +13,7 @@ function formatCredits(value: number): string {
 
 function formatCompact(value: number): string {
   const rounded = Math.max(0, Math.floor(Number.isFinite(value) ? value : 0))
-  if (rounded >= 1000) {
-    const compact = new Intl.NumberFormat(undefined, {
-      notation: 'compact',
-      maximumFractionDigits: rounded >= 10_000 ? 0 : 1,
-    }).format(rounded)
-    return compact
-  }
-  return String(rounded)
+  return rounded.toLocaleString()
 }
 
 export function CreditPill() {
@@ -167,7 +160,7 @@ export function CreditPill() {
                     </div>
                     <div className="flex flex-shrink-0 items-baseline gap-1.5 text-right">
                       <span className={`text-[12.5px] font-semibold tabular-nums ${task.amount <= 0 ? 'text-text-secondary' : 'text-text-primary'}`}>
-                        {task.amount <= 0 ? '' : '−'}{Math.abs(Number.isFinite(task.amount) ? task.amount : 0).toFixed(1)}
+                        {task.amount <= 0 ? '' : '−'}{Math.round(Math.abs(Number.isFinite(task.amount) ? task.amount : 0)).toLocaleString()}
                       </span>
                       <span className="text-[10px] font-medium text-text-muted">credits</span>
                     </div>
