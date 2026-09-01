@@ -23,6 +23,7 @@ try {
   ])
 
   assert.match(agentLoop, /all\|done\|ready\|complete\|completed\|finished/, 'one-word handoff tails must be rejected')
+  assert.match(agentLoop, /\[a-z\]\(\?:The\|This\|Your\|Here\|You\|It\)/, 'concatenated provider handoff fragments such as canThe must be rejected before user-visible release')
   assert.doesNotMatch(agentLoop, /attemptNumber\s*>=\s*2[\s\S]{0,180}!finalDeliverableHandoffHasInvalidForm/, 'a second handoff attempt must not bypass completeness checks')
   assert.match(agentLoop, /deliverable_handoff_failed[\s\S]{0,240}phase = 'ERROR'/, 'failed handoff prose must not produce a false done event')
   assert.match(toolPipeline, /BROWSER_TARGET_MISMATCH:[\s\S]*unrelated external webpage cannot verify a local generated artifact/, 'external pages must not verify local artifacts')

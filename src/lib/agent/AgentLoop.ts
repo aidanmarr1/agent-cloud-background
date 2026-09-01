@@ -1628,6 +1628,10 @@ function finalDeliverableHandoffHasInvalidForm(
   const text = content.trim()
   if (!text || !/[A-Za-z0-9]/.test(text)) return true
   if (/^(?:i(?:'|’)?ll|i will|i am going to|let me)\b/i.test(text)) return true
+  // Some providers resume a clipped sentence inside the same nominal turn,
+  // producing joins such as "You canThe PDF...". A terminal period alone
+  // would otherwise make that malformed splice look complete and release it.
+  if (/[a-z](?:The|This|Your|Here|You|It)\b/.test(text)) return true
   if (/\bi (?:have )?finished\s+(?:synthesize|write|create|compile|generate|produce|build|draft|prepare|research|analyze|summarize)\b/i.test(text)) {
     return true
   }
