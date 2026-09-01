@@ -980,7 +980,7 @@ export interface AgentLoopOptions {
 
 type Phase = 'PLANNING' | 'STREAMING' | 'EXECUTING_TOOLS' | 'EVALUATING' | 'COMPLETE' | 'ERROR'
 
-function durableTaskFileContext(files: TaskFileRecord[]): ChatMessageParam | null {
+function durableTaskFileContextContent(files: TaskFileRecord[]): string | null {
   if (files.length === 0) return null
   const visibleFiles = files.slice(0, 80)
   const rows = visibleFiles.map(file => {
@@ -992,14 +992,16 @@ function durableTaskFileContext(files: TaskFileRecord[]): ChatMessageParam | nul
   if (files.length > visibleFiles.length) {
     rows.push(`- …and ${files.length - visibleFiles.length} more existing task files`)
   }
-  return {
-    role: 'system',
-    content: [
-      'DURABLE TASK FILE INVENTORY: These files already exist in this task and are restored into the current workspace before a file, export, package, terminal, or browser action needs them.',
-      ...rows,
-      'Treat this inventory as factual workspace context. Resolve references such as “it”, “that report”, or “the file” against the prior conversation and these paths. Use the relevant existing source instead of recreating it; choose freely among all available tools based on the actual task, and inspect a file only when its identity or contents are genuinely uncertain.',
-    ].join('\n'),
-  } as ChatMessageParam
+  return [
+    'DURABLE TASK FILE INVENTORY: These files already exist in this task and are restored into the current workspace before a file, export, package, terminal, or browser action needs them.',
+    ...rows,
+    'Treat this inventory as factual workspace context. Resolve references such as “it”, “that report”, or “the file” against the prior conversation and these paths. Use the relevant existing source instead of recreating it; choose freely among all available tools based on the actual task, and inspect a file only when its identity or contents are genuinely uncertain.',
+  ].join('\n')
+}
+
+function durableTaskFileContext(files: TaskFileRecord[]): ChatMessageParam | null {
+  const content = durableTaskFileContextContent(files)
+  return content ? { role: 'system', content } as ChatMessageParam : null
 }
 
 const AUTOSAVE_DRAFT_MIN_CHARS = 1200
@@ -3988,6 +3990,7 @@ export class AgentLoop {
           return []
         })
       : Promise.resolve([] as TaskFileRecord[])
+    const durableTaskPlanningContextPromise = durableTaskFilesPromise.then(durableTaskFileContextContent)
     const strategy = resolveStrategy(scopedMessages)
     const complexity = estimateTaskComplexity(scopedMessages)
     const iterationLimit = computeIterationLimit(complexity)
@@ -4155,6 +4158,7 @@ export class AgentLoop {
       this.options.skipStartupAcknowledgement === true,
       signal,
       processedMessages as ChatMessageParam[],
+      durableTaskPlanningContextPromise,
     )
 
     planManager.setStateRef(state)
@@ -5963,6 +5967,17 @@ export class AgentLoop {
             const toolMessages = toolPipeline.buildToolResultMessages(lastToolResults, state)
             for (const msg of toolMessages) {
               contextManager.push(msg as unknown as ChatMessageParam, 4)
+            }
+
+            const successfulPdfExport = lastToolResults.find(result => (
+              result.tc.name === 'export_pdf' && !result.isError
+            ))
+            if (successfulPdfExport) {
+              const pdfPath = toolResultPath(successfulPdfExport) || 'the requested PDF'
+              contextManager.push({
+                role: 'system',
+                content: `NATIVE PDF EXPORT VERIFIED: ${pdfPath} was rendered in the task workspace, its PDF signature and non-empty byte size were validated, and it was saved durably. Do not run terminal, browser, file-listing, or text-extraction checks merely to re-verify this successful export. If the current phase is satisfied, advance it; otherwise continue only work that the user actually requested. All tools remain available when a specific unresolved need genuinely requires one.`,
+              } as ChatMessageParam, 2)
             }
 
             updateExactExtractionGuardAfterTools(state, lastToolResults, messages)

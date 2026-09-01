@@ -4750,6 +4750,11 @@ export class ToolPipeline {
       const pdfResult = result as { path?: string } | undefined
       const path = pdfResult?.path || (args.output_path as string) || ''
       if (path) state.createdFiles.add(path)
+      state.deliverableVerified = true
+      recordWorkLedgerVerification(state, {
+        kind: 'native-pdf-export',
+        detail: `Native PDF export validated the rendered PDF signature, non-empty byte size, and durable output${path ? ` at ${path}` : ''}.`,
+      })
       logWork(state, `Exported PDF: ${path}`)
       if (this.memory && path) {
         this.memory.recordFileCreated(path, state.currentStepIdx)

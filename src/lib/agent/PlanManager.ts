@@ -735,6 +735,8 @@ export class PlanManager {
   private plannerAbortController: AbortController | null = null
   private externalSignal?: AbortSignal
   private removeExternalAbortListener: (() => void) | null = null
+  private planningContextPromise?: Promise<string | null>
+  private planningContext?: string
   constructor(
     emitter: AgentEventEmitter,
     messages: Array<{ role: string; content: string }>,
@@ -746,6 +748,7 @@ export class PlanManager {
     skipAcknowledgement = false,
     externalSignal?: AbortSignal,
     nativeMessages?: ChatMessageParam[],
+    planningContextPromise?: Promise<string | null>,
   ) {
     this.emitter = emitter
     this.messages = messages
@@ -757,6 +760,7 @@ export class PlanManager {
     this.skipAcknowledgement = skipAcknowledgement
     this.externalSignal = externalSignal
     this.nativeMessages = nativeMessages
+    this.planningContextPromise = planningContextPromise
     this.resetPlannerAbortController()
   }
 
@@ -827,6 +831,15 @@ export class PlanManager {
     const start = async (): Promise<null> => {
       if (PLAN_STARTUP_DELAY_MS > 0) {
         await this.waitForPlannerDelay(PLAN_STARTUP_DELAY_MS)
+      }
+      if (this.planningContextPromise) {
+        try {
+          this.planningContext = (await this.planningContextPromise)?.trim() || undefined
+        } catch (error) {
+          console.warn('[AgentDiagnostics] Optional planning context could not be loaded', {
+            error: sanitizePlannerError(error),
+          })
+        }
       }
       this.plannerDeadlineAtMs = Date.now() + PLANNER_OVERALL_DEADLINE_MS
       return null
@@ -1571,7 +1584,7 @@ Rules:
           },
           {
             role: 'user' as const,
-          content: `USER REQUEST:\n${request}\n${this.customInstructionPlanningContext()}${qualityContext}\n\nBROKEN PLANNER RESPONSE:\n${raw.slice(0, 4000) || '(empty response)'}`,
+          content: `USER REQUEST:\n${request}\n${this.customInstructionPlanningContext()}${this.planningContext ? `\nCURRENT TASK CONTEXT:\n${this.planningContext}\n` : ''}${qualityContext}\n\nBROKEN PLANNER RESPONSE:\n${raw.slice(0, 4000) || '(empty response)'}`,
           },
         ],
         temperature: 0.1,
@@ -1790,6 +1803,10 @@ Rules:
               ? getFastPlanningPrompt(this.customInstructions)
               : getPlanningPrompt(this.customInstructions),
           },
+          ...(this.planningContext ? [{
+            role: 'system' as const,
+            content: this.planningContext,
+          }] : []),
           ...plannerTaskMessages(this.messages, this.nativeMessages),
         ],
         temperature: fastPlannerMode ? 0.2 : 0.3,

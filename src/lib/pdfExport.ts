@@ -2,7 +2,12 @@ import { extname } from 'path'
 import type { FileResult } from '@/types'
 import { readSandboxFileBytes, writeSandboxFileBytes } from './sandbox'
 
-type PdfExportResult = FileResult & { error?: string }
+type PdfExportResult = FileResult & {
+  error?: string
+  validated?: boolean
+  validation?: string
+  pageSize?: 'A4'
+}
 
 function normalizeWorkspacePath(path: string): string {
   return path.replace(/^\.?\/+/, '').replace(/\/+/g, '/') || 'deliverables/output.pdf'
@@ -192,7 +197,14 @@ export async function exportPdfFromSandbox(
     }
 
     await writeSandboxFileBytes(conversationId, normalizedOutput, pdfBuffer)
-    return { action: 'exported', path: normalizedOutput, size: pdfBuffer.byteLength }
+    return {
+      action: 'exported',
+      path: normalizedOutput,
+      size: pdfBuffer.byteLength,
+      validated: true,
+      validation: 'PDF signature and non-empty rendered byte size validated before durable save',
+      pageSize: 'A4',
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return {

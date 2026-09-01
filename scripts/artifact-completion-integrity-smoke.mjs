@@ -10,8 +10,9 @@ const runnerPath = join(workDir, 'runner.ts')
 const bundlePath = join(workDir, 'runner.mjs')
 
 try {
-  const [agentLoop, toolPipeline, dispatcher, pdfExport, browser, config] = await Promise.all([
+  const [agentLoop, planManager, toolPipeline, dispatcher, pdfExport, browser, config] = await Promise.all([
     readFile(join(root, 'src/lib/agent/AgentLoop.ts'), 'utf8'),
+    readFile(join(root, 'src/lib/agent/PlanManager.ts'), 'utf8'),
     readFile(join(root, 'src/lib/agent/ToolPipeline.ts'), 'utf8'),
     readFile(join(root, 'src/stream/client/eventDispatcher.ts'), 'utf8'),
     readFile(join(root, 'src/lib/pdfExport.ts'), 'utf8'),
@@ -28,7 +29,12 @@ try {
   assert.match(dispatcher, /The task ended before this action returned a result/, 'a terminal done event must expose unresolved actions')
   assert.match(browser, /renderDocumentPdf[\s\S]*format: 'A4'[\s\S]*preferCSSPageSize: true/, 'PDF export must render on the provider-backed task browser')
   assert.match(pdfExport, /readSandboxFileBytes[\s\S]*renderDocumentPdf[\s\S]*%PDF-[\s\S]*writeSandboxFileBytes/, 'PDF export must read and write through the active sandbox provider and validate a real PDF payload')
+  assert.match(pdfExport, /validated: true[\s\S]*PDF signature and non-empty rendered byte size validated/, 'successful PDF export results must tell the model that native validation already passed')
   assert.match(agentLoop, /DURABLE TASK FILE INVENTORY:[\s\S]*choose freely among all available tools/, 'contextual follow-ups must receive the existing task artifact inventory without removing tool autonomy')
+  assert.match(agentLoop, /durableTaskPlanningContextPromise[\s\S]*new PlanManager\([\s\S]*durableTaskPlanningContextPromise/, 'follow-up planning must receive durable task artifacts without delaying the acknowledgement call')
+  assert.match(planManager, /scheduleAcknowledgementCall\(\)[\s\S]*await this\.planningContextPromise[\s\S]*attemptPlanCall/, 'acknowledgement must start before optional artifact context is awaited by the planner')
+  assert.match(toolPipeline, /tc\.name === 'export_pdf'[\s\S]*state\.deliverableVerified = true[\s\S]*native-pdf-export/, 'native PDF export must satisfy deliverable verification without shell re-checks')
+  assert.match(agentLoop, /NATIVE PDF EXPORT VERIFIED:[\s\S]*All tools remain available when a specific unresolved need genuinely requires one/, 'successful PDF export must discourage redundant verification while preserving tool autonomy')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
 
   await writeFile(runnerPath, `
