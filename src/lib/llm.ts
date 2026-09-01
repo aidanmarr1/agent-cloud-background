@@ -1,10 +1,11 @@
 import {
-  DEFAULT_ASSISTANT_MODEL,
+  DEFAULT_OPENROUTER_MODEL,
   estimateUsageCost,
 } from '@/lib/modelPricing'
 import { ensureProviderRequestEndsWithInputTurn } from '@/lib/agent/ProviderRequestFailure'
 
-const ASSISTANT_BASE_URL = 'https://api.deepseek.com'
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
+const GENERATION_URL = `${OPENROUTER_BASE_URL}/generation`
 const ASSISTANT_LOG_LABEL = 'Agent'
 
 function trimmedEnv(value: string | undefined): string | undefined {
@@ -15,13 +16,14 @@ function trimmedEnv(value: string | undefined): string | undefined {
 // Keep the provider/model boundary explicit. Individual requests, stale
 // worker environments, and client-supplied model names cannot silently route
 // tasks back to another provider.
-export const ASSISTANT_PROVIDER = 'deepseek' as const
+export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
-export const ASSISTANT_SUPPORTS_VIDEO_INPUT = false
-export const ASSISTANT_SUPPORTS_FILE_INPUT = false
-export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
-export const DEFAULT_MODEL = DEFAULT_ASSISTANT_MODEL
-export const ASSISTANT_TOOL_REASONING_EFFORT = 'low' as const
+export const ASSISTANT_SUPPORTS_VIDEO_INPUT = true
+export const ASSISTANT_SUPPORTS_FILE_INPUT = true
+export const ASSISTANT_SUPPORTS_AUDIO_INPUT = true
+export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
+export const PINNED_OPENROUTER_PROVIDER = 'meta' as const
+export const ASSISTANT_REASONING_EFFORT = 'minimal' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 
@@ -250,7 +252,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const MAX_ERROR_BODY_CHARS = 2000
 
 function getAssistantApiKey(): string {
-  const apiKey = trimmedEnv(process.env.DEEPSEEK_API_KEY)
+  const apiKey = trimmedEnv(process.env.OPENROUTER_API_KEY)
   if (!apiKey) {
     throw new Error('Missing assistant service credentials.')
   }
@@ -258,7 +260,7 @@ function getAssistantApiKey(): string {
 }
 
 function chatCompletionsUrl(): string {
-  return `${ASSISTANT_BASE_URL}/chat/completions`
+  return `${OPENROUTER_BASE_URL}/chat/completions`
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -271,7 +273,7 @@ function headersToObject(headers: Headers): Record<string, string> {
 
 function redactSecrets(text: string): string {
   let redacted = text.replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
-  const assistantKey = process.env.DEEPSEEK_API_KEY
+  const assistantKey = process.env.OPENROUTER_API_KEY
   if (assistantKey) {
     redacted = redacted.split(assistantKey).join('[redacted-assistant-key]')
   }
@@ -428,13 +430,71 @@ function finiteNumber(value: unknown): number | null {
   return Number.isFinite(number) ? number : null
 }
 
+function normalizeGenerationUsage(data: unknown): ChatCompletionUsage | null {
+  if (!data || typeof data !== 'object') return null
+  const record = data as Record<string, unknown>
+  const promptTokens = finiteNumber(record.native_tokens_prompt) ?? finiteNumber(record.tokens_prompt)
+  const completionBase = finiteNumber(record.native_tokens_completion) ?? finiteNumber(record.tokens_completion)
+  const reasoningTokens = finiteNumber(record.native_tokens_reasoning) ?? 0
+  const cost = finiteNumber(record.total_cost) ?? finiteNumber(record.usage)
+
+  if (promptTokens === null || completionBase === null || cost === null) return null
+
+  const completionTokens = completionBase + Math.max(0, reasoningTokens)
+  return {
+    prompt_tokens: Math.max(0, Math.round(promptTokens)),
+    completion_tokens: Math.max(0, Math.round(completionTokens)),
+    total_tokens: Math.max(0, Math.round(promptTokens + completionTokens)),
+    cost: Math.max(0, cost),
+  }
+}
+
+async function fetchGenerationMetadata(id: string, signal?: AbortSignal): Promise<unknown> {
+  const url = new URL(GENERATION_URL)
+  url.searchParams.set('id', id)
+
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${getAssistantApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    signal,
+  })
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '')
+    throw createApiError(response, body)
+  }
+
+  const json = await response.json().catch(() => null) as { data?: unknown } | null
+  return json?.data ?? null
+}
+
 export async function fetchGenerationUsage(
-  _id: string | undefined,
-  _signal?: AbortSignal,
+  id: string | undefined,
+  signal?: AbortSignal,
 ): Promise<ChatCompletionUsage | null> {
-  // DeepSeek includes usage in the terminal Chat Completions response/chunk.
-  // There is no separate generation-metadata endpoint to recover missing
-  // usage, so callers correctly fail closed if a malformed response omits it.
+  const generationId = typeof id === 'string' ? id.trim() : ''
+  if (!generationId) return null
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      const data = await fetchGenerationMetadata(generationId, signal)
+      return normalizeGenerationUsage(data)
+    } catch (error) {
+      const status = (error as { status?: number })?.status
+      if ((status === 404 || status === 429 || (status !== undefined && status >= 500)) && attempt < 4) {
+        await sleep(400 + attempt * 350, signal)
+        continue
+      }
+      if (status === 404 || status === 429 || (status !== undefined && status >= 500)) {
+        return null
+      }
+      throw error
+    }
+  }
+
   return null
 }
 
@@ -467,22 +527,30 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
 }
 
 function providerReasoningPayload(
-  reasoning: ChatCompletionParams['reasoning'],
+  _reasoning: ChatCompletionParams['reasoning'],
   _maxOutputTokens: number | undefined,
-  hasNativeTools: boolean,
+  _hasNativeTools: boolean,
 ): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort' | 'reasoning'> {
-  // Acknowledgements, planning, narration, direct chat, and final responses
-  // remain non-thinking. Only native tool-selection turns opt into DeepSeek's
-  // lowest supported thinking effort.
+  // Muse rejects disabled reasoning at the provider boundary. Clamp every
+  // request lane to its lowest supported effort and exclude hidden reasoning
+  // from visible output, without reducing task or completion budgets.
+  void _reasoning
   void _maxOutputTokens
-  if (hasNativeTools && reasoning?.effort !== 'none') {
-    return {
-      thinking: { type: 'enabled' },
-      reasoning_effort: ASSISTANT_TOOL_REASONING_EFFORT,
-    }
-  }
+  void _hasNativeTools
   return {
-    thinking: { type: 'disabled' },
+    reasoning: {
+      effort: ASSISTANT_REASONING_EFFORT,
+      exclude: true,
+    },
+  }
+}
+
+export function exactOpenRouterProviderRoute(): NonNullable<ChatCompletionParams['provider']> {
+  return {
+    order: [PINNED_OPENROUTER_PROVIDER],
+    only: [PINNED_OPENROUTER_PROVIDER],
+    allow_fallbacks: false,
+    require_parameters: true,
   }
 }
 
@@ -519,9 +587,10 @@ function withPinnedModel(
     messages: compatibleMessages.messages as ChatMessageParam[],
     model: DEFAULT_MODEL,
     stream,
-    stream_options: { include_usage: true },
-    // DeepSeek's native Chat Completions endpoint accepts automatic tool choice.
-    // Keep every healthy tool available and let the model choose among them.
+    usage: { include: true },
+    provider: exactOpenRouterProviderRoute(),
+    // Meta's exact Muse endpoint accepts automatic tool choice. Keep every
+    // healthy tool available and let the model choose among them.
     ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
     // AgentLoop controls whether it exposes one tool or a safe extraction batch,
     // and ToolPipeline executes eligible batches in parallel.

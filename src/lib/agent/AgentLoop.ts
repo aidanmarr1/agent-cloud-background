@@ -298,7 +298,7 @@ const FAST_ACTION_CONTENT_ONLY_TIMEOUT_MS = 3_000
 const FAST_ACTION_CONTENT_ONLY_MIN_CHARS = 320
 const INITIAL_STANDALONE_WEBSITE_ITERATION_TIMEOUT_MS = 180_000
 const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
-// DeepSeek thinking is disabled, but one complete native tool envelope still
+// Visible reasoning is excluded, but one complete native tool envelope still
 // needs enough output room. A 260-token ceiling repeatedly cut otherwise
 // tiny search JSON at the stream boundary, making the runtime pay for a full
 // repair turn. Keep this far below synthesis budgets while leaving enough room

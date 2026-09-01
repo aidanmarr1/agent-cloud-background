@@ -47,9 +47,10 @@ const REQUIRED_LOCAL_KEYS = new Set([
   'AUTH_SECRET',
   'TURSO_DATABASE_URL',
   'TURSO_AUTH_TOKEN',
-  'DEEPSEEK_API_KEY',
+  'OPENROUTER_API_KEY',
   'E2B_API_KEY',
 ])
+const OBSOLETE_WORKER_ENV_KEYS = ['DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL']
 
 loadLocalEnvFiles(rootUrl)
 
@@ -782,7 +783,7 @@ function buildExpectedEntries(templateEntries) {
 }
 
 function buildRows(expected, current) {
-  return expected.map((entry) => {
+  const expectedRows = expected.map((entry) => {
     const currentValue = current.get(entry.key)
     const exists = current.has(entry.key)
     const matches = exists && currentValue === entry.value
@@ -794,6 +795,16 @@ function buildRows(expected, current) {
       action: exists && matches ? 'keep' : exists ? 'update' : 'create',
     }
   })
+  const obsoleteRows = OBSOLETE_WORKER_ENV_KEYS
+    .filter((key) => current.has(key))
+    .map((key) => ({
+      key,
+      exists: true,
+      matches: false,
+      secret: /(?:SECRET|TOKEN|KEY|PASSWORD|DATABASE_URL|API_KEY|AUTH)/.test(key),
+      action: 'delete',
+    }))
+  return [...expectedRows, ...obsoleteRows]
 }
 
 function printReport(input) {
@@ -813,7 +824,9 @@ function printReport(input) {
   console.log(`serviceId ${input.serviceId}`)
   console.log('Secret values are never printed.')
   for (const row of input.rows) {
-    const state = row.exists
+    const state = row.action === 'delete'
+      ? 'present, will delete'
+      : row.exists
       ? row.matches ? 'present, matches' : 'present, will update'
       : 'missing, will create'
     console.log(`${state.padEnd(24)} ${row.key}`)
@@ -829,6 +842,13 @@ function printReport(input) {
 async function applyEnvVars(serviceId, expected, rows) {
   for (const row of rows) {
     if (row.action === 'keep') continue
+    if (row.action === 'delete') {
+      console.log(`Deleting obsolete ${row.key} from Render worker`)
+      await renderRequest(`/services/${encodeURIComponent(serviceId)}/env-vars/${encodeURIComponent(row.key)}`, {
+        method: 'DELETE',
+      })
+      continue
+    }
     const entry = expected.find((item) => item.key === row.key)
     if (!entry) continue
     console.log(`${row.action === 'create' ? 'Creating' : 'Updating'} ${entry.key} on Render worker`)

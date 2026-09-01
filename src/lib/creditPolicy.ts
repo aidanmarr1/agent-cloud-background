@@ -43,7 +43,7 @@ export const TASK_START_CREDITS = 0
 export const ACTIVE_CREDITS_PER_MINUTE = 0
 
 // Public provider rates used to keep in-app credits anchored to real spend.
-// Current default route: DeepSeek V4 Flash Vision Exp through DeepSeek's API.
+// Current default route: Muse Spark 1.2 Contributor through OpenRouter's exact Meta endpoint.
 export const MODEL_INPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.inputUsdPer1M
 export const MODEL_OUTPUT_USD_PER_1M = DEFAULT_MODEL_PRICING.outputUsdPer1M
 export const MODEL_LONG_CONTEXT_THRESHOLD_TOKENS = DEFAULT_MODEL_PRICING.longContextThresholdTokens

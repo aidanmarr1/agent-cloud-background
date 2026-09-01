@@ -78,7 +78,7 @@ export async function runSmoke() {
     state,
     false,
     output => estimateConservativeMissingStreamUsage({
-      model: 'deepseek-v4-flash-vision-exp',
+      model: 'meta/muse-spark-1.2-contributor',
       requestMessages,
       requestTools,
       assistantContent: output.assistantContent,
@@ -128,8 +128,8 @@ export async function runSmoke() {
     logLevel: 'silent',
   })
 
-  process.env.LLM_PROVIDER = 'deepseek'
-  process.env.DEEPSEEK_API_KEY = 'smoke-test-key'
+  process.env.LLM_PROVIDER = 'openrouter'
+  process.env.OPENROUTER_API_KEY = 'smoke-test-key'
   const { runSmoke } = await import(pathToFileURL(bundlePath).href)
   await runSmoke()
   console.log('missing streamed usage latency smoke checks passed')

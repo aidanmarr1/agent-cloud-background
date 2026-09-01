@@ -67,7 +67,7 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// DeepSeek thinking is disabled. This ceiling preserves one complete visible
+// Planner reasoning is kept at the provider minimum and excluded. This ceiling preserves one complete visible
 // sentence without adding hidden-token latency. This dedicated call is used
 // only when a persisted precomputed plan still needs its worker-authored opening.
 const PLANNER_ACK_MAX_TOKENS = 320

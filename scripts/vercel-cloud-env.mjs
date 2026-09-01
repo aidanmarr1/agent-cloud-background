@@ -13,6 +13,7 @@ const apply = applyAll || applyAvailable
 const verifyValues = args.includes('--verify-values') || args.includes('--verify')
 const replaceDrift = args.includes('--replace-drift')
 const json = args.includes('--json')
+const OBSOLETE_CLOUD_ENV = ['DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL']
 const configuredVercelCli = process.env.VERCEL_CLI?.trim() || ''
 const localVercelBin = resolve(process.cwd(), 'node_modules/.bin/vercel')
 const configuredPnpmBin = process.env.PNPM_BIN?.trim() || ''
@@ -36,11 +37,11 @@ const CLOUD_ENV = [
   { name: 'AGENT_TRUST_PROXY_HEADERS', value: 'true' },
   { name: 'TURSO_DATABASE_URL', source: 'local', required: true },
   { name: 'TURSO_AUTH_TOKEN', source: 'local', required: true },
-  { name: 'LLM_PROVIDER', value: 'deepseek' },
-  { name: 'DEEPSEEK_API_KEY', source: 'local', required: true },
+  { name: 'LLM_PROVIDER', value: 'openrouter' },
+  { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
-  { name: 'DEEPSEEK_MODEL', value: 'deepseek-v4-flash-vision-exp' },
+  { name: 'OPENROUTER_MODEL', value: 'meta/muse-spark-1.2-contributor' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },
   { name: 'AGENT_TASK_WORKER_MODE', value: 'external' },
   { name: 'AGENT_TASK_QUEUE_NAME', value: 'production' },
@@ -293,6 +294,13 @@ if (applyAll && blockers.length > 0) {
 
 let added = 0
 let replaced = 0
+let removed = 0
+for (const name of OBSOLETE_CLOUD_ENV) {
+  if (!existingNames.has(name)) continue
+  console.log(`Removing obsolete ${name} from Vercel ${target}`)
+  await runVercel(['env', 'rm', name, target, '--yes'])
+  removed += 1
+}
 for (const entry of CLOUD_ENV) {
   const row = rows.find((item) => item.name === entry.name)
   if (existingNames.has(entry.name)) {
@@ -310,7 +318,7 @@ for (const entry of CLOUD_ENV) {
 }
 
 const drift = rows.filter((row) => row.valueMismatch)
-console.log(`Vercel cloud env apply finished. Added ${added} variable(s), replaced ${replaced} variable(s). Redeploy production so the new environment is active.`)
+console.log(`Vercel cloud env apply finished. Added ${added} variable(s), replaced ${replaced} variable(s), removed ${removed} obsolete variable(s). Redeploy production so the new environment is active.`)
 if (drift.length > replaced) {
   const unrepaired = drift.filter((row) => row.canApply).map((row) => row.name)
   if (unrepaired.length > 0) console.log(`Detected value drift not replaced without --replace-drift: ${unrepaired.join(', ')}`)

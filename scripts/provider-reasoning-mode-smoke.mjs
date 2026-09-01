@@ -13,18 +13,18 @@ const llmSource = await readFile(llmPath, 'utf8')
 
 assert.match(
   llmSource,
-  /ASSISTANT_PROVIDER\s*=\s*'deepseek'\s+as const/,
-  'the assistant provider must be statically pinned to DeepSeek',
+  /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/,
+  'the assistant provider must be statically pinned to OpenRouter',
 )
 assert.match(
   llmSource,
-  /ASSISTANT_BASE_URL\s*=\s*'https:\/\/api\.deepseek\.com'/,
-  'the assistant must call the direct DeepSeek endpoint',
+  /OPENROUTER_BASE_URL\s*=\s*'https:\/\/openrouter\.ai\/api\/v1'/,
+  'the assistant must call OpenRouter',
 )
 assert.doesNotMatch(
   llmSource,
-  /process\.env\.OPENROUTER_API_KEY|openrouter\.ai/,
-  'the active provider module must not retain OpenRouter routing',
+  /process\.env\.DEEPSEEK_API_KEY|api\.deepseek\.com/,
+  'the active provider module must not retain DeepSeek routing',
 )
 
 const workDir = await mkdtemp('/tmp/provider-reasoning-mode-smoke-')
@@ -134,8 +134,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
       ...process.env,
       LLM_PROVIDER: 'openrouter',
       ASSISTANT_PROVIDER: 'openrouter',
-      DEEPSEEK_API_KEY: 'smoke-deepseek-key',
-      OPENROUTER_API_KEY: 'ignored-stale-key',
+      OPENROUTER_API_KEY: 'smoke-openrouter-key',
       OPENROUTER_MODEL: 'ignored/stale-model',
       OPENROUTER_REASONING_EFFORT: 'xhigh',
       OPENROUTER_REASONING_EXCLUDE: 'false',
@@ -150,32 +149,34 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   assert.equal(requests.length, 5)
 
   for (const request of requests) {
-    assert.equal(request.url, 'https://api.deepseek.com/chat/completions')
-    assert.equal(request.body.model, 'deepseek-v4-flash-vision-exp')
+    assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
+    assert.equal(request.body.model, 'meta/muse-spark-1.2-contributor')
     assert.equal('models' in request.body, false)
-    assert.equal('provider' in request.body, false)
-    assert.deepEqual(request.body.stream_options, { include_usage: true })
-    assert.equal('reasoning' in request.body, false)
+    assert.deepEqual(request.body.provider, {
+      order: ['meta'],
+      only: ['meta'],
+      allow_fallbacks: false,
+      require_parameters: true,
+    })
+    assert.deepEqual(request.body.usage, { include: true })
+    assert.equal('stream_options' in request.body, false)
     assert.equal('parallel_tool_calls' in request.body, false)
     assert.equal(request.body.temperature, 0.3)
+    assert.equal('thinking' in request.body, false)
+    assert.equal('reasoning_effort' in request.body, false)
   }
-  assert.deepEqual(requests[0].body.thinking, { type: 'enabled' })
-  assert.equal(requests[0].body.reasoning_effort, 'low')
+  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[0].body.tool_choice, 'auto')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review the natively supported image.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
   ])
-  assert.deepEqual(requests[1].body.thinking, { type: 'disabled' })
-  assert.equal('reasoning_effort' in requests[1].body, false)
-  assert.deepEqual(requests[2].body.thinking, { type: 'enabled' })
-  assert.equal(requests[2].body.reasoning_effort, 'low')
+  assert.deepEqual(requests[1].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[2].body.tool_choice, 'auto')
-  assert.deepEqual(requests[3].body.thinking, { type: 'disabled' })
-  assert.equal('reasoning_effort' in requests[3].body, false)
-  assert.deepEqual(requests[4].body.thinking, { type: 'disabled' })
-  assert.equal('reasoning_effort' in requests[4].body, false)
+  assert.deepEqual(requests[3].body.reasoning, { effort: 'minimal', exclude: true })
+  assert.deepEqual(requests[4].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
     requests[4].body.messages.slice(-3),
     [
@@ -186,7 +187,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'DeepSeek histories must preserve the exact task context and end with a valid input turn',
+    'OpenRouter histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[4].body.messages.some(message =>
@@ -196,7 +197,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('DeepSeek V4 Flash Vision direct-provider tool-reasoning split smoke test passed')
+  console.log('Muse Spark OpenRouter exact-provider minimal-reasoning smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

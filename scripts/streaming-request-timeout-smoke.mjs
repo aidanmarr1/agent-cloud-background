@@ -21,7 +21,7 @@ try {
     logLevel: 'silent',
   })
 
-  process.env.DEEPSEEK_API_KEY = 'stream-timeout-smoke-key'
+  process.env.OPENROUTER_API_KEY = 'stream-timeout-smoke-key'
   let providerSawAbort = false
   globalThis.fetch = async (_url, init) => {
     const signal = init?.signal
