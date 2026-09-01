@@ -183,6 +183,9 @@ function normalizeUserProvidedUrl(value: string): string | null {
   if (/^https?:\/\//i.test(cleaned)) return cleaned
   if (/^localhost(?::\d+)?(?:[/?#].*)?$/i.test(cleaned)) return `http://${cleaned}`
   if (/^127\.0\.0\.1(?::\d+)?(?:[/?#].*)?$/i.test(cleaned)) return `http://${cleaned}`
+  if (!/[/?#]/.test(cleaned) && /\.(?:md|markdown|pdf|txt|rtf|docx?|xlsx?|pptx?|csv|tsv|json|ya?ml|xml|html?|css|jsx?|tsx?|zip|tar|gz)$/i.test(cleaned)) {
+    return null
+  }
   if (/^(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?(?:[/?#].*)?$/i.test(cleaned)) {
     return `https://${cleaned}`
   }
@@ -196,7 +199,7 @@ function extractUserProvidedUrl(messages: Array<{ role: string; content: string 
   const fullUrl = content.match(/https?:\/\/[^\s<>()\]]+/i)
   if (fullUrl) return normalizeUserProvidedUrl(fullUrl[0])
   // Bare domain match
-  const bareDomain = content.match(/(?<!@)\b(?:localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?)(?:\/[^\s<>()\]]*)?/i)
+  const bareDomain = content.match(/(?<![@/\\])\b(?:localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?|(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?)(?:\/[^\s<>()\]]*)?/i)
   if (bareDomain) return normalizeUserProvidedUrl(bareDomain[0])
   return null
 }

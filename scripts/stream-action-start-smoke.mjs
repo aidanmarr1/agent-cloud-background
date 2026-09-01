@@ -174,6 +174,11 @@ async function* phaseEndNarrationChunks() {
   yield { choices: [{ delta: { content: 'The three primary sources now establish the launch timing and architecture. Next, I’ll compare the documented capabilities. <next_step/>' } }] }
 }
 
+async function* providerNativeNextStepChunks() {
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_provider_next_step', function: { name: 'next_step', arguments: '{' } }] } }] }
+  yield { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '}' } }] } }] }
+}
+
 async function* realBlockerNarrationChunks() {
   yield { choices: [{ delta: { content: 'The requested private repository returned an authorization error, so its contents cannot be verified until access is restored.' } }] }
 }
@@ -760,6 +765,20 @@ export async function runSmoke() {
   assert.equal(phaseEndResult.stepAdvancedThisIteration, true, 'phase-end narration must preserve its step marker semantics')
   assert.match(phaseEndResult.assistantContent, /three primary sources now establish/)
   assert.equal(phaseEndEmitter.events.filter(e => e.type === 'text_delta').length, 1, 'accepted phase-end narration must remain visible')
+
+  const providerNextStepEmitter = makeEmitter()
+  const providerNextStepState = createInitialState(true, timeouts)
+  providerNextStepState.currentPlanItems = ['Create the file', 'Deliver the file']
+  providerNextStepState.currentStepIdx = 0
+  const providerNextStepResult = await new StreamProcessor(providerNextStepEmitter as any, timeouts)
+    .processStream(providerNativeNextStepChunks() as any, providerNextStepState)
+  assert.equal(providerNextStepResult.stepAdvancedThisIteration, true, 'a provider-native next_step call must advance the active phase')
+  assert.equal(providerNextStepResult.toolCalls.size, 0, 'a provider-native next_step call must never reach tool execution')
+  assert.equal(
+    providerNextStepEmitter.events.filter(event => event.type === 'tool_start').length,
+    0,
+    'a provider-native next_step call must not render a ghost or failed action pill',
+  )
 
   const realBlockerEmitter = makeEmitter()
   const realBlockerState = createInitialState(false, timeouts)

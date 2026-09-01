@@ -137,6 +137,10 @@ const DISPLAY_INTERNAL_PROVIDER_RECOVERY_START_RE =
 const DISPLAY_INTERNAL_PROVIDER_RECOVERY_SENTENCE_RE =
   /(?:^|(?<=[.!?]\s))\s*[^.!?\n]{0,80}\b(?:(?:free\s+)?(?:serper|tavily|firecrawl|openrouter|deepseek|browserless|e2b)(?:\s+api)?|(?:search|model|tool|browser|extraction)\s+(?:api|provider)|provider\s+(?:api|request|response))\b[^.!?\n]{0,160}\b(?:block(?:ed|ing)?|fail(?:ed|ure)?|reject(?:ed|ion)?|tim(?:ed?\s*out|eout)|rate[-\s]?limit(?:ed|ing)?|quota|unavailable|error)\b[^.!?\n]*(?:[.!?]|$)/gi
 
+function isProviderStepAdvanceToolName(value: string): boolean {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '') === 'nextstep'
+}
+
 function normalizeUsage(raw: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }): StreamUsage | null {
   if (!Number.isFinite(raw.prompt_tokens) || !Number.isFinite(raw.completion_tokens) || !Number.isFinite(raw.cost)) return null
   const promptTokens = Math.max(0, Math.round(raw.prompt_tokens || 0))
@@ -627,6 +631,7 @@ export class StreamProcessor {
     let contentBuffer = ''
     let visibleTextBuffer = ''
     const toolCalls: Map<number, ToolCallData> = new Map()
+    const providerStepAdvanceToolIndexes = new Set<number>()
     let firstToolCallIndex: number | null = null
     const textSavedDeliverable = toolCallPolicy?.textSavedDeliverable
     const requestedParallelSourceCallLimitRaw = toolCallPolicy?.maxParallelSourceExtractionCalls
@@ -1167,6 +1172,19 @@ export class StreamProcessor {
             function?: { name?: string; arguments?: string }
           }>
           for (const tc of tcs) {
+            const existing = toolCalls.get(tc.index)
+            const streamedName = tc.function?.name || existing?.name || ''
+            if (providerStepAdvanceToolIndexes.has(tc.index) || isProviderStepAdvanceToolName(streamedName)) {
+              // Some OpenAI-compatible providers occasionally encode the
+              // instructed <next_step/> marker as a native function call even
+              // though no such tool was offered. Treat that variant as the
+              // same model-authored phase-advance request. It must never enter
+              // display validation as a hidden/failed ghost action.
+              providerStepAdvanceToolIndexes.add(tc.index)
+              stepAdvancedThisIteration = true
+              toolCalls.delete(tc.index)
+              continue
+            }
             if (firstToolCallIndex === null) firstToolCallIndex = tc.index
             const isPrimaryToolCall = tc.index === firstToolCallIndex
             if (
@@ -1175,7 +1193,6 @@ export class StreamProcessor {
               toolCalls.size >= maxStreamedToolCalls
             ) continue
 
-            const existing = toolCalls.get(tc.index)
             if (existing) {
               existing.arguments += tc.function?.arguments || ''
             } else {
@@ -1305,6 +1322,14 @@ export class StreamProcessor {
     assistantContent = stripThinkingTags(assistantContent)
     assistantContent = stripStepMarkers(assistantContent)
     assistantContent = stripPlanMarkers(assistantContent)
+
+    // Defensive normalization if a provider reveals the hallucinated
+    // next_step function name only after earlier argument chunks.
+    for (const [index, toolCall] of toolCalls) {
+      if (!isProviderStepAdvanceToolName(toolCall.name)) continue
+      stepAdvancedThisIteration = true
+      toolCalls.delete(index)
+    }
 
     // The model may stream multiple native calls only on an explicitly enabled,
     // capped source-action turn. Preserve provider index order for a valid
