@@ -55,8 +55,8 @@ export function effectiveTaskRequest(messages: ConversationContextMessage[]): st
 
   const previous = previousUserText(messages)
   return [
-    previous || 'Continue the previous task.',
-    `Latest user interruption/correction: ${latest}`,
+    `Latest user direction (authoritative; do this now): ${latest}`,
+    `Previous task request (completed context only; do not repeat it): ${previous || 'Continue the previous task.'}`,
   ].filter(Boolean).join('\n\n')
 }
 

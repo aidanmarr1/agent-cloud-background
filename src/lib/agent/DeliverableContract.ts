@@ -92,7 +92,14 @@ export function taskRequiresExistingInputArtifact(
   state: Pick<AgentStateData, 'originalUserRequest'>,
   fallbackRequest = '',
 ): boolean {
-  const request = state.originalUserRequest || fallbackRequest
+  const rawRequest = state.originalUserRequest || fallbackRequest
+  // Contextual follow-ups deliberately retain the previous request, but the
+  // labelled latest direction owns the action contract. Otherwise an earlier
+  // "create a report" instruction can incorrectly turn a later "put it in a
+  // PDF" conversion back into a source-creation task.
+  const request = rawRequest.match(
+    /^Latest user direction \(authoritative(?:; do this now)?\):\s*([\s\S]*?)(?:\n\nPrevious task request|$)/i,
+  )?.[1]?.trim() || rawRequest
   if (!requestedFinalArtifactFormat(state, fallbackRequest)) return false
 
   // "Create/design X and export it" is a creation workflow, not a conversion

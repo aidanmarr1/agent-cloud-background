@@ -138,6 +138,7 @@ export interface ToolExecutionResult {
 import {
   TOOL_TIMEOUT_MS, FILE_WRITE_TOOL_TIMEOUT_MS, MAX_TOOL_RESULT_CHARS, MAX_BROWSE_RESULT_CHARS,
   MAX_SOURCE_RESULT_CHARS,
+  SANDBOX_IO_TOOL_TIMEOUT_MS,
   WEB_SEARCH_TOOL_TIMEOUT_MS, IMAGE_SEARCH_TOOL_TIMEOUT_MS, BROWSER_TOOL_TIMEOUT_MS, DOCUMENT_TOOL_TIMEOUT_MS,
   TOOL_TIMEOUT_SETTLE_GRACE_MS,
   URL_NORMALIZE_STRIP_PARAMS,
@@ -225,6 +226,9 @@ const BROWSER_SEQUENCE_ACTION_BY_TOOL: Record<string, 'click_at' | 'type' | 'sel
 
 function timeoutMsForTool(toolName: string): number {
   if (FILE_WRITE_TOOLS.has(toolName)) return FILE_WRITE_TOOL_TIMEOUT_MS
+  if (toolName === 'read_file' || toolName === 'list_files' || toolName === 'execute_command' || toolName === 'run_code') {
+    return SANDBOX_IO_TOOL_TIMEOUT_MS
+  }
   if (toolName === 'web_search') return WEB_SEARCH_TOOL_TIMEOUT_MS
   if (toolName === 'image_search') return IMAGE_SEARCH_TOOL_TIMEOUT_MS
   if (toolName.startsWith('browser_') || toolName === 'browse_page') return BROWSER_TOOL_TIMEOUT_MS
@@ -3841,6 +3845,7 @@ export class ToolPipeline {
       })
       trackToolCall(state, tc.name, JSON.stringify(args))
       state.stepToolCallCount++
+      state.stepToolTypeCounts.set(tc.name, (state.stepToolTypeCounts.get(tc.name) || 0) + 1)
       state.stepFailureCount++
       return preflightResult(errorResult)
     }

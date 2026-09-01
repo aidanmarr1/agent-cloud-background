@@ -33,6 +33,7 @@ try {
   assert.match(pdfExport, /readSandboxFileBytes[\s\S]*renderDocumentPdf[\s\S]*%PDF-[\s\S]*writeSandboxFileBytes/, 'PDF export must read and write through the active sandbox provider and validate a real PDF payload')
   assert.match(pdfExport, /validated: true[\s\S]*PDF signature and non-empty rendered byte size validated/, 'successful PDF export results must tell the model that native validation already passed')
   assert.match(agentLoop, /DURABLE TASK FILE INVENTORY:[\s\S]*Plan only the work that remains:[\s\S]*choose freely among all available tools/, 'follow-ups must receive the existing task artifact inventory without removing tool autonomy')
+  assert.match(agentLoop, /CURRENT FOLLOW-UP CONTRACT:[\s\S]*Do not recreate, rewrite, research, or ask the user to provide the source again/, 'existing-artifact follow-ups must receive an execution-level conversion contract in addition to planner context')
   assert.match(agentLoop, /durableTaskPlanningContextPromise[\s\S]*new PlanManager\([\s\S]*durableTaskPlanningContextPromise/, 'follow-up planning must receive durable task artifacts without delaying the acknowledgement call')
   assert.match(planManager, /scheduleAcknowledgementCall\(\)[\s\S]*await this\.planningContextPromise[\s\S]*attemptPlanCall/, 'acknowledgement must start before optional artifact context is awaited by the planner')
   assert.match(planManager, /getFastPlanningPrompt\(this\.customInstructions\)[\s\S]*CURRENT TASK CONTEXT \(factual; plan only remaining work\)/, 'artifact inventory must be merged into the primary planner instruction so providers cannot ignore a later system message')
@@ -44,6 +45,8 @@ try {
   assert.match(agentLoop, /successfulPdfExport[\s\S]*taskRequiresExistingInputArtifact\(\{[\s\S]*latestUserText\(messages\)[\s\S]*remainingAdvances[\s\S]*handleStepAdvance\(state\)[\s\S]*finalDeliverableHandoffPending = \{[\s\S]*path: pdfPath[\s\S]*continueFinalPhaseAfterVerifiedArtifact\(state, pdfPath, contextManager\)/, 'successful existing-artifact PDF export must advance through redundant conversion phases directly into its bounded final handoff')
   assert.match(agentLoop, /isSuccessfulCompactFilePhaseWrite[\s\S]*partialWriteIncomplete[\s\S]*research-notes[\s\S]*successfulCompactFileWrite[\s\S]*handleStepAdvance\(state\)/, 'a complete compact user file must advance its creation phase while partial writes and internal notes remain open')
   assert.match(config, /create_website: 4/, 'whole-site regeneration must have a bounded per-step circuit breaker')
+  assert.match(config, /SANDBOX_IO_TOOL_TIMEOUT_MS[\s\S]*20_000/, 'remote sandbox reads and terminal actions must allow E2B wake time instead of false two-second failures')
+  assert.match(toolPipeline, /existingInputReason[\s\S]*stepToolTypeCounts\.set\(tc\.name/, 'rejected source fabrication must count toward the per-phase circuit breaker')
 
   await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
@@ -81,6 +84,11 @@ const naturalPutConversion = createInitialState(true, timeouts)
 naturalPutConversion.originalUserRequest = 'Put it in a PDF.'
 assert.equal(requestedFinalArtifactFormat(naturalPutConversion)?.label, 'PDF')
 assert.equal(taskRequiresExistingInputArtifact(naturalPutConversion), true)
+
+const contextualPutConversion = createInitialState(true, timeouts)
+contextualPutConversion.originalUserRequest = 'Latest user direction (authoritative; do this now): Put it in a PDF.\\n\\nPrevious task request (completed context only; do not repeat it): Create a Markdown report about AI.'
+assert.equal(requestedFinalArtifactFormat(contextualPutConversion)?.label, 'PDF')
+assert.equal(taskRequiresExistingInputArtifact(contextualPutConversion), true)
 
 recordWorkLedgerDeliverable(conversion, { path: 'cover.html', purpose: 'deliverable' })
 let audit = auditAgentCompletion(conversion, 'complete')

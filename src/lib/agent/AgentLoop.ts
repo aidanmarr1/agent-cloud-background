@@ -2089,7 +2089,11 @@ function pruneExhaustedStepToolsForCurrentTurn(
   const exhausted = new Set<string>()
   const filtered = tools.filter(tool => {
     const name = tool.function?.name || ''
-    if (!name || !toolStepRateLimitReached(state, name)) return true
+    const rejectedSourceCreation =
+      (name === 'create_file' || name === 'create_website') &&
+      taskRequiresExistingInputArtifact(state) &&
+      (state.stepToolTypeCounts.get(name) || 0) >= 1
+    if (!name || (!toolStepRateLimitReached(state, name) && !rejectedSourceCreation)) return true
     exhausted.add(name)
     return false
   })
@@ -4287,6 +4291,20 @@ export class AgentLoop {
               const durableFiles = await durableTaskFilesPromise
               const durableContext = durableTaskFileContext(durableFiles)
               if (durableContext) contextManager.push(durableContext, 9)
+              const latestDirection = latestUserText(messages)
+              const requestedExistingFormat = taskRequiresExistingInputArtifact({ originalUserRequest: latestDirection })
+                ? requestedFinalArtifactFormat({ originalUserRequest: latestDirection })
+                : null
+              if (requestedExistingFormat && durableFiles.length > 0) {
+                contextManager.push({
+                  role: 'system',
+                  content: [
+                    `CURRENT FOLLOW-UP CONTRACT: The latest user direction asks you to convert the existing task artifact to ${requestedExistingFormat.label}.`,
+                    'The durable task inventory is the source of truth. Do not recreate, rewrite, research, or ask the user to provide the source again.',
+                    'Choose the relevant existing path and complete only the conversion and handoff. Every healthy tool remains available; use another tool only if it is genuinely required for this conversion.',
+                  ].join(' '),
+                } as ChatMessageParam, 10)
+              }
             }
 
             if (state.taskComplexity !== complexity) {
@@ -7399,6 +7417,29 @@ export class AgentLoop {
               role: 'system',
               content: 'RENDERED CONFIRMATION UNAVAILABLE: continue from the successful direct extraction. Do not claim that the detail was visually confirmed; state the missing rendered confirmation as a limitation only when it materially affects the answer.',
             } as ChatMessageParam)
+          }
+        }
+        const latestConversionDirection = latestUserText(this.options.messages)
+        if (
+          activeTools.length > 0 &&
+          taskRequiresExistingInputArtifact({ originalUserRequest: latestConversionDirection })
+        ) {
+          const format = requestedFinalArtifactFormat({ originalUserRequest: latestConversionDirection })
+          const preferredNames = format?.label === 'PDF'
+            ? ['export_pdf', 'read_file', 'list_files']
+            : format?.label === 'ZIP archive'
+              ? ['package_files', 'list_files', 'read_file']
+              : []
+          if (preferredNames.length > 0) {
+            const rank = new Map(preferredNames.map((name, index) => [name, index]))
+            activeTools = activeTools
+              .map((tool, index) => ({ tool, index }))
+              .sort((left, right) => (
+                (rank.get(left.tool.function?.name || '') ?? preferredNames.length) -
+                (rank.get(right.tool.function?.name || '') ?? preferredNames.length) ||
+                left.index - right.index
+              ))
+              .map(({ tool }) => tool)
           }
         }
         const compactResearchNeedsTool = useCompactResearchTurn && compactResearchNeedsToolAction(state)

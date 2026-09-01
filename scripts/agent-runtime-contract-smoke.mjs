@@ -2435,7 +2435,7 @@ export async function runLedgerSmoke() {
     { role: 'user', content: 'no pancake mix' },
   ]
   assert.equal(isContextualTaskUpdate(interruptedBrowseMessages), true)
-  assert.ok(effectiveTaskRequest(interruptedBrowseMessages).includes('Latest user interruption/correction: no pancake mix'))
+  assert.ok(effectiveTaskRequest(interruptedBrowseMessages).startsWith('Latest user direction (authoritative; do this now): no pancake mix'))
   assert.equal(isContextualTaskUpdate([
     { role: 'user', content: 'research about pacific parrotlets' },
     { role: 'assistant', content: 'Earlier long task output' },

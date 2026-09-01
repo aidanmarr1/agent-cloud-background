@@ -91,6 +91,11 @@ export const TIER_TIMEOUTS = {
 
 // --- Tool execution ---
 export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
+// Remote sandbox file and terminal actions include E2B wake/reconnect time.
+// A two-second watchdog produced false red failures while the action was still
+// healthy, which then sent the model into needless recovery loops. This is a
+// maximum only and does not delay actions that complete quickly.
+export const SANDBOX_IO_TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 20_000
 export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
 // Image search includes both Serper discovery and concurrent retrieval of up
 // to eight real assets. It must not inherit the text-search watchdog, which
@@ -98,7 +103,7 @@ export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
 export const IMAGE_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 25_000
 export const BROWSER_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 20_000
 export const DOCUMENT_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 15_000
-export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 8_000
+export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA ? 8 * 60 * 1000 : 30_000
 // Give an aborted handler a brief chance to settle, but never turn a tool
 // timeout into an unbounded wait for the same hung provider request.
 export const TOOL_TIMEOUT_SETTLE_GRACE_MS = 1_000
