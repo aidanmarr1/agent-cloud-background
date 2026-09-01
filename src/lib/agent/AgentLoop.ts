@@ -995,7 +995,7 @@ function durableTaskFileContextContent(files: TaskFileRecord[]): string | null {
   return [
     'DURABLE TASK FILE INVENTORY: These files already exist in this task and are restored into the current workspace before a file, export, package, terminal, or browser action needs them.',
     ...rows,
-    'Treat this inventory as factual workspace context. Resolve references such as “it”, “that report”, or “the file” against the prior conversation and these paths. Use the relevant existing source instead of recreating it; choose freely among all available tools based on the actual task, and inspect a file only when its identity or contents are genuinely uncertain.',
+    'Treat this inventory as factual workspace context. Resolve references such as “it”, “that report”, or “the file” against the prior conversation and these paths. Plan only the work that remains: do not include a phase to recreate an existing source unless the user explicitly asked to revise or regenerate it. Use the relevant existing source instead of recreating it; choose freely among all available tools based on the actual task, and inspect a file only when its identity or contents are genuinely uncertain.',
   ].join('\n')
 }
 
@@ -3982,7 +3982,7 @@ export class AgentLoop {
 
     const scopedMessages = scopeAgentTaskMessages(messages)
     const durableTaskFilesPromise = this.options.userId && conversationId &&
-      this.options.startFreshSandbox !== true && isContextualTaskUpdate(scopedMessages)
+      this.options.startFreshSandbox !== true
       ? listTaskFilesForUser(this.options.userId, conversationId).catch((error) => {
           log.warn('Failed to load durable task file inventory', {
             error: error instanceof Error ? error.message : String(error),
@@ -5969,17 +5969,6 @@ export class AgentLoop {
               contextManager.push(msg as unknown as ChatMessageParam, 4)
             }
 
-            const successfulPdfExport = lastToolResults.find(result => (
-              result.tc.name === 'export_pdf' && !result.isError
-            ))
-            if (successfulPdfExport) {
-              const pdfPath = toolResultPath(successfulPdfExport) || 'the requested PDF'
-              contextManager.push({
-                role: 'system',
-                content: `NATIVE PDF EXPORT VERIFIED: ${pdfPath} was rendered in the task workspace, its PDF signature and non-empty byte size were validated, and it was saved durably. Do not run terminal, browser, file-listing, or text-extraction checks merely to re-verify this successful export. If the current phase is satisfied, advance it; otherwise continue only work that the user actually requested. All tools remain available when a specific unresolved need genuinely requires one.`,
-              } as ChatMessageParam, 2)
-            }
-
             updateExactExtractionGuardAfterTools(state, lastToolResults, messages)
 
             const executedCoalescedBrowserSequence =
@@ -6043,6 +6032,35 @@ export class AgentLoop {
             // model-authored phase; final handoff behavior belongs only to the
             // actual last step.
             const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
+            const successfulPdfExport = lastToolResults.find(result => (
+              result.tc.name === 'export_pdf' && !result.isError
+            ))
+            if (successfulPdfExport && state.currentPlanItems) {
+              const pdfPath = toolResultPath(successfulPdfExport) || 'the requested PDF'
+              state.deliverableVerificationDone = true
+              state.pendingDeliverableRevision = null
+
+              if (!isLastStep) {
+                const stepBeforeAdvance = state.currentStepIdx
+                const advanceMsg = planManager.handleStepAdvance(state)
+                if (state.currentStepIdx > stepBeforeAdvance) {
+                  contextManager.compactForStepTransition(state)
+                  this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                  if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+                }
+                if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+              }
+
+              continueFinalPhaseAfterVerifiedArtifact(state, pdfPath, contextManager)
+              state.lastIterationEnd = Date.now()
+              log.info('Native PDF export completed and verified — advancing directly to the remaining handoff work', {
+                path: pdfPath,
+                step: state.currentStepIdx,
+                totalSteps: state.currentPlanItems.length,
+              })
+              phase = 'STREAMING'
+              break
+            }
             const successfulStandaloneWebsiteCreate = lastToolResults.find(result => (
               result.tc.name === 'create_website' && !result.isError
             ))
