@@ -1,4 +1,4 @@
-import { sanitizeNarrationText } from '@/lib/stream/cleaners'
+import { sanitizeNarrationText, splitNarrationSentences } from '@/lib/stream/cleaners'
 import type { AgentStateData } from './AgentState'
 import { isProspectiveWorkflowNarration } from '@/lib/narrationSignals'
 import {
@@ -333,7 +333,7 @@ function hasConcreteResearchPayload(text: string, minimumTokens = 2): boolean {
 }
 
 function isVagueResearchNarration(text: string): boolean {
-  const firstSentence = text.split(/(?<=[.!?])\s+/, 1)[0]?.trim() || text.trim()
+  const firstSentence = splitNarrationSentences(text)[0]?.trim() || text.trim()
   if (DEICTIC_RESEARCH_REFERENCE_RE.test(firstSentence)) {
     return !hasConcreteResearchPayload(firstSentence.replace(DEICTIC_RESEARCH_REFERENCE_RE, ' '), 4)
   }

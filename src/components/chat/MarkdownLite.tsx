@@ -46,9 +46,19 @@ function isExternalHttpUrl(href: string): boolean {
   }
 }
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+function trimAutolinkEnd(url: string): string {
+  let trimmed = url.replace(/[.,;:!?*]+$/, '')
+  for (const [open, close] of [['(', ')'], ['[', ']']]) {
+    while (trimmed.endsWith(close) && trimmed.split(close).length > trimmed.split(open).length) {
+      trimmed = trimmed.slice(0, -1)
+    }
+  }
+  return trimmed
+}
+
+function renderInline(text: string, keyPrefix: string, allowAutolinks = true): ReactNode[] {
   const nodes: ReactNode[] = []
-  const pattern = /(!\[([^\]]*)\]\(([^)\s]+)\)|`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|_([^_]+)_)/g
+  const pattern = /(!\[([^\]]*)\]\(([^)\s]+)\)|`([^`]+)`|\[([^\]]+)\]\(([^)\s]+)\)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*]+)\*|_([^_]+)_|(<https?:\/\/[^<>\s]+>|https?:\/\/[^\s<>"`]+))/g
   let lastIndex = 0
   let match: RegExpExecArray | null
 
@@ -74,16 +84,25 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
           target={external ? '_blank' : undefined}
           rel={external ? 'noopener noreferrer' : undefined}
         >
-          {renderInline(match[5], `${key}-link`)}
+          {renderInline(match[5], `${key}-link`, false)}
         </a>
       ) : match[0])
+    } else if (match[11] !== undefined) {
+      const raw = match[11]
+      const angled = raw.startsWith('<') && raw.endsWith('>')
+      const label = angled ? raw.slice(1, -1) : trimAutolinkEnd(raw)
+      const href = allowAutolinks ? safeLinkHref(label) : null
+      nodes.push(href ? (
+        <a key={key} href={href} target="_blank" rel="noopener noreferrer">{label}</a>
+      ) : raw)
+      if (href && !angled && label.length < raw.length) nodes.push(raw.slice(label.length))
     } else {
       const strong = match[7] ?? match[8]
       const emphasis = match[9] ?? match[10]
       if (strong !== undefined) {
-        nodes.push(<strong key={key}>{renderInline(strong, `${key}-strong`)}</strong>)
+        nodes.push(<strong key={key}>{renderInline(strong, `${key}-strong`, allowAutolinks)}</strong>)
       } else if (emphasis !== undefined) {
-        nodes.push(<em key={key}>{renderInline(emphasis, `${key}-em`)}</em>)
+        nodes.push(<em key={key}>{renderInline(emphasis, `${key}-em`, allowAutolinks)}</em>)
       }
     }
 

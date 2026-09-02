@@ -44,6 +44,7 @@ import {
 } from './ResearchDepth'
 import { analyzeTaskIntent } from './TaskIntent'
 import { taskRequiresSavedFinalArtifact } from './DeliverableContract'
+import { detectBrowserTaskCompletion, reviewBrowserPhaseCompletion } from '@/lib/browserIntelligence'
 
 export type PolicyActionType = 'inject_message' | 'step_advance' | 'terminate' | 'continue_loop'
 
@@ -56,7 +57,7 @@ export interface PolicyAction {
   reason?: string
 }
 
-const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful.'
+const NATURAL_FINAL_RESPONSE_GUIDANCE = 'Write a natural final response, then STOP. Summarize the actual outcome in user-facing terms, not the internal step name. Do not start with "Here is the completed..." or "Here’s the completed...". Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed unless the user explicitly asked for those counts. Do not force **Summary** or **Deliverables** headings. If files/artifacts exist, mention the deliverable naturally in one short sentence, like "You can find the report below." Include concrete results, caveats, or next steps only when useful. Match the detail to the request: a factual lookup needs its answer, relevant uncertainty, and a clickable source link, not unrelated options or a long report. Distinguish an observed listed price from an unverified checkout total, a selected option from a submitted order, and an estimate from a confirmed charge. Do not imply that an unobserved action or state occurred.'
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 
 /** Helper to build step message with findings, micro-plan, working memory, goal tracking, and session health */
@@ -258,10 +259,10 @@ function browserActionRecoveryGuidance(state: AgentStateData, detail?: string): 
   const stepText = state.currentPlanItems?.[state.currentStepIdx] || 'the current website action'
   return [
     detail,
-    `Browser action recovery for "${stepText}": do NOT write a failure report while the current page still has actionable controls.`,
-    'Read TARGET HINTS first, then cross-check the marked screenshot and fresh elements list. Prefer the hinted [N] with its recommended tool unless the screenshot clearly contradicts it.',
-    'Do not re-click [SELECTED], [CHECKED], [PRESSED], [CURRENT], [DISABLED], [UNAVAILABLE], or any target the backend just blocked as no-progress. If the wanted control is missing, recover with browser_scroll, browser_find_text, browser_screenshot, browser_get_content, browser_press_key({key:"Escape"}), or a genuinely different browser_navigate.',
-    'Only report failure after a concrete hard blocker is visible: CAPTCHA, login, payment, access denied, hard site error, rate limit, sold out, unavailable inventory, or required manual verification.',
+    `Assess the remaining outcome for "${stepText}" against the evidence already collected.`,
+    'If the phase is satisfied, state its concrete finding and emit <next_step/>. Reuse existing page evidence across phases; an unchanged page or remaining clickable controls do not mean more work is required. Do not repeat observations solely to reconfirm the same facts.',
+    'If an outcome is still missing, name that specific gap and choose an action that can resolve it. Use the current screenshot, elements and TARGET HINTS as evidence, not as a mandatory checklist. All available tools remain options.',
+    'Do not re-click an already-selected or disabled control. Repeated find/read/screenshot calls on the same evidence are not progress. For state-changing work, verify the actual result rather than inferring success from an available button. Report concrete blockers honestly; do not invent success or failure.',
   ].filter(Boolean).join('\n')
 }
 
@@ -348,7 +349,6 @@ function finalDeliverableRequired(state: AgentStateData): boolean {
 function isFinalInlineAnswerStep(state: AgentStateData): boolean {
   return !!state.currentPlanItems &&
     state.currentStepIdx === state.currentPlanItems.length - 1 &&
-    !isBrowserActionTask(state) &&
     !finalDeliverableRequired(state)
 }
 
@@ -356,6 +356,18 @@ function shouldAcceptFinalInlineText(state: AgentStateData, content: string): bo
   if (!isFinalInlineAnswerStep(state)) return false
   const text = content.trim()
   const request = state.originalUserRequest || ''
+  if (isBrowserActionTask(state) &&
+      !state.browserTaskCompleted &&
+      (!state.lastBrowserObservation?.content || state.lastBrowserObservation.success === false || state.lastBrowserObservation.error) &&
+      !namesHardBrowserBlocker(text)) return false
+  if (isBrowserActionTask(state) && state.lastBrowserObservation) {
+    const observed = detectBrowserTaskCompletion(
+      [request, state.currentPlanItems?.[state.currentStepIdx], state.currentPlanScopes?.[state.currentStepIdx]].filter(Boolean).join('\n'),
+      state.lastBrowserObservation,
+    )
+    if (!observed.completed && observed.evidence.length > 0 &&
+        !/\b(?:not|couldn['’]t|failed|blocked|missing|invalid|error|requires?|unavailable)\b/i.test(text)) return false
+  }
   const explicitlyRequestsShortLiteralAnswer =
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:(?:with|using)\s+)?(?:exactly|only)\b/i.test(request) ||
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:only\s+)?(?:the\s+)?(?:word|string|text|phrase)\b/i.test(request)
@@ -920,7 +932,6 @@ export class PolicyEngine {
       assistantContent.trim() &&
       state.currentPlanItems &&
       state.currentStepIdx === state.currentPlanItems.length - 1 &&
-      !isBrowserActionTask(state) &&
       !finalDeliverableRequired(state) &&
       shouldAcceptFinalInlineText(state, assistantContent)
     ) {
@@ -970,6 +981,15 @@ export class PolicyEngine {
 
     const futureNarration = this.checkFutureTenseAfterProgress(state, assistantContent, toolCalls)
     if (futureNarration) return futureNarration
+
+    // A model-authored completion request must be evaluated before a stale-page
+    // nudge. Otherwise the nudge swallows <next_step/> and demands more of the
+    // very observations that the model is trying to stop repeating.
+    if (isBrowserActionTask(state) && toolCalls.size === 0 && stepAdvancedThisIteration) {
+      state.consecutiveNoToolCalls = 0
+      const stepActions = this.checkStepAdvancement(state, true, iterationLimit, assistantContent)
+      if (stepActions.length > 0) return stepActions
+    }
 
     // Stuck-click detection — model is clicking but the page never changes.
     // Runs before tier 2 loop checks because it's a more specific signal than
@@ -1329,10 +1349,8 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
    * ToolPipeline increments consecutiveNoProgressClicks each time an interactive
    * browser tool returns the same URL/title/elements as the previous call.
    *
-   * Stage 1 (>= 3): Inject a strong nudge telling the model the click is a no-op
-   *   and to scroll, pick a different @(x,y), or navigate elsewhere.
-   * Stage 2 (>= 5): Reset the stale browser route and require a different
-   *   inspection/navigation strategy without ending the task.
+   * Repeated observations can also mean the requested facts are already known.
+   * Ask for a goal/evidence decision rather than prescribing more inspection.
    */
   private checkBrowserProgress(state: AgentStateData, assistantContent: string): PolicyAction[] | null {
     if (state.browserTaskCompleted) return null
@@ -1356,7 +1374,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
             role: 'system',
             content: browserActionRecoveryGuidance(
               state,
-              `Your last ${stuck} browser actions left the page visually unchanged. Treat that as a signal to change tactics, not as permission to give up.`,
+              `Your last ${stuck} browser actions returned already-seen page evidence. Decide whether the phase is complete before making another browser call.`,
             ),
           },
           continueLoop: true,
@@ -1380,7 +1398,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
           type: 'inject_message',
           message: {
             role: 'system',
-            content: stepMsg(state, `BROWSER ROUTE CHANGE: your last ${stuck} browser actions left the page unchanged.${researchDetail} Stop using the same control or coordinates. Read the rendered content or screenshot, then use a different visible control, scroll direction, navigation path, source domain, or non-browser tool. Continue the task and do not report an internal failure.`),
+            content: stepMsg(state, `BROWSER ROUTE CHANGE: your last ${stuck} browser actions returned already-seen evidence.${researchDetail} If the current phase is satisfied, state the finding and emit <next_step/>. Otherwise identify the missing outcome and choose a tool that can add new evidence or change the required state. Do not repeat checks just to appear to make progress.`),
           },
           continueLoop: true,
         },
@@ -1394,7 +1412,7 @@ DO NOT apologize, do not explain, do not refuse again. Your next response MUST b
         type: 'inject_message',
         message: {
           role: 'system',
-          content: `STOP. Your last ${stuck} browser actions left the page UNCHANGED — same URL, same title, same elements. The clicks are hitting empty space or dead pixels. DO NOT click the same coordinates again. Instead: (1) browser_get_content to read the loaded article, (2) browser_find_text for a relevant section, (3) browser_scroll('down') to reveal new elements, or (4) browser_navigate to a different unvisited source domain.`,
+          content: browserActionRecoveryGuidance(state, `The last ${stuck} browser actions returned already-seen evidence. This alone does not prove an interaction failed. Check the remaining objective before repeating any observation.`),
         },
         continueLoop: true,
       },
@@ -1767,7 +1785,6 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
       if (
           isLastStep &&
-          !isBrowserActionTask(state) &&
           (
           (!finalDeliverableRequired(state) && shouldAcceptFinalInlineText(state, assistantContent)) ||
           (isFixedWebSearchInlineAnswerState(state) && shouldAcceptFinalInlineText(state, assistantContent))
@@ -1783,6 +1800,13 @@ Then make your first tool call. Your plan will be remembered across iterations o
       }
 
       if (isBrowserActionTask(state) && (!isLastStep || state.createdFiles.size === 0)) {
+        if (isLastStep && !finalDeliverableRequired(state)) {
+          return [{
+            type: 'inject_message',
+            message: { role: 'system', content: finalInlineAnswerRecoveryGuidance(state) + ' ' + NATURAL_FINAL_RESPONSE_GUIDANCE },
+            continueLoop: true,
+          }]
+        }
         if (!isLastStep && state.browserTaskCompleted) {
           const finding = state.browserTaskCompletionEvidence.length > 0
             ? `Verified browser state: ${state.browserTaskCompletionEvidence.slice(0, 3).join('; ')}`
@@ -1825,7 +1849,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
               type: 'inject_message',
               message: {
                 role: 'system',
-                content: stepMsg(state, browserActionRecoveryGuidance(state, 'BROWSER ROUTE RESET: repeated text-only recovery did not produce an action. Refresh the visible state with browser_screenshot or browser_get_content, then choose a different control or navigation path and continue.')),
+                content: stepMsg(state, browserActionRecoveryGuidance(state, 'BROWSER ROUTE RESET: repeated text-only recovery did not resolve the phase. State the observed finding and emit <next_step/> if it is complete; otherwise choose a tool for the named missing outcome.')),
               },
               continueLoop: true,
             }]
@@ -1834,9 +1858,9 @@ Then make your first tool call. Your plan will be remembered across iterations o
             state.browserNoToolRecoveryAttempts = 2
             state.consecutiveNoToolCalls = Math.max(0, threshold - 1)
           }
-          const recoveryDetail = state.stepToolCallCount === 0
-            ? 'NO-TOOL BROWSER START RECOVERY: The website step has not actually started. Do not write more text. Make exactly one concrete browser tool call now, preferably browser_navigate for the target site or browser_get_content/browser_screenshot if the page is already open.'
-            : 'NO-TOOL BROWSER RECOVERY: The live page is still actionable. Do not write more text and do not mark the step blocked. Make exactly one concrete browser tool call now on the current page: type into the active field, click the matching result/add button, select the relevant option, inspect content, press Escape to clear a modal, or scroll only if the target is off-screen.'
+          const recoveryDetail = !state.lastBrowserObservation
+            ? 'NO-TOOL BROWSER START RECOVERY: No browser evidence has been collected yet. Choose the appropriate tool for the requested website outcome.'
+            : 'NO-TOOL BROWSER RECOVERY: Use the evidence already collected. Advance with a concrete finding if the phase is satisfied; otherwise take an action that resolves its remaining gap.'
           return [
             {
               type: 'inject_message',
@@ -1851,7 +1875,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
         const guidance = isLastStep
           ? 'If the website action is complete or a concrete hard blocker is visible, save the short action report with create_file. If not, use a browser tool now to verify or continue the flow.'
-          : browserActionRecoveryGuidance(state, 'Text-only response blocked: browser action steps require another concrete browser action, not narration or failure prose.')
+          : browserActionRecoveryGuidance(state, 'Resolve the current phase: emit <next_step/> with its observed finding when complete, or choose a useful action for the remaining outcome.')
         return [
           { type: 'inject_message', message: { role: 'assistant', content: assistantContent || '' } },
           {
@@ -2787,7 +2811,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
       } else {
         const nowLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
         const hint = nowLastStep
-          ? 'This is the action report step. Use the completion evidence already gathered; verify only if the requested final answer needs it.'
+          ? `Use the completion evidence already gathered; verify only a material unresolved gap. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`
           : browserActionRecoveryGuidance(state, 'Continue from the current browser state. The previous step was advanced because the live page showed completion evidence.')
         actions.push({
           type: 'inject_message',
@@ -2920,27 +2944,18 @@ Then make your first tool call. Your plan will be remembered across iterations o
       // reject the advance and tell it to keep working.
       // Require minimum REAL research calls (search/browse) — note files don't count.
       const minIters = 6
-      if (isBrowserActionTask(state) && !isCurrentLastStep && state.stepToolCallCount === 0) {
-        actions.push({
-          type: 'inject_message',
-          message: {
-            role: 'system',
-            content: stepMsg(state, browserActionRecoveryGuidance(state, 'You tried to advance without taking a browser action on this step. Do the website action first.')),
-          },
-        })
-        return actions
-      }
-      if (isBrowserActionTask(state) && !isCurrentLastStep && state.consecutiveNoProgressClicks > 0 && !state.browserTaskCompleted) {
-        actions.push({
-          type: 'inject_message',
-          message: {
-            role: 'system',
-            content: stepMsg(state, browserActionRecoveryGuidance(state, 'You tried to advance immediately after a no-progress browser action. First recover on the live page or verify the target is already selected/completed.')),
-          },
-        })
-        return actions
-      }
       if (isBrowserActionTask(state) && !isCurrentLastStep) {
+        const phaseFinding = assistantContent.replace(/<next_step\s*\/?>/gi, '').trim() ||
+          [...state.recentNarrations].reverse().find(narration => narration.stepIdx === state.currentStepIdx)?.text || ''
+        const completionReview = reviewBrowserPhaseCompletion(
+          [state.currentPlanItems[state.currentStepIdx], state.currentPlanScopes?.[state.currentStepIdx]].filter(Boolean).join('\n'),
+          phaseFinding,
+          state.lastBrowserObservation,
+        )
+        if (!state.browserTaskCompleted && completionReview.completed) {
+          state.browserTaskCompleted = true
+          state.browserTaskCompletionEvidence = completionReview.evidence
+        }
         if (!state.browserTaskCompleted) {
           actions.push({
             type: 'inject_message',
@@ -2948,7 +2963,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
               role: 'system',
               content: stepMsg(state, browserActionRecoveryGuidance(
                 state,
-                'You tried to advance this browser action step, but the live browser state does not prove the step is complete. Do not emit <next_step/> for browser work until the current page shows exact completion evidence for this step.',
+                completionReview.reason,
               )),
             },
             continueLoop: true,
@@ -2961,6 +2976,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         }
         const finding = browserCompletionFinding(state)
         advanceStep(state, finding)
+        actions.push({ type: 'step_advance' })
 
         if (state.currentStepIdx >= state.currentPlanItems.length) {
           actions.push({
@@ -2973,7 +2989,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
         } else {
           const isLast = state.currentStepIdx === state.currentPlanItems.length - 1
           const hint = isLast
-            ? 'This is the action report step. First verify the current browser state if needed. Only report failure when there is a concrete hard blocker; otherwise keep completing the website flow.'
+            ? `Use the evidence already gathered for the requested answer; make another call only for a material unresolved gap. ${NATURAL_FINAL_RESPONSE_GUIDANCE}`
             : browserActionRecoveryGuidance(state, 'Continue the website flow from the current page. Do not restart or redo completed selections.')
           actions.push({
             type: 'inject_message',

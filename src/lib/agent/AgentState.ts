@@ -2,7 +2,7 @@ import type { TierTimeouts } from './guards'
 import type { WorkingMemory } from './WorkingMemory'
 import type { GoalTracker } from './GoalTracker'
 import type { TaskStrategyConfig } from './TaskStrategy'
-import type { BrowserActionRecord } from '@/lib/browserIntelligence'
+import type { BrowserActionRecord, BrowserResultLike } from '@/lib/browserIntelligence'
 import {
   createResearchActivityIndex,
   normalizeResearchUrl,
@@ -218,6 +218,8 @@ export interface AgentStateData {
   consecutiveNoProgressClicks: number
   recentBrowserStateHashes: string[]  // Ring buffer of last 5 hashes — re-visiting any of these is "no progress"
   browserActionHistory: BrowserActionRecord[]
+  // Retained across plan phases; advancing the planner does not reset the page.
+  lastBrowserObservation: BrowserResultLike | null
   lastNoProgressTargetKey: string | null
   browserRecoveryRequired: boolean
   browserVisualSnapshotsSent: number
@@ -534,6 +536,7 @@ export function createInitialState(buildTask: boolean, tierTimeouts: TierTimeout
     consecutiveNoProgressClicks: 0,
     recentBrowserStateHashes: [],
     browserActionHistory: [],
+    lastBrowserObservation: null,
     lastNoProgressTargetKey: null,
     browserRecoveryRequired: false,
     browserVisualSnapshotsSent: 0,

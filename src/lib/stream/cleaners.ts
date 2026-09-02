@@ -391,7 +391,37 @@ function isImperativeNarration(text: string): boolean {
 function isMalformedNarration(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed) return true
+  if (!hasBalancedNarrationBrackets(trimmed)) return true
   return MALFORMED_NARRATION_PATTERNS.some(pattern => pattern.test(trimmed))
+}
+
+function hasBalancedNarrationBrackets(text: string): boolean {
+  const stack: string[] = []
+  for (const char of text) {
+    if (char === '(' || char === '[') stack.push(char)
+    else if (char === ')' || char === ']') {
+      if (stack.pop() !== (char === ')' ? '(' : '[')) return false
+    }
+  }
+  return stack.length === 0
+}
+
+/** Keep abbreviations and parenthetical clauses attached to their sentence. */
+export function splitNarrationSentences(text: string): string[] {
+  const sentences: string[] = []
+  let start = 0
+  for (const match of text.matchAll(/[.!?][)"'\]]*(?:\s+|$)/g)) {
+    const end = match.index! + match[0].length
+    const candidate = text.slice(start, end).trim()
+    const hasMore = end < text.length
+    const abbreviation = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|approx|mo|no|fig|vol)|\b(?:e\.g|i\.e|a\.m|p\.m|p\.a)|\b(?:[A-Z]\.)+[A-Z])\.$/i.test(candidate)
+    if (hasMore && (abbreviation || !hasBalancedNarrationBrackets(candidate))) continue
+    sentences.push(candidate)
+    start = end
+  }
+  const tail = text.slice(start).trim()
+  if (tail) sentences.push(tail)
+  return sentences
 }
 
 function isCompleteNarrationSentence(text: string): boolean {
@@ -478,7 +508,7 @@ export function stripToolActionNarration(text: string): string {
     .trim()
   if (!normalized) return ''
 
-  const sentenceChunks = normalized.split(/(?<=[.!?])\s+/)
+  const sentenceChunks = splitNarrationSentences(normalized)
   const kept: string[] = []
 
   for (const chunk of sentenceChunks) {
@@ -645,8 +675,7 @@ export function sanitizeNarrationText(
 
   if (cleaned.length <= 12 || !cleaned.includes(' ')) return null
 
-  const candidates = cleaned
-    .split(/(?<=[.!?])\s+/)
+  const candidates = splitNarrationSentences(cleaned)
     .map(sentence => stripNarrationArtifacts(sentence).trim())
     .filter(sentence => {
       if (sentence.length < 15) return false
@@ -676,11 +705,9 @@ export function sanitizeNarrationText(
 
   if (sentences.length === 0) return null
 
-  let narrationText = sentences.slice(0, maxSentences).join(' ').replace(/\s+/g, ' ').trim()
-  if (narrationText.length > maxLength) {
-    const cutPoint = narrationText.lastIndexOf('. ', maxLength - 3)
-    narrationText = cutPoint > 50 ? narrationText.slice(0, cutPoint + 1) : ''
-  }
+  // Never truncate at an abbreviation or discard the start of a sentence.
+  while (sentences.length > 0 && sentences.join(' ').length > maxLength) sentences.pop()
+  const narrationText = sentences.join(' ').replace(/\s+/g, ' ').trim()
 
   const minWords = requireSignal ? MIN_PROGRESS_NARRATION_WORDS : MIN_NARRATION_WORDS
   return narrationText.length > 12 && countNarrationWords(narrationText) >= minWords ? narrationText : null

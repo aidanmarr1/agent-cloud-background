@@ -3001,6 +3001,9 @@ export class ToolPipeline {
     const resultObj = result as BrowserActionResult
     const localArtifactMismatch = browserCannotVerifyLocalArtifactReason(args, resultObj, state)
     if (localArtifactMismatch) {
+      state.lastBrowserObservation = null
+      state.browserTaskCompleted = false
+      state.browserTaskCompletionEvidence = []
       return {
         ...resultObj,
         success: false,
@@ -3021,10 +3024,12 @@ export class ToolPipeline {
       : resultObj
     const outcome = classifyBrowserProgress(state.browserActionHistory, tc.name, args, progressResult, targetKey)
     const recoveryUsed = isBrowserRecoveryTool(tc.name, args)
-    const combinedCompletionContent = [resultObj.content, snapshot?.content].filter(Boolean).join('\n\n')
+    const combinedCompletionContent = [resultObj.content, snapshot?.content]
+      .filter((content): content is string => !!content)
+      .map(content => content.replace(/\n?(?:TARGET HINTS|TASK COMPLETION DETECTED|TASK COMPLETION REJECTED):[\s\S]*$/gi, ''))
+      .join('\n\n')
     const useFreshSnapshotForCompletion = isBrowserPreflightActionBlock(resultObj.error) && !!snapshot?.content
-    const completion = detectBrowserTaskCompletion(browserCompletionObjectiveText(state), {
-      ...resultObj,
+    const observation = {
       success: useFreshSnapshotForCompletion ? true : resultObj.success,
       error: useFreshSnapshotForCompletion ? undefined : resultObj.error,
       url: useFreshSnapshotForCompletion ? (snapshot?.url || resultObj.url) : resultObj.url,
@@ -3032,8 +3037,10 @@ export class ToolPipeline {
       action: useFreshSnapshotForCompletion
         ? `${resultObj.action || tc.name}\nFresh browser state after blocked preflight action.`
         : resultObj.action,
-      content: combinedCompletionContent,
-    })
+      content: combinedCompletionContent.slice(0, 64_000),
+    }
+    state.lastBrowserObservation = observation
+    const completion = detectBrowserTaskCompletion(browserCompletionObjectiveText(state), observation)
     const contentWithHints = appendTargetHintsToContent(resultObj.content, hints)
     const contentWithCompletion = appendTaskCompletionToContent(contentWithHints, completion)
 
@@ -3072,8 +3079,12 @@ export class ToolPipeline {
       state.lastNoProgressTargetKey = null
       state.consecutiveNoProgressClicks = 0
     } else if (outcome.kind === 'no_progress_same_target' || outcome.kind === 'no_progress_same_page') {
-      state.browserRecoveryRequired = !!targetKey
-      state.lastNoProgressTargetKey = targetKey
+      // An unchanged read/screenshot must not unlock a known no-op click.
+      // Only fresh evidence or a genuinely different action clears that fence.
+      if (!recoveryUsed && targetKey) {
+        state.browserRecoveryRequired = true
+        state.lastNoProgressTargetKey = targetKey
+      }
       state.consecutiveNoProgressClicks++
       state.lastLoopSignal = { type: 'browser_state', tool: tc.name }
     } else if (outcome.kind === 'recoverable_block') {
@@ -3089,9 +3100,11 @@ export class ToolPipeline {
       })
     }
 
+    // New evidence can invalidate an earlier success (for example a changed
+    // selection or validation error); completion is not a sticky flag.
+    state.browserTaskCompleted = completion.completed
+    state.browserTaskCompletionEvidence = completion.completed ? completion.evidence.slice(0, 5) : []
     if (completion.completed) {
-      state.browserTaskCompleted = true
-      state.browserTaskCompletionEvidence = completion.evidence.slice(0, 5)
       state.consecutiveNoProgressClicks = 0
       state.browserRecoveryRequired = false
       state.lastNoProgressTargetKey = null

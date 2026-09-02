@@ -54,7 +54,7 @@ export interface BrowserTaskCompletionSignal {
   evidence: string[]
 }
 
-interface BrowserResultLike {
+export interface BrowserResultLike {
   success?: boolean
   url?: string
   title?: string
@@ -374,14 +374,13 @@ function normalizeBrowserContent(content: string): string {
     .replace(/^.*Page UNCHANGED.*$/gmi, '')
     .replace(/^.*Page changed:.*$/gmi, '')
     .replace(/\[(NEW|JUST CLICKED)\]/gi, '')
-    .replace(/\(value: "[^"]*"\)/g, '')
     .replace(/^Focused element:.*$/gmi, '')
     .replace(/^\(format:.*$/gmi, '')
     .replace(/Scroll position:\s*\d+px\s*\/\s*\d+px/gi, '')
     .replace(/scroll\s+\d+\/\d+px/gi, 'scroll')
     .replace(/\s+/g, ' ')
     .trim()
-    .slice(0, 2000)
+    .slice(0, 64_000)
 }
 
 export function computeBrowserPageSignature(result: BrowserResultLike): string {
@@ -624,26 +623,23 @@ export function classifyBrowserProgress(
     return { kind: 'progress', reason: 'First browser state recorded.', pageSignature, targetKey, recoveryUsed }
   }
 
-  // A recovery action may provide a fresh decision surface once, but repeating
-  // the exact same recovery against an unchanged page is not new progress.
-  // In particular, cached browser_get_content/browser_screenshot calls must
-  // not keep clearing the stuck-state fence indefinitely.
-  if (
-    recoveryUsed &&
-    previous.recoveryUsed &&
-    previous.toolName === toolName &&
-    previous.pageSignature === pageSignature
-  ) {
-    if (targetKey && previous.targetKey === targetKey) {
-      return { kind: 'no_progress_same_target', reason: 'Repeated recovery targeted the same unchanged browser state.', pageSignature, targetKey, recoveryUsed }
-    }
-    if (!targetKey && !previous.targetKey) {
-      return { kind: 'no_progress_same_page', reason: 'Repeated recovery returned the same unchanged page.', pageSignature, targetKey, recoveryUsed }
-    }
-  }
-
+  // Track evidence, not the name of the observation tool or its search terms.
+  // Switching between find/read/screenshot (or scrolling back to a known view)
+  // must not erase the no-progress history. A first full-text read may still
+  // add useful evidence beyond the compact navigation snapshot.
   if (recoveryUsed) {
-    return { kind: 'progress', reason: 'Recovery tactic used; allow a new target decision.', pageSignature, targetKey, recoveryUsed }
+    const knownState = history.filter(record => record.success && record.pageSignature === pageSignature)
+    const firstFullRead = toolName === 'browser_get_content' &&
+      !knownState.some(record => record.toolName === 'browser_get_content')
+    if (knownState.length > 0 && !firstFullRead) {
+      const sameTarget = targetKey && knownState.some(record => record.targetKey === targetKey)
+      return {
+        kind: sameTarget ? 'no_progress_same_target' : 'no_progress_same_page',
+        reason: 'Observation returned browser evidence already seen; changing tools or search terms is not new progress.',
+        pageSignature, targetKey, recoveryUsed,
+      }
+    }
+    return { kind: 'progress', reason: firstFullRead ? 'First full-text read of this browser state.' : 'Observation exposed new browser evidence.', pageSignature, targetKey, recoveryUsed }
   }
 
   if (previous.pageSignature === pageSignature) {
@@ -949,6 +945,49 @@ export function detectBrowserTaskCompletion(
   }
 
   return empty
+}
+
+/**
+ * Automatic recognizers are useful evidence, not a whitelist of browser tasks.
+ * Let the model finish a read-only phase with a finding grounded in a successful
+ * observation, including one collected in an earlier phase. State-changing
+ * work still needs its actual selected/submitted/cart/download evidence.
+ */
+export function reviewBrowserPhaseCompletion(
+  objectiveText: string,
+  finding: string,
+  observation: BrowserResultLike | null,
+): BrowserTaskCompletionSignal {
+  const pending = (reason: string): BrowserTaskCompletionSignal => ({ completed: false, confidence: 0, reason, evidence: [] })
+  if (!observation || observation.success === false || observation.error || !observation.content?.trim()) {
+    return pending('No successful browser observation supports this phase yet.')
+  }
+  const recognized = detectBrowserTaskCompletion(objectiveText, observation)
+  if (recognized.completed || recognized.evidence.length > 0) return recognized
+
+  const changesState = /\b(?:add|put|place|move)\b.{0,60}\b(?:cart|bag|basket)\b|\b(?:checkout|buy|purchase|submit|send|register|sign[ -]?up|apply|book|reserve|download|save|export|delete|remove|upload|install|cancel|select|choose|configure|set|pick|type|enter|fill)\b/i.test(objectiveText)
+  if (changesState) return pending('The requested website action still needs visible final-state evidence.')
+
+  const claim = finding.replace(/<next_step\s*\/?>/gi, '').replace(/https?:\/\/\S+/g, '').trim()
+  if (claim.length < 30 || /^(?:i(?:['’]ll| will)|next[, :]|let me|please)\b/i.test(claim)) {
+    return pending('State the concrete finding from the page before advancing.')
+  }
+  const source = normalizeText(`${observation.title || ''}\n${observation.content}`)
+  const evidenceWords = new Set(source.split(/\s+/))
+  const claimWords = new Set(tokenize(claim).filter(word => word.length >= 3 && !STOP_WORDS.has(word)))
+  const overlap = [...claimWords].filter(word => evidenceWords.has(word))
+  const numbers = claim.match(/\b\d+(?:[.,]\d+)*(?:%|\b)/g) || []
+  const normalizeNumber = (value: string) => `${Number(value.replace(/[,%]/g, ''))}${value.endsWith('%') ? '%' : ''}`
+  const sourceNumbers = new Set((`${observation.title || ''}\n${observation.content}`.match(/\b\d+(?:[.,]\d+)*(?:%|\b)/g) || []).map(normalizeNumber))
+  if (overlap.length < 2 || numbers.some(number => !sourceNumbers.has(normalizeNumber(number)))) {
+    return pending('The stated finding is not supported by the available browser evidence.')
+  }
+  return {
+    completed: true,
+    confidence: 0.65,
+    reason: 'The model completed a read-only phase with a finding grounded in observed page content.',
+    evidence: [claim.replace(/\s+/g, ' ').slice(0, 360)],
+  }
 }
 
 export function appendTaskCompletionToContent(

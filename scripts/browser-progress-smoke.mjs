@@ -93,10 +93,10 @@ export async function runSmoke() {
     const longReadableText = 'Rendered browser evidence remains readable across the complete page. '.repeat(240)
     const launch = await writePage(conversationId, 'index.html', \`
       <h1>Browser Progress long-page evidence</h1>
-      <p>\${longReadableText}</p>
-      <p>FINAL_BROWSER_CONTENT_MARKER</p>
       <button id="noop" type="button">No-op</button>
       <button id="next" type="button" onclick="document.body.dataset.next = 'yes'; document.querySelector('main').insertAdjacentHTML('beforeend', '<button id=&quot;done&quot; type=&quot;button&quot;>Done</button>')">Next</button>
+      <p>\${longReadableText}</p>
+      <p>FINAL_BROWSER_CONTENT_MARKER</p>
     \`)
 
     const nav1 = await call(pipeline, state, 'nav1', 'browser_navigate', { url: launch.url })
@@ -131,7 +131,7 @@ export async function runSmoke() {
 
     const recovery = await call(pipeline, state, 'shot1', 'browser_screenshot', {})
     assert.equal(recovery.isError, false)
-    assert.equal(state.browserRecoveryRequired, false, 'screenshot recovery should clear repeat block')
+    assert.equal(state.browserRecoveryRequired, true, 'an unchanged screenshot must not clear a known no-op target block')
 
     const repeatedRecovery = classifyBrowserProgress(
       state.browserActionHistory,
@@ -147,8 +147,8 @@ export async function runSmoke() {
     )
     assert.equal(repeatedRecovery.kind, 'no_progress_same_page', 'an identical recovery read must not count as fresh progress')
 
-    const allowedAfterRecovery = await call(pipeline, state, 'noop3', 'browser_click_at', { index: noop.index })
-    assert.equal(allowedAfterRecovery.isError, false)
+    const blockedAfterUnchangedObservation = await call(pipeline, state, 'noop3', 'browser_click_at', { index: noop.index })
+    assert.equal(blockedAfterUnchangedObservation.isError, true, 'changing observation tools must not unlock a repeated no-op click')
     assert.equal(state.browserRecoveryRequired, true)
 
     const differentTarget = await call(
