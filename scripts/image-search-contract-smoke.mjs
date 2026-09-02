@@ -25,7 +25,7 @@ assert.match(
 )
 assert.match(
   toolRegistry,
-  /imageSearch\(args\.query as string, 8, ctx\.signal\)/,
+  /imageSearch\(args\.query as string, 8, ctx\.signal, imageSearchType\(args\.image_type\)\)/,
   'the model-facing image search tool must request the top eight results',
 )
 assert.doesNotMatch(
@@ -54,5 +54,9 @@ assert.match(computerPanel, /<SearchResults[^>]*streaming=\{activeSearchPending\
 assert.match(computerPanel, /<ImageSearchResults[^>]*streaming=\{activeSearchPending\}/, 'image search must receive the task-aware pending state')
 assert.match(searchResults, /aria-busy="true"[\s\S]*aria-label="Searching for results"/, 'web search skeleton must expose an accessible loading state')
 assert.match(imageSearchResults, /aria-busy="true"[\s\S]*aria-label="Searching for images"/, 'image search skeleton must expose an accessible loading state')
+assert.match(imageSearchResults, /items\.length === 0 && error/, 'failed searches must not render a successful empty result')
+assert.match(imageSearchResults, /Image search unavailable/, 'image search errors must remain visible')
+assert.match(imageSearchResults, /Source preview · not saved/, 'remote candidates must not be presented as saved assets')
+assert.doesNotMatch(imageSearch, /resolve\(\[\]\)/, 'an image-search timeout must not be reported as zero matches')
 
 console.log('Image search, favicon, and duplicate-thinking contracts passed.')

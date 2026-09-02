@@ -9,7 +9,7 @@ import { isSearchResultPending } from './searchLoadingState'
 import { isBrowseResultPending } from './browseLoadingState'
 import { BrowseView } from './BrowseView'
 import { BrowserView } from './BrowserView'
-import { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, BrowserResult } from '@/types'
+import { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, ImageSearchPanelResult, BrowserResult } from '@/types'
 import { TerminalView } from './TerminalView'
 import dynamic from 'next/dynamic'
 import { useState, useEffect, useRef, useCallback, PointerEvent as ReactPointerEvent, TouchEvent as ReactTouchEvent } from 'react'
@@ -479,7 +479,7 @@ export function ComputerPanel({ items, conversationId }: ComputerPanelProps) {
             {/* Content */}
             <div ref={contentRef} className="flex-1 overflow-y-auto overflow-x-hidden">
               {activeItem ? (activeItem.type === 'image_search' ? (
-                <ImageSearchResults key={activeItem.id} results={activeItem.data as ImageSearchPanelItem[]} streaming={activeSearchPending} title={activeItem.title} />
+                <ImageSearchResults key={activeItem.id} results={activeItem.data as ImageSearchPanelItem[] | ImageSearchPanelResult} streaming={activeSearchPending} title={activeItem.title} />
               ) : activeItem.type === 'search' ? (
                 <SearchResults key={activeItem.id} results={activeItem.data as SearchResult[]} streaming={activeSearchPending} title={activeItem.title} />
               ) : activeItem.type === 'terminal' ? (

@@ -67,11 +67,12 @@ const BILLABLE_USAGE_ERROR = 'The assistant provider did not return billable usa
 const PLANNER_QUALITY_ERROR = 'The agent did not produce a task-specific plan or acknowledgement.'
 const PLANNER_REPAIR_EXHAUSTED_ERROR = 'The planner could not produce a usable task-specific plan after repair.'
 const PLANNER_QUALITY_REPAIR_ATTEMPTS = 1
-// Planner reasoning is kept at the provider minimum and excluded. This ceiling preserves one complete visible
-// sentence without adding hidden-token latency. This dedicated call is used
-// only when a persisted precomputed plan still needs its worker-authored opening.
-const PLANNER_ACK_MAX_TOKENS = 320
-const PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000
+// Muse shares max_tokens between mandatory hidden reasoning and visible text.
+// A 320-token ceiling could be consumed entirely by the provider before the
+// acknowledgement became visible. Keep reasoning at the provider minimum but
+// leave enough total output room for one complete streamed sentence.
+const PLANNER_ACK_MAX_TOKENS = 768
+const PLANNER_ACK_REQUEST_TIMEOUT_MS = 10_000
 // Planner output includes task-specific scopes and hidden checklists, not just
 // short visible titles. The old 760/980-token ceilings regularly truncated
 // valid JSON for detailed prompts and then needlessly entered repair.
@@ -389,10 +390,12 @@ function completedPlannerAckFromJson(raw: string): string | null {
 }
 
 function isSafeStreamingPlannerAckDraft(ack: string, request: string): boolean {
-  // Never paint a fragment that cannot be retracted. The precomputed-plan
-  // acknowledgement is streamed for low latency, but its first visible draft
-  // must already be a complete, task-specific sentence.
-  return isUsablePlannerAck(ack, request)
+  // Release the model's acknowledgement as it is written instead of holding
+  // all text behind a complete-sentence quality gate. Requiring the standard
+  // first-person prefix and a concrete first verb filters JSON/reasoning noise;
+  // the completed sentence still receives the full quality check below.
+  void request
+  return /^I(?:'ll| will)\s+\S+/i.test(ack) && ackWordCount(ack) >= 3
 }
 
 function ackWordCount(text: string): number {
@@ -903,8 +906,17 @@ export class PlanManager {
 
   private emitPlanAfterAcknowledgement(items: string[]): boolean {
     if (!this.skipAcknowledgement && !this.acknowledgementEmitted) {
-      console.warn('[AgentDiagnostics] Suppressed visible plan because no model-authored acknowledgement was emitted')
-      return false
+      // A provider may terminate after some visible acknowledgement text even
+      // though the structured planner has already returned a valid plan. The
+      // visible text is model-authored and cannot be retracted; close its block
+      // and continue rather than discarding a healthy plan and billing repairs.
+      if (this.acknowledgementStreamStarted) {
+        this.emitter.textDelta('\n\n')
+        this.acknowledgementEmitted = true
+      } else {
+        console.warn('[AgentDiagnostics] Suppressed visible plan because no model-authored acknowledgement was emitted')
+        return false
+      }
     }
     this.emitter.plan(items)
     return true
@@ -921,7 +933,10 @@ export class PlanManager {
       if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
       const acknowledged = this.acknowledgementEmitted || await this.emitAcknowledgement(undefined, 'task')
       if (!acknowledged || !this.acknowledgementEmitted) {
-        throw new Error(PLANNER_QUALITY_ERROR)
+        // The precomputed plan is already durably visible. An unavailable
+        // acknowledgement must not turn that valid plan into a terminal task
+        // failure or start a chain of unrelated repair calls.
+        console.warn('[AgentDiagnostics] Continuing precomputed plan after acknowledgement provider failure')
       }
       return
     }
@@ -946,10 +961,10 @@ export class PlanManager {
   async recoverFromPlannerFailure(state: AgentStateData): Promise<boolean> {
     if (state.planEmitted || this.emitter.isClosed) return state.planEmitted
 
-    // Never continue into tools behind an invisible locally-authored fallback.
     // If the ordinary structured response failed, make one final bounded model
-    // repair and require the same acknowledgement -> visible plan fence before
-    // returning control to AgentLoop.
+    // repair. The repaired response owns both its acknowledgement and plan, so
+    // do not buy a separate acknowledgement repair before learning whether the
+    // structured repair already contains a good one.
     if (this.acknowledgementPromise) {
       await this.acknowledgementPromise
       if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
@@ -957,11 +972,6 @@ export class PlanManager {
 
     this.resetPlannerAbortController()
     this.plannerDeadlineAtMs = Date.now() + PLANNER_REPAIR_REQUEST_TIMEOUT_MS
-
-    if (!this.skipAcknowledgement && !this.acknowledgementEmitted) {
-      const acknowledged = await this.emitAcknowledgement(undefined, 'task')
-      if (!acknowledged || !this.acknowledgementEmitted) return false
-    }
 
     const request = effectiveTaskRequest(this.messages).slice(0, 4000)
     const repaired = await this.repairPlannerResponse(
@@ -1192,7 +1202,7 @@ export class PlanManager {
       length: sanitizedAck.length,
       taskShape,
     })
-    throw new Error(PLANNER_QUALITY_ERROR)
+    return false
   }
 
   private async repairAcknowledgementCandidate(plannerAck: string): Promise<string> {
@@ -1701,7 +1711,8 @@ Rules:
         return false
       }
       const acknowledged = await this.emitAcknowledgement(obj.ack, mappedTaskType)
-      if (!acknowledged || (!this.skipAcknowledgement && !this.acknowledgementEmitted)) {
+      const acknowledgementAvailable = acknowledged || this.acknowledgementEmitted || this.acknowledgementStreamStarted
+      if (!acknowledgementAvailable) {
         throw new Error(PLANNER_QUALITY_ERROR)
       }
       this.throwIfPlannerAborted()
@@ -1738,7 +1749,8 @@ Rules:
     const withRequired = this.applyRequiredFirstSteps(withCustomRequirements.titles, withCustomRequirements.scopes)
     const modelPlan = withRequired
     const acknowledged = await this.emitAcknowledgement(obj.ack, mappedTaskType)
-    if (!acknowledged || (!this.skipAcknowledgement && !this.acknowledgementEmitted)) {
+    const acknowledgementAvailable = acknowledged || this.acknowledgementEmitted || this.acknowledgementStreamStarted
+    if (!acknowledgementAvailable) {
       throw new Error(PLANNER_QUALITY_ERROR)
     }
     this.throwIfPlannerAborted()
@@ -1916,13 +1928,8 @@ Rules:
       await this.recordCompletionUsage(usage, 'initial')
       this.throwIfPlannerAborted()
       if (this.acknowledgementPromise) {
-        const acknowledged = await this.acknowledgementPromise
+        await this.acknowledgementPromise
         if (this.acknowledgementUsageError) throw this.acknowledgementUsageError
-        // If the dedicated request exposed an unretractable partial sentence
-        // but could not finish cleanly, do not append a competing planner draft.
-        if (!acknowledged && this.acknowledgementStreamStarted) {
-          throw plannerRepairExhaustedError()
-        }
       }
       console.log(`[Plan] Planner response received (${raw.length} chars)`)
       if (state && !state.planEmitted && !this.emitter.isClosed) {

@@ -1,7 +1,9 @@
 import { ImageSearchResult } from '@/types'
+import { createHash } from 'crypto'
 import { writeSandboxFileBytes } from './sandbox'
 import { checkHost, guardedFetch, validateHttpUrl } from './ssrf'
 import { normalizeSearchQuery } from './searchQuery'
+import { imageSearchQuery, isImageSearchCandidate, validateDownloadedImage, type DownloadedImageAsset, type ImageSearchType } from './imageAssets'
 
 const SERPER_API_KEY = process.env.SERPER_API_KEY
 const SERPER_BASE_URL = (process.env.SERPER_BASE_URL || 'https://google.serper.dev').replace(/\/+$/, '')
@@ -72,9 +74,10 @@ function serperApiKey(): string {
   return key
 }
 
-async function serperImages(rawQuery: unknown, count: number, signal?: AbortSignal): Promise<SerperImagesResponse> {
-  const query = normalizeSearchQuery(rawQuery)
-  if (!query) throw new Error('Image search query is empty after cleanup')
+async function serperImages(rawQuery: unknown, count: number, signal: AbortSignal | undefined, type: ImageSearchType): Promise<SerperImagesResponse> {
+  const normalizedQuery = normalizeSearchQuery(rawQuery)
+  if (!normalizedQuery) throw new Error('Image search query is empty after cleanup')
+  const query = imageSearchQuery(normalizedQuery, type)
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), IMAGE_SEARCH_TIMEOUT_MS)
   const requestSignal = signal ? AbortSignal.any([controller.signal, signal]) : controller.signal
@@ -106,29 +109,13 @@ async function serperImages(rawQuery: unknown, count: number, signal?: AbortSign
   }
 }
 
-export async function imageSearch(query: unknown, count: number = 8, signal?: AbortSignal): Promise<ImageSearchResult[]> {
+export async function imageSearch(query: unknown, count: number = 8, signal?: AbortSignal, type: ImageSearchType = 'photo'): Promise<ImageSearchResult[]> {
   count = Math.max(1, Math.min(8, count))
-
-  let timeoutId: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      imageSearchInner(query, count, signal),
-      new Promise<ImageSearchResult[]>((resolve) => {
-        timeoutId = setTimeout(() => {
-          console.error('[ImageSearch] Overall timeout reached')
-          resolve([])
-        }, IMAGE_SEARCH_TIMEOUT_MS)
-      }),
-    ])
-  } finally {
-    if (timeoutId !== undefined) clearTimeout(timeoutId)
-  }
-}
-
-async function imageSearchInner(query: unknown, count: number, signal?: AbortSignal): Promise<ImageSearchResult[]> {
-  const data = await serperImages(query, count, signal)
+  // Provider timeouts are errors, not successful searches with zero images.
+  const data = await serperImages(query, count, signal, type)
   return (data.images || [])
     .filter(result => result.imageUrl || result.thumbnailUrl)
+    .filter(result => isImageSearchCandidate(result.title || '', type))
     .slice(0, count)
     .map(result => ({
       title: result.title || result.source || result.domain || '',
@@ -140,14 +127,6 @@ async function imageSearchInner(query: unknown, count: number, signal?: AbortSig
 
 // --- Download images to sandbox ---
 
-const MIME_TO_EXT: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-}
-
 function sanitizeFilename(name: string): string {
   return name
     .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -155,24 +134,16 @@ function sanitizeFilename(name: string): string {
     .slice(0, 80)
 }
 
-function getExtensionFromUrl(url: string): string {
-  try {
-    const pathname = new URL(url).pathname
-    const ext = pathname.split('.').pop()?.toLowerCase()
-    if (ext && ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) {
-      return ext === 'jpeg' ? 'jpg' : ext
-    }
-  } catch { /* ignore */ }
-  return ''
-}
-
 export async function downloadImagesToSandbox(
   conversationId: string,
   results: ImageSearchResult[],
   signal?: AbortSignal,
-): Promise<{ downloaded: string[]; failed: string[] }> {
+  type: ImageSearchType = 'photo',
+): Promise<{ downloaded: string[]; failed: string[]; assets: DownloadedImageAsset[]; failures: Array<{ imageUrl: string; reason: string }> }> {
   const downloaded: string[] = []
   const failed: string[] = []
+  const assets: DownloadedImageAsset[] = []
+  const failures: Array<{ imageUrl: string; reason: string }> = []
 
   const outcomes = await Promise.allSettled(
     results.map(async (result, idx) => {
@@ -197,38 +168,32 @@ export async function downloadImagesToSandbox(
         }
       }
 
-      const contentType = response.headers.get('content-type') || ''
-      let ext = getExtensionFromUrl(result.imageUrl)
-      if (!ext) {
-        for (const [mime, mimeExt] of Object.entries(MIME_TO_EXT)) {
-          if (contentType.includes(mime)) { ext = mimeExt; break }
-        }
-      }
-      if (!ext) ext = 'jpg' // fallback
-
-      const titlePart = sanitizeFilename(result.title || `image_${idx}`)
-      const filename = `${idx}_${titlePart}.${ext}`
-      const filePath = `downloads/${filename}`
-
       const buffer = Buffer.from(await response.arrayBuffer())
       if (signal?.aborted) throw new DOMException('The operation was aborted.', 'AbortError')
       // Real size check after download — catches missing/malformed Content-Length headers
       if (buffer.length > MAX_IMAGE_BYTES) {
         throw new Error('Image exceeds 20MB size limit')
       }
+      const { extension, width, height } = await validateDownloadedImage(buffer, type === 'photo' ? 128 : 16)
+      const titlePart = sanitizeFilename(result.title || `image_${idx}`)
+      const sourceId = createHash('sha256').update(result.imageUrl).digest('hex').slice(0, 10)
+      const filePath = `downloads/${idx}_${titlePart}_${sourceId}.${extension}`
       await writeSandboxFileBytes(conversationId, filePath, new Uint8Array(buffer))
-      return filePath
+      return { ...result, path: filePath, width, height } satisfies DownloadedImageAsset
     })
   )
 
+  signal?.throwIfAborted()
   for (let i = 0; i < outcomes.length; i++) {
     const outcome = outcomes[i]
     if (outcome.status === 'fulfilled') {
-      downloaded.push(outcome.value)
+      downloaded.push(outcome.value.path)
+      assets.push(outcome.value)
     } else {
       failed.push(results[i].imageUrl)
+      failures.push({ imageUrl: results[i].imageUrl, reason: outcome.reason instanceof Error ? outcome.reason.message.slice(0, 200) : 'Image download failed.' })
     }
   }
 
-  return { downloaded, failed }
+  return { downloaded, failed, assets, failures }
 }

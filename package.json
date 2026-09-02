@@ -46,6 +46,8 @@
     "agent:website-credit-smoke": "node scripts/website-build-credit-fence-smoke.mjs",
     "agent:artifact-integrity-smoke": "node scripts/artifact-completion-integrity-smoke.mjs",
     "agent:pdf-export-smoke": "node scripts/pdf-export-runtime-smoke.mjs",
+    "agent:image-assets-smoke": "node scripts/image-assets-runtime-smoke.mjs",
+    "agent:image-panel-smoke": "node scripts/image-search-ui-smoke.mjs",
     "agent:start-protocol-smoke": "node scripts/task-start-protocol-smoke.mjs",
     "agent:start-recovery-smoke": "node scripts/client-task-start-recovery-smoke.mjs",
     "cloud:worker-ready": "node scripts/prod-background-worker-ready.mjs",

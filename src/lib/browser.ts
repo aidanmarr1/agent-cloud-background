@@ -13,7 +13,7 @@ import {
   type BrowserTaskCompletionSignal,
   type BrowserTargetHint,
 } from './browserIntelligence'
-import type { ScreenshotQuality } from './visualQuality'
+import { analyzeScreenshotQuality, type ScreenshotQuality } from './visualQuality'
 import { registerBrowserSessionFenceAcquirer } from './browserSessionLifecycle'
 import { truncateReadablePageContent } from './readablePageLimits'
 
@@ -1537,10 +1537,25 @@ async function getOrCreateSession(conversationId: string): Promise<BrowserSessio
  * directory. A separate page keeps document rendering isolated from the
  * user's live browser tab while preserving the task's sandbox lifecycle.
  */
+export interface DocumentPdfRenderValidation {
+  textCharacters: number
+  headingCount: number
+  linkCount: number
+  tableCount: number
+  horizontalOverflow: boolean
+  bodyBackground: string
+  screenshotQuality: ScreenshotQuality | null
+}
+
+export interface DocumentPdfRenderResult {
+  bytes: Uint8Array
+  validation: DocumentPdfRenderValidation
+}
+
 export async function renderDocumentPdf(
   conversationId: string,
   html: string,
-): Promise<Uint8Array> {
+): Promise<DocumentPdfRenderResult> {
   const session = await getOrCreateSession(conversationId)
   const page = await session.context.newPage()
   let cdp: CDPSession | null = null
@@ -1556,14 +1571,49 @@ export async function renderDocumentPdf(
       }
       await route.abort('blockedbyclient')
     })
+    await page.setViewportSize({ width: 1240, height: 1754 })
+    await page.emulateMedia({ media: 'print' })
     await page.setContent(html, { waitUntil: 'load', timeout: 10_000 })
+    await page.evaluate(async () => {
+      if (document.fonts?.ready) await document.fonts.ready
+    })
+    const layout = await page.evaluate(() => {
+      const root = document.documentElement
+      const body = document.body
+      const textCharacters = (body?.innerText || '').replace(/\s+/g, ' ').trim().length
+      return {
+        textCharacters,
+        headingCount: document.querySelectorAll('h1,h2,h3,h4,h5,h6').length,
+        linkCount: document.querySelectorAll('a[href]').length,
+        tableCount: document.querySelectorAll('table').length,
+        horizontalOverflow: root.scrollWidth > root.clientWidth + 2 || (body?.scrollWidth || 0) > root.clientWidth + 2,
+        bodyBackground: body ? getComputedStyle(body).backgroundColor : '',
+      }
+    })
+    const preview = await page.screenshot({ type: 'png', fullPage: false })
+    const screenshotQuality = await analyzeScreenshotQuality(preview.toString('base64'))
+    if (layout.textCharacters < 8) {
+      throw new Error('Document visual validation failed: rendered page contains no readable content')
+    }
+    if (layout.horizontalOverflow) {
+      throw new Error('Document visual validation failed: rendered content overflows the page horizontally')
+    }
+    if (screenshotQuality?.blank) {
+      throw new Error(`Document visual validation failed: ${screenshotQuality.reason || 'rendered preview is blank'}`)
+    }
     const pdf = await page.pdf({
       format: 'A4',
       preferCSSPageSize: true,
       printBackground: true,
       margin: { top: '0.75in', right: '0.75in', bottom: '0.75in', left: '0.75in' },
     })
-    return new Uint8Array(pdf)
+    return {
+      bytes: new Uint8Array(pdf),
+      validation: {
+        ...layout,
+        screenshotQuality,
+      },
+    }
   } finally {
     await cdp?.detach().catch(() => {})
     await page.close().catch(() => {})

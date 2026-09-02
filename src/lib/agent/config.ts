@@ -3,6 +3,8 @@
  * All magic numbers, thresholds, and tuning parameters live here.
  */
 
+import { WEB_SEARCH_REQUEST_TIMEOUT_MS } from '@/lib/search'
+
 const IS_OLLAMA = false
 
 // --- Iteration & timing ---
@@ -96,7 +98,10 @@ export const TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 2_000
 // healthy, which then sent the model into needless recovery loops. This is a
 // maximum only and does not delay actions that complete quickly.
 export const SANDBOX_IO_TOOL_TIMEOUT_MS = IS_OLLAMA ? 180_000 : 20_000
-export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : 3_500
+// The outer tool watchdog must outlive Serper's own request deadline. Keeping
+// the values derived prevents the pipeline from aborting a healthy paid search
+// several seconds before its HTTP client is prepared to give up.
+export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA ? 120_000 : WEB_SEARCH_REQUEST_TIMEOUT_MS + 2_000
 // Image search includes both Serper discovery and concurrent retrieval of up
 // to eight real assets. It must not inherit the text-search watchdog, which
 // aborted healthy image downloads after 3.5 seconds.

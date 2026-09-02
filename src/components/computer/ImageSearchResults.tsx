@@ -1,11 +1,11 @@
 'use client'
 
-import { ImageSearchPanelItem } from '@/types'
-import { ImageIcon } from '@/components/icons'
+import { ImageSearchPanelItem, ImageSearchPanelResult } from '@/types'
+import { ImageIcon, AlertCircle } from '@/components/icons'
 import { useDeferredEmptyState } from './useDeferredEmptyState'
 
 interface ImageSearchResultsProps {
-  results: ImageSearchPanelItem[]
+  results: ImageSearchPanelItem[] | ImageSearchPanelResult
   streaming?: boolean
   title?: string
 }
@@ -53,7 +53,10 @@ function ImageSearchContextHeader({ title, count, streaming }: { title?: string;
 }
 
 export function ImageSearchResults({ results, streaming, title }: ImageSearchResultsProps) {
-  const items = Array.isArray(results) ? results : []
+  const result = !Array.isArray(results) && results && typeof results === 'object' ? results : null
+  const items = Array.isArray(results) ? results : Array.isArray(result?.images) ? result.images : []
+  const error = typeof result?.error === 'string' ? result.error : ''
+  const warning = typeof result?.warning === 'string' ? result.warning : ''
   const resolvingEmptyResult = useDeferredEmptyState(items.length === 0, streaming)
 
   if (resolvingEmptyResult) {
@@ -77,6 +80,21 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
     )
   }
 
+  if (items.length === 0 && error) {
+    return (
+      <>
+        <ImageSearchContextHeader title={title} count={0} />
+        <div className="flex-1 flex flex-col items-center justify-center h-full py-16 px-6" role="alert">
+          <div className="w-12 h-12 rounded-2xl bg-bg-secondary border border-border-primary flex items-center justify-center mb-4">
+            <AlertCircle size={18} className="text-text-tertiary" strokeWidth={1.75} />
+          </div>
+          <p className="text-[14px] text-text-primary [font-family:var(--font-display)]">Image search unavailable</p>
+          <p className="text-[12px] text-text-tertiary text-center mt-2 max-w-sm break-words">{error}</p>
+        </div>
+      </>
+    )
+  }
+
   if (items.length === 0) {
     return (
       <>
@@ -85,7 +103,8 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
           <div className="w-12 h-12 rounded-2xl bg-bg-secondary border border-border-primary flex items-center justify-center mb-4">
             <ImageIcon size={18} className="text-text-tertiary" strokeWidth={1.75} />
           </div>
-          <p className="text-[14px] text-text-primary [font-family:var(--font-display)]">No images found</p>
+          <p className="text-[14px] text-text-primary [font-family:var(--font-display)]">{warning ? 'Images could not be saved' : 'No images found'}</p>
+          {warning && <p className="text-[12px] text-text-tertiary text-center mt-2 px-6 max-w-sm break-words">{warning}</p>}
         </div>
       </>
     )
@@ -94,6 +113,11 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
   return (
     <div className="overflow-y-auto">
       <ImageSearchContextHeader title={title} count={items.length} streaming={streaming} />
+      {(error || warning) && (
+        <p role="status" className="mx-4 mt-3 px-3 py-2 rounded-lg border border-border-primary bg-bg-secondary text-[12px] text-text-tertiary leading-relaxed break-words">
+          {error || warning}
+        </p>
+      )}
       <div className="p-4 grid grid-cols-2 gap-2.5">
         {items.map((item, i) => {
         const sourceUrl = getSafeHttpUrl(item.sourceUrl)
@@ -129,6 +153,7 @@ export function ImageSearchResults({ results, streaming, title }: ImageSearchRes
             <div className="absolute inset-x-0 bottom-0 bg-[var(--overlay-caption)] px-2.5 py-1.5 opacity-0 group-hover:opacity-100 transition-opacity duration-150">
               <p className="text-[10.5px] text-text-on-accent truncate font-medium">{item.title}</p>
             </div>
+            {item.saved === false && <span className="absolute left-2 top-2 rounded-md bg-bg-primary border border-border-primary px-2 py-1 text-[10px] text-text-secondary">Source preview · not saved</span>}
           </>
         )
 

@@ -54,6 +54,13 @@ export interface ImageSearchPanelItem {
   thumbnailUrl: string
   localUrl: string
   sourceUrl: string
+  saved?: boolean
+}
+
+export interface ImageSearchPanelResult {
+  images: ImageSearchPanelItem[]
+  error?: string
+  warning?: string
 }
 
 export interface FileResult {

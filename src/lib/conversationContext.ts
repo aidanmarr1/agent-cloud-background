@@ -8,6 +8,8 @@ const CONTEXTUAL_UPDATE_PATTERN =
   /^(?:no\b.+|not\b.+|don'?t\b.+|do\s+not\b.+|instead\b.+|actually\b.+|wait\b.*|hold\s+on\b.*|also\b.+|retry\b.+|continue\b.+|go\s+back\b.+|that\b.+|this\b.+|same\b.+|previous\b.+|current\b.+)/i
 const CONTEXTUAL_EDIT_PATTERN =
   /^(?:use|choose|pick|select|make|change|switch|replace|remove|skip|avoid|exclude|include|add|try|export|convert|save|download|package|put)\b.+/i
+const CONTEXTUAL_CONTINUATION_PATTERN =
+  /^(?:okay|ok|sure|alright|thanks|thank\s+you)\b[\s,;:—-]*(?:but|and|also)\b.+/i
 const CONTEXTUAL_REFERENCE_PATTERN =
   /\b(?:it|that|this|those|them|there|above|earlier|previous|current|same|instead|now|also)\b/i
 
@@ -39,6 +41,7 @@ export function isContextualTaskUpdateText(text: string | null | undefined): boo
   if (!trimmed) return false
   const wordCount = trimmed.split(/\s+/).filter(Boolean).length
   if (wordCount > CONTEXTUAL_UPDATE_WORD_LIMIT) return false
+  if (CONTEXTUAL_CONTINUATION_PATTERN.test(trimmed)) return true
   if (CONTEXTUAL_UPDATE_PATTERN.test(trimmed)) return true
   return CONTEXTUAL_EDIT_PATTERN.test(trimmed) && CONTEXTUAL_REFERENCE_PATTERN.test(trimmed)
 }

@@ -6,6 +6,7 @@
 
 import { webSearch } from './search'
 import { imageSearch, downloadImagesToSandbox } from './imageSearch'
+import { imageSearchType } from './imageAssets'
 import {
   createFileInSandbox,
   readFileInSandbox,
@@ -60,17 +61,20 @@ register('image_search', {
   required: ['query'],
   needsConversation: true,
   execute: async (args, ctx) => {
-    const results = await imageSearch(args.query as string, 8, ctx.signal)
+    const results = await imageSearch(args.query as string, 8, ctx.signal, imageSearchType(args.image_type))
     if (results.length === 0) {
-      return { downloaded: [], failed: [], message: 'No images found for this query.' }
+      return { downloaded: [], failed: [], images: [], assets: [], message: 'No matching image candidates found for this query. Try a more specific subject.' }
     }
-    const dl = await downloadImagesToSandbox(ctx.conversationId!, results, ctx.signal)
+    const dl = await downloadImagesToSandbox(ctx.conversationId!, results, ctx.signal, imageSearchType(args.image_type))
     return {
       downloaded: dl.downloaded,
       failed: dl.failed,
+      assets: dl.assets,
+      failures: dl.failures,
       images: results,
       conversationId: ctx.conversationId,
-      message: `Downloaded ${dl.downloaded.length} image(s) to downloads/ directory.${dl.failed.length > 0 ? ` ${dl.failed.length} failed.` : ''}`,
+      ...(dl.failed.length > 0 ? { warning: `${dl.failed.length} image candidate(s) could not be downloaded or validated. Source thumbnails are not saved files.` } : {}),
+      message: `Downloaded and decoded ${dl.downloaded.length} image(s) to downloads/.${dl.failed.length > 0 ? ` ${dl.failed.length} candidates were unavailable or invalid.` : ''} These are candidates, not visually verified photos; inspect relevant images and source attribution before using them.`,
     }
   },
 })

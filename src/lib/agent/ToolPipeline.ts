@@ -1,8 +1,9 @@
 import { executeTool, ToolContext } from '@/lib/tools'
 import { appendFileInSandbox, createFileInSandbox, listFilesInSandbox, getOrCreateSandboxDir, readFileInSandbox } from '@/lib/sandbox'
-import { chargeServerTool } from '@/lib/serverCredits'
+import { chargeServerTool, refundServerToolCharge, type ServerCreditRecord } from '@/lib/serverCredits'
 import { assertWebSearchRequestReady } from '@/lib/search'
 import { markTaskFileDeleted, persistSandboxTaskFile } from '@/lib/taskFiles'
+import { persistImageSearchDownloads } from '@/lib/imageAssets'
 import type { ChatMessageParam } from '@/lib/llm'
 import type { AgentEventEmitter } from './SSEEmitter'
 import {
@@ -2187,8 +2188,8 @@ export class ToolPipeline {
     if (this.signal?.aborted) throw this.abortError()
   }
 
-  private async emitServerToolCharge(toolCallId: string, toolName: string): Promise<void> {
-    if (!this.userId || !this.conversationId) return
+  private async emitServerToolCharge(toolCallId: string, toolName: string): Promise<ServerCreditRecord | null> {
+    if (!this.userId || !this.conversationId) return null
     const recorded = await chargeServerTool(
       this.userId,
       this.conversationId,
@@ -2197,6 +2198,19 @@ export class ToolPipeline {
       this.creditRunId,
     )
     if (recorded?.created) this.emitter.creditEvent(recorded.entry)
+    return recorded
+  }
+
+  private async refundUnavailableServerToolCharge(toolCallId: string, toolName: string): Promise<void> {
+    if (!this.userId || !this.conversationId) return
+    const refunded = await refundServerToolCharge(
+      this.userId,
+      this.conversationId,
+      toolName,
+      `attempt:${this.creditAttempt}:${toolCallId}`,
+      this.creditRunId,
+    )
+    if (refunded?.created) this.emitter.creditEvent(refunded.entry)
   }
 
   private async persistGeneratedTaskFile(toolName: string, args: Record<string, unknown>, result: unknown): Promise<void> {
@@ -2216,25 +2230,6 @@ export class ToolPipeline {
         conversationId: this.conversationId,
         path: deletePath,
       })
-      return
-    }
-
-    if (toolName === 'image_search') {
-      const downloaded = Array.isArray((result as { downloaded?: unknown }).downloaded)
-        ? (result as { downloaded: unknown[] }).downloaded
-        : []
-      for (const rawPath of downloaded) {
-        const path = typeof rawPath === 'string' ? rawPath : ''
-        if (!path) continue
-        const persisted = await persistSandboxTaskFile({
-          userId: this.userId,
-          conversationId: this.conversationId,
-          path,
-        })
-        if (!persisted) {
-          throw new Error(`Downloaded image "${path}" could not be copied to durable task storage.`)
-        }
-      }
       return
     }
 
@@ -4015,30 +4010,6 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
-    if (tc.name === 'web_search') {
-      const query = ((args.query as string) || '').toLowerCase().trim()
-      if (query && state.stepSearchQueries.has(query)) {
-        const errorMessage = `INTERNAL_RECOVERY: this web_search query already ran in the active phase. Do not show this to the user. Use a different query, read/extract a strong source from the existing results, or emit <next_step/> if the phase has enough evidence.`
-        const errorResult = { error: errorMessage }
-        this.recordResearchActivity(state, {
-          tool: tc.name,
-          kind: 'failure',
-          query,
-          success: false,
-          error: errorMessage,
-        })
-        recordWorkLedgerFailure(state, {
-          tool: tc.name,
-          target: query,
-          error: errorMessage,
-        })
-        trackToolCall(state, tc.name, JSON.stringify(args))
-        state.stepToolCallCount++
-        state.lastLoopSignal = { type: 'search_duplicate', tool: 'web_search' }
-        return preflightResult(errorResult)
-      }
-    }
-
     // Emit tool_start after final-step/browser-action/file-write preflight so blocked
     // calls do not appear in the UI as if the agent actually acted.
     const startArgs = buildToolStartArgsForExecution(tc.name, args)
@@ -4278,7 +4249,7 @@ export class ToolPipeline {
     }
 
     // --- Execute with timeout and retry ---
-    await this.emitServerToolCharge(tc.id, tc.name)
+    const serverToolCharge = await this.emitServerToolCharge(tc.id, tc.name)
     let result: unknown
     const executeFn = async () => {
       this.throwIfAborted()
@@ -4400,6 +4371,9 @@ export class ToolPipeline {
         // create, but the exact file was found on reconciliation.
       } else if (searchRecovery) {
         result = searchRecovery
+        if (serverToolCharge) {
+          await this.refundUnavailableServerToolCharge(tc.id, tc.name)
+        }
       } else if (documentRecovery) {
         result = documentRecovery
       } else {
@@ -4411,6 +4385,20 @@ export class ToolPipeline {
           error: `Tool execution failed: ${errMsg}${sideEffectWarning}`,
         }
       }
+    }
+
+    // Persist image candidates independently before tracking or emitting them.
+    // A single optional asset failing storage is a recoverable partial result,
+    // not a terminal failure that discards every successful image and the task.
+    if (tc.name === 'image_search' && this.userId && this.conversationId && result && typeof result === 'object' && !('error' in result)) {
+      result = await persistImageSearchDownloads(result as Record<string, unknown>, async (path) => {
+        try {
+          return await persistSandboxTaskFile({ userId: this.userId!, conversationId: this.conversationId!, path })
+        } catch (error) {
+          this.logger?.warn('Could not persist an image candidate', { path, error: error instanceof Error ? error.message : String(error) })
+          throw error
+        }
+      }, this.signal ?? undefined)
     }
 
     // --- Error tracking: record failures without substituting another tool ---
@@ -4752,7 +4740,11 @@ export class ToolPipeline {
         this.memory.recordFileCreated(path, state.currentStepIdx)
       }
     } else if (!isError && tc.name === 'export_pdf') {
-      const pdfResult = result as { path?: string } | undefined
+      const pdfResult = result as {
+        path?: string
+        validated?: boolean
+        renderValidation?: { previewNonBlank?: boolean; horizontalOverflow?: boolean }
+      } | undefined
       const path = pdfResult?.path || (args.output_path as string) || ''
       const sourcePath = normalizeSandboxFilePath(String(args.source_path || ''))
       // Native export necessarily reads the source in the sandbox. Record that
@@ -4761,10 +4753,12 @@ export class ToolPipeline {
       // read_file call before invoking the exporter.
       if (sourcePath) state.inputArtifactPathsRead.add(sourcePath)
       if (path) state.createdFiles.add(path)
-      state.deliverableVerified = true
+      state.deliverableVerified = pdfResult?.validated === true &&
+        pdfResult.renderValidation?.previewNonBlank === true &&
+        pdfResult.renderValidation?.horizontalOverflow === false
       recordWorkLedgerVerification(state, {
         kind: 'native-pdf-export',
-        detail: `Native PDF export validated the rendered PDF signature, non-empty byte size, and durable output${path ? ` at ${path}` : ''}.`,
+        detail: `Native PDF export validated its signature, readable non-blank rendered preview, white print canvas, overflow-free A4 layout, and durable output${path ? ` at ${path}` : ''}.`,
       })
       logWork(state, `Exported PDF: ${path}`)
       if (this.memory && path) {
@@ -4876,14 +4870,12 @@ export class ToolPipeline {
       logWork(state, `Edited file: ${(args.path as string) || ''}`)
     }
 
-    if (!isError && (tc.name === 'create_file' || tc.name === 'create_website' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'package_files' || tc.name === 'delete_file' || tc.name === 'image_search')) {
+    if (!isError && (tc.name === 'create_file' || tc.name === 'create_website' || tc.name === 'append_file' || tc.name === 'edit_file' || tc.name === 'export_pdf' || tc.name === 'package_files' || tc.name === 'delete_file')) {
       try {
         await this.persistGeneratedTaskFile(tc.name, args, result)
       } catch (error) {
         this.emitter.toolResult(tc.id, tc.name, {
-          error: tc.name === 'image_search'
-            ? 'The images downloaded in the active workspace but could not be saved durably.'
-            : 'The file operation completed in the active workspace but could not be saved durably.',
+          error: 'The file operation completed in the active workspace but could not be saved durably.',
           path: String((args.path as string | undefined) || (args.output_path as string | undefined) || ''),
         } as never)
         throw error

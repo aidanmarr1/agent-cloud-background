@@ -248,13 +248,13 @@ async function assertSourceContracts() {
   assert.match(prompts, /Custom instructions supersede.*including the visible number of plan phases\/steps.*except for safety, permissions, sandbox\/tool availability, and core runtime rules/s, 'custom instructions must supersede defaults including visible phase count except safety/core rules')
   assert.match(prompts, /They do NOT supersede safety, permissions, sandbox\/tool availability, or core runtime rules/, 'planner prompt must preserve safety/core constraints above custom instructions')
   assert.match(prompts, /fixed number of visible phases, honor that count/, 'planner prompt must honor custom visible phase-count instructions')
-  assert.match(planManager, /PLANNER_ACK_MAX_TOKENS = 320/, 'planner acknowledgement generation must leave room for a complete visible sentence')
+  assert.match(planManager, /PLANNER_ACK_MAX_TOKENS = 768/, 'planner acknowledgement generation must leave enough room for visible text even when the provider uses hidden reasoning tokens')
   assert.match(planManager, /PLANNER_SIMPLE_JSON_MAX_TOKENS = 1_200/, 'simple planner JSON calls must have room for task-specific internal checklists without truncation')
   assert.match(planManager, /PLANNER_MEDIUM_JSON_MAX_TOKENS = 2_000/, 'medium planner JSON calls must have room for task-specific internal checklists')
   assert.match(planManager, /PLANNER_JSON_MAX_TOKENS = 2_800/, 'complex planner JSON calls must preserve detailed task-specific planning headroom')
   assert.match(planManager, /plannerJsonMaxTokens/, 'planner calls must use a task-sized token budget instead of one slow blanket cap')
   assert.match(planManager, /REPLAN_JSON_MAX_TOKENS = 520/, 'replanning JSON calls must use a compact output cap')
-  assert.match(planManager, /PLANNER_ACK_REQUEST_TIMEOUT_MS = 6_000/, 'a slow dedicated acknowledgement must yield quickly to the planner-authored fallback')
+  assert.match(planManager, /PLANNER_ACK_REQUEST_TIMEOUT_MS = 10_000/, 'a dedicated acknowledgement must have a bounded window that tolerates provider startup without creating a fixed reveal gate')
   assert.doesNotMatch(planManager, /PLANNER_ACK_THOUGHTFUL_MIN_MS|waitForThoughtfulAcknowledgementWindow/, 'startup acknowledgement must show as soon as usable model text is available')
   assert.match(prompts, /getFastPlanningPrompt/, 'planner must expose a compact first-pass planning prompt')
   assert.match(planManager, /PLANNER_FAST_JSON_MAX_TOKENS = 1_600/, 'fast planner should have enough output room to finish structured multi-step JSON with internal checklists')
@@ -713,7 +713,7 @@ async function assertSourceContracts() {
   assert.match(validationSchemas, /contentEncoding:\s*z\.enum\(\['text',\s*'data-url'\]\)/, 'chat validation must preserve attachment contentEncoding')
   assert.match(streamConstants, /read_attachment:\s*'read_file'/, 'client must render read_attachment as a file-style subtask')
   assert.doesNotMatch(agentLoop, /buildTaskStartAcknowledgement|I'll open the site, check what loads/, 'agent startup acknowledgement must not use a hardcoded generic sentence')
-  assert.match(planManager, /function isSafeStreamingPlannerAckDraft\(ack: string, request: string\): boolean \{[\s\S]*isUsablePlannerAck\(ack, request\)/, 'startup must withhold incomplete acknowledgement fragments until the streamed draft is a usable task-specific sentence')
+  assert.match(planManager, /function isSafeStreamingPlannerAckDraft\(ack: string, request: string\): boolean \{[\s\S]*\^I\(\?:'ll\| will\)[\s\S]*ackWordCount\(ack\) >= 3/, 'startup must release a safe model-authored acknowledgement prefix while it is still generating')
   assert.match(planManager, /function completedPlannerAckFromJson[\s\S]*JSON\.parse\(raw\.slice\(openingQuote, index \+ 1\)\)/, 'ordinary startup must extract only a complete JSON acknowledgement string, never an unretractable fragment')
   assert.match(planManager, /scheduleAcknowledgementCall[\s\S]*emitModelGeneratedAcknowledgement\('task'\)/, 'ordinary startup must stream a dedicated model-authored acknowledgement')
   assert.match(planManager, /dedicatedAcknowledgementForPlan \|\|[\s\S]*emitAcknowledgementFromStreamingPlan/, 'the structured planner stream must not emit a competing acknowledgement when the dedicated opening owns startup text')
@@ -723,8 +723,8 @@ async function assertSourceContracts() {
   assert.doesNotMatch(planManager, /pendingVisibleAck|flushPendingVisibleAck/, 'planner acknowledgement must not expose repeated provider fragments as separate visible messages')
   assert.match(planManager, /comparisonTargets[\s\S]*isUsablePlannerAck\(ack: string, request = ''\)[\s\S]*requiredComparisonTargets/, 'planner acknowledgement quality must cover both sides of comparison requests')
   assert.match(planManager, /repairAcknowledgementCandidate[\s\S]*PLANNER DRAFT TO IMPROVE[\s\S]*EARLY DRAFT TO IMPROVE[\s\S]*isUsablePlannerAck\(repaired, effectiveTaskRequest\(this\.messages\)\)/, 'unusable acknowledgement drafts must receive one model-written full-request repair instead of a hardcoded fallback or a missing acknowledgement')
-  assert.match(planManager, /private emitPlanAfterAcknowledgement\(items: string\[\]\): boolean \{[\s\S]*!this\.skipAcknowledgement && !this\.acknowledgementEmitted[\s\S]*return false[\s\S]*this\.emitter\.plan\(items\)/, 'every visible plan emission must pass the model-authored acknowledgement gate')
-  assert.match(planManager, /const acknowledged = await this\.emitAcknowledgement\(obj\.ack, mappedTaskType\)[\s\S]*!acknowledged \|\| \(!this\.skipAcknowledgement && !this\.acknowledgementEmitted\)[\s\S]*throw new Error\(PLANNER_QUALITY_ERROR\)[\s\S]*emitPlanAfterAcknowledgement\(modelPlan\.titles\)/, 'normal planner output must fail model repair rather than expose a plan without an acknowledgement')
+  assert.match(planManager, /private emitPlanAfterAcknowledgement\(items: string\[\]\): boolean \{[\s\S]*acknowledgementStreamStarted[\s\S]*this\.emitter\.textDelta[\s\S]*acknowledgementEmitted = true[\s\S]*this\.emitter\.plan\(items\)/, 'a visible model-authored acknowledgement prefix must be closed before the plan is released')
+  assert.match(planManager, /const acknowledged = await this\.emitAcknowledgement\(obj\.ack, mappedTaskType\)[\s\S]*const acknowledgementAvailable = acknowledged \|\| this\.acknowledgementEmitted \|\| this\.acknowledgementStreamStarted[\s\S]*if \(!acknowledgementAvailable\)[\s\S]*emitPlanAfterAcknowledgement\(modelPlan\.titles\)/, 'normal planner output must preserve a valid task-specific plan when a model-authored acknowledgement prefix is already visible')
   assert.match(streamProcessor, /toolCalls\.size === 0[\s\S]*this\.emitter\.textDelta\(`\\n\\n\$\{assistantContent\}`\)/, 'each accepted text-only model turn must begin at a paragraph boundary instead of concatenating with earlier narration')
   assert.match(streamProcessor, /toolCalls\.size > 0 && !cadenceProgressUpdate[\s\S]*assistantContent = ''/, 'ordinary prose must be suppressed when the completed native turn yields a tool call')
   assert.match(planManager, /startPlanCall\(\): void \{[\s\S]*scheduleAcknowledgementCall\(\)[\s\S]*attemptPlanCall\(0,\s*true\)/, 'normal startup must start acknowledgement first and planning immediately afterward')
@@ -1063,9 +1063,11 @@ async function assertSourceContracts() {
   assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker route must not create deterministic local plans')
   assert.match(
     chatRoute,
-    /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Thinking…',\s*\},\s*\]/,
-    'external-worker route must immediately persist truthful thinking progress before worker-emitted startup stages',
+    /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*startIsolatedTaskSandbox \? 'Initializing new computer…' : 'Thinking…',\s*\},\s*\]/,
+    'external-worker route must immediately distinguish a fresh computer start from a continuation that is only thinking',
   )
+  assert.match(chatRoute, /initialProgressEmitted:\s*true/, 'the queued worker payload must not emit a duplicate startup status')
+  assert.match(chatTaskRunner, /if \(!initialProgressEmitted\) \{[\s\S]*Initializing new computer…[\s\S]*Thinking…/, 'the worker must emit startup status only when the route did not already persist it')
   assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload/, 'external-worker route must durably enqueue before returning while the worker owns visible planning')
   assert.doesNotMatch(chatRoute, /startupPlanExpected:\s*!directChat && useExternalWorker/, 'worker must not wait behind route-owned startup planning after claiming a queued job')
   assert.ok(chatRoute.indexOf('findActiveTaskJobForConversation(userId, conversationId)') < chatRoute.indexOf('enqueueTaskJob({'), 'same-conversation queued or running work must be detected before enqueue')
@@ -1752,6 +1754,7 @@ import {
   isContextualTaskUpdate,
   planningTaskRequest,
 } from ${JSON.stringify(join(root, 'src/lib/conversationContext.ts'))}
+import { shouldUseDirectChat } from ${JSON.stringify(join(root, 'src/lib/directChatRouting.ts'))}
 import {
   resolveStrategy,
 } from ${JSON.stringify(join(root, 'src/lib/agent/TaskStrategy.ts'))}
@@ -1820,6 +1823,14 @@ export async function runLedgerSmoke() {
   assert.ok(planningTaskRequest(exportFollowUpMessages).includes('deliverables/ai-state-of-the-art-report.md'), 'planning must receive the compact prior artifact hand-off')
   assert.ok(planningTaskRequest(exportFollowUpMessages).includes('Latest user direction (authoritative): Put it in a pdf'), 'planning must lead with the exact current conversion instruction')
   assert.equal(resolveStrategy(exportFollowUpMessages).type, 'build', 'artifact conversion follow-ups must use file/export tools instead of repeating earlier research')
+
+  const styledPdfFollowUpMessages = [
+    { role: 'user', content: 'Research the current state of AI' },
+    { role: 'assistant', content: 'The report is ready at deliverables/ai-state-of-the-art-report.md.' },
+    { role: 'user', content: 'okay but can u remove the grey box around it and make it nicely designed' },
+  ]
+  assert.equal(isContextualTaskUpdate(styledPdfFollowUpMessages), true, 'conversational acknowledgements with a concrete artifact revision must retain task context')
+  assert.equal(shouldUseDirectChat(styledPdfFollowUpMessages), false, 'a contextual artifact revision must not be swallowed by lightweight social-chat routing')
 
   const registry = new ToolRegistry()
   for (const name of ['create_file', 'web_search', 'browser_navigate']) {

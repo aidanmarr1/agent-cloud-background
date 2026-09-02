@@ -6538,7 +6538,12 @@ export class AgentLoop {
                 } else if (deliverableResult.tc.name === 'export_pdf') {
                   const originalRequest = messages[messages.length - 1]?.content || ''
                   const wantsPdf = /\bpdf\b/i.test(originalRequest)
-                  const pdfPath = (deliverableResult.result as { path?: string })?.path || ''
+                  const pdfResult = deliverableResult.result as {
+                    path?: string
+                    validated?: boolean
+                    renderValidation?: { previewNonBlank?: boolean; horizontalOverflow?: boolean }
+                  }
+                  const pdfPath = pdfResult?.path || ''
                   if (wantsPdf && !pdfPath.toLowerCase().endsWith('.pdf') && state.deliverableRevisionCount < MAX_DELIVERABLE_REVISIONS) {
                     state.deliverableRevisionCount++
                     contextManager.push({
@@ -6546,6 +6551,15 @@ export class AgentLoop {
                       content: 'OUTPUT QUALITY CHECK FAILED: The user requested a PDF, but the exported file path is not a .pdf. Call export_pdf again with an output_path ending in .pdf.',
                     } as ChatMessageParam)
                     phase = 'EVALUATING'
+                    break
+                  }
+                  const renderedPdfVerified = pdfResult?.validated === true &&
+                    pdfResult.renderValidation?.previewNonBlank === true &&
+                    pdfResult.renderValidation?.horizontalOverflow === false
+                  if (!renderedPdfVerified) {
+                    state.deliverableVerificationDone = false
+                    terminalReason = 'deliverable_verification_failed'
+                    phase = 'COMPLETE'
                     break
                   }
                 }

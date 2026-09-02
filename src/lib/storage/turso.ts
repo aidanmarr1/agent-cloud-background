@@ -11,7 +11,9 @@ let storageSchemaPromise: Promise<void> | null = null
 
 export function normalizeTursoStorageKey(key: string): string {
   const normalized = key.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/')
-  if (!normalized || normalized.includes('..') || !STORAGE_KEY_PATTERN.test(normalized)) {
+  // Dots inside a filename (for example a search title ending in "...")
+  // are not path traversal. Reject traversal segments, not safe filenames.
+  if (!normalized || normalized.split('/').some(part => part === '.' || part === '..') || !STORAGE_KEY_PATTERN.test(normalized)) {
     throw new Error('Invalid storage key')
   }
   return normalized

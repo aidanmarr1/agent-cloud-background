@@ -1,10 +1,10 @@
-import type { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, BrowserResult } from './results'
+import type { SearchResult, BrowseResult, TerminalResult, FileResult, ImageSearchPanelItem, ImageSearchPanelResult, BrowserResult } from './results'
 
 export interface ComputerPanelItem {
   id: string
   type: 'search' | 'browse' | 'terminal' | 'file' | 'image_search' | 'browser'
   title: string
-  data: SearchResult[] | BrowseResult | TerminalResult | FileResult | ImageSearchPanelItem[] | BrowserResult
+  data: SearchResult[] | BrowseResult | TerminalResult | FileResult | ImageSearchPanelItem[] | ImageSearchPanelResult | BrowserResult
   timestamp: number
   streaming?: boolean
 }

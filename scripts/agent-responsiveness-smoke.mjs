@@ -41,11 +41,12 @@ assert.match(config, /checkIntervalMs:\s*150/, 'timeout watchdog must check ofte
 assert.match(config, /export const STREAM_REQUEST_TIMEOUT_MS = 60_000/, 'streaming model requests must tolerate routed provider startup while remaining bounded')
 assert.match(config, /export const STREAM_RETRY_MAX_DELAY_MS = 1_500/, 'stream retries must not sleep for provider-scale retry windows')
 assert.match(config, /export const STREAM_MAX_RETRIES = 0/, 'agent streaming retries must not hide slow starts behind invisible retry waits')
-assert.match(config, /export const WEB_SEARCH_TOOL_TIMEOUT_MS = .*3_500/, 'web search needs a bounded timeout that covers Serper-backed search calls')
+assert.match(search, /export const WEB_SEARCH_REQUEST_TIMEOUT_MS = 8_000/, 'Serper search must own one explicit provider request timeout')
+assert.match(config, /export const WEB_SEARCH_TOOL_TIMEOUT_MS = IS_OLLAMA \? 120_000 : WEB_SEARCH_REQUEST_TIMEOUT_MS \+ 2_000/, 'the outer search watchdog must leave time for the provider request to settle cleanly')
 assert.match(config, /export const IMAGE_SEARCH_TOOL_TIMEOUT_MS = .*25_000/, 'image search needs enough time for Serper discovery plus real asset downloads')
 assert.match(config, /export const BROWSER_TOOL_TIMEOUT_MS = .*20_000/, 'browser actions need enough time to return real rendered state without entering rapid retry loops')
 assert.match(config, /export const DOCUMENT_TOOL_TIMEOUT_MS = .*15_000/, 'document reads need enough time to return extracted content or a structured recovery result')
-assert.match(config, /export const FILE_WRITE_TOOL_TIMEOUT_MS = .*8_000/, 'file writes must not wait for multi-minute stalls')
+assert.match(config, /export const FILE_WRITE_TOOL_TIMEOUT_MS = IS_OLLAMA \? 8 \* 60 \* 1000 : 30_000/, 'remote file writes must tolerate sandbox wake time while remaining bounded well below a multi-minute stall')
 
 assert.match(toolPipeline, /function timeoutMsForTool\(toolName: string\): number/, 'tool pipeline must route tool-specific timeouts')
 assert.match(toolPipeline, /toolName === 'web_search'\) return WEB_SEARCH_TOOL_TIMEOUT_MS[\s\S]*toolName === 'image_search'\) return IMAGE_SEARCH_TOOL_TIMEOUT_MS/, 'image search must use its download-aware timeout instead of the text-search watchdog')
@@ -91,7 +92,7 @@ assert.match(streamProcessor, /orderedEntries\.slice\(0, maxStreamedToolCalls\)/
 assert.match(streamProcessor, /Tool-call chunks reset provider inactivity through lastChunkTime[\s\S]*Only reset visible inactivity once an action pill or file preview/, 'hidden tool arguments must not keep an apparently frozen UI alive forever')
 assert.match(streamProcessor, /Timeout with tool calls in progress:[\s\S]*route malformed\/incomplete JSON through internal recovery[\s\S]*Non-fatal timeout during tool streaming/, 'timed-out partial tool calls must be returned for tool-pipeline recovery instead of terminal task errors')
 assert.doesNotMatch(streamProcessor, /INLINE_FINAL_TEXT_STREAM_CAP/, 'final in-chat answers must not be clipped by a fixed character ceiling')
-assert.match(streamProcessor, /textSavedDeliverable \|\| inlineFinalAnswerAllowsLongText\(state\)[\s\S]*\? null[\s\S]*TEXT_ONLY_CAP !== null/, 'final answers and saved text deliverables must drain the full configured model output instead of entering text-overflow suppression')
+assert.match(streamProcessor, /const allowLongAssistantText = !!textSavedDeliverable[\s\S]*inlineFinalAnswerAllowsLongText\(state\)[\s\S]*const TEXT_ONLY_CAP[\s\S]*\? null[\s\S]*TEXT_ONLY_CAP !== null/, 'final answers and saved text deliverables must drain the full configured model output instead of entering text-overflow suppression')
 assert.match(agentLoop, /FINAL_INLINE_ANSWER_CONTENT_ONLY_TIMEOUT_MS = FINAL_INLINE_ANSWER_ITERATION_TIMEOUT_MS/, 'a substantive final in-chat answer must retain its full iteration budget after text starts streaming')
 assert.doesNotMatch(streamProcessor, /if \(toolName === 'read_document'/, 'source-read pills must wait for committed execution so they cannot get stranded during source extraction retries')
 assert.doesNotMatch(streamProcessor, /if \(toolName === 'browser_navigate' \|\| toolName === 'browse_page'\)/, 'browser navigation pills must wait for committed execution so preflight/reroute guards cannot leave ghost actions')
@@ -150,9 +151,10 @@ assert.doesNotMatch(chatRoute, /taskStartPromise = workerStartupPlanPromise\.the
 assert.doesNotMatch(chatRoute, /createFastStartupPlan|chooseFastStartupPlan|fastStartupPlanSubject/, 'external-worker chat route must not fabricate deterministic visible plans')
 assert.match(
   chatRoute,
-  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*'Thinking…',\s*\},\s*\]/,
-  'external-worker chat route should immediately persist truthful thinking progress before worker-owned startup stages',
+  /const initialEvents:\s*SSEEvent\[\]\s*=\s*\[\s*heartbeatEvent,\s*\{\s*type:\s*'progress_update',\s*content:\s*startIsolatedTaskSandbox \? 'Initializing new computer…' : 'Thinking…',\s*\},\s*\]/,
+  'external-worker chat route should immediately persist truthful fresh-start or continuation progress before worker-owned startup stages',
 )
+assert.match(chatRoute, /initialProgressEmitted:\s*true/, 'worker startup must not duplicate the route-persisted status')
 assert.match(chatRoute, /startupPlanExpected: false[\s\S]*await enqueueTaskJob\(\{[\s\S]*payload: queuedTaskPayload[\s\S]*markRouteTiming\('taskQueuedMs'\)/, 'external-worker chat route must durably enqueue before returning an accepted stream')
 assert.match(chatRoute, /catch \(error\) \{[\s\S]*error instanceof TaskConversationConflictError[\s\S]*status: 409/, 'atomic enqueue conflicts must remain truthful HTTP 409 responses')
 assert.ok(chatRoute.indexOf('if (access && !access.ok)') < chatRoute.indexOf('enqueueTaskJob({'), 'task access must be approved before enqueue')

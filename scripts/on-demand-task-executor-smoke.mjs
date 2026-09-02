@@ -212,7 +212,7 @@ check('rollout holds intake and verifies Render before activating Vercel', () =>
 check('immediate progress is durable and truthful', () => {
   const initialEvents = sources.chatRoute.indexOf('const initialEvents: SSEEvent[]')
   const progress = sources.chatRoute.indexOf(
-    "content: 'Thinking…'",
+    "content: startIsolatedTaskSandbox ? 'Initializing new computer…' : 'Thinking…'",
     initialEvents,
   )
   const enqueue = sources.chatRoute.indexOf('await enqueueTaskJob({', progress)
@@ -221,8 +221,8 @@ check('immediate progress is durable and truthful', () => {
   assert(enqueue > progress, 'the preparation event must exist before enqueue begins')
   assert.match(
     sources.chatRoute.slice(initialEvents, enqueue + 300),
-    /type:\s*'progress_update'[\s\S]*Thinking…[\s\S]*initialEvents,/,
-    'task acceptance must enqueue a truthful thinking event instead of claiming work already happened',
+    /type:\s*'progress_update'[\s\S]*Initializing new computer…[\s\S]*Thinking…[\s\S]*initialEvents,/,
+    'task acceptance must enqueue a truthful fresh-computer or continuation status instead of claiming work already happened',
   )
   assert.match(
     exportedFunction(sources.taskJobs, 'enqueueTaskJob'),

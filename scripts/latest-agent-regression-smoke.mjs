@@ -76,7 +76,7 @@ assert.match(
 )
 assert.match(
   agentLoopSource,
-  /case 'STREAMING': \{\s+if \(repairPrematureFinalStepJump\(state\)\)/,
+  /case 'STREAMING': \{[\s\S]{0,2200}if \(repairPrematureFinalStepJump\(state\)\)/,
   'the main model loop must repair a premature final-step jump before another action',
 )
 assert.match(

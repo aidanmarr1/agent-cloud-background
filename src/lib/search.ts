@@ -9,7 +9,7 @@ const WEB_SEARCH_RESULT_COUNT = 15
 // paid request per accepted web_search while giving that request enough time to
 // finish; retrying would cost another search credit and is intentionally not
 // done here.
-const WEB_SEARCH_REQUEST_TIMEOUT_MS = 8_000
+export const WEB_SEARCH_REQUEST_TIMEOUT_MS = 8_000
 
 interface SerperOrganicResult {
   title?: string

@@ -16,7 +16,7 @@ function storageRoot(): string {
 
 export function normalizeStorageKey(key: string): string {
   const normalized = key.replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+/g, '/')
-  if (!normalized || normalized.includes('..') || !STORAGE_KEY_PATTERN.test(normalized)) {
+  if (!normalized || normalized.split('/').some(part => part === '.' || part === '..') || !STORAGE_KEY_PATTERN.test(normalized)) {
     throw new Error('Invalid storage key')
   }
   return normalized
@@ -27,7 +27,7 @@ function resolveStoragePath(key: string): string {
   const normalized = normalizeStorageKey(key)
   const target = resolve(root, normalized)
   const rel = relative(root, target)
-  if (rel.startsWith('..') || isAbsolute(rel)) {
+  if (rel === '..' || rel.startsWith('../') || isAbsolute(rel)) {
     throw new Error('Invalid storage key')
   }
   return target
@@ -35,7 +35,7 @@ function resolveStoragePath(key: string): string {
 
 function isInsideStorageRoot(root: string, target: string): boolean {
   const rel = relative(root, target)
-  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
+  return rel === '' || (rel !== '..' && !rel.startsWith('../') && !isAbsolute(rel))
 }
 
 async function realStorageRoot(): Promise<string> {

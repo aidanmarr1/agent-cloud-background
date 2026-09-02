@@ -1,6 +1,6 @@
 import type {
   ComputerPanelItem, SearchResult, BrowseResult, TerminalResult,
-  FileResult, ImageSearchPanelItem, BrowserResult,
+  FileResult, ImageSearchPanelItem, ImageSearchPanelResult, BrowserResult,
 } from '@/types'
 import { FILE_TOOLS, BROWSER_TOOLS, BROWSE_TOOLS } from '@/lib/stream/constants'
 
@@ -131,7 +131,7 @@ function transformPanelData(
   name: string,
   result: unknown,
   conversationId: string,
-): SearchResult[] | BrowseResult | TerminalResult | FileResult | ImageSearchPanelItem[] | BrowserResult {
+): ComputerPanelItem['data'] {
   if (name === 'web_search' && !Array.isArray(result)) {
     return [] as SearchResult[]
   }
@@ -140,6 +140,7 @@ function transformPanelData(
     const imgResult = asRecord(result)
     const rawImages = imgResult?.images
     const rawDownloaded = imgResult?.downloaded
+    const rawAssets = imgResult?.assets
     const images = Array.isArray(rawImages)
       ? rawImages as Array<{ title?: string; thumbnailUrl?: string; sourceUrl?: string; imageUrl?: string }>
       : []
@@ -147,15 +148,39 @@ function transformPanelData(
       ? rawDownloaded.filter((item): item is string => typeof item === 'string')
       : []
     const convId = stringField(imgResult, 'conversationId') || conversationId
-    return downloaded.map((filePath: string, idx: number) => {
-      const image = images[idx]
+    const assets = Array.isArray(rawAssets) ? rawAssets.map(asRecord).filter(asset => asset !== null) : []
+    const items: ImageSearchPanelItem[] = downloaded.map((filePath: string) => {
+      // Downloads can fail in the middle of the candidate set. Preserve the
+      // explicit path/source relationship; compacted array indices are wrong.
+      const asset = assets.find(item => item.path === filePath)
+      const originalIndex = Number(filePath.split('/').pop()?.match(/^(\d+)_/)?.[1])
+      const image = asset || (Number.isInteger(originalIndex) ? images[originalIndex] : undefined)
       return {
-        title: image?.title || filePath.split('/').pop() || 'Image',
-        thumbnailUrl: image?.thumbnailUrl || '',
-        localUrl: `/api/sandbox/${convId}/${filePath}`,
-        sourceUrl: image?.sourceUrl || '',
+        title: typeof image?.title === 'string' ? image.title : filePath.split('/').pop() || 'Image',
+        thumbnailUrl: typeof image?.thumbnailUrl === 'string' ? image.thumbnailUrl : '',
+        localUrl: `/api/files?conversationId=${encodeURIComponent(convId)}&file=${encodeURIComponent(filePath)}&inline=1`,
+        sourceUrl: typeof image?.sourceUrl === 'string' ? image.sourceUrl : '',
+        saved: true,
       }
-    }) as ImageSearchPanelItem[]
+    })
+    const error = stringField(imgResult, 'error')
+    const warning = stringField(imgResult, 'warning')
+    // Keep remote candidates visible when none could be downloaded, but label
+    // them as previews rather than pretending they are saved local images.
+    if (items.length === 0) {
+      items.push(...images.map(image => ({
+        title: image.title || 'Image candidate',
+        thumbnailUrl: image.thumbnailUrl || image.imageUrl || '',
+        localUrl: '',
+        sourceUrl: image.sourceUrl || '',
+        saved: false,
+      })))
+    }
+    return {
+      images: items,
+      ...(error ? { error } : {}),
+      ...(warning ? { warning } : {}),
+    } satisfies ImageSearchPanelResult
   }
 
   if (name === 'read_document') {

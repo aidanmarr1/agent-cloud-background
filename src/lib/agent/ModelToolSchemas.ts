@@ -15,7 +15,7 @@ const BOUNDED_FILE_CONTENT_TOOLS = new Set(['create_file', 'append_file'])
 // every tool remains available without paying for the same prose 29 times.
 const COMPACT_TOOL_DESCRIPTIONS: Record<string, string> = {
   web_search: 'Discover candidate webpage URLs from a topical query; results are source previews, not extracted page evidence.',
-  image_search: 'Find and download real image assets.',
+  image_search: 'Find and download photo candidates; choose image_type any for other assets. Inspect images and sources before use.',
   create_file: 'Create a new workspace file with complete content.',
   read_file: 'Read a workspace file.',
   delete_file: 'Delete a workspace file.',

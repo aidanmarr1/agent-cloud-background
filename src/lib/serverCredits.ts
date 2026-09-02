@@ -1384,6 +1384,32 @@ export async function chargeServerTool(
   }), { requireFullAmount: true })
 }
 
+/**
+ * Reverse one prepaid external-tool charge when the accepted provider request
+ * returns no usable result because the provider failed or timed out. The
+ * deterministic ledger id makes worker retries and recovery replays safe.
+ */
+export async function refundServerToolCharge(
+  userId: string,
+  conversationId: string,
+  toolName: string,
+  toolCallId: string,
+  runId?: string,
+): Promise<ServerCreditRecord | null> {
+  const amount = toolCreditCharge(toolName)
+  if (amount <= 0) return null
+
+  return recordServerCreditEvent(userId, conversationId, makeEntry({
+    id: `credit:${runId || 'standalone'}:${toolCallId}:tool-refund:${toolName}`,
+    runId,
+    conversationId,
+    amount: -amount,
+    category: 'adjustment',
+    reason: `${toolName.replace(/_/g, ' ')} unavailable refund`,
+    toolName,
+  }))
+}
+
 export async function chargeServerTokenUsage(
   userId: string,
   conversationId: string,

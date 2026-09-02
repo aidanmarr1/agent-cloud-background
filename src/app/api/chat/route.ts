@@ -651,13 +651,14 @@ export async function POST(request: Request) {
       heartbeatEvent,
       {
         type: 'progress_update',
-        content: 'Thinking…',
+        content: startIsolatedTaskSandbox ? 'Initializing new computer…' : 'Thinking…',
       },
     ]
     try {
       const queuedTaskPayload: ChatTaskPayload = {
         ...taskPayload,
         messages,
+        initialProgressEmitted: true,
         startupPlanExpected: false,
       }
       if (request.signal.aborted) {

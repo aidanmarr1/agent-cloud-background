@@ -335,6 +335,23 @@ export class OutputVerifier {
       suggestions.push('Add source URLs to support claims')
     }
 
+    if (requiredCitations > 0 && filePath.toLowerCase().endsWith('.md')) {
+      const terminalSourcesIndex = content.search(/^##\s+(?:References|Sources|Bibliography|Works Cited)\b/im)
+      const reportBody = terminalSourcesIndex >= 0 ? content.slice(0, terminalSourcesIndex) : content
+      const inlineUrls = new Set(reportBody.match(/https?:\/\/[^\s)\]]+/g) || [])
+      const explicitlyRequiresClaimLevelLinks =
+        /\b(?:every|each)\s+(?:major|material|important|factual)?\s*claim\b[\s\S]{0,80}\b(?:link|cite|source)\b/i.test(originalRequest) ||
+        /\b(?:inline|claim[-\s]?level)\s+(?:links?|citations?|sources?)\b/i.test(originalRequest) ||
+        /\blink\b[\s\S]{0,50}\boriginal\s+source\b/i.test(originalRequest)
+      const requiredInlineUrls = explicitlyRequiresClaimLevelLinks
+        ? Math.min(5, Math.max(3, explicitSourceCount || 0))
+        : 1
+      if (inlineUrls.size < requiredInlineUrls) {
+        failures.push(`Only ${inlineUrls.size} inline source link(s) appear beside the report's claims; required at least ${requiredInlineUrls}`)
+        suggestions.push('Place Markdown source links directly beside the claims they support, not only in a terminal source list')
+      }
+    }
+
     // Cross-reference with working memory
     if (workingMemory) {
       const rendered = workingMemory.render()

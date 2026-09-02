@@ -1126,11 +1126,11 @@ export class StreamProcessor {
               const TEXT_ONLY_CAP: number | null = allowLongAssistantText
                 ? null
                 : progressNarrationTextCap
-                if (TEXT_ONLY_CAP !== null && toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
-                  suppressTextOnlyOverflow = true
-                  contentBuffer = ''
-                  break contentDelta
-                }
+              if (TEXT_ONLY_CAP !== null && toolCalls.size === 0 && assistantContent.length > TEXT_ONLY_CAP && !stepAdvancedThisIteration) {
+                suppressTextOnlyOverflow = true
+                contentBuffer = ''
+                break contentDelta
+              }
 
               // Check for leakage BEFORE emitting to prevent leaked content reaching the UI
               if (accumulatedForLeakCheck.length > 150 && checkForLeakage(accumulatedForLeakCheck)) {

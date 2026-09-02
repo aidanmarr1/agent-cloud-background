@@ -8,7 +8,10 @@ export interface DirectChatRouteMessage {
   attachments?: unknown[]
 }
 
-const SIMPLE_SOCIAL_PATTERN = /^(hi|hello|hey|good\s+(?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|got it|sounds good|sure|alright)\b/i
+// Only a complete social utterance belongs on the direct-chat path. A prefix
+// such as "okay, but remove the grey border" is task continuation, not a
+// social acknowledgement.
+const SIMPLE_SOCIAL_PATTERN = /^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening)|thanks|thank you|thx|ok|okay|got it|sounds good|sure|alright)[\s.!?]*$/i
 const URL_OR_DOMAIN_PATTERN = /https?:\/\/|(?:^|\s)[a-z0-9-]+(?:\.[a-z0-9-]+)+/i
 const LIVE_OR_TIME_SENSITIVE_PATTERN = /\b(latest|current|today|yesterday|tomorrow|recent|news|price|stock|weather|score|schedule|live|up[-\s]?to[-\s]?date)\b/i
 const BROWSER_ACTION_PATTERN = /\b(go to|navigate|open\s+(?:the\s+)?(?:site|website|page|url)|click|log in|sign in|fill out|select|choose|scroll|browser|browse)\b/i
@@ -83,10 +86,10 @@ export function shouldUseDirectChat(messages: DirectChatRouteMessage[]): boolean
   if (URL_OR_DOMAIN_PATTERN.test(content)) return false
   if (requestsExternalWork(content)) return false
 
+  if (hasPriorTaskContext && isContextualTaskUpdate(messages)) return false
   if (isExplicitDirectAnswerRequest(content)) return true
   if (AGENT_META_QUESTION_PATTERN.test(content)) return true
   if (SIMPLE_SOCIAL_PATTERN.test(content)) return true
-  if (hasPriorTaskContext && isContextualTaskUpdate(messages)) return false
   if (words <= 3) return true
 
   if (GENERAL_KNOWLEDGE_PATTERN.test(content) && words <= 80) return true

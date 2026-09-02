@@ -25,11 +25,12 @@ const baseToolDefinitions: ChatCompletionTool[] = [
     type: 'function',
     function: {
       name: 'image_search',
-      description: 'Search real images/assets and download them to downloads/.',
+      description: 'Find and download image assets to downloads/. Defaults to photographs; use image_type any for illustrations or other assets. Inspect candidates before use; search results alone do not verify subject, authenticity, or licensing.',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: 'Image search query' },
+          image_type: { type: 'string', enum: ['photo', 'any'], description: 'photo (default) excludes obvious illustrations and cartoons; any allows all image assets.' },
         },
         required: ['query'],
       },

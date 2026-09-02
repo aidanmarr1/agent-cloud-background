@@ -1168,11 +1168,15 @@ function minimalToolResultForPersistence(
             imageUrl: compactStringForPersistence(String(image.imageUrl || ''), 2_048),
             sourceUrl: compactStringForPersistence(String(image.sourceUrl || ''), 2_048),
             localUrl: compactStringForPersistence(String(image.localUrl || ''), 2_048),
+            path: compactStringForPersistence(String(image.path || ''), 2_048),
           }
         })
       : []
     return {
       images: compactImages(source.images),
+      assets: compactImages(source.assets),
+      ...(typeof source.error === 'string' ? { error: compactStringForPersistence(source.error, 1_024) } : {}),
+      ...(typeof source.warning === 'string' ? { warning: compactStringForPersistence(source.warning, 1_024) } : {}),
       downloaded: Array.isArray(source.downloaded)
         ? source.downloaded.slice(0, 8).map((item) => compactStringForPersistence(String(item), 2_048))
         : [],
@@ -1770,6 +1774,7 @@ function parseTaskPayload(raw: unknown): TaskJobPayload | null {
       startIsolatedTaskSandbox: chatPayload.startIsolatedTaskSandbox,
       directChat: chatPayload.directChat,
       skipStartupAcknowledgement: chatPayload.skipStartupAcknowledgement === true,
+      initialProgressEmitted: chatPayload.initialProgressEmitted === true,
       startupPlan: normalizeStartupPlan(chatPayload.startupPlan),
       startupPlanExpected: chatPayload.startupPlanExpected === true,
       startupPlanDeadlineMs: startupPlanDeadlineMs(chatPayload.startupPlanDeadlineMs),

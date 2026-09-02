@@ -90,6 +90,7 @@ export interface ChatTaskPayload {
   startIsolatedTaskSandbox: boolean
   directChat: boolean
   skipStartupAcknowledgement?: boolean
+  initialProgressEmitted?: boolean
   startupPlan?: AgentLoopOptions['startupPlan']
   startupPlanExpected?: boolean
   startupPlanDeadlineMs?: number
@@ -493,6 +494,7 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
     startIsolatedTaskSandbox,
     directChat,
     skipStartupAcknowledgement,
+    initialProgressEmitted,
     startupPlan,
     startupPlanExpected,
     startupPlanDeadlineMs,
@@ -802,7 +804,9 @@ export async function runChatTaskJob(input: ChatTaskRunInput): Promise<void> {
       }
       const startupTasks: Array<Promise<unknown>> = []
       if (!directChat) {
-        emitter.progressUpdate(startIsolatedTaskSandbox ? 'Initializing new computer…' : 'Thinking…')
+        if (!initialProgressEmitted) {
+          emitter.progressUpdate(startIsolatedTaskSandbox ? 'Initializing new computer…' : 'Thinking…')
+        }
         if (staleLeaseRecovery) {
           releaseStartupBrowserFence = await runClaimedPreChargeBootstrap(
             'task_bootstrap',
