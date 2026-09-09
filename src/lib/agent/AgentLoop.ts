@@ -263,6 +263,7 @@ function assistantHistoryMessageForStreamResult(
   const message: Record<string, unknown> = {
     role: 'assistant',
     content: content || null,
+    reasoning_content: result.reasoningContent,
   }
   return message as ChatMessageParam
 }
@@ -5741,6 +5742,7 @@ export class AgentLoop {
                 const assistantMsg: Record<string, unknown> = {
                   role: 'assistant',
                   content: lastStreamResult.assistantContent || null,
+                  reasoning_content: lastStreamResult.reasoningContent,
                   tool_calls: executedSiblingCalls.map(tc => ({
                     id: tc.id,
                     type: 'function' as const,
@@ -6035,6 +6037,7 @@ export class AgentLoop {
               const assistantMsg: Record<string, unknown> = {
                 role: 'assistant',
                 content: lastStreamResult.assistantContent || null,
+                reasoning_content: lastStreamResult.reasoningContent,
                 tool_calls: executedToolCalls.map(tc => ({
                   id: tc.id,
                   type: 'function' as const,

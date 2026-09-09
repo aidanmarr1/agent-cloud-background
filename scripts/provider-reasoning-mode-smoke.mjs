@@ -11,22 +11,6 @@ const root = process.cwd()
 const llmPath = join(root, 'src/lib/llm.ts')
 const llmSource = await readFile(llmPath, 'utf8')
 
-assert.match(
-  llmSource,
-  /ASSISTANT_PROVIDER\s*=\s*'openrouter'\s+as const/,
-  'the assistant provider must be statically pinned to OpenRouter',
-)
-assert.match(
-  llmSource,
-  /OPENROUTER_BASE_URL\s*=\s*'https:\/\/openrouter\.ai\/api\/v1'/,
-  'the assistant must call OpenRouter',
-)
-assert.doesNotMatch(
-  llmSource,
-  /process\.env\.DEEPSEEK_API_KEY|api\.deepseek\.com/,
-  'the active provider module must not retain DeepSeek routing',
-)
-
 const workDir = await mkdtemp('/tmp/provider-reasoning-mode-smoke-')
 const bundlePath = join(workDir, 'llm.mjs')
 
@@ -78,6 +62,8 @@ await llm.createCompletion({
   tool_choice: 'required',
   max_tokens: 512,
   reasoning: { max_tokens: 192, exclude: true },
+  thinking: { type: 'disabled' },
+  reasoning_effort: 'max',
 })
 const multimodalParts = [
   { type: 'text', text: 'Review the natively supported image.' },
@@ -121,6 +107,27 @@ await llm.createCompletion({
   ],
   max_tokens: 256,
 })
+await llm.createCompletion({
+  ...common,
+  messages: [
+    { role: 'user', content: 'Continue.' },
+    { role: 'assistant', content: 'Recorded result.', reasoning_content: 'Preserved provider reasoning.' },
+    { role: 'user', content: 'Next action.' },
+  ],
+  tools: [{ type: 'function', function: { name: 'probe', parameters: { type: 'object', properties: {} } } }],
+})
+globalThis.fetch = async (url, init) => {
+  captured.push({ url: String(url), body: JSON.parse(String(init.body)) })
+  return new Response('{"error":{"message":"Model expired"}}', { status: 404 })
+}
+let expired = false
+try {
+  await llm.createCompletion({ ...common, retryMaxAttempts: 3, messages: [{ role: 'user', content: 'Try the expired model.' }] })
+} catch (error) {
+  expired = error.status === 404
+}
+if (!expired) throw new Error('Expired models must fail without switching providers or models')
+await llm.fetchGenerationUsage('missing-usage')
 process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
 `
 
@@ -132,11 +139,13 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     cwd: root,
     env: {
       ...process.env,
-      LLM_PROVIDER: 'openrouter',
+      LLM_PROVIDER: 'stale-provider',
       ASSISTANT_PROVIDER: 'openrouter',
-      OPENROUTER_API_KEY: 'smoke-openrouter-key',
+      DEEPSEEK_API_KEY: 'smoke-deepseek-key',
       OPENROUTER_MODEL: 'ignored/stale-model',
-      OPENROUTER_REASONING_EFFORT: 'xhigh',
+      DEEPSEEK_MODEL: 'ignored-model',
+      DEEPSEEK_REASONING_EFFORT: 'max',
+      DEEPSEEK_THINKING_ENABLED: 'false',
       OPENROUTER_REASONING_EXCLUDE: 'false',
     },
     maxBuffer: 4 * 1024 * 1024,
@@ -146,37 +155,30 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   const jsonStart = stdout.lastIndexOf(marker)
   assert.ok(jsonStart >= 0, 'probe must emit captured request JSON')
   const requests = JSON.parse(stdout.slice(jsonStart + marker.length))
-  assert.equal(requests.length, 5)
+  assert.equal(requests.length, 7, 'expired models and missing usage must not trigger a fallback provider call')
+  assert.equal(requests[5].body.messages[1].reasoning_content, 'Preserved provider reasoning.')
 
   for (const request of requests) {
-    assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
-    assert.equal(request.body.model, 'meta/muse-spark-1.2-contributor')
+    assert.equal(request.url, 'https://api.deepseek.com/chat/completions')
+    assert.equal(request.body.model, 'deepseek-v4.1-flash-expires-on-0910')
     assert.equal('models' in request.body, false)
-    assert.deepEqual(request.body.provider, {
-      order: ['meta'],
-      only: ['meta'],
-      allow_fallbacks: false,
-      require_parameters: true,
-    })
-    assert.deepEqual(request.body.usage, { include: true })
-    assert.equal('stream_options' in request.body, false)
+    assert.equal('provider' in request.body, false)
+    assert.equal('usage' in request.body, false)
+    assert.equal('reasoning' in request.body, false)
     assert.equal('parallel_tool_calls' in request.body, false)
-    assert.equal(request.body.temperature, 0.3)
-    assert.equal('thinking' in request.body, false)
-    assert.equal('reasoning_effort' in request.body, false)
+    assert.equal('temperature' in request.body, false)
+    assert.equal('retryMaxAttempts' in request.body, false)
+    assert.deepEqual(request.body.thinking, { type: 'enabled' })
+    assert.equal(request.body.reasoning_effort, 'low')
+    assert.deepEqual(request.body.stream_options, request.body.stream ? { include_usage: true } : undefined)
   }
-  assert.deepEqual(requests[0].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[0].body.tool_choice, 'auto')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review the natively supported image.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
   ])
-  assert.deepEqual(requests[1].body.reasoning, { effort: 'minimal', exclude: true })
-  assert.deepEqual(requests[2].body.reasoning, { effort: 'minimal', exclude: true })
   assert.equal(requests[2].body.tool_choice, 'auto')
-  assert.deepEqual(requests[3].body.reasoning, { effort: 'minimal', exclude: true })
-  assert.deepEqual(requests[4].body.reasoning, { effort: 'minimal', exclude: true })
   assert.deepEqual(
     requests[4].body.messages.slice(-3),
     [
@@ -187,7 +189,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'OpenRouter histories must preserve the exact task context and end with a valid input turn',
+    'DeepSeek histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[4].body.messages.some(message =>
@@ -197,7 +199,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('Muse Spark OpenRouter exact-provider minimal-reasoning smoke test passed')
+  console.log('DeepSeek preview exclusive-route low-thinking smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

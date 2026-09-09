@@ -103,9 +103,9 @@ function validatePositiveInteger(value) {
 
 requireRealEnv('TURSO_DATABASE_URL', 'Turso database URL', validateTursoUrl)
 requireRealEnv('TURSO_AUTH_TOKEN', 'Turso auth token', validateNonShortToken)
-requireExact('LLM_PROVIDER', 'openrouter', 'OpenRouter model provider')
-requireRealEnv('OPENROUTER_API_KEY', 'OpenRouter API key', validateNonShortToken)
-requireExact('OPENROUTER_MODEL', 'meta/muse-spark-1.2-contributor', 'pinned Meta Muse Spark 1.2 Contributor model')
+requireExact('LLM_PROVIDER', 'deepseek', 'DeepSeek model provider')
+requireRealEnv('DEEPSEEK_API_KEY', 'DeepSeek API key', validateNonShortToken)
+requireExact('DEEPSEEK_MODEL', 'deepseek-v4.1-flash-expires-on-0910', 'pinned DeepSeek V4.1 Flash preview model')
 requireUnset('OPENROUTER_REASONING_EFFORT', 'reasoning effort is pinned per turn in code')
 requireUnset('OPENROUTER_REASONING_EXCLUDE', 'reasoning visibility is pinned per turn in code')
 requireRealEnv('AUTH_SECRET', 'Auth.js signing secret', validateSecret)

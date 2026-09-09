@@ -13,7 +13,7 @@ const apply = applyAll || applyAvailable
 const verifyValues = args.includes('--verify-values') || args.includes('--verify')
 const replaceDrift = args.includes('--replace-drift')
 const json = args.includes('--json')
-const OBSOLETE_CLOUD_ENV = ['DEEPSEEK_API_KEY', 'DEEPSEEK_MODEL']
+const OBSOLETE_CLOUD_ENV = ['OPENROUTER_API_KEY', 'OPENROUTER_MODEL', 'OPENROUTER_REASONING_EFFORT', 'OPENROUTER_REASONING_EXCLUDE', 'DEEPSEEK_REASONING_EFFORT', 'DEEPSEEK_THINKING_ENABLED']
 const configuredVercelCli = process.env.VERCEL_CLI?.trim() || ''
 const localVercelBin = resolve(process.cwd(), 'node_modules/.bin/vercel')
 const configuredPnpmBin = process.env.PNPM_BIN?.trim() || ''
@@ -37,11 +37,11 @@ const CLOUD_ENV = [
   { name: 'AGENT_TRUST_PROXY_HEADERS', value: 'true' },
   { name: 'TURSO_DATABASE_URL', source: 'local', required: true },
   { name: 'TURSO_AUTH_TOKEN', source: 'local', required: true },
-  { name: 'LLM_PROVIDER', value: 'openrouter' },
-  { name: 'OPENROUTER_API_KEY', source: 'local', required: true },
+  { name: 'LLM_PROVIDER', value: 'deepseek' },
+  { name: 'DEEPSEEK_API_KEY', source: 'local', required: true },
   { name: 'SERPER_API_KEY', source: 'local', required: true },
   { name: 'SERPER_BASE_URL', value: process.env.SERPER_BASE_URL || 'https://google.serper.dev' },
-  { name: 'OPENROUTER_MODEL', value: 'meta/muse-spark-1.2-contributor' },
+  { name: 'DEEPSEEK_MODEL', value: 'deepseek-v4.1-flash-expires-on-0910' },
   { name: 'AGENT_STORAGE_DRIVER', value: 'turso' },
   { name: 'AGENT_TASK_WORKER_MODE', value: 'external' },
   { name: 'AGENT_TASK_QUEUE_NAME', value: 'production' },

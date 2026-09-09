@@ -12,7 +12,7 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// Muse Spark 1.2 Contributor exposes a 1,048,576-token context window. Keep
+// DeepSeek V4.1 Flash exposes a 1,048,576-token context window. Keep
 // the product completion cap at 131,072 tokens, leaving 917,504 prompt tokens
 // for evidence while preserving the existing high-quality output ceiling.
 // Keep the complete bounded agent run in model context instead of discarding
@@ -78,8 +78,8 @@ export const WORK_SUMMARY_RECENT_ACTIONS = 6
 
 // --- Timeouts (ms) ---
 export const TIER_TIMEOUTS = {
-  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 60_000,    // Final artifacts still need room even with minimal reasoning
-  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 8_000,    // Direct Meta streams may pause briefly before a native tool envelope
+  iterationTimeoutMs: IS_OLLAMA ? 600_000 : 60_000,    // Final artifacts still need room even with low reasoning
+  inactivityTimeoutMs: IS_OLLAMA ? 120_000 : 8_000,    // Provider streams may pause briefly before a native tool envelope
   checkIntervalMs: 150,
   build: {
     contentOnlyTimeoutMs: IS_OLLAMA ? 180_000 : 4_000,

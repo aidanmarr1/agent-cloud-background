@@ -1,14 +1,13 @@
-// The assistant is pinned to Muse Spark 1.2 Contributor through OpenRouter's
-// exact Meta endpoint. Provider routing is fenced separately at the request
-// boundary.
-export const DEFAULT_OPENROUTER_MODEL = 'meta/muse-spark-1.2-contributor'
+// Pin the expiring preview exactly; do not replace it automatically on expiry.
+// Preview cost estimates use the published Flash rates (peak and off-peak).
+export const DEFAULT_DEEPSEEK_MODEL = 'deepseek-v4.1-flash-expires-on-0910'
 
-export const OPENROUTER_MODEL_PRICING = {
-  model: DEFAULT_OPENROUTER_MODEL,
-  inputUsdPer1M: 0.1,
-  cacheHitInputUsdPer1M: 0.002,
-  outputUsdPer1M: 0.2,
-  internalReasoningUsdPer1M: 0.2,
+export const DEEPSEEK_MODEL_PRICING = {
+  model: DEFAULT_DEEPSEEK_MODEL,
+  inputUsdPer1M: 0.44,
+  cacheHitInputUsdPer1M: 0.014,
+  outputUsdPer1M: 1.32,
+  internalReasoningUsdPer1M: 1.32,
   contextPriceTiers: [] as Array<{
     minPromptTokens: number
     inputUsdPer1M: number
@@ -16,17 +15,17 @@ export const OPENROUTER_MODEL_PRICING = {
     outputUsdPer1M: number
   }>,
   longContextThresholdTokens: 1_048_576,
-  longContextInputUsdPer1M: 0.1,
-  longContextCacheHitInputUsdPer1M: 0.002,
-  longContextOutputUsdPer1M: 0.2,
+  longContextInputUsdPer1M: 0.44,
+  longContextCacheHitInputUsdPer1M: 0.014,
+  longContextOutputUsdPer1M: 1.32,
   contextTokens: 1_048_576,
-  maxCompletionTokens: 943_718,
-  source: 'OpenRouter (Meta Muse Spark 1.2 Contributor)',
+  maxCompletionTokens: 393_216,
+  source: 'https://api-docs.deepseek.com/quick_start/pricing/',
 } as const
 
-export const DEFAULT_MODEL_PRICING = OPENROUTER_MODEL_PRICING
+export const DEFAULT_MODEL_PRICING = DEEPSEEK_MODEL_PRICING
 
-export type ModelPricing = typeof OPENROUTER_MODEL_PRICING
+export type ModelPricing = typeof DEEPSEEK_MODEL_PRICING
 
 function finiteNumber(value: unknown): number | null {
   const number = Number(value)
@@ -34,14 +33,18 @@ function finiteNumber(value: unknown): number | null {
 }
 
 export function pricingForModel(model: string | undefined): ModelPricing {
-  const normalized = (model || '').trim().toLowerCase()
-  const routeIndependentModel = normalized.replace(/:(?:nitro|exacto|free)$/, '')
-  const openRouterBaseModel = DEFAULT_OPENROUTER_MODEL.replace(/:(?:nitro|exacto|free)$/, '')
-  if (routeIndependentModel === openRouterBaseModel) return OPENROUTER_MODEL_PRICING
+  void model
   return DEFAULT_MODEL_PRICING
 }
 
+export function isDeepSeekPeakTime(at: Date): boolean {
+  const day = at.getUTCDay()
+  const hour = at.getUTCHours()
+  return day >= 1 && day <= 5 && ((hour >= 1 && hour < 4) || (hour >= 6 && hour < 10))
+}
+
 export function estimateUsageCost(input: {
+  at?: Date
   model?: string
   prompt_tokens?: number
   completion_tokens?: number
@@ -66,5 +69,6 @@ export function estimateUsageCost(input: {
       (Math.max(0, cacheMissTokens ?? Math.max(0, promptTokens - Math.max(0, cacheHitTokens || 0))) * inputUsdPer1M)) / 1_000_000
     : Math.max(0, promptTokens) * inputUsdPer1M / 1_000_000
   const outputCost = Math.max(0, completionTokens) * outputUsdPer1M / 1_000_000
-  return Math.max(0, inputCost + outputCost)
+  const rateMultiplier = isDeepSeekPeakTime(input.at ?? new Date()) ? 1 : 0.5
+  return Math.max(0, (inputCost + outputCost) * rateMultiplier)
 }
