@@ -1,3 +1,4 @@
+import { retryDecision, waitForRetry } from './ExecutionControl'
 /**
  * Tool Retry Logic — handles transient failures with exponential backoff.
  *
@@ -37,38 +38,6 @@ const TOOL_RETRY_CONFIGS: Record<string, Partial<RetryConfig>> = {
   image_search: { maxRetries: 0, baseDelayMs: 750 },
 }
 
-// Error patterns that indicate transient failures (worth retrying)
-const TRANSIENT_PATTERNS = [
-  /timeout/i,
-  /timed out/i,
-  /ECONNRESET/i,
-  /ECONNREFUSED/i,
-  /ENETUNREACH/i,
-  /socket hang up/i,
-  /network error/i,
-  /fetch failed/i,
-  /\b429\b/,
-  /rate limit/i,
-  /temporarily unavailable/i,
-  /\b(502|503|504)\b/,
-  /bad gateway/i,
-  /service unavailable/i,
-  /gateway timeout/i,
-]
-
-// Error patterns that are permanent (never retry)
-const PERMANENT_PATTERNS = [
-  /BLOCKED/i,
-  /already exists/i,
-  /already searched/i,
-  /disabled/i,
-  /invalid.*argument/i,
-  /not found/i,
-  /\b(401|403)\b/,
-  /forbidden/i,
-  /unauthorized/i,
-]
-
 export class ToolRetry {
   private logger: Logger | null
 
@@ -85,6 +54,7 @@ export class ToolRetry {
     fn: () => Promise<unknown>,
     signal?: AbortSignal,
     args?: unknown,
+    deadlineAtMs?: number,
   ): Promise<unknown> {
     if (signal?.aborted) throw new Error('Tool execution aborted')
     // No retry for side-effect tools
@@ -102,37 +72,10 @@ export class ToolRetry {
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
 
-        // Check if this is a permanent error (don't retry)
-        if (this.isPermanentError(lastError)) {
-          this.logger?.debug(`Permanent error for ${toolName}, not retrying`, {
-            error: lastError.message,
-          })
-          throw lastError
-        }
-
-        // Check if this is retryable
-        if (!this.isTransientError(lastError)) {
-          this.logger?.debug(`Unknown error type for ${toolName}, not retrying`, {
-            error: lastError.message,
-          })
-          throw lastError
-        }
-
-        // Don't retry if this was the last attempt
-        if (attempt >= config.maxRetries) {
-          this.logger?.warn(`${toolName} failed after ${attempt + 1} attempts`, {
-            error: lastError.message,
-          })
-          throw lastError
-        }
-
-        // Calculate backoff delay
-        const delay = this.calculateDelay(attempt, config)
-        this.logger?.info(`Retrying ${toolName} (attempt ${attempt + 2}/${config.maxRetries + 1}) in ${delay}ms`, {
-          error: lastError.message,
-        })
-
-        await this.waitForRetry(delay, signal)
+        const decision = retryDecision(lastError, attempt, config, { signal, sideEffects: isNonIdempotentToolCall(toolName, args), deadlineAtMs })
+        if (!decision.retry) throw lastError
+        this.logger?.info(`Retrying ${toolName} (attempt ${attempt + 2}/${config.maxRetries + 1}) in ${decision.delayMs}ms`)
+        await waitForRetry(decision.delayMs, signal)
       }
     }
 
@@ -148,9 +91,9 @@ export class ToolRetry {
 
     if (result && typeof result === 'object' && 'error' in (result as Record<string, unknown>)) {
       const errorMsg = String((result as Record<string, unknown>).error)
-      // Check for transient patterns in the error message
-      return TRANSIENT_PATTERNS.some(p => p.test(errorMsg))
-        && !PERMANENT_PATTERNS.some(p => p.test(errorMsg))
+      return retryDecision(new Error(errorMsg), 0, this.getConfig(toolName), {
+        sideEffects: isNonIdempotentToolCall(toolName, args),
+      }).retry
     }
 
     return false
@@ -159,43 +102,5 @@ export class ToolRetry {
   private getConfig(toolName: string): RetryConfig {
     const override = TOOL_RETRY_CONFIGS[toolName] || {}
     return { ...DEFAULT_CONFIG, ...override }
-  }
-
-  private isTransientError(error: Error): boolean {
-    return TRANSIENT_PATTERNS.some(p => p.test(error.message))
-  }
-
-  private isPermanentError(error: Error): boolean {
-    return PERMANENT_PATTERNS.some(p => p.test(error.message))
-  }
-
-  private calculateDelay(attempt: number, config: RetryConfig): number {
-    const baseDelay = config.baseDelayMs * Math.pow(config.backoffExponent, attempt)
-    const capped = Math.min(baseDelay, config.maxDelayMs)
-    // Small symmetric jitter keeps retries from bunching without making them feel stalled.
-    const jitter = capped * config.jitterFraction * (Math.random() * 2 - 1)
-    return Math.max(100, Math.round(capped + jitter))
-  }
-
-  private waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
-    if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs))
-    if (signal.aborted) return Promise.reject(new Error('Tool execution aborted'))
-
-    return new Promise<void>((resolve, reject) => {
-      let timeout: ReturnType<typeof setTimeout>
-      const cleanup = () => {
-        clearTimeout(timeout)
-        signal.removeEventListener('abort', onAbort)
-      }
-      const onAbort = () => {
-        cleanup()
-        reject(new Error('Tool execution aborted'))
-      }
-      timeout = setTimeout(() => {
-        cleanup()
-        resolve()
-      }, delayMs)
-      signal.addEventListener('abort', onAbort, { once: true })
-    })
   }
 }

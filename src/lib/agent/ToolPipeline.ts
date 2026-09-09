@@ -1,3 +1,5 @@
+import { requestTimeoutWithinDeadline } from './ExecutionControl'
+import { evidenceContextFromResult, type EvidenceContext } from './WorkingMemory'
 import { executeTool, ToolContext } from '@/lib/tools'
 import { appendFileInSandbox, createFileInSandbox, listFilesInSandbox, getOrCreateSandboxDir, readFileInSandbox } from '@/lib/sandbox'
 import { chargeServerTool, refundServerToolCharge, type ServerCreditRecord } from '@/lib/serverCredits'
@@ -39,8 +41,8 @@ import type { ToolRetry } from './ToolRetry'
 // WorkingMemory interface — only the methods ToolPipeline uses
 interface WorkingMemoryLike {
   recordFailure(toolName: string, error: string, stepIdx: number): void
-  extractFromSearch(query: string, results: unknown[], stepIdx: number): void
-  extractFromBrowse(url: string, content: string, stepIdx: number): void
+  extractFromSearch(query: string, results: unknown[], stepIdx: number, context?: EvidenceContext): void
+  extractFromBrowse(url: string, content: string, stepIdx: number, context?: EvidenceContext): void
   recordFileCreated(path: string, stepIdx: number): void
 }
 
@@ -1647,7 +1649,7 @@ function compactCommandResultForModel(resultObj: Record<string, unknown> | null,
   return serialized.length <= limit ? serialized : truncateBrowserText(serialized, limit)
 }
 
-function normalizeSandboxFilePath(path: string): string {
+export function normalizeSandboxFilePath(path: string): string {
   const normalized = path.replace(/^\.?\/+/, '').replace(/\/+/g, '/')
   return normalized
 }
@@ -2398,7 +2400,7 @@ export class ToolPipeline {
             title: item.title,
           })
         }
-        this.memory?.extractFromSearch(query, resultArr, state.currentStepIdx)
+        this.memory?.extractFromSearch(query, resultArr, state.currentStepIdx, { objective: state.currentPlanItems?.[state.currentStepIdx] })
       }
     } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
       const url = (args.url as string) || (cached as { url?: string } | undefined)?.url || ''
@@ -2419,7 +2421,7 @@ export class ToolPipeline {
       trackBrowseResult(state, false, url)
       logWork(state, `Used cached browser result: ${url}`)
       const browseContent = (cached as { content?: string })?.content || ''
-      if (browseContent && usableCachedBrowserEvidence) this.memory?.extractFromBrowse(url, browseContent, state.currentStepIdx)
+      if (browseContent && usableCachedBrowserEvidence) this.memory?.extractFromBrowse(url, browseContent, state.currentStepIdx, evidenceContextFromResult(cached, state.currentPlanItems?.[state.currentStepIdx]))
     } else if (tc.name === 'http_request') {
       this.recordHttpRequestEvidence(args, cached, state, true)
     } else if (tc.name === 'read_document') {
@@ -2475,7 +2477,7 @@ export class ToolPipeline {
     const target = url || toolTargetFromArgs(args, result)
     logWork(state, `${cached ? 'Used cached HTTP result' : 'Fetched HTTP result'}: ${method} ${target}`)
     const body = typeof resultObj?.body === 'string' ? resultObj.body : ''
-    if (url && body) this.memory?.extractFromBrowse(url, body, state.currentStepIdx)
+    if (url && body) this.memory?.extractFromBrowse(url, body, state.currentStepIdx, evidenceContextFromResult(result, state.currentPlanItems?.[state.currentStepIdx]))
   }
 
   private recordDocumentReadEvidence(
@@ -2517,7 +2519,7 @@ export class ToolPipeline {
     }
 
     const content = typeof resultObj?.content === 'string' ? resultObj.content : ''
-    if (url && content) this.memory?.extractFromBrowse(url, content, state.currentStepIdx)
+    if (url && content) this.memory?.extractFromBrowse(url, content, state.currentStepIdx, evidenceContextFromResult(result, state.currentPlanItems?.[state.currentStepIdx]))
   }
 
   private recordFileListingEvidence(
@@ -3595,6 +3597,11 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
+    // This gate also precedes the truncated-file recovery path.
+    if (state.recoveryInspectionPending && isNonIdempotentToolCall(tc.name)) {
+      return preflightResult({ error: 'WORKER_RECOVERY_CHECK: Inspect current files or browser state before taking a side effect. Reuse completed work from the durable journal.' })
+    }
+
     // Parse arguments
     let args: Record<string, unknown>
     const repairedArguments = repairTruncatedFlatToolArguments(
@@ -4010,6 +4017,10 @@ export class ToolPipeline {
       return preflightResult(errorResult)
     }
 
+    if (state.recoveryInspectionPending && isNonIdempotentToolCall(tc.name, args)) {
+      return preflightResult({ error: 'WORKER_RECOVERY_CHECK: Inspect the current state with list_files/read_file or browser_screenshot/browser_get_content before taking a side effect. Reconcile it with the durable completed-action summary and continue only the remaining work.' })
+    }
+
     const fileWritePreflightReason = fileWritePreflightBlockReason(tc.name, args, state)
     if (fileWritePreflightReason) {
       const errorResult = { error: fileWritePreflightReason }
@@ -4268,7 +4279,7 @@ export class ToolPipeline {
       this.throwIfAborted()
       let timeoutId: ReturnType<typeof setTimeout> | undefined
       let settleGraceId: ReturnType<typeof setTimeout> | undefined
-      const timeoutMs = timeoutMsForTool(tc.name)
+      const timeoutMs = requestTimeoutWithinDeadline(timeoutMsForTool(tc.name), state.runStartedAtMs + state.runMaxDurationMs)
       let abortPromise: ReturnType<ToolPipeline['createAbortPromise']> = null
       let timeoutTriggered = false
       const toolAbortController = new AbortController()
@@ -4345,7 +4356,7 @@ export class ToolPipeline {
 
     try {
       if (this.retry) {
-        result = await this.retry.execute(tc.name, executeFn, this.signal ?? undefined, args)
+        result = await this.retry.execute(tc.name, executeFn, this.signal ?? undefined, args, state.runStartedAtMs + state.runMaxDurationMs)
       } else {
         result = await executeFn()
       }
@@ -4657,7 +4668,7 @@ export class ToolPipeline {
         }
         // Extract findings into working memory
         if (this.memory) {
-          this.memory.extractFromSearch(query, resultArr, state.currentStepIdx)
+          this.memory.extractFromSearch(query, resultArr, state.currentStepIdx, { objective: state.currentPlanItems?.[state.currentStepIdx] })
         }
       }
     } else if (tc.name === 'browse_page' || tc.name === 'browser_navigate' || tc.name === 'browser_get_content' || tc.name === 'browser_find_text') {
@@ -4697,7 +4708,7 @@ export class ToolPipeline {
       if (this.memory && !isError && usableBrowserEvidence) {
         const browseContent = (result as { content?: string })?.content || ''
         if (browseContent) {
-          this.memory.extractFromBrowse(url, browseContent, state.currentStepIdx)
+          this.memory.extractFromBrowse(url, browseContent, state.currentStepIdx, evidenceContextFromResult(result, state.currentPlanItems?.[state.currentStepIdx]))
         }
       }
     } else if (tc.name === 'http_request') {
@@ -4917,6 +4928,10 @@ export class ToolPipeline {
           ),
         })
       }
+    }
+
+    if (!isError && (['list_files', 'read_file', 'browser_screenshot', 'browser_get_content'].includes(tc.name) || (tc.name === 'http_request' && !isNonIdempotentToolCall(tc.name, args)))) {
+      state.recoveryInspectionPending = false
     }
 
     // Emit success only after any generated file is durably persisted.

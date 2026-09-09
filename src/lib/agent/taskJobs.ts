@@ -1,3 +1,4 @@
+import { parseTaskCheckpoint, reconcileTaskCheckpoint, type TaskCheckpoint } from './TaskCheckpoint'
 import { randomUUID } from 'crypto'
 import type {
   Artifact,
@@ -61,6 +62,7 @@ interface TaskJobSubscriber {
 }
 
 interface TaskJob {
+  checkpoint?: TaskCheckpoint
   runId: string
   userId: string
   conversationId: string
@@ -604,6 +606,7 @@ async function ensureTaskJobSchema(): Promise<void> {
         )
       `)
       await addTaskJobColumn('alter table agent_task_jobs add column payload_json text')
+      await addTaskJobColumn('alter table agent_task_jobs add column checkpoint_json text')
       await addTaskJobColumn('alter table agent_task_jobs add column worker_id text')
       await addTaskJobColumn('alter table agent_task_jobs add column lease_expires_at_ms integer')
       await addTaskJobColumn('alter table agent_task_jobs add column attempts integer not null default 0')
@@ -1821,6 +1824,7 @@ function assessTaskRecoveryEvents(rows: Array<Record<string, unknown>>): TaskRec
   type PendingStart = { id: string; name: string; args: unknown; seq: number; provisional: boolean }
   const pendingById = new Map<string, PendingStart>()
   const summaries: string[] = []
+  const sideEffectSummaries: string[] = []
   let hasPersistedTextDelta = false
   const ordered = [...rows].sort((a, b) => Number(a.seq) - Number(b.seq))
 
@@ -1866,7 +1870,10 @@ function assessTaskRecoveryEvents(rows: Array<Record<string, unknown>>): TaskRec
         )
       if (abandonedProvisional) continue
       const detail = persistedToolResultSummary(event.result)
-      summaries.push(`Completed ${event.name}${detail ? ` (${detail})` : ''}.`)
+      const failed = !!result?.error || result?.success === false || (typeof result?.exitCode === 'number' && result.exitCode !== 0)
+      const summary = `${failed ? 'Failed' : 'Completed'} ${event.name}${detail ? ` (${detail})` : ''}.`
+      if (pendingStart && isNonIdempotentPersistedToolStart(pendingStart.name, pendingStart.args)) sideEffectSummaries.push(summary)
+      else summaries.push(summary)
       continue
     }
     if (event.type === 'artifact_created') {
@@ -1886,8 +1893,8 @@ function assessTaskRecoveryEvents(rows: Array<Record<string, unknown>>): TaskRec
     summaries.push(`Unfinished read-only action ${start.name}; verify whether it needs to be rerun.`)
   }
 
-  const context = summaries.length
-    ? summaries.slice(-30).join(' ').slice(0, TASK_JOB_RECOVERY_CONTEXT_LIMIT_CHARS)
+  const context = summaries.length || sideEffectSummaries.length
+    ? [...sideEffectSummaries, ...summaries.slice(-30)].join(' ').slice(0, TASK_JOB_RECOVERY_CONTEXT_LIMIT_CHARS)
     : undefined
   return {
     unsafeUnmatchedTool: unsafe ? { id: unsafe.id, name: unsafe.name } : null,
@@ -2095,6 +2102,52 @@ function recordTaskJobEvent(job: TaskJob, event: SSEEvent): void {
 
 class TaskJobEmitter implements AgentEventEmitter {
   constructor(private job: TaskJob) {}
+
+  async saveCheckpoint(checkpoint: TaskCheckpoint): Promise<void> {
+    // Tool results must be durable before a snapshot can claim their progress.
+    const eventSeq = this.job.nextSeq - 1
+    await this.flush()
+    checkpoint = { ...checkpoint, eventSeq }
+    if (!shouldUseDatabaseTaskJobs()) {
+      this.job.checkpoint = structuredClone(checkpoint)
+      return
+    }
+    const saved = await withTaskJobSchemaRepair(() => tursoExecuteIsolated({
+      sql: `update agent_task_jobs set checkpoint_json = ?
+        where run_id = ? and user_id = ? and conversation_id = ? and queue_name = ?
+          and status = 'running' and terminal_status is null and cancel_requested = 0
+          and (? is null or (worker_id = ? and attempts = ? and lease_expires_at_ms > ?))`,
+      args: [JSON.stringify(checkpoint), this.job.runId, this.job.userId, this.job.conversationId, this.job.queueName,
+        this.job.claimWorkerId, this.job.claimWorkerId, this.job.claimAttempts, nowMs()],
+    }))
+    if (saved.rowsAffected !== 1) throw new TaskJobClaimLostError(this.job.runId)
+  }
+
+  async loadCheckpoint(): Promise<TaskCheckpoint | null> {
+    if (!shouldUseDatabaseTaskJobs()) return this.job.checkpoint ? structuredClone(this.job.checkpoint) : null
+    const rows = await withTaskJobSchemaRepair(() => tursoExecuteIsolated({
+      sql: `select checkpoint_json from agent_task_jobs
+        where run_id = ? and user_id = ? and conversation_id = ? and queue_name = ?
+          and status = 'running' and terminal_status is null and cancel_requested = 0
+          and (? is null or (worker_id = ? and attempts = ? and lease_expires_at_ms > ?))`,
+      args: [this.job.runId, this.job.userId, this.job.conversationId, this.job.queueName,
+        this.job.claimWorkerId, this.job.claimWorkerId, this.job.claimAttempts, nowMs()],
+    }))
+    if (!rows.rows[0]) throw new TaskJobClaimLostError(this.job.runId)
+    const raw = rows.rows[0].checkpoint_json
+    if (!raw) return null // Existing jobs from before checkpoints were introduced.
+    const checkpoint = parseTaskCheckpoint(raw)
+    if (!checkpoint) throw new Error('The saved task checkpoint could not be validated. The task cannot safely resume automatically.')
+    const tail = await withTaskJobSchemaRepair(() => tursoExecuteIsolated({
+      sql: `select event_json from agent_task_events where run_id = ? and seq > ?
+        and (event_json like '%"type":"plan"%' or event_json like '%"type":"step_advance"%'
+          or event_json like '%"type":"tool_start"%' or event_json like '%"type":"tool_result"%' or event_json like '%"type":"artifact_created"%')
+        order by seq asc`,
+      args: [this.job.runId, checkpoint.eventSeq],
+    }))
+    const events = tail.rows.map(row => JSON.parse(String(row.event_json)) as SSEEvent)
+    return reconcileTaskCheckpoint(checkpoint, events)
+  }
 
   private scopedId(id: string): string {
     return this.job.claimAttempts && this.job.claimAttempts > 1

@@ -74,7 +74,7 @@ assert.match(
 )
 assert.match(
   completion,
-  /NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS[\s\S]*sealLiveDirectiveRun/,
+  /canReopenCompletion\(terminalReason, 'live_directive'\)[\s\S]*sealLiveDirectiveRun/,
   'non-reopenable terminal reasons must retain explicit run sealing',
 )
 

@@ -43,7 +43,7 @@ assert.match(chatRoute, /acceptsLiveDirectives: !directChat/, 'in-process direct
 assert.match(directiveRoute, /if \(!activeJob\.acceptsLiveDirectives\)/, 'the directive API must reject execution modes that cannot consume directives')
 assert.match(liveDirectives, /agent_live_directive_seals/, 'completion must use a durable directive acceptance cutoff')
 assert.match(liveDirectives, /terminal_status is null and cancel_requested = 0[\s\S]*status = 'running' and attempts = \?/, 'durable directive claims must be fenced by the current worker attempt')
-assert.match(loop, /NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS[\s\S]*safety_leakage[\s\S]*runtime_deadline/, 'safety and hard runtime stops must seal rather than reopen for a live directive')
+assert.match(await readFile(join(root, 'src/lib/agent/ExecutionControl.ts'), 'utf8'), /CLOSED_TO_ALL[\s\S]*safety_leakage[\s\S]*runtime_deadline/, 'safety and hard runtime stops must seal rather than reopen for a live directive')
 
 assert.ok(runner.indexOf('await taskStartCreditPromise') < runner.indexOf('ensureE2BRemoteBrowser(conversationId)'), 'task-start charging must succeed before paid remote sandbox startup')
 assert.ok(runner.indexOf('await taskStartCreditPromise') < runner.indexOf('await runDirectChat('), 'task-start charging must succeed before direct model work')

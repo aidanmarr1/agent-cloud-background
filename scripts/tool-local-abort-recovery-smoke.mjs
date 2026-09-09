@@ -16,6 +16,9 @@ try {
 export interface ToolContext { signal?: AbortSignal }
 
 export async function executeTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+  ;(globalThis as any).__executedRecoveryTools?.push(name)
+  if (name === 'read_file') return args.path === 'missing.md'
+    ? {error:'File not found'} : {action:'read',path:args.path,content:'Existing completed task notes for inspection.',size:44}
   const target = String(args.query || args.url || args.source || '')
   if (target.includes('outer-abort')) {
     ;(globalThis as any).__abortOuterTask?.()
@@ -29,6 +32,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
 `, 'utf8')
 
   await writeFile(searchStubPath, `
+export const WEB_SEARCH_REQUEST_TIMEOUT_MS = 8000
 export function assertWebSearchRequestReady() {}
 `, 'utf8')
 
@@ -93,7 +97,28 @@ await assert.rejects(
   'an outer task cancellation must still unwind instead of becoming a tool recovery result',
 )
 
-console.log('tool-local abort recovery smoke checks passed')
+const resumed = state()
+resumed.taskStrategy = 'code'
+resumed.currentPhase = 'build'
+resumed.currentPlanItems = ['Inspect existing notes and run the remaining command']
+resumed.originalUserRequest = 'Inspect existing notes and run the remaining command'
+resumed.recoveryInspectionPending = true
+const resumedPipeline = new ToolPipeline(emitter() as any, undefined)
+const calls: string[] = []
+;(globalThis as any).__executedRecoveryTools = calls
+const call = (id: string, name: string, args: object) => new Map([[0, {id,name,arguments:JSON.stringify({action_label:'Inspect current task state',plan_step_index:1,...args})}]])
+const blocked = await resumedPipeline.executeAll(call('write-before-read','execute_command',{command:'echo resume'}), resumed)
+assert.match(String((blocked[0].result as any).error), /WORKER_RECOVERY_CHECK/)
+assert.equal(calls.length, 0, 'recovery must inspect before repeating a side effect')
+await resumedPipeline.executeAll(call('missing','read_file',{path:'missing.md'}), resumed)
+assert.equal(resumed.recoveryInspectionPending, true, 'a failed inspection cannot unlock side effects')
+const inspected = await resumedPipeline.executeAll(call('inspect','read_file',{path:'notes.md'}), resumed)
+if (resumed.recoveryInspectionPending) console.log('Inspection fixture failed', inspected.map(r => r.result))
+assert.equal(resumed.recoveryInspectionPending, false, 'a successful inspection unlocks remaining work')
+await resumedPipeline.executeAll(call('remaining-command','execute_command',{command:'echo resume'}), resumed)
+assert.equal(calls.filter(name => name === 'execute_command').length, 1, 'execute the remaining action once after inspection')
+delete (globalThis as any).__executedRecoveryTools
+console.log('tool-local abort and checkpoint inspection recovery smoke checks passed')
 `, 'utf8')
 
   await build({

@@ -1,3 +1,6 @@
+import { isTransientFailure, retryDecision } from '../ExecutionControl'
+import { isNonIdempotentToolCall } from '../toolSafety'
+import { TOOL_RETRY_MAX } from '../config'
 /**
  * ErrorRecoveryEngine — centralized failure diagnosis, root-cause analysis,
  * and recovery strategy selection.
@@ -39,6 +42,7 @@ export interface DiagnosisResult {
   affectedTools: string[]
   affectedSteps: string[]
   isTransient: boolean
+  retrySafe?: boolean
   userExplanation: string
 }
 
@@ -97,11 +101,6 @@ const ERROR_PATTERNS: ErrorPattern[] = [
   { pattern: /missing.?context|context.?required|state.?not.?found/i, rootCause: { type: 'configuration', detail: 'missing_context' }, isTransient: false, confidence: 0.8, explanation: 'Required context is missing' },
   { pattern: /incompatible|version.?mismatch|conflict/i, rootCause: { type: 'configuration', detail: 'incompatible_state' }, isTransient: false, confidence: 0.75, explanation: 'Incompatible state or version conflict' },
 ]
-
-// Transient root cause details that are worth retrying
-const TRANSIENT_DETAILS = new Set([
-  'timeout', 'rate_limited', 'connection_refused', 'empty_response', 'timeout_exceeded',
-])
 
 // Maximum failures to keep in history
 const MAX_FAILURE_HISTORY = 50
@@ -170,7 +169,8 @@ export class ErrorRecoveryEngine {
       confidence,
       affectedTools: [failure.toolName],
       affectedSteps: [],
-      isTransient: bestMatch.isTransient,
+      isTransient: isTransientFailure(failure.error),
+      retrySafe: !isNonIdempotentToolCall(failure.toolName, failure.args),
       userExplanation: bestMatch.explanation,
     }
   }
@@ -186,7 +186,12 @@ export class ErrorRecoveryEngine {
    */
   selectStrategy(diagnosis: DiagnosisResult, context: RecoveryContext): RecoveryStrategy {
     // 1. Retry transient errors if we have budget
-    if (diagnosis.isTransient && context.consecutiveFailures < 3 && context.remainingBudget > 2) {
+    if (diagnosis.isTransient && context.remainingBudget > 2 && retryDecision(
+      new Error(diagnosis.rootCause.detail === 'rate_limited' ? 'rate limit' : 'network timeout'),
+      Math.max(0, context.consecutiveFailures - 1),
+      { maxRetries: TOOL_RETRY_MAX, baseDelayMs: 1500, maxDelayMs: 3000 },
+      { sideEffects: diagnosis.retrySafe !== true },
+    ).retry) {
       const backoffMs = diagnosis.rootCause.type === 'network' && diagnosis.rootCause.detail === 'rate_limited'
         ? 3000
         : 1500

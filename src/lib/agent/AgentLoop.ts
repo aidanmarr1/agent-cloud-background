@@ -1,3 +1,5 @@
+import { classifyFailure, isTransientFailure as isTransientAssistantStreamError, retryDecision, waitForRetry, canReopenCompletion, finalOutputRetryDecision } from './ExecutionControl'
+import { captureTaskCheckpoint, restoreTaskCheckpoint, renderTaskCheckpoint } from './TaskCheckpoint'
 /**
  * AgentLoop — the main orchestrator for the AI agent.
  *
@@ -81,6 +83,7 @@ import {
   ToolPipeline,
   partialAppendRecoveryCountForPath,
   type ToolExecutionResult,
+  normalizeSandboxFilePath,
 } from './ToolPipeline'
 import {
   decidePaidModelTurnProgress,
@@ -322,19 +325,6 @@ const FAST_ACTION_REASONING = { effort: 'low' as const, exclude: true }
 const TASK_REASONING = { effort: 'low' as const, exclude: true }
 const DEEP_TASK_REASONING = { effort: 'low' as const, exclude: true }
 const SUBSTANTIVE_RESEARCH_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
-
-function isAssistantRequestTimeout(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error || '')
-  return /Assistant request timed out after \d+ seconds/i.test(message) ||
-    /\b(?:timed out|timeout|ETIMEDOUT)\b/i.test(message)
-}
-
-function isTransientAssistantStreamError(error: unknown): boolean {
-  if ((error as { name?: string })?.name === 'AbortError') return false
-  if (error instanceof TypeError) return true
-  const message = error instanceof Error ? error.message : String(error || '')
-  return /\b(?:fetch failed|network|socket|terminated|ECONNRESET|ETIMEDOUT|EAI_AGAIN|UND_ERR|temporarily unavailable)\b/i.test(message)
-}
 
 function isRetryableTaskInfrastructureInitializationError(error: unknown): boolean {
   return !!error &&
@@ -1034,24 +1024,6 @@ function durableTaskFileContext(files: TaskFileRecord[]): ChatMessageParam | nul
 const AUTOSAVE_DRAFT_MIN_CHARS = 1200
 const FINAL_AUTOSAVE_DRAFT_MIN_CHARS = 600
 const TEXT_ONLY_DRAFT_SAVE_VISIBLE_WAIT_MS = 3_500
-const NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS = new Set([
-  'safety_leakage',
-  'runtime_deadline',
-  'runtime_deadline_finalized',
-])
-const NON_REOPENABLE_WEBSITE_TERMINAL_REASONS = new Set([
-  'safety_leakage',
-  'runtime_deadline',
-  'runtime_deadline_finalized',
-  'iteration_cap',
-  'post_completion_rewrite',
-  'step_blocked',
-  'browser_stuck_step',
-  'deliverable_verification_failed',
-  'saved_deliverable_model_start_timeout',
-  'deliverable_handoff_complete',
-  'deliverable_handoff_fallback',
-])
 const SKILL_ATTACHMENT_TYPE = 'application/x-agent-skill'
 const MAX_PLANNING_SKILL_CHARS = 18_000
 const MAX_PLANNING_ATTACHMENT_CHARS = 12_000
@@ -3703,6 +3675,11 @@ export class AgentLoop {
     if (!target) return null
     const { path, id } = target
 
+    if (state.recoveryInspectionPending) {
+      contextManager.push({ role: 'system', content: 'Inspect the current workspace with list_files/read_file before saving a recovered draft. Reuse the durable completed work and continue remaining requirements.' } as ChatMessageParam)
+      return 'STREAMING'
+    }
+
     if (!target.started) {
       target.started = true
       this.emitter.toolStart(id, 'create_file', {
@@ -4022,6 +3999,7 @@ export class AgentLoop {
           log.warn('Failed to load durable task file inventory', {
             error: error instanceof Error ? error.message : String(error),
           })
+          if ((this.options.recoveryAttempt || 1) > 1) throw error
           return []
         })
       : Promise.resolve([] as TaskFileRecord[])
@@ -4132,7 +4110,19 @@ export class AgentLoop {
     const toolRetry = new ToolRetry(log.child('Retry'))
     const errorRecovery = new ErrorRecoveryEngine()
     const streamProcessor = new StreamProcessor(this.emitter, timeouts, signal)
-    const workingMemory = new WorkingMemory()
+    const workingMemory = new WorkingMemory(state.originalUserRequest || '')
+    const recoveredCheckpoint = (this.options.recoveryAttempt || 1) > 1
+      ? await this.emitter.loadCheckpoint?.() : null
+    if (recoveredCheckpoint) {
+      restoreTaskCheckpoint(state, workingMemory, recoveredCheckpoint)
+      if (state.currentStepIdx >= recoveredCheckpoint.plan.length && taskNeedsSavedFinalArtifact(state, messages)) {
+        state.currentStepIdx = recoveredCheckpoint.plan.length - 1
+        updatePhase(state)
+      }
+      contextManager.push({ role: 'system', content: renderTaskCheckpoint(recoveredCheckpoint) } as ChatMessageParam, 10)
+      contextManager.injectMemorySummary(workingMemory)
+    }
+    state.recoveryInspectionPending = (this.options.recoveryAttempt || 1) > 1
     state.workingMemory = workingMemory
     const browserFrameStream = {
       unsubscribe: null as (() => void) | null,
@@ -4197,10 +4187,12 @@ export class AgentLoop {
     )
 
     planManager.setStateRef(state)
-    const startupPlanUsed = this.options.startupPlan?.items?.length
+    const startupPlanUsed = !recoveredCheckpoint && this.options.startupPlan?.items?.length
       ? planManager.usePrecomputedPlan(state, this.options.startupPlan, { emitPlan: false })
       : false
-    if (startupPlanUsed) {
+    if (recoveredCheckpoint) {
+      log.info('Restored durable task checkpoint', { step: state.currentStepIdx, iterations: state.iterations })
+    } else if (startupPlanUsed) {
       // The persisted plan is already present in the task event stream, but
       // the worker still owns the opening message. Start only the model-authored
       // acknowledgement call here; awaitPlan() fences first-step work on it.
@@ -4251,6 +4243,10 @@ export class AgentLoop {
         if (phase === 'ERROR') break
         while (phase !== 'COMPLETE' && phase !== 'ERROR') {
           if (signal?.aborted) { phase = 'ERROR'; break }
+          if (phase === 'STREAMING' && this.emitter.saveCheckpoint) {
+            const checkpoint = captureTaskCheckpoint(state, workingMemory)
+            if (checkpoint) await this.emitter.saveCheckpoint(checkpoint)
+          }
           if (agentRunRemainingMs(state) <= (state.deadlineHardStopBufferMs || AGENT_DEADLINE_HARD_STOP_BUFFER_MS)) {
             terminalReason = state.deadlineFinalizationStarted
               ? 'runtime_deadline_finalized'
@@ -4294,6 +4290,11 @@ export class AgentLoop {
             if (!durableTaskFileContextInjected) {
               durableTaskFileContextInjected = true
               const durableFiles = await durableTaskFilesPromise
+              if (recoveredCheckpoint) {
+                const durablePaths = new Set(durableFiles.map(file => normalizeSandboxFilePath(file.path)))
+                state.createdFiles = new Set([...state.createdFiles].filter(path => durablePaths.has(normalizeSandboxFilePath(path))))
+                state.workLedger.deliverableCandidates = state.workLedger.deliverableCandidates.filter(file => durablePaths.has(normalizeSandboxFilePath(file.path)))
+              }
               const durableContext = durableTaskFileContext(durableFiles)
               if (durableContext) contextManager.push(durableContext, 9)
               const latestDirection = latestUserText(messages)
@@ -4332,6 +4333,7 @@ export class AgentLoop {
             // Initialize goal tracking from the plan
             if (state.currentPlanItems && !goalTracker.isInitialized()) {
               goalTracker.initializeFromPlan(state.currentPlanItems)
+              for (let step = 1; step <= state.currentStepIdx; step++) goalTracker.advanceToStep(step)
             }
 
             phase = 'STREAMING'
@@ -4940,10 +4942,9 @@ export class AgentLoop {
               }
               if (finalSavedDeliverableTurn(state, this.options.messages)) {
                 const hasSavedFinalDeliverable = hasSavedFinalDeliverableCandidate(state)
-                if (
-                  hasSavedFinalDeliverable &&
-                  state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP
-                ) {
+                const finalDecision = finalOutputRetryDecision(state.consecutiveNullStreams,
+                  FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP, hasSavedFinalDeliverable && state.deliverableVerified)
+                if (finalDecision === 'complete') {
                   const stepBeforeComplete = state.currentStepIdx
                   state.pendingDeliverableRevision = null
                   state.deliverableVerificationDone = true
@@ -4961,8 +4962,10 @@ export class AgentLoop {
                   phase = 'COMPLETE'
                   break
                 }
-                if (!hasSavedFinalDeliverable && state.consecutiveNullStreams >= FINAL_SAVED_DELIVERABLE_MODEL_START_TIMEOUT_CAP) {
-                  state.lastModelErrorForUser = 'The final file write could not start quickly enough. Please retry the task.'
+                if (finalDecision === 'error') {
+                  state.lastModelErrorForUser = hasSavedFinalDeliverable
+                    ? 'The file was saved, but its verification could not finish before the assistant timed out. The saved file remains available.'
+                    : 'The final file write could not start quickly enough. Please retry the task.'
                   phase = 'ERROR'
                   break
                 }
@@ -6940,7 +6943,7 @@ export class AgentLoop {
 
         if (phase !== 'COMPLETE') break
 
-        const websiteBlocker = NON_REOPENABLE_WEBSITE_TERMINAL_REASONS.has(terminalReason)
+        const websiteBlocker = !canReopenCompletion(terminalReason, 'website')
           ? null
           : await getNextWebsiteCompletionBlocker(
               conversationId,
@@ -6963,7 +6966,7 @@ export class AgentLoop {
         // transaction. If an instruction won the race, reopen the final phase
         // and give it real execution budget; otherwise no later POST can be
         // accepted between this check and the terminal event.
-        const terminalCanAcceptLiveDirective = !NON_REOPENABLE_LIVE_DIRECTIVE_TERMINAL_REASONS.has(terminalReason)
+        const terminalCanAcceptLiveDirective = canReopenCompletion(terminalReason, 'live_directive')
         if (!terminalCanAcceptLiveDirective) {
           const normalizedWorkerAttempt = Number.isFinite(Number(this.options.workerAttempt))
             ? Math.max(1, Math.floor(Number(this.options.workerAttempt)))
@@ -7008,6 +7011,7 @@ export class AgentLoop {
             missing === 'the iteration limit was reached before a verified completion state',
           )
         if (
+          canReopenCompletion(terminalReason, 'inline_answer') &&
           recoverableMissingInlineAnswer &&
           scheduleFinalInlineAnswerRecovery(state, this.options.messages)
         ) {
@@ -7223,7 +7227,7 @@ export class AgentLoop {
       !state.exactExtractionGuardPending &&
       !briefInlineResearchNeedsEvidenceAction &&
       !explicitTaskToolNeedsInitialAction
-    const useTextFinalDeliverable = shouldUseTextSavedFinalDeliverable(state, this.options.messages) &&
+    const useTextFinalDeliverable = !state.recoveryInspectionPending && shouldUseTextSavedFinalDeliverable(state, this.options.messages) &&
       !useCompactNarration &&
       !state.exactExtractionGuardPending &&
       !savedResearchNeedsEvidenceAction &&
@@ -7449,7 +7453,7 @@ export class AgentLoop {
           (state.deadlineFinalizationStarted && !taskNeedsSavedFinalArtifact(state, this.options.messages)) ||
           (isLeanFinalSynthesisStep(state) && isFixedWebSearchInlineAnswerState(state))
 
-        if (intentionalTextOnlyTurn) {
+        if (intentionalTextOnlyTurn && !state.recoveryInspectionPending) {
           activeTools = []
         } else {
           // Phase, strategy, urgency, and recovery state guide ordering and
@@ -7757,6 +7761,14 @@ export class AgentLoop {
           : undefined
         lastShouldRequireToolCall = useRequiredToolCall
 
+        if (state.recoveryInspectionPending) {
+          requestMessages = [...requestMessages, { role: 'system', content: [
+            'RECOVERY VERIFICATION: Before writing or repeating any action, inspect the relevant current files/page with read_file/list_files, browser_get_content/browser_screenshot, or a read-only http_request. Reuse completed actions and perform only the remaining work. If inspection is unavailable, report the uncertainty.',
+            `Saved paths: ${JSON.stringify([...state.createdFiles])}. Remaining requirements: ${JSON.stringify(state.workLedger.remainingRequirements)}.`,
+            this.options.recoveryContext || '',
+          ].filter(Boolean).join(' ') } as ChatMessageParam]
+        }
+
         const approxChars = requestMessages.reduce((sum, m) => {
           if (typeof m.content === 'string') return sum + m.content.length
           if (Array.isArray(m.content)) return sum + (m.content as Array<{ text?: string }>).reduce((s, p) => s + (p.text?.length || 0), 0)
@@ -7949,7 +7961,7 @@ export class AgentLoop {
       } catch (streamErr) {
         const status = (streamErr as { status?: number })?.status
         const errorText = `${(streamErr as { body?: string })?.body || ''}\n${streamErr instanceof Error ? streamErr.message : String(streamErr)}`
-        if (isAssistantRequestTimeout(streamErr)) {
+        if (classifyFailure(streamErr) === 'timeout') {
           this.options.diagnostics?.({
             type: 'stream_error',
             data: {
@@ -8182,15 +8194,13 @@ export class AgentLoop {
             step: state.currentStepIdx,
             status,
           })
-          const retryAfterRaw = (streamErr as { headers?: Record<string, string> })?.headers?.['retry-after']
-          const retryAfterMs = retryAfterRaw ? (parseInt(retryAfterRaw, 10) || 0) * 1000 : 0
-          const baseBackoff = STREAM_RETRY_BASE_MS * Math.pow(STREAM_RETRY_EXPONENT, attempt)
-          const retryDelay = Math.min(Math.max(retryAfterMs, baseBackoff), STREAM_RETRY_MAX_DELAY_MS)
-          const backoff = retryDelay + Math.random() * 300
-
-          this.emitter.textDelta('')  // keep connection alive
-          if (attempt === 0) console.log('[Agent] Rate limited, retrying streaming request')
-          await this.wait(backoff)
+          const decision = retryDecision(streamErr, attempt, {
+            maxRetries: STREAM_MAX_RETRIES, baseDelayMs: STREAM_RETRY_BASE_MS,
+            maxDelayMs: STREAM_RETRY_MAX_DELAY_MS, backoffExponent: STREAM_RETRY_EXPONENT,
+          }, { signal: this.options.signal, deadlineAtMs: Date.now() + agentRunRemainingMs(state) })
+          if (!decision.retry) return null
+          this.emitter.textDelta('')
+          await waitForRetry(decision.delayMs, this.options.signal)
           if (this.options.signal?.aborted) return null
           continue
         }
@@ -8346,10 +8356,9 @@ export class AgentLoop {
 
       if (finalSavedDeliverableTurn(state, this.options.messages)) {
         const hasSavedFinalDeliverable = hasSavedFinalDeliverableCandidate(state)
-        if (
-          hasSavedFinalDeliverable &&
-          state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES
-        ) {
+        const finalDecision = finalOutputRetryDecision(state.timeoutNudgeCount, MAX_TIMEOUT_NUDGES,
+          hasSavedFinalDeliverable && state.deliverableVerified)
+        if (finalDecision === 'complete') {
           const stepBeforeComplete = state.currentStepIdx
           state.pendingDeliverableRevision = null
           state.deliverableVerificationDone = true
@@ -8365,11 +8374,13 @@ export class AgentLoop {
           })
           return 'COMPLETE'
         }
-        if (!hasSavedFinalDeliverable && state.timeoutNudgeCount >= MAX_TIMEOUT_NUDGES) {
-          state.lastModelErrorForUser = 'The final file write took too long to start. Please retry the task.'
+        if (finalDecision === 'error') {
+          state.lastModelErrorForUser = hasSavedFinalDeliverable
+            ? 'The file was saved, but its verification could not finish before the assistant timed out. The saved file remains available.'
+            : 'The final file write took too long to start. Please retry the task.'
           return 'ERROR'
         }
-        if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
+        if (finalDecision === 'retry') {
           state.timeoutNudgeCount++
           state.forceTextNextIteration = false
           contextManager.push({
@@ -8383,19 +8394,6 @@ export class AgentLoop {
           state.lastIterationEnd = Date.now()
           return 'STREAMING'
         }
-
-        state.timeoutNudgeCount = 0
-        state.forceTextNextIteration = false
-        contextManager.push({
-          role: 'system',
-          content: finalSavedDeliverableToolCallInstruction(
-            state,
-            'FINAL SAVED DELIVERABLE IMMEDIATE WRITE: the previous saved-output turn was too slow.',
-          ),
-        } as ChatMessageParam)
-        state.iterationDelayMs = MIN_ITERATION_DELAY_MS
-        state.lastIterationEnd = Date.now()
-        return 'STREAMING'
       }
 
       if (state.timeoutNudgeCount < MAX_TIMEOUT_NUDGES) {
@@ -8460,13 +8458,6 @@ export class AgentLoop {
       return 'ERROR'
     }
 
-    // Unknown errors — retry
-    if (state.iterations < state.dynamicIterationLimit) {
-      console.error('[Agent] Stream interrupted, retrying iteration...')
-      state.lastIterationEnd = Date.now()
-      state.iterationDelayMs = MIN_ITERATION_DELAY_MS
-      return 'STREAMING'
-    }
     state.lastModelErrorForUser = 'The task stopped before it finished. Please try again.'
     return 'ERROR'
   }

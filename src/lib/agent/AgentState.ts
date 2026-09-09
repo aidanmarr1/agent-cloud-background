@@ -49,6 +49,7 @@ export interface WorkLedger {
 }
 
 export interface AgentStateData {
+  recoveryInspectionPending?: boolean
   iterations: number
   runStartedAtMs: number
   runMaxDurationMs: number

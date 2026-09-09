@@ -1,294 +1,258 @@
-/**
- * Working memory: accumulates facts learned from search/browse calls across
- * iterations within a single task. Surfaced in step messages as
- * "What you know so far" so the model has persistent grounded context instead
- * of re-deriving its mental state from message history every iteration.
- *
- * Enhanced with confidence scoring, corroboration tracking, contradiction
- * detection, and importance-weighted eviction.
- */
-
+/** Bounded, source-backed evidence retained across task steps and worker restarts. */
 import {
-  WORKING_MEMORY_CORROBORATION_THRESHOLD,
   WORKING_MEMORY_CONTRADICTION_THRESHOLD,
   WORKING_MEMORY_HIGH_CONFIDENCE_DOMAINS,
-  WORKING_MEMORY_IMPORTANCE_CORROBORATION_BONUS,
-  WORKING_MEMORY_MAX_IMPORTANCE,
   WORKING_MEMORY_SUMMARY_MAX_CHARS,
 } from './config'
 
 export type FactConfidence = 'high' | 'medium' | 'low'
-
+export interface EvidenceSource {
+  url: string
+  title?: string
+  /** Publication time is only populated from explicit source metadata. */
+  publishedAt?: string
+  observedAt: number
+}
 export interface WorkingMemoryFact {
-  text: string              // Human-readable single sentence
-  source: string            // URL or query that produced the fact
-  stepIdx: number           // Which step this fact came from
+  text: string
+  source: string
+  sources: EvidenceSource[]
+  stepIdx: number
   confidence: FactConfidence
-  corroborationCount: number // How many independent sources confirmed this
-  importance: number         // 0-10, drives eviction priority
-  addedAt: number           // Timestamp for age-based tiebreaking
+  corroborationCount: number
+  importance: number
+  relevance: number
+  addedAt: number
+}
+export interface EvidenceContext {
+  objective?: string
+  title?: string
+  publishedAt?: string
+  observedAt?: number
+}
+export interface WorkingMemoryRenderOptions { maxFacts?: number; maxChars?: number; stepIdx?: number }
+export interface WorkingMemorySnapshot {
+  version: 1
+  facts: WorkingMemoryFact[]
+  failures: Array<{ tool: string; error: string; stepIdx: number }>
+  files: Array<{ path: string; stepIdx: number }>
 }
 
-export interface WorkingMemoryRenderOptions {
-  maxFacts?: number
-  maxChars?: number
-  stepIdx?: number
-}
-
-// Negation/opposing keyword pairs for contradiction detection
-const OPPOSING_PAIRS: [string, string][] = [
-  ['increase', 'decrease'], ['rise', 'fall'], ['grow', 'shrink'],
-  ['true', 'false'], ['yes', 'no'], ['positive', 'negative'],
-  ['success', 'failure'], ['open', 'closed'], ['available', 'unavailable'],
-  ['active', 'inactive'], ['approved', 'rejected'], ['legal', 'illegal'],
+const STOPWORDS = new Set('is of in at to on as by be an or it we us do so if up am my me the and for are but you all her was one our out has had its that this with from they been have will each make like than them then into just over such also more some very what which how please find research about'.split(' '))
+const OPPOSING_PAIRS = [
+  ['increase', 'decrease'], ['rise', 'fall'], ['grow', 'shrink'], ['true', 'false'],
+  ['yes', 'no'], ['positive', 'negative'], ['success', 'failure'], ['open', 'closed'],
+  ['available', 'unavailable'], ['active', 'inactive'], ['approved', 'rejected'], ['legal', 'illegal'],
 ]
+const NEGATION = /\b(?:not|no|never|without|cannot)\b|n['’]t\b/i
+const MAX_FACTS = 30
+const MAX_PASSAGE_CHARS = 700
 
-/** Tokenize a string into lowercase significant words (>= 3 chars, no stopwords) */
 function tokenize(text: string): string[] {
-  const stopwords = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her', 'was', 'one', 'our', 'out', 'has', 'had', 'its', 'that', 'this', 'with', 'from', 'they', 'been', 'have', 'will', 'each', 'make', 'like', 'than', 'them', 'then', 'into', 'just', 'over', 'such', 'also', 'more', 'some', 'very'])
-  return text.toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter(w => w.length >= 3 && !stopwords.has(w))
+  return [...new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || [])]
+    .filter(word => word.length > 1 && !STOPWORDS.has(word))
 }
-
-/** Compute token overlap ratio between two token arrays */
-function tokenOverlap(a: string[], b: string[]): number {
-  if (a.length === 0 || b.length === 0) return 0
-  const setB = new Set(b)
-  const overlap = a.filter(t => setB.has(t)).length
-  return overlap / Math.min(a.length, b.length)
+function overlap(a: string[], b: string[]): number {
+  const other = new Set(b)
+  return a.filter(word => other.has(word)).length / Math.max(1, a.length, b.length)
 }
-
-/** Score confidence based on the source domain */
-function scoreConfidence(source: string, corroboration: number): FactConfidence {
-  if (corroboration >= 2) return 'high'
-  const lower = source.toLowerCase()
-  for (const domain of WORKING_MEMORY_HIGH_CONFIDENCE_DOMAINS) {
-    if (lower.includes(domain)) return 'high'
+function hostname(source: string): string {
+  try { return new URL(source).hostname.toLowerCase().replace(/^www\./, '') } catch { return '' }
+}
+function scoreConfidence(sources: EvidenceSource[]): FactConfidence {
+  const hosts = new Set(sources.map(source => hostname(source.url)).filter(Boolean))
+  if (hosts.size >= 2) return 'high'
+  for (const host of hosts) {
+    if (WORKING_MEMORY_HIGH_CONFIDENCE_DOMAINS.some(domain => domain.startsWith('.')
+      ? host.endsWith(domain)
+      : host === domain || host.endsWith(`.${domain}`))) return 'high'
   }
-  if (lower.includes('wikipedia')) return 'medium'
-  if (lower.includes('.com') || lower.includes('.net') || lower.includes('.io')) return 'medium'
-  return 'low'
+  return hosts.size ? 'medium' : 'low'
 }
-
-/** Map confidence to base importance score */
-function confidenceToImportance(confidence: FactConfidence): number {
-  switch (confidence) {
-    case 'high': return 8
-    case 'medium': return 5
-    case 'low': return 3
+function normalizeClaim(text: string): string {
+  // Preserve negation, quantities, punctuation and qualifiers; topic similarity
+  // alone does not prove two sources made the same claim.
+  return text.toLowerCase().replace(/\s+/g, ' ').trim()
+}
+function publicationDate(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim() || value.length > 80) return undefined
+  // Require an explicit year; never turn a relative date into a guessed date.
+  return /\b(?:19|20)\d{2}\b/.test(value) && Number.isFinite(Date.parse(value)) ? value.trim() : undefined
+}
+export function evidenceContextFromResult(result: unknown, objective?: string): EvidenceContext {
+  const record = result && typeof result === 'object' ? result as Record<string, unknown> : {}
+  return {
+    objective,
+    title: typeof record.title === 'string' ? record.title.slice(0, 240) : undefined,
+    publishedAt: publicationDate(record.publishedAt ?? record.publishedDate ?? record.published_date ?? record.date),
   }
+}
+function possibleConflict(a: string, b: string): boolean {
+  const at = tokenize(a), bt = tokenize(b)
+  if (at.length < 4 || bt.length < 4 || overlap(at, bt) < WORKING_MEMORY_CONTRADICTION_THRESHOLD) return false
+  if (NEGATION.test(a) !== NEGATION.test(b)) return true
+  if (OPPOSING_PAIRS.some(([left, right]) =>
+    (at.includes(left) && bt.includes(right)) || (at.includes(right) && bt.includes(left)))) return true
+  // Different values only conflict when the surrounding claim matches. Merely
+  // mentioning different years or numbers on the same topic is not enough.
+  const numbers = /\d+(?:[.,]\d+)*/g
+  return a.replace(numbers, '#').toLowerCase() === b.replace(numbers, '#').toLowerCase() &&
+    JSON.stringify(a.match(numbers)) !== JSON.stringify(b.match(numbers))
+}
+function excerpt(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  return `${text.slice(0, limit - 1).replace(/\s+\S*$/, '')}…`
 }
 
 export class WorkingMemory {
   private facts: WorkingMemoryFact[] = []
-  private failures: Array<{ tool: string; error: string; stepIdx: number }> = []
-  private filesCreated: Array<{ path: string; stepIdx: number }> = []
+  private failures: WorkingMemorySnapshot['failures'] = []
+  private filesCreated: WorkingMemorySnapshot['files'] = []
+  constructor(private readonly taskQuestion = '') {}
 
-  private readonly MAX_FACTS = 30
-  private readonly MAX_FAILURES = 10
+  private relevance(text: string, objective = ''): number {
+    const words = new Set(tokenize(text))
+    const score = (query: string) => {
+      const terms = tokenize(query)
+      return terms.filter(term => words.has(term)).length / Math.max(1, terms.length)
+    }
+    return Math.min(1, score(this.taskQuestion) * 0.6 + score(objective || this.taskQuestion) * 0.4)
+  }
 
-  /** Pull a few salient findings from a search result and store them. */
-  extractFromSearch(query: string, results: unknown[], stepIdx: number): void {
-    if (!Array.isArray(results) || results.length === 0) return
-    for (const r of results.slice(0, 3)) {
-      if (!r || typeof r !== 'object') continue
-      const obj = r as { title?: string; snippet?: string; url?: string }
-      const text = obj.snippet?.trim() || obj.title?.trim()
-      if (!text || text.length < 20) continue
-      this.addFact({
-        text: text.length > 200 ? text.slice(0, 197) + '...' : text,
-        source: obj.url || `search: ${query}`,
-        stepIdx,
-        confidence: 'low',  // Defaults; addFact() will score properly
-        corroborationCount: 1,
-        importance: 3,
-        addedAt: Date.now(),
+  extractFromSearch(query: string, results: unknown[], stepIdx: number, context: EvidenceContext = {}): void {
+    if (!Array.isArray(results)) return
+    const candidates = results.slice(0, 40).flatMap(result => {
+      if (!result || typeof result !== 'object') return []
+      const obj = result as Record<string, unknown>
+      const text = typeof obj.snippet === 'string' && obj.snippet.trim()
+        ? obj.snippet.trim() : typeof obj.title === 'string' ? obj.title.trim() : ''
+      if (text.length < 20) return []
+      return [{ text: excerpt(text, MAX_PASSAGE_CHARS), url: typeof obj.url === 'string' ? obj.url : `search: ${query}`,
+        context: { ...context, ...evidenceContextFromResult(result, context.objective || query) },
+        relevance: this.relevance(text, `${context.objective || ''} ${query}`) }]
+    }).sort((a, b) => b.relevance - a.relevance).slice(0, 4)
+    for (const candidate of candidates) this.addFact(candidate.text, candidate.url, stepIdx, candidate.context, candidate.relevance)
+  }
+
+  extractFromBrowse(url: string, content: string, stepIdx: number, context: EvidenceContext = {}): void {
+    if (!content || content.length < 30) return
+    // Scan the full bounded document, including later sections. Newlines also
+    // delimit evidence in tables, PDFs and pages without sentence punctuation.
+    const passages = content.slice(0, 300_000).split(/\n+|(?<=[.!?])\s+/)
+      .map(text => text.replace(/\s+/g, ' ').trim())
+      .filter(text => text.length >= 30 && !/^(?:skip to|cookies?\b|privacy policy|sign in|log in|menu\b)/i.test(text))
+      .flatMap(text => {
+        if (text.length <= MAX_PASSAGE_CHARS) return [text]
+        const words = text.split(' '), windows: string[] = []
+        let start = 0
+        while (start < words.length) {
+          let end = start, length = 0
+          while (end < words.length && length + words[end].length < MAX_PASSAGE_CHARS) length += words[end++].length + 1
+          if (end === start) { start++; continue }
+          windows.push(`${start > 0 ? '…' : ''}${words.slice(start, end).join(' ')}${end < words.length ? '…' : ''}`)
+          start = end
+        }
+        return windows
       })
+    const unique = [...new Set(passages)]
+    const ranked = unique.map((text, index) => ({ text, index, relevance: this.relevance(text, context.objective) }))
+      .sort((a, b) => b.relevance - a.relevance || a.index - b.index)
+    const relevanceFloor = (ranked[0]?.relevance || 0) * 0.25
+    for (const passage of ranked.filter(item => item.relevance >= relevanceFloor).slice(0, 4)) {
+      this.addFact(passage.text, url, stepIdx, context, passage.relevance)
     }
   }
 
-  /** Pull salient sentences from a browsed page's content. */
-  extractFromBrowse(url: string, content: string, stepIdx: number): void {
-    if (!content || content.length < 50) return
-    const sentences = content
-      .split(/(?<=[.!?])\s+/)
-      .map(s => s.trim())
-      .filter(s => s.length >= 30 && s.length <= 250)
-      .filter(s => !/^(Skip to|Cookies?|Privacy Policy|Sign in|Log in|Menu|Search|Home|About|Contact)/i.test(s))
-      .slice(0, 2)
-
-    for (const sentence of sentences) {
-      this.addFact({
-        text: sentence,
-        source: url,
-        stepIdx,
-        confidence: 'low',
-        corroborationCount: 1,
-        importance: 3,
-        addedAt: Date.now(),
-      })
-    }
+  recordFailure(tool: string, error: string, stepIdx: number): void {
+    this.failures.push({ tool, error: error.slice(0, 200), stepIdx })
+    this.failures = this.failures.slice(-10)
   }
-
-  /** Track tool failures for the failure-pattern check. */
-  recordFailure(toolName: string, error: string, stepIdx: number): void {
-    this.failures.push({ tool: toolName, error: error.slice(0, 200), stepIdx })
-    if (this.failures.length > this.MAX_FAILURES) this.failures.shift()
-  }
-
-  /** Track files created (mostly informational). */
   recordFileCreated(path: string, stepIdx: number): void {
+    this.filesCreated = this.filesCreated.filter(file => file.path !== path)
     this.filesCreated.push({ path, stepIdx })
+    this.filesCreated = this.filesCreated.slice(-100)
   }
-
-  /**
-   * Detect contradictions between a new fact text and existing facts.
-   * Returns contradicting existing facts (if any).
-   */
   detectContradictions(newFactText: string): WorkingMemoryFact[] {
-    const newTokens = tokenize(newFactText)
-    if (newTokens.length < 3) return []
-
-    const contradictions: WorkingMemoryFact[] = []
-
-    for (const existing of this.facts) {
-      const existingTokens = tokenize(existing.text)
-      const overlap = tokenOverlap(newTokens, existingTokens)
-
-      // Need sufficient topic overlap to even consider contradiction
-      if (overlap < WORKING_MEMORY_CONTRADICTION_THRESHOLD) continue
-
-      // Check for opposing keyword pairs
-      const newSet = new Set(newTokens)
-      const existSet = new Set(existingTokens)
-
-      for (const [a, b] of OPPOSING_PAIRS) {
-        if ((newSet.has(a) && existSet.has(b)) || (newSet.has(b) && existSet.has(a))) {
-          contradictions.push(existing)
-          break
-        }
+    return this.facts.filter(fact => possibleConflict(newFactText, fact.text))
+  }
+  private addFact(text: string, source: string, stepIdx: number, context: EvidenceContext, relevance: number): void {
+    const observedAt = context.observedAt && Number.isFinite(context.observedAt) ? context.observedAt : Date.now()
+    const provenance: EvidenceSource = { url: source.slice(0, 2048), title: context.title,
+      publishedAt: publicationDate(context.publishedAt), observedAt }
+    const existing = this.facts.find(fact => normalizeClaim(fact.text) === normalizeClaim(text))
+    if (existing) {
+      const sameSource = existing.sources.find(item => item.url === provenance.url &&
+        (!item.publishedAt || !provenance.publishedAt || item.publishedAt === provenance.publishedAt))
+      if (sameSource) {
+        sameSource.publishedAt ||= provenance.publishedAt
+        sameSource.title ||= provenance.title
+      } else {
+        existing.sources = [...existing.sources, provenance].slice(0, 5)
       }
-
-      // Check for different numbers in similar contexts
-      if (contradictions[contradictions.length - 1] !== existing) {
-        const newNumbers = newFactText.match(/\b\d{4}\b/g) || []
-        const existNumbers = existing.text.match(/\b\d{4}\b/g) || []
-        if (newNumbers.length > 0 && existNumbers.length > 0) {
-          const hasConflict = newNumbers.some(n => existNumbers.some(e => n !== e))
-          if (hasConflict) contradictions.push(existing)
-        }
-      }
+      existing.corroborationCount = Math.max(1, new Set(existing.sources.map(item => hostname(item.url)).filter(Boolean)).size)
+      existing.confidence = scoreConfidence(existing.sources)
+      existing.relevance = Math.max(existing.relevance, relevance)
+      return
     }
-
-    return contradictions
+    this.facts.push({ text, source: provenance.url, sources: [provenance], stepIdx,
+      confidence: scoreConfidence([provenance]), corroborationCount: 1,
+      importance: 3 + relevance * 7, relevance, addedAt: observedAt })
+    if (this.facts.length > MAX_FACTS) {
+      const ranked = this.facts.map((fact, index) => ({ index, score: this.priority(fact) }))
+        .sort((a, b) => a.score - b.score || a.index - b.index)
+      this.facts.splice(ranked[0].index, 1)
+    }
+  }
+  private priority(fact: WorkingMemoryFact, stepIdx?: number): number {
+    return fact.importance + fact.relevance * 10 + fact.corroborationCount +
+      (fact.stepIdx === stepIdx ? 3 : 0) + (this.detectContradictions(fact.text).length ? 5 : 0)
   }
 
-  /** Internal: add a fact with confidence scoring and importance-weighted eviction. */
-  private addFact(fact: WorkingMemoryFact): void {
-    const factTokens = tokenize(fact.text)
-
-    // Check for exact duplicate
-    const factLower = fact.text.toLowerCase()
-    for (const existing of this.facts) {
-      const existingLower = existing.text.toLowerCase()
-      if (existingLower === factLower) return
-      // Cheap overlap check
-      if (factLower.length >= 50 && existingLower.includes(factLower.slice(0, 50))) return
-      if (existingLower.length >= 50 && factLower.includes(existingLower.slice(0, 50))) return
-    }
-
-    // Check for corroboration: high token overlap from a different source = corroborating
-    for (const existing of this.facts) {
-      const existingTokens = tokenize(existing.text)
-      const overlap = tokenOverlap(factTokens, existingTokens)
-      if (overlap >= WORKING_MEMORY_CORROBORATION_THRESHOLD && fact.source !== existing.source) {
-        existing.corroborationCount++
-        existing.importance = Math.min(
-          WORKING_MEMORY_MAX_IMPORTANCE,
-          existing.importance + WORKING_MEMORY_IMPORTANCE_CORROBORATION_BONUS,
-        )
-        existing.confidence = scoreConfidence(existing.source, existing.corroborationCount)
-        return // Don't add the duplicate, just boost the existing fact
-      }
-    }
-
-    // Score the new fact
-    fact.confidence = scoreConfidence(fact.source, fact.corroborationCount)
-    fact.importance = confidenceToImportance(fact.confidence)
-    fact.addedAt = Date.now()
-
-    this.facts.push(fact)
-    this.evictLeastImportant()
-  }
-
-  /** Evict the least important fact when over capacity. */
-  private evictLeastImportant(): void {
-    if (this.facts.length <= this.MAX_FACTS) return
-
-    let minIdx = 0
-    let minScore = Infinity
-    for (let i = 0; i < this.facts.length; i++) {
-      const score = this.facts[i].importance + (this.facts[i].corroborationCount * 0.5)
-      if (score < minScore) {
-        minScore = score
-        minIdx = i
-      }
-    }
-    this.facts.splice(minIdx, 1)
-  }
-
-  /**
-   * Render the working memory as a compact string for inclusion in step messages.
-   * Returns null if there are no facts yet.
-   */
   render(opts?: WorkingMemoryRenderOptions): string | null {
-    if (this.facts.length === 0) return null
+    if (!this.facts.length) return null
     const maxFacts = Math.max(1, opts?.maxFacts ?? 15)
     const maxChars = Math.max(250, opts?.maxChars ?? WORKING_MEMORY_SUMMARY_MAX_CHARS)
-    const facts = this.selectFactsForRender(maxFacts, opts?.stepIdx)
-    const lines = facts.map((f, i) => {
-      const src = f.source.length > 50 ? f.source.slice(0, 47) + '...' : f.source
-      const conf = f.confidence === 'high' ? '[H]' : f.confidence === 'medium' ? '[M]' : '[L]'
-      const corrob = f.corroborationCount > 1 ? ` x${f.corroborationCount}` : ''
-      return `  ${i + 1}. ${conf} ${f.text} (${src}${corrob})`
-    })
-    const rendered = `What you know so far (${this.facts.length} fact${this.facts.length === 1 ? '' : 's'} collected):\n${lines.join('\n')}`
-    return rendered.length <= maxChars ? rendered : rendered.slice(0, maxChars).trimEnd() + '\n...[memory compacted]'
+    let output = `Research evidence (${this.facts.length} passages; source confidence is heuristic):`
+    const ranked = [...this.facts].sort((a, b) => this.priority(b, opts?.stepIdx) - this.priority(a, opts?.stepIdx))
+    const included = new Set<WorkingMemoryFact>()
+    const line = (fact: WorkingMemoryFact) => {
+      const sources = fact.sources.map(source => `${source.url}${source.publishedAt ? `; published ${source.publishedAt}` : '; publication date unknown'}; observed ${new Date(source.observedAt).toISOString().slice(0, 10)}`)
+      return `- [${fact.confidence}] ${excerpt(fact.text, 300)} (${sources.join(' | ')})`
+    }
+    for (const fact of ranked) {
+      if (included.has(fact) || included.size >= maxFacts) continue
+      const conflicts = this.detectContradictions(fact.text)
+      const group = [fact, ...conflicts].filter(item => !included.has(item))
+      const block = `${conflicts.length ? '\nPossible conflict — unresolved; verify date and scope:' : ''}\n${group.map(line).join('\n')}`
+      // Keep conflicting claims together and never slice through a citation.
+      if (output.length + block.length > maxChars || included.size + group.length > maxFacts) continue
+      output += block
+      group.forEach(item => included.add(item))
+    }
+    const omitted = this.facts.length - included.size
+    const note = `\n${omitted} additional passage(s) retained in memory.`
+    if (omitted && output.length + note.length <= maxChars) output += note
+    return output
   }
-
-  /** Compact alias for context summaries that expect getSummary(). */
-  getSummary(): string {
-    return this.render({ maxFacts: 8, maxChars: WORKING_MEMORY_SUMMARY_MAX_CHARS }) || ''
+  getSummary(): string { return this.render({ maxFacts: 8 }) || '' }
+  snapshot(): WorkingMemorySnapshot {
+    return JSON.parse(JSON.stringify({ version: 1, facts: this.facts, failures: this.failures, files: this.filesCreated })) as WorkingMemorySnapshot
   }
-
-  private selectFactsForRender(maxFacts: number, stepIdx?: number): WorkingMemoryFact[] {
-    if (this.facts.length <= maxFacts) return [...this.facts]
-    if (typeof stepIdx !== 'number') return this.facts.slice(-maxFacts)
-
-    return this.facts
-      .map((fact, index) => ({
-        fact,
-        index,
-        score:
-          fact.importance +
-          fact.corroborationCount +
-          (fact.stepIdx === stepIdx ? 6 : 0) +
-          (index / Math.max(1, this.facts.length)),
-      }))
-      .sort((a, b) => b.score - a.score || b.index - a.index)
-      .slice(0, maxFacts)
-      .sort((a, b) => a.index - b.index)
-      .map(item => item.fact)
+  restore(snapshot: WorkingMemorySnapshot): void {
+    if (snapshot.version !== 1) return
+    // Rebuild scores and provenance instead of trusting persisted derived data.
+    for (const fact of snapshot.facts.slice(-MAX_FACTS)) {
+      if (typeof fact.text !== 'string' || !Array.isArray(fact.sources)) continue
+      for (const source of fact.sources.slice(0, 5)) {
+        if (typeof source.url !== 'string' || !Number.isFinite(source.observedAt)) continue
+        this.addFact(excerpt(fact.text, MAX_PASSAGE_CHARS), source.url, fact.stepIdx,
+          { ...source, observedAt: source.observedAt }, this.relevance(fact.text))
+      }
+    }
+    this.failures = snapshot.failures.slice(-10)
+    this.filesCreated = snapshot.files.slice(-100)
   }
-
-  /** Get the number of facts added since a given count snapshot. */
-  factCountSince(previousCount: number): number {
-    return Math.max(0, this.facts.length - previousCount)
-  }
-
-  /** For debugging / inspection. */
+  factCountSince(previousCount: number): number { return Math.max(0, this.facts.length - previousCount) }
   size(): { facts: number; failures: number; files: number } {
     return { facts: this.facts.length, failures: this.failures.length, files: this.filesCreated.length }
   }

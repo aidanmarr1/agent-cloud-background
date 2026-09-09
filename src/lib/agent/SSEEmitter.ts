@@ -1,3 +1,4 @@
+import type { TaskCheckpoint } from './TaskCheckpoint'
 import { encodeSSE } from '@/lib/stream'
 import type { SSEEvent, Artifact, SearchResult, BrowseResult, TerminalResult, FileResult, BrowserResult, StepAdvanceStatus } from '@/types'
 import type { ProgressUpdatePlacement, ToolStartMetadata } from '@/types/events'
@@ -17,6 +18,8 @@ export interface AgentEventEmitter {
   readonly isClosed: boolean
   readonly terminalStatus: 'done' | 'error' | null
   flush?(): Promise<void>
+  saveCheckpoint?(checkpoint: TaskCheckpoint): Promise<void>
+  loadCheckpoint?(): Promise<TaskCheckpoint | null>
   heartbeat(): void
   textDelta(content: string): void
   progressUpdate(content: string, placement?: ProgressUpdatePlacement): void
@@ -54,6 +57,8 @@ export function sanitizeAgentEventEmitter(emitter: AgentEventEmitter): AgentEven
     get isClosed() { return emitter.isClosed },
     get terminalStatus() { return emitter.terminalStatus },
     async flush() { await emitter.flush?.() },
+    ...(emitter.saveCheckpoint ? { saveCheckpoint: emitter.saveCheckpoint.bind(emitter) } : {}),
+    ...(emitter.loadCheckpoint ? { loadCheckpoint: emitter.loadCheckpoint.bind(emitter) } : {}),
     heartbeat() { emitter.heartbeat() },
     textDelta(content) { emitter.textDelta(content) },
     progressUpdate(content, placement) { emitter.progressUpdate(content, placement) },

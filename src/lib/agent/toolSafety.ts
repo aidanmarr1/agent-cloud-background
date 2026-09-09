@@ -1,5 +1,7 @@
 const NON_IDEMPOTENT_TOOL_NAMES = new Set([
   'create_file',
+  'create_website',
+  'package_files',
   'edit_file',
   'append_file',
   'delete_file',

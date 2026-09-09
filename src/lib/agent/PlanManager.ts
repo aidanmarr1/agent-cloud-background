@@ -1,3 +1,4 @@
+import { requestTimeoutWithinDeadline, waitForRetry } from './ExecutionControl'
 import {
   createCompletion,
   createStreamingCompletion,
@@ -1010,35 +1011,13 @@ export class PlanManager {
   }
 
   private plannerRequestTimeoutMs(preferredMs: number): number {
-    if (!this.plannerDeadlineAtMs) return preferredMs
-    const remainingMs = this.plannerDeadlineAtMs - Date.now()
-    if (remainingMs <= 250) {
-      throw new Error(`Assistant request timed out after ${Math.round(PLANNER_OVERALL_DEADLINE_MS / 1000)} seconds.`)
-    }
-    return Math.max(250, Math.min(preferredMs, remainingMs - 150))
+    return requestTimeoutWithinDeadline(preferredMs, this.plannerDeadlineAtMs || undefined)
   }
 
-  private waitForPlannerDelay(delayMs: number): Promise<void> {
-    const signal = this.plannerAbortController?.signal
-    if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs))
-    if (signal.aborted) return Promise.reject(new DOMException('The operation was aborted.', 'AbortError'))
-
-    return new Promise<void>((resolve, reject) => {
-      let timer: ReturnType<typeof setTimeout>
-      const cleanup = () => {
-        clearTimeout(timer)
-        signal.removeEventListener('abort', onAbort)
-      }
-      const onAbort = () => {
-        cleanup()
-        reject(new DOMException('The operation was aborted.', 'AbortError'))
-      }
-      timer = setTimeout(() => {
-        cleanup()
-        resolve()
-      }, delayMs)
-      signal.addEventListener('abort', onAbort, { once: true })
-    })
+  private async waitForPlannerDelay(delayMs: number): Promise<void> {
+    // Reserve enough time for the following request before committing to a wait.
+    requestTimeoutWithinDeadline(250, this.plannerDeadlineAtMs ? this.plannerDeadlineAtMs - delayMs : undefined)
+    await waitForRetry(delayMs, this.plannerAbortController?.signal)
   }
 
   private plannerWasAborted(): boolean {

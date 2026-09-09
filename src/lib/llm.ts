@@ -1,3 +1,4 @@
+import { retryDecision, waitForRetry } from './agent/ExecutionControl'
 import {
   DEFAULT_DEEPSEEK_MODEL,
   estimateUsageCost,
@@ -320,12 +321,6 @@ function isAbortError(error: unknown): boolean {
   return (error as { name?: string })?.name === 'AbortError'
 }
 
-function isTransientNetworkError(error: unknown): boolean {
-  if (error instanceof TypeError) return true
-  const message = error instanceof Error ? error.message : String(error || '')
-  return /\b(fetch failed|network|socket|terminated|timeout|timed out|econnreset|etimedout|eai_again|und_err|temporarily unavailable)\b/i.test(message)
-}
-
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw createAbortError()
 }
@@ -352,26 +347,6 @@ function createLinkedAbortController(parentSignal?: AbortSignal): {
   }
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    throwIfAborted(signal)
-    let timeout: ReturnType<typeof setTimeout>
-    const cleanup = () => {
-      clearTimeout(timeout)
-      signal?.removeEventListener('abort', onAbort)
-    }
-    const onAbort = () => {
-      cleanup()
-      reject(createAbortError())
-    }
-    timeout = setTimeout(() => {
-      cleanup()
-      resolve()
-    }, ms)
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   signal?: AbortSignal,
@@ -388,23 +363,12 @@ async function retryWithBackoff<T>(
     } catch (error: unknown) {
       if (isAbortError(error) || signal?.aborted) throw error
 
-      const status = (error as { status?: number })?.status
-      const isRateLimit = status === 429
-      const isServerError = status !== undefined && status >= 500
-      const isNetworkError = status === undefined && isTransientNetworkError(error)
-
-      if ((isRateLimit || isServerError || isNetworkError) && attempt < maxRetries) {
-        const retryAfter = (error as { headers?: Record<string, string> })
-          ?.headers?.['retry-after']
-        const parsedRetryAfter = retryAfter ? parseInt(retryAfter, 10) : NaN
-        const rawDelay = !isNaN(parsedRetryAfter) && parsedRetryAfter > 0
-          ? parsedRetryAfter * 1000
-          : baseDelayMs * Math.pow(2, attempt)
-        const jitter = Math.random() * 1000
-        const delayMs = Math.min(rawDelay, maxDelayMs) + jitter
-        const reason = isNetworkError ? 'network error' : isRateLimit ? '429' : String(status)
-        console.log(`[${ASSISTANT_LOG_LABEL}] ${reason} on attempt ${attempt + 1}/${totalAttempts}, retrying in ${Math.round(delayMs)}ms`)
-        await sleep(delayMs, signal)
+      const decision = retryDecision(error, attempt, {
+        maxRetries, baseDelayMs, maxDelayMs, backoffExponent: 2,
+      }, { signal })
+      if (decision.retry) {
+        console.log(`[${ASSISTANT_LOG_LABEL}] Retry ${attempt + 1}/${totalAttempts} in ${decision.delayMs}ms`)
+        await waitForRetry(decision.delayMs, signal)
         continue
       }
       throw error

@@ -167,7 +167,29 @@ try {
     throw new Error(`Expected replacement claim attempt to be 2, got ${replacementClaim.attempts}`)
   }
 
+  let checkpointRoundTrip = false
   await runClaimedTaskJob(replacementClaim, async (emitter) => {
+    const { createInitialState } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/AgentState.ts', import.meta.url)))
+    const { WorkingMemory } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/WorkingMemory.ts', import.meta.url)))
+    const { captureTaskCheckpoint } = await jiti.import(fileURLToPath(new URL('../src/lib/agent/TaskCheckpoint.ts', import.meta.url)))
+    const state = createInitialState(false, {iterationTimeoutMs:30000,inactivityTimeoutMs:30000,contentOnlyTimeoutMs:null,contentOnlyMinChars:0,checkIntervalMs:20})
+    state.currentPlanItems = ['Read diagnostic evidence', 'Finish diagnostic probe']
+    state.currentPlanScopes = [null, null]
+    state.originalUserRequest = 'Verify durable checkpoint recovery'
+    state.dynamicIterationLimit = 10
+    emitter.plan(state.currentPlanItems)
+    await emitter.saveCheckpoint(captureTaskCheckpoint(state, new WorkingMemory(state.originalUserRequest)))
+    emitter.toolStart('checkpoint-evidence', 'read_document', {url:'https://example.com/checkpoint'})
+    emitter.toolResult('checkpoint-evidence', 'read_document', {
+      url:'https://example.com/checkpoint',
+      content:'This is synthetic diagnostic evidence for verifying durable checkpoint recovery.',
+    })
+    emitter.stepAdvance('done')
+    await emitter.flush()
+    const restored = await emitter.loadCheckpoint()
+    checkpointRoundTrip = restored?.currentStepIdx === 1 &&
+      restored.memory.facts.some(fact => fact.source === 'https://example.com/checkpoint')
+    if (!checkpointRoundTrip) throw new Error('Live checkpoint round trip lost completed-step or post-checkpoint source evidence.')
     emitter.plan(['Initial worker lease expired', 'Replacement worker reclaimed the task', 'Replacement worker completed the task'])
     emitter.textDelta(`__lease_smoke_reclaimed__ ${queueName}\n`)
     emitter.done()
@@ -259,6 +281,7 @@ try {
     firstWorkerAttempts: firstClaim.attempts,
     replacementWorkerAttempts: replacementClaim.attempts,
     freshHeartbeatProtected: !protectedClaim,
+    checkpointRoundTrip,
     maxAttemptsError: sawExhausted,
     activeLeaseReleasedAfterMaxAttempts: !activeLeaseAfterExhaustion,
     replayedEvents: events.map((event) => ({ type: event.type, seq: event.seq })),
