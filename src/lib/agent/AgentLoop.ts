@@ -7699,7 +7699,17 @@ export class AgentLoop {
             ]
           }
         }
+        // After a successful action the model must be able to assess its
+        // result and advance the phase. Requiring another tool here turns
+        // verification/handoff phases into endless reads of the same file.
+        // Completion remains subject to the normal phase and artifact audits.
+        const allowPhaseDecision = state.stepToolCallCount > state.stepFailureCount &&
+          !partialFileContinuationNeedsTool && !finalSavedDeliverableNeedsTool &&
+          !explicitTaskToolNeedsInitialAction && !briefInlineResearchNeedsEvidenceAction &&
+          !state.exactExtractionGuardPending && !state.recoveryInspectionPending &&
+          !state.fileWriteRepairPending && !state.pendingDeliverableRevision
         const effectiveCadenceNarrationInMainTurn =
+          !allowPhaseDecision &&
           cadenceNarrationInMainTurn &&
           activeTools.length > 0
         if (effectiveCadenceNarrationInMainTurn && !useCompactNarration) {
@@ -7712,6 +7722,7 @@ export class AgentLoop {
           ]
         }
         const shouldRequireToolCall =
+          !allowPhaseDecision &&
           activeTools.length > 0 &&
           !isPostCompletion &&
           !state.forceTextNextIteration &&
@@ -7734,7 +7745,7 @@ export class AgentLoop {
             )
           )
         let requiredToolIntent = shouldRequireToolCall
-        let fastActionTurn = activeTools.length > 0 &&
+        let fastActionTurn = !allowPhaseDecision && activeTools.length > 0 &&
           !isPostCompletion &&
           isFastActionToolTurn(state, this.options.messages)
         let fastSourceActionTurn = !explicitTaskToolNeedsInitialAction &&
@@ -7760,6 +7771,12 @@ export class AgentLoop {
         // the initial requirement calculation. Never ask a provider to require
         // a tool call when the final tool menu is empty.
         requiredToolIntent = requiredToolIntent && activeTools.length > 0
+        if (allowPhaseDecision) {
+          requestMessages = [...requestMessages, {
+            role: 'system',
+            content: 'ASSESS THE COMPLETED ACTION: A tool has returned successfully in this phase. Use that result. If the phase objective is satisfied, state the concrete outcome and emit <next_step/> without another tool call. If work remains, choose only the action that resolves the specific remaining gap. Do not reread unchanged files or repeat checks merely to keep calling tools. A final answer must still satisfy the requested output and verification requirements.',
+          } as ChatMessageParam]
+        }
         if (fastActionTurn && !useCompactNarration) {
           requestMessages = [
             ...requestMessages,

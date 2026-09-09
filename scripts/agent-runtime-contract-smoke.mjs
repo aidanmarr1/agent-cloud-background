@@ -1204,7 +1204,7 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /FAST_ACTION_REQUEST_TIMEOUT_MS = 45_000/, 'non-source action starts must tolerate routed provider startup')
   assert.match(agentLoop, /FAST_ACTION_RETRY_REQUEST_TIMEOUT_MS = 60_000/, 'hot action retries must avoid rapid null-stream loops during medium-reasoning provider variance')
   assert.match(agentLoop, /function isFastActionToolTurn/, 'agent loop must classify fast between-tool action turns centrally')
-  assert.match(agentLoop, /let fastActionTurn = activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast lowest-reasoning lane by default')
+  assert.match(agentLoop, /let fastActionTurn = !allowPhaseDecision && activeTools\.length > 0 &&[\s\S]*!isPostCompletion &&[\s\S]*isFastActionToolTurn\(state,\s*this\.options\.messages\)/, 'active tool-selection turns must enter the fast lowest-reasoning lane by default')
   assert.match(agentLoop, /HOT PATH ACTION TURN:[\s\S]*make exactly one native tool call[\s\S]*speed comes from choosing the next action quickly, not from doing less work/, 'fast action turns must explicitly ask lightweight models for immediate tool selection without reducing depth')
   assert.match(agentLoop, /HOT PATH SOURCE ACTION TURN:[\s\S]*parallel batch of up to 2 source extraction calls[\s\S]*read_document or http_request/, 'source-action turns must retain one fast pair while reserving the third action for narration')
   assert.match(agentLoop, /parallel_tool_calls:\s*allowParallelSourceToolCalls/, 'model parallel tool calls must be enabled only for source-action turns')

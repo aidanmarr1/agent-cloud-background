@@ -147,6 +147,7 @@ await runSmoke()
     outfile: bundlePath,
     bundle: true,
     platform: 'node',
+    packages: 'external',
     format: 'esm',
     target: ['node20'],
     logLevel: 'silent',

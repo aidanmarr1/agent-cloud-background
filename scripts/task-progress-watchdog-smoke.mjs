@@ -49,6 +49,8 @@ try {
   }
   const source = await readFile('src/lib/agent/AgentLoop.ts', 'utf8')
   assert.ok(source.indexOf('taskProgressWatchdog.boundary()') < source.indexOf('decidePaidModelTurnProgress('), 'global fence must precede all local recovery resets')
+  assert.match(source, /const shouldRequireToolCall =\s*!allowPhaseDecision/, 'a completed action must allow a phase decision instead of forcing another read')
+  assert.match(source, /const allowPhaseDecision = state\.stepToolCallCount > state\.stepFailureCount[\s\S]*?!state\.exactExtractionGuardPending/, 'phase decisions must require successful evidence and respect mandatory verification')
   assert.match(source, /taskProgressWatchdog\.record\(lastToolResults\)/)
   assert.match(source, /progressWatchdog: taskProgressWatchdog\.snapshot\(\)/)
   assert.match(source, /new TaskProgressWatchdog\(recoveredCheckpoint\?\.progressWatchdog\)/)
