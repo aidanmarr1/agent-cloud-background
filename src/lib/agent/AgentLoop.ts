@@ -1,4 +1,5 @@
 import { classifyFailure, isTransientFailure as isTransientAssistantStreamError, retryDecision, waitForRetry, canReopenCompletion, finalOutputRetryDecision } from './ExecutionControl'
+import { TaskProgressWatchdog } from './TaskProgressWatchdog'
 import { captureTaskCheckpoint, restoreTaskCheckpoint, renderTaskCheckpoint } from './TaskCheckpoint'
 /**
  * AgentLoop — the main orchestrator for the AI agent.
@@ -4212,6 +4213,7 @@ export class AgentLoop {
     let lastStreamWasCompactNarration = false
     let lastToolResults: ToolExecutionResult[] = []
     let pendingPaidTurnProgress: PaidModelTurnProgressSnapshot | null = null
+    const taskProgressWatchdog = new TaskProgressWatchdog(recoveredCheckpoint?.progressWatchdog)
     let pendingActionSelectionRepairPrompt: string | null = null
     let pendingCadenceTurnProgress: {
       attemptIteration: number
@@ -4229,6 +4231,7 @@ export class AgentLoop {
     ): Promise<false | 'injected'> => {
       const result = await this.injectLiveDirectives(contextManager, options)
       if (!result) return false
+      taskProgressWatchdog.reset()
       return result
     }
 
@@ -4245,7 +4248,7 @@ export class AgentLoop {
           if (signal?.aborted) { phase = 'ERROR'; break }
           if (phase === 'STREAMING' && this.emitter.saveCheckpoint) {
             const checkpoint = captureTaskCheckpoint(state, workingMemory)
-            if (checkpoint) await this.emitter.saveCheckpoint(checkpoint)
+            if (checkpoint) await this.emitter.saveCheckpoint({ ...checkpoint, progressWatchdog: taskProgressWatchdog.snapshot() })
           }
           if (agentRunRemainingMs(state) <= (state.deadlineHardStopBufferMs || AGENT_DEADLINE_HARD_STOP_BUFFER_MS)) {
             terminalReason = state.deadlineFinalizationStarted
@@ -4394,6 +4397,21 @@ export class AgentLoop {
               state.toolJsonRecoveryCount = 0
               state.suppressedResearchToolName = null
               log.info('Injected live user directive before model turn')
+            }
+
+            const taskProgressDecision = taskProgressWatchdog.boundary()
+            if (taskProgressDecision === 'stop') {
+              terminalReason = 'task_no_progress'
+              state.lastModelErrorForUser = 'I stopped because repeated attempts were no longer producing new results or changes. Any saved work is preserved; the task is not complete.'
+              this.options.diagnostics?.({ type: 'task_no_progress', data: { iteration: state.iterations, step: state.currentStepIdx } })
+              phase = 'ERROR'
+              break
+            }
+            if (taskProgressDecision === 'redirect') {
+              contextManager.push({
+                role: 'system',
+                content: 'PROGRESS REQUIRED: The last three turns produced no new successful results or changes. Repeated reads, cached results, status messages, and plan changes do not count as progress. Use the evidence already in context to perform the next missing action or finish the requested output. Read again only if the target changed or you need information not yet retrieved. If blocked, state the specific blocker; do not restart the plan. Only three further turns without progress remain.',
+              } as ChatMessageParam)
             }
 
             if (pendingCadenceTurnProgress) {
@@ -5282,6 +5300,7 @@ export class AgentLoop {
                   userDebitSkipped: nonBillableInternalTurn,
                 },
               )
+              taskProgressWatchdog.startTurn()
               pendingPaidTurnProgress = {
                 iteration: state.iterations,
                 stepIdxBefore: modelTurnStartStepIdx,
@@ -5713,6 +5732,7 @@ export class AgentLoop {
               state,
               lastStreamResult.assistantContent,
             )
+            taskProgressWatchdog.record(lastToolResults)
             if (signal?.aborted) { phase = 'ERROR'; break }
             const currentPaidTurnProgress = paidTurnProgressForIteration(
               pendingPaidTurnProgress,

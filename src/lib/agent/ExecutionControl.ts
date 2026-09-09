@@ -72,7 +72,7 @@ export function requestTimeoutWithinDeadline(preferredMs: number, deadlineAtMs?:
 }
 
 // One terminal policy owns whether each recovery path may reopen a task.
-const CLOSED_TO_ALL = new Set(['safety_leakage', 'runtime_deadline', 'runtime_deadline_finalized'])
+const CLOSED_TO_ALL = new Set(['safety_leakage', 'runtime_deadline', 'runtime_deadline_finalized', 'task_no_progress'])
 const CLOSED_TO_WEBSITE = new Set(['iteration_cap', 'post_completion_rewrite', 'step_blocked', 'browser_stuck_step',
   'deliverable_verification_failed', 'saved_deliverable_model_start_timeout', 'deliverable_handoff_complete', 'deliverable_handoff_fallback'])
 export function canReopenCompletion(reason: string, target: 'website' | 'live_directive' | 'inline_answer'): boolean {

@@ -38,6 +38,10 @@ const checkpointSchema = z.object({
   sets: z.record(z.string(), strings), counts: z.record(z.string(), count),
   maps: z.record(z.string(), z.array(z.tuple([short, count])).max(500)),
   workLog: z.array(text).max(100),
+  progressWatchdog: z.object({
+    seen: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(512),
+    pending: z.boolean(), progressed: z.boolean(), stalledTurns: count,
+  }).optional(),
 }).refine(value => value.currentStepIdx <= value.plan.length && value.scopes.length === value.plan.length)
 
 export type TaskCheckpoint = z.infer<typeof checkpointSchema>

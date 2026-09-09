@@ -73,6 +73,8 @@ state.workLedger.remainingRequirements = ['Save report', 'Verify report']
 state.stepResearchCallCount = 3
 state.stepSearchQueries.add('Aurora bus range')
 const checkpoint = captureTaskCheckpoint(state, memory)!
+checkpoint.progressWatchdog = { seen: ['a'.repeat(64)], pending: true, progressed: false, stalledTurns: 3 }
+assert.deepEqual(parseTaskCheckpoint(JSON.stringify(checkpoint))?.progressWatchdog, checkpoint.progressWatchdog)
 assert.ok(checkpoint)
 assert.ok(parseTaskCheckpoint(JSON.stringify(checkpoint)))
 assert.equal(parseTaskCheckpoint('{broken'), null)

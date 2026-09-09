@@ -40,6 +40,7 @@
     "cloud:worker-shutdown-smoke": "node scripts/cloud-worker-shutdown-smoke.mjs",
     "cloud:worker-supervisor-smoke": "node scripts/task-worker-supervisor-smoke.mjs",
     "test:on-demand": "node scripts/on-demand-task-executor-smoke.mjs",
+    "agent:progress-smoke": "node scripts/task-progress-watchdog-smoke.mjs",
     "agent:memory-control-smoke": "node scripts/agent-memory-control-smoke.mjs",
     "agent:checkpoint-smoke": "node scripts/task-checkpoint-smoke.mjs",
     "agent:orchestration-smoke": "node scripts/agent-orchestration-smoke.mjs",

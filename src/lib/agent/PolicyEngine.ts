@@ -2013,7 +2013,7 @@ Then make your first tool call. Your plan will be remembered across iterations o
           const hint = isNowLastStep
             ? finalStepStartGuidance(state)
             : state.currentPhase === 'build' || state.taskStrategy === 'build' || state.taskStrategy === 'code' || state.taskStrategy === 'creative'
-              ? 'Continue with this step. Use create_file, append_file, export_pdf, edit_file, or read_file to make concrete saved-file progress.'
+              ? 'Continue with this step. Use a file write, edit, export, or code execution to make concrete saved-file progress. Read only missing information; rereading unchanged files does not advance this step.'
               : phaseStartGuidance(state)
           return [
             { type: 'step_advance' },
@@ -2148,10 +2148,10 @@ Then make your first tool call. Your plan will be remembered across iterations o
 
         const urgency = state.consecutiveNoToolCalls >= threshold - 1
           ? state.currentPhase === 'build' || state.taskStrategy === 'build' || state.taskStrategy === 'code' || state.taskStrategy === 'creative'
-            ? 'You have produced text without saving it. Make exactly one file tool call now: create_file for a new file, append_file for continuation chunks, export_pdf for a completed PDF request, edit_file for targeted replacements, or read_file to inspect existing work.'
+            ? 'You have produced text without saving it. Make exactly one file tool call now: create_file for a new file, append_file for continuation chunks, export_pdf for a completed PDF request, edit_file for targeted replacements, or execute_command/run_code to generate other requested formats such as DOCX. Inspect existing work only when information needed for the next change is missing.'
             : 'You have produced text without tool calls multiple times. Make a tool call (e.g., create_file or append_file to save your work, export_pdf for a completed PDF request, or web_search for research) to continue making progress.'
           : state.currentPhase === 'build' || state.taskStrategy === 'build' || state.taskStrategy === 'code' || state.taskStrategy === 'creative'
-            ? 'You must save progress with tools. Make exactly one create_file, append_file, export_pdf, edit_file, or read_file call now.'
+            ? 'You must save progress with tools. Make one concrete file write, edit, export, or code execution now. Use existing context instead of rereading unchanged files.'
             : 'You must use tools to complete this step. Make a tool call now — for example, use create_file or append_file to save your output, or export_pdf for a completed PDF request.'
         return [
           {

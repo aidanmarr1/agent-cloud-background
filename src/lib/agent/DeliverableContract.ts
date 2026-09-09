@@ -41,7 +41,7 @@ const OUTPUT_FORMAT_RULES: Array<{
   },
   {
     contract: { label: 'Word document', extensions: ['.docx'] },
-    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:docx|word\s+document)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:docx|word\s+document)\b)/i,
+    pattern: /(?:\b(?:put|save|return|deliver|download|output|produce|generate|create|make|export)\b[^\n.!?]{0,100}\b(?:docx|word\s+doc(?:ument)?)\b|\b(?:to|as|in|into)\s+(?:an?\s+)?(?:docx|word\s+doc(?:ument)?)\b)/i,
   },
   {
     contract: { label: 'Excel workbook', extensions: ['.xlsx'] },
