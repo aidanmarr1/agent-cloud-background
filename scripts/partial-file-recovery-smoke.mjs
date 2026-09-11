@@ -121,6 +121,30 @@ export async function runSmoke() {
   const pipeline = new ToolPipeline(emitter as any, conversationId)
 
   try {
+    const shortFileState = createInitialState(true, timeouts)
+    shortFileState.originalUserRequest = 'Create release-check.txt containing exactly: The sum of squares from 1 to 20 is 2870.'
+    shortFileState.currentPlanItems = ['Create and verify the exact requested file']
+    shortFileState.currentStepIdx = 0
+    const exactContent = 'The sum of squares from 1 to 20 is 2870.'
+    const shortFile = await call(pipeline, shortFileState, 'short-file', 'create_file', JSON.stringify({
+      path: 'release-check.txt', content: exactContent, action_label: 'Create the exact requested text', plan_step_index: 1,
+    }))
+    assert.equal(shortFile.isError, false, 'valid short files must not trigger paid repair turns or shell workarounds')
+    assert.equal((await readFileInSandbox(conversationId, 'release-check.txt')).content, exactContent)
+    const shortAppend = await call(pipeline, shortFileState, 'short-append', 'append_file', JSON.stringify({
+      path: 'release-check.txt', content: '!', action_label: 'Add the requested punctuation', plan_step_index: 1,
+    }))
+    assert.equal(shortAppend.isError, false, 'a precise small append must not force padding or a rewrite')
+    assert.equal((await readFileInSandbox(conversationId, 'release-check.txt')).content, exactContent + '!')
+    const emptyFile = await call(pipeline, shortFileState, 'empty-file', 'create_file', JSON.stringify({
+      path: 'empty.txt', content: '', action_label: 'Create an empty file', plan_step_index: 1,
+    }))
+    assert.equal(emptyFile.isError, true, 'empty output must still be rejected')
+    const missingContent = await call(pipeline, shortFileState, 'missing-content', 'create_file', JSON.stringify({
+      path: 'missing.txt', action_label: 'Create the requested file', plan_step_index: 1,
+    }))
+    assert.equal(missingContent.isError, true, 'missing content remains a malformed tool call')
+
     const contentFirstState = createInitialState(true, timeouts)
     contentFirstState.currentPlanItems = ['Write the report']
     contentFirstState.currentStepIdx = 0

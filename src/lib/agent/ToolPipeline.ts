@@ -543,16 +543,17 @@ function fileWritePreflightBlockReason(
     const isBuildStep = hasPlan ? isConcreteBuildStep(state, stepText) : false
     console.log(`[ToolPipeline] create_file guard: path="${filePath}" isMd=${isMdFile} hasPlan=${!!hasPlan} isLastStep=${isLastStep} isBuildStep=${isBuildStep} step=${state.currentStepIdx}/${state.currentPlanItems?.length || 0} researchCalls=${state.stepResearchCallCount}`)
 
-    const content = args.content as string | undefined
-    if (!content || content.trim().length < 50) {
-      return 'BLOCKED: File content is too short (minimum 50 characters). Write substantive content before creating a file.'
+    // Small config, code, and exact-text files are valid deliverables. Judge
+    // report completeness against the task contract, not a universal length
+    // floor that forces otherwise successful work into repair loops.
+    if (typeof args.content !== 'string' || args.content.length === 0) {
+      return 'BLOCKED: File content must be a non-empty string. Include the exact requested contents.'
     }
   }
 
   if (toolName === 'append_file') {
-    const content = args.content as string | undefined
-    if (!content || content.trim().length < 20) {
-      return 'BLOCKED: Append content is too short. Append a substantive chapter, scene, section, or revision chunk.'
+    if (typeof args.content !== 'string' || args.content.length === 0) {
+      return 'BLOCKED: Append content must be a non-empty string. Supply the exact text to add.'
     }
   }
 
