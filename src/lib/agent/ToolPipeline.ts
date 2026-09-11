@@ -66,6 +66,7 @@ import {
   currentStepWebSearchLimit,
   explicitTaskToolConstraintFromText,
   hasSingleWebSearchLimit,
+  requestedOutputFilePaths,
   requestsMarkdownDeliverable,
   taskDefaultsToMarkdownDeliverable,
   toolAllowedByExplicitTaskConstraint,
@@ -1031,6 +1032,9 @@ function artifactPurposeForCurrentStep(state: AgentStateData, filePath = '', exp
   if (filePath && !artifactPathSatisfiesFinalOutputContract(state, filePath)) return 'support'
   if (!state.currentPlanItems || state.currentPlanItems.length === 0) return 'deliverable'
   if (explicitDeliverable || isCurrentPlanDeliverableStep(state)) return 'deliverable'
+  if (requestedOutputFilePaths(state.originalUserRequest || '').some(path =>
+    normalizeSandboxFilePath(path) === normalizeSandboxFilePath(filePath),
+  )) return 'deliverable'
   if (
     (state.taskStrategy === 'build' || state.taskStrategy === 'code') &&
     filePath &&

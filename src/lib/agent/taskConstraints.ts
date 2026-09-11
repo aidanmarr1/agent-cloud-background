@@ -19,6 +19,12 @@ const NUMBER_WORDS: Record<string, number> = {
 
 const MARKDOWN_DELIVERABLE_PATTERN = /\b(?:\.md|markdown|md\s+file|markdown\s+file)\b/i
 const FILE_DELIVERABLE_PATTERN = /\b(?:create|write|save|return|deliver|make)\b.{0,80}\b(?:file|report|document)\b/i
+
+/** Explicit output filenames remain outputs even when the planner splits creation and delivery. */
+export function requestedOutputFilePaths(text: string): string[] {
+  const pattern = /(?:^|[.!?;]\s*|\b(?:please|then|and|also)\s+)(?:create|write|save|generate|produce|return|deliver|make)\s+(?:(?:an?|the)\s+)?(?:(?:file|document)\s+(?:named|called)\s+)?[`"']?((?:\.?\/?[\w-]+\/)*[\w-]+\.[a-zA-Z0-9]{1,10})(?=[`"'\s,;.!?]|$)/gi
+  return [...new Set([...text.matchAll(pattern)].map(match => match[1].replace(/^\.\//, '')))]
+}
 const INLINE_ANSWER_PATTERN = /\b(?:no file|no document|without\s+(?:a\s+)?(?:file|document)|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|(?:answer|tell|respond|reply)(?:\s+me)?\b.{0,80}\b(?:directly|in chat|here)|answer\b.{0,40}\bin\s+(?:one|two|three|four|five|\d+)\s+sentences?|(?:one|two|three|four|five|\d+)[-\s]+sentence\s+(?:answer|response|summary)|write\s+(?:it|this|the answer|the\s+(?:final\s+)?report|the summary|the findings?)\s+(?:directly\s+)?(?:in chat|here)|just\s+answer|inline)\b/i
 const REPORT_MARKDOWN_DEFAULT_PATTERN = /\b(?:research\b|report(?:\s+on|\s+about)?|research\s+report|findings?|write[-\s]?up|source[-\s]?backed\s+summary|cited\s+summary|compile\s+(?:the\s+)?(?:findings|research|report)|synthesi[sz]e\s+(?:the\s+)?(?:findings|research)|deliver\s+(?:the\s+)?(?:findings|report))\b/i
 const BARE_RESEARCH_OVERVIEW_PATTERN = /^\s*(?:please\s+)?(?:research|look\s+up|search(?:\s+for)?|find\s+out\s+about|learn\s+about)\s+(?:about|on|into|for)?\s+(.{2,120}?)\s*[.!?]*\s*$/i

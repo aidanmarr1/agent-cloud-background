@@ -1235,6 +1235,7 @@ function finalBriefInlineResearchNeedsEvidenceAction(
 ): boolean {
   if (!finalInlineAnswerTurn(state, messages)) return false
   const request = state.originalUserRequest || effectiveTaskRequest(messages)
+  if (!analyzeTaskIntent([{ role: 'user', content: request }]).asksForResearch) return false
   // Plan advancement resets step-local counters. Reassess the evidence from
   // fresh, run-wide tool successes and sources actually opened in this run so
   // the final step neither repeats completed research nor trusts search-result
@@ -1257,6 +1258,7 @@ function finalSavedResearchNeedsEvidenceAction(
 ): boolean {
   if (!finalSavedDeliverableTurn(state, messages)) return false
   const request = state.originalUserRequest || effectiveTaskRequest(messages)
+  if (!analyzeTaskIntent([{ role: 'user', content: request }]).asksForResearch) return false
   if (!/\b(?:research|search|look\s*up|find\s*out|current|latest|recent|source|citation|reference|credible|official|primary|fact|verify|evidence)\b/i.test(request)) {
     return false
   }
@@ -1668,7 +1670,7 @@ function verifiedFinalPhaseNaturalHandoffPath(
   return completionCue ? path : null
 }
 
-function shouldRejectBuildTextOnlyEmission(
+export function shouldRejectBuildTextOnlyEmission(
   state: AgentStateData,
   result: Pick<StreamResult, 'assistantContent' | 'toolCalls' | 'stepAdvancedThisIteration'>,
 ): boolean {
@@ -1679,6 +1681,10 @@ function shouldRejectBuildTextOnlyEmission(
 
   const text = result.assistantContent.trim()
   if (!text) return false
+  // A verified artifact makes "I have created ..." a valid final handoff.
+  // Rejecting that sentence here used to discard the model's completion and
+  // pay for repeated rewrites despite successful creation and verification.
+  if (verifiedFinalPhaseNaturalHandoffPath(state, text)) return false
   const codeOrFalseCompletion =
     /```(?:tsx?|jsx?|css|html)?\b/i.test(text) ||
     /\b(?:import\s+React|export\s+default\s+function|className=|What Was Built|I have created|I(?:'|’)ve created|fully responsive|website is complete)\b/i.test(text)

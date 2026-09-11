@@ -1,5 +1,5 @@
 import { effectiveTaskRequest } from '@/lib/conversationContext'
-import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { requestedOutputFilePaths, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 export type TaskDepth = 'quick' | 'normal' | 'deep'
 
@@ -25,7 +25,12 @@ export interface TaskIntent {
 const QUICK_RE = /\b(?:very quickly|real quick|asap|super quick|quickly|quick|briefly|brief|short|succinct|simple|one[-\s]?sentence|two[-\s]?sentence|in\s+\d+\s+sentences?)\b/i
 const DEEP_RE = /\b(?:deep|comprehensive|thorough|detailed|in[-\s]?depth|deep[-\s]?dive|full report|serious analysis|strategic|technical|historical|cultural|comparative|market research|due diligence)\b/i
 const WRITING_RE = /\b(?:write|draft|compose|prepare|create|make|produce|generate|give)\b/i
-const RESEARCH_RE = /\b(?:research|find\s*out|investigate|look\s*(?:it\s*)?up|web\s*search|search(?:es|ing)?|source|sources|cited?|citations?|references?|bibliography|evidence|compare|analy[sz]e|latest|current|recent|today|news|up[-\s]?to[-\s]?date|current\s+state|state\s+of|landscape|ecosystem|real[-\s]?world\s+applications?|use\s+cases?)\b/i
+const RESEARCH_RE = /\b(?:research|find\s*out|investigate|fact[-\s]?check|look\s*(?:it\s*)?up|web\s*search|search(?:es|ing)?|source|sources|cited?|citations?|references?|bibliography|evidence|compare|analy[sz]e|latest|current|recent|today|news|up[-\s]?to[-\s]?date|current\s+state|state\s+of|landscape|ecosystem|real[-\s]?world\s+applications?|use\s+cases?)\b/i
+const RESEARCH_TARGET = String.raw`(?:research|(?:web|internet)(?:[-\s]+search(?:es|ing)?)?|brows(?:er|e|ing)|search(?:es|ing)?|sources?|citations?|references?)(?:\s+tools?)?`
+const NEGATED_RESEARCH_RE = new RegExp(
+  String.raw`\b(?:do\s+not|don'?t|dont|never|avoid|without|no)\s+(?:(?:use|using|do|doing|perform|conduct|run)\s+)?(?:(?:any|more|further|external|live)\s+)?${RESEARCH_TARGET}(?:\s*(?:,\s*(?:(?:and|or)\s+)?|(?:and|or)\s+)${RESEARCH_TARGET})*`,
+  'gi',
+)
 const CITATION_RE = /\b(?:sources?|citations?|cited?|references?|bibliography|footnotes?|evidence-backed|source-backed)\b/i
 const CURRENT_RE = /\b(?:latest|current|recent|today|tonight|this\s+week|this\s+month|this\s+year|news|newest|up[-\s]?to[-\s]?date|202[4-9])\b/i
 const INLINE_RE = /\b(?:no file|no document|don'?t\s+create\s+(?:a\s+)?file|do\s+not\s+create\s+(?:a\s+)?file|(?:answer|tell|respond|reply)(?:\s+me)?\b.{0,80}\b(?:directly|in chat|here)|just\s+answer|inline)\b/i
@@ -67,6 +72,7 @@ export function analyzeTaskIntent(messages: Array<{ role: string; content: strin
   const rawText = normalizedTaskText(messages)
   const text = rawText.toLowerCase()
   const artifactText = artifactPositiveText(text)
+  const researchText = text.replace(NEGATED_RESEARCH_RE, ' ')
 
   const taskLevelBrevityText = text.replace(
     /\b(?:short|brief|concise|succinct|small|tiny)\s+(?:executive\s+)?summary\b/gi,
@@ -76,10 +82,11 @@ export function analyzeTaskIntent(messages: Array<{ role: string; content: strin
   const wantsDeep = DEEP_RE.test(text)
   const asksForWriting = WRITING_RE.test(text)
   const wantsReport = REPORT_RE.test(text) || BRIEF_NOUN_RE.test(text)
-  const wantsCitations = CITATION_RE.test(text)
-  const wantsCurrentInfo = CURRENT_RE.test(text)
-  const asksForResearch = RESEARCH_RE.test(text)
+  const wantsCitations = CITATION_RE.test(researchText)
+  const wantsCurrentInfo = CURRENT_RE.test(researchText)
+  const asksForResearch = RESEARCH_RE.test(researchText)
   const explicitSavedArtifact =
+    requestedOutputFilePaths(artifactText).length > 0 ||
     ARTIFACT_ACTION_RE.test(artifactText) ||
     CREATE_ARTIFACT_RE.test(artifactText) ||
     FORMAT_ARTIFACT_RE.test(artifactText) ||

@@ -76,7 +76,7 @@ function makeEmitter() {
     toolStart(id: string, name: string, args: Record<string, unknown>) { events.push({ type: 'tool_start', id, name, args }) },
     toolResult(id: string, name: string, result: unknown) { events.push({ type: 'tool_result', id, name, result }) },
     terminalOutput() {},
-    artifactCreated() {},
+    artifactCreated(artifact: unknown) { events.push({ type: 'artifact_created', artifact }) },
     fileContentStart() {},
     fileContentDelta() {},
   }
@@ -123,7 +123,8 @@ export async function runSmoke() {
   try {
     const shortFileState = createInitialState(true, timeouts)
     shortFileState.originalUserRequest = 'Create release-check.txt containing exactly: The sum of squares from 1 to 20 is 2870.'
-    shortFileState.currentPlanItems = ['Create and verify the exact requested file']
+    shortFileState.currentPlanItems = ['Create the exact requested file', 'Verify and deliver the file']
+    shortFileState.taskStrategy = 'browse'
     shortFileState.currentStepIdx = 0
     const exactContent = 'The sum of squares from 1 to 20 is 2870.'
     const shortFile = await call(pipeline, shortFileState, 'short-file', 'create_file', JSON.stringify({
@@ -131,6 +132,10 @@ export async function runSmoke() {
     }))
     assert.equal(shortFile.isError, false, 'valid short files must not trigger paid repair turns or shell workarounds')
     assert.equal((await readFileInSandbox(conversationId, 'release-check.txt')).content, exactContent)
+    assert.ok(shortFileState.workLedger.deliverableCandidates.some(candidate => candidate.path === 'release-check.txt' && candidate.purpose === 'deliverable'),
+      'an explicitly requested output must remain a deliverable when created before the final phase')
+    assert.ok(emitter.events.some(event => event.type === 'artifact_created' && (event.artifact as any)?.filePath === 'release-check.txt'),
+      'the original requested file must be returned without a second write or replacement artifact')
     const shortAppend = await call(pipeline, shortFileState, 'short-append', 'append_file', JSON.stringify({
       path: 'release-check.txt', content: '!', action_label: 'Add the requested punctuation', plan_step_index: 1,
     }))

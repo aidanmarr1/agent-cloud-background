@@ -1,6 +1,6 @@
 import type { AgentStateData } from './AgentState'
 import { analyzeTaskIntent } from './TaskIntent'
-import { taskDefaultsToMarkdownDeliverable } from './taskConstraints'
+import { requestedOutputFilePaths, taskDefaultsToMarkdownDeliverable } from './taskConstraints'
 
 type DeliverableContractState = Pick<
   AgentStateData,
@@ -73,7 +73,14 @@ export function requestedFinalArtifactFormat(
 ): FinalArtifactFormatContract | null {
   const request = state.originalUserRequest || fallbackRequest
   if (!request.trim()) return null
-  return OUTPUT_FORMAT_RULES.find(rule => rule.pattern.test(request))?.contract || null
+  const explicitFormat = OUTPUT_FORMAT_RULES.find(rule => rule.pattern.test(request))?.contract
+  if (explicitFormat) return explicitFormat
+  const paths = requestedOutputFilePaths(request)
+  // Multiple named outputs may legitimately have different formats.
+  if (paths.length !== 1) return null
+  return OUTPUT_FORMAT_RULES.find(rule =>
+    rule.contract.extensions.some(extension => paths[0].toLowerCase().endsWith(extension)),
+  )?.contract || null
 }
 
 export function artifactPathSatisfiesFinalOutputContract(
@@ -123,6 +130,7 @@ export function hasExistingInputArtifactEvidence(state: ExistingInputEvidenceSta
 }
 
 function browseRequestCreatesSavedArtifact(request: string): boolean {
+  if (requestedOutputFilePaths(request).length > 0) return true
   const artifactTarget = String.raw`(?:file|artifact|pdf|markdown|document|docx?|word\s+doc(?:ument)?|pptx|slides?|presentation|deck|spreadsheet|xlsx|csv|notebook|[A-Za-z0-9][A-Za-z0-9._-]*\.(?:md|pdf|docx?|pptx|xlsx|csv))`
   const outputAction = new RegExp(
     String.raw`\b(?:save|export|deliver|download|return|send|write|create|make|generate|produce)\b[^\n.!?]{0,120}\b${artifactTarget}\b`,

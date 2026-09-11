@@ -57,11 +57,15 @@ try {
 import assert from 'node:assert/strict'
 import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
 import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
+import { analyzeTaskIntent } from ${JSON.stringify(join(root, 'src/lib/agent/TaskIntent.ts'))}
+import { requestedOutputFilePaths } from ${JSON.stringify(join(root, 'src/lib/agent/taskConstraints.ts'))}
+import { shouldRejectBuildTextOnlyEmission } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
 import {
   artifactPathSatisfiesFinalOutputContract,
   hasExistingInputArtifactEvidence,
   requestedFinalArtifactFormat,
   taskRequiresExistingInputArtifact,
+  taskRequiresSavedFinalArtifact,
 } from ${JSON.stringify(join(root, 'src/lib/agent/DeliverableContract.ts'))}
 
 const timeouts = {
@@ -71,6 +75,39 @@ const timeouts = {
   contentOnlyMinChars: 0,
   checkIntervalMs: 100,
 }
+
+const exactFileRequest = 'Create release-check.txt containing exactly: The sum of squares from 1 to 20 is 2870. Use create_file, read the file back once to verify it, then finish with a concise handoff. Do not use research, web, or browser tools.'
+const exactFileIntent = analyzeTaskIntent([{ role: 'user', content: exactFileRequest }])
+assert.equal(exactFileIntent.explicitSavedArtifact, true, 'an output filename must define a saved-file contract')
+assert.equal(exactFileIntent.asksForResearch, false, 'negated research and local verification must not force external evidence calls')
+const exactFileState = createInitialState(false, timeouts)
+exactFileState.originalUserRequest = exactFileRequest
+exactFileState.taskStrategy = 'browse'
+exactFileState.currentPlanItems = ['Create release-check.txt', 'Verify and deliver file']
+assert.equal(taskRequiresSavedFinalArtifact(exactFileState), true, 'a planner action/browse strategy must retain the named output')
+assert.equal(requestedFinalArtifactFormat(exactFileState)?.label, 'text file')
+assert.equal(artifactPathSatisfiesFinalOutputContract(exactFileState, 'release-check.zip'), false, 'an invented archive cannot replace the requested text file')
+assert.deepEqual(requestedOutputFilePaths('Create app/page.tsx and write config.json.'), ['app/page.tsx', 'config.json'])
+assert.equal(requestedFinalArtifactFormat({ originalUserRequest: 'Create app/page.tsx and write README.md.' }), null,
+  'mixed named outputs must not all be forced into one filename-derived format')
+assert.deepEqual(requestedOutputFilePaths('Read existing.txt and summarize it here.'), [], 'a source filename is not an output request')
+assert.equal(analyzeTaskIntent([{ role: 'user', content: 'Verify the checksum of the local file and finish.' }]).asksForResearch, false)
+assert.equal(analyzeTaskIntent([{ role: 'user', content: 'Do not use browser tools, but research official papers and cite sources.' }]).asksForResearch, true,
+  'a negative tool preference must not erase a separate positive research request')
+
+exactFileState.taskStrategy = 'build'
+exactFileState.currentStepIdx = 1
+exactFileState.currentPhase = 'deliver'
+const fileHandoff = {
+  assistantContent: 'I have created release-check.txt with the exact requested text and verified its contents. The file is ready to open.',
+  toolCalls: new Map(),
+  stepAdvancedThisIteration: false,
+}
+assert.equal(shouldRejectBuildTextOnlyEmission(exactFileState, fileHandoff), true, 'unsupported completion claims must still be rejected')
+recordWorkLedgerDeliverable(exactFileState, { path: 'release-check.txt', purpose: 'deliverable' })
+assert.equal(shouldRejectBuildTextOnlyEmission(exactFileState, fileHandoff), true, 'a saved file still needs verification before a final handoff')
+exactFileState.deliverableVerificationDone = true
+assert.equal(shouldRejectBuildTextOnlyEmission(exactFileState, fileHandoff), false, 'verified completion prose must be released rather than discarded and retried')
 
 const conversion = createInitialState(true, timeouts)
 conversion.originalUserRequest = 'Cover to PDF, return it here.'
