@@ -44,6 +44,7 @@ state.dynamicIterationLimit = 30
 const memory = new WorkingMemory(state.originalUserRequest)
 memory.extractFromBrowse('https://example.com/research','The research project found a substantial improvement in measured performance.',0)
 const checkpoint = captureTaskCheckpoint(state, memory)!
+checkpoint.progressWatchdog = { seen: [], pending: false, progressed: false, stalledTurns: 2, recentProgress: [false, false, true, false, false], redirected: true }
 const job: any = {runId:'run',userId:'user',conversationId:'conversation',queueName:'queue',claimWorkerId:'worker',claimAttempts:1,nextSeq:2,closed:false}
 const emitter = new CheckpointTestEmitter(job)
 let flushed = false
@@ -56,6 +57,7 @@ assert.ok(flushed, 'durable event flush must precede the checkpoint write')
 let saved = JSON.parse(String(db.prepare('select checkpoint_json from agent_task_jobs').get()!.checkpoint_json))
 assert.equal(saved.eventSeq, 1)
 assert.equal(saved.currentStepIdx, 0)
+assert.deepEqual(saved.progressWatchdog, checkpoint.progressWatchdog, 'rolling no-progress debt must survive validated durable checkpoint storage')
 
 // Simulate a crash after successful writes and advancement, before the next snapshot.
 await tursoExecute('insert into agent_task_events values (?,?,?)', ['run',2,JSON.stringify({type:'tool_result',id:'2',name:'create_file',result:{action:'created',path:'notes.md',size:200}})])
@@ -66,6 +68,7 @@ const successor = new CheckpointTestEmitter(successorJob)
 successor.flush = async () => {}
 const restored = await sanitizeAgentEventEmitter(successor).loadCheckpoint!()
 assert.equal(restored!.currentStepIdx, 1)
+assert.deepEqual(restored!.progressWatchdog, checkpoint.progressWatchdog, 'worker replacement and phase advancement must not erase no-progress debt')
 assert.ok(restored!.sets.createdFiles.includes('notes.md'))
 assert.equal(restored!.memory.facts[0].text, checkpoint.memory.facts[0].text)
 assert.equal(restored!.workLog.filter(line => line.includes('Completed create_file')).length, 1)

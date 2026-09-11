@@ -29,7 +29,7 @@ try {
 const captured = []
 globalThis.fetch = async (url, init) => {
   const body = JSON.parse(String(init?.body || '{}'))
-  captured.push({ url: String(url), body })
+  captured.push({ url: String(url), body, authorization: init.headers.Authorization })
   if (body.stream) {
     return new Response(
       'data: {"id":"provider-smoke-stream","choices":[{"delta":{"content":"ok"},"index":0}]}\\n\\n' +
@@ -64,6 +64,7 @@ await llm.createCompletion({
   reasoning: { max_tokens: 192, exclude: true },
   thinking: { type: 'disabled' },
   reasoning_effort: 'max',
+  provider: { only: ['stale-provider'], sort: 'price', allow_fallbacks: false },
 })
 const multimodalParts = [
   { type: 'text', text: 'Review the natively supported image.' },
@@ -72,7 +73,7 @@ const multimodalParts = [
 await llm.createCompletion({
   ...common,
   messages: [{ role: 'user', content: multimodalParts }],
-  max_tokens: 256,
+  max_tokens: 100_000,
   reasoning: { effort: 'none', exclude: false },
 })
 await llm.createCompletion({
@@ -111,7 +112,7 @@ await llm.createCompletion({
   ...common,
   messages: [
     { role: 'user', content: 'Continue.' },
-    { role: 'assistant', content: 'Recorded result.', reasoning_content: 'Preserved provider reasoning.' },
+    { role: 'assistant', content: 'Recorded result.', reasoning_content: 'Preserved provider reasoning.', reasoning_details: [{ type: 'reasoning.encrypted', data: 'opaque-signature', id: 'tool-1', format: 'google-gemini-v1', index: 0 }] },
     { role: 'user', content: 'Next action.' },
   ],
   tools: [{ type: 'function', function: { name: 'probe', parameters: { type: 'object', properties: {} } } }],
@@ -141,7 +142,8 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
       ...process.env,
       LLM_PROVIDER: 'stale-provider',
       ASSISTANT_PROVIDER: 'openrouter',
-      DEEPSEEK_API_KEY: 'smoke-deepseek-key',
+      DEEPSEEK_API_KEY: 'unused-deepseek-key',
+      OPENROUTER_API_KEY: '  smoke-openrouter-key  ',
       OPENROUTER_MODEL: 'ignored/stale-model',
       DEEPSEEK_MODEL: 'ignored-model',
       DEEPSEEK_REASONING_EFFORT: 'max',
@@ -157,28 +159,31 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
   const requests = JSON.parse(stdout.slice(jsonStart + marker.length))
   assert.equal(requests.length, 7, 'expired models and missing usage must not trigger a fallback provider call')
   assert.equal(requests[5].body.messages[1].reasoning_content, 'Preserved provider reasoning.')
+  assert.deepEqual(requests[5].body.messages[1].reasoning_details, [{ type: 'reasoning.encrypted', data: 'opaque-signature', id: 'tool-1', format: 'google-gemini-v1', index: 0 }])
+  assert.equal(requests[0].authorization, 'Bearer smoke-openrouter-key')
 
   for (const request of requests) {
-    assert.equal(request.url, 'https://api.deepseek.com/chat/completions')
-    assert.equal(request.body.model, 'deepseek-v4.1-flash-expires-on-0910')
+    assert.equal(request.url, 'https://openrouter.ai/api/v1/chat/completions')
+    assert.equal(request.body.model, 'google/gemini-3.8-flash')
     assert.equal('models' in request.body, false)
-    assert.equal('provider' in request.body, false)
+    assert.deepEqual(request.body.provider, { sort: 'throughput', allow_fallbacks: true, require_parameters: true })
     assert.equal('usage' in request.body, false)
-    assert.equal('reasoning' in request.body, false)
+    assert.deepEqual(request.body.reasoning, { effort: 'low', exclude: false })
     assert.equal('parallel_tool_calls' in request.body, false)
     assert.equal('temperature' in request.body, false)
     assert.equal('retryMaxAttempts' in request.body, false)
-    assert.deepEqual(request.body.thinking, { type: 'enabled' })
-    assert.equal(request.body.reasoning_effort, 'low')
+    assert.equal('thinking' in request.body, false)
+    assert.equal('reasoning_effort' in request.body, false)
     assert.deepEqual(request.body.stream_options, request.body.stream ? { include_usage: true } : undefined)
   }
-  assert.equal(requests[0].body.tool_choice, 'auto')
+  assert.equal(requests[0].body.tool_choice, 'required')
   assert.equal(requests[0].body.tools[0].function.name, 'probe')
   assert.deepEqual(requests[1].body.messages[0].content, [
     { type: 'text', text: 'Review the natively supported image.' },
     { type: 'image_url', image_url: { url: 'data:image/png;base64,aW1hZ2U=' } },
   ])
   assert.equal(requests[2].body.tool_choice, 'auto')
+  assert.equal(requests[1].body.max_tokens, 65_536, 'caller token caps cannot exceed Gemini output support')
   assert.deepEqual(
     requests[4].body.messages.slice(-3),
     [
@@ -189,7 +194,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
         content: 'Continue the active task from the latest completed work. Follow the current instructions and return the next LLM-authored action or progress update.',
       },
     ],
-    'DeepSeek histories must preserve the exact task context and end with a valid input turn',
+    'Gemini histories must preserve the exact task context and end with a valid input turn',
   )
   assert.equal(
     requests[4].body.messages.some(message =>
@@ -199,7 +204,7 @@ process.stdout.write('__CAPTURED_REQUESTS__' + JSON.stringify(captured))
     'provider compatibility must retain the original assistant history',
   )
 
-  console.log('DeepSeek preview exclusive-route low-thinking smoke test passed')
+  console.log('OpenRouter Gemini low-reasoning throughput-route smoke test passed')
 } finally {
   await rm(workDir, { recursive: true, force: true })
 }

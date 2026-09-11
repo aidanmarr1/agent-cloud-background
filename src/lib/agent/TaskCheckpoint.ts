@@ -41,6 +41,8 @@ const checkpointSchema = z.object({
   progressWatchdog: z.object({
     seen: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(512),
     pending: z.boolean(), progressed: z.boolean(), stalledTurns: count,
+    recentProgress: z.array(z.boolean()).max(8).optional(),
+    redirected: z.boolean().optional(),
   }).optional(),
 }).refine(value => value.currentStepIdx <= value.plan.length && value.scopes.length === value.plan.length)
 

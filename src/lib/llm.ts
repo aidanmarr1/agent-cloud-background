@@ -1,11 +1,12 @@
 import { retryDecision, waitForRetry } from './agent/ExecutionControl'
 import {
-  DEFAULT_DEEPSEEK_MODEL,
+  DEFAULT_OPENROUTER_MODEL,
+  DEFAULT_MODEL_PRICING,
   estimateUsageCost,
 } from '@/lib/modelPricing'
 import { ensureProviderRequestEndsWithInputTurn } from '@/lib/agent/ProviderRequestFailure'
 
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com'
+const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1'
 const ASSISTANT_LOG_LABEL = 'Agent'
 
 function trimmedEnv(value: string | undefined): string | undefined {
@@ -16,12 +17,12 @@ function trimmedEnv(value: string | undefined): string | undefined {
 // Keep the provider/model boundary explicit. Individual requests, stale
 // worker environments, and client-supplied model names cannot silently route
 // tasks back to another provider.
-export const ASSISTANT_PROVIDER = 'deepseek' as const
+export const ASSISTANT_PROVIDER = 'openrouter' as const
 export const ASSISTANT_SUPPORTS_IMAGE_INPUT = true
 export const ASSISTANT_SUPPORTS_VIDEO_INPUT = false
 export const ASSISTANT_SUPPORTS_FILE_INPUT = false
 export const ASSISTANT_SUPPORTS_AUDIO_INPUT = false
-export const DEFAULT_MODEL = DEFAULT_DEEPSEEK_MODEL
+export const DEFAULT_MODEL = DEFAULT_OPENROUTER_MODEL
 export const ASSISTANT_REASONING_EFFORT = 'low' as const
 
 type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
@@ -44,6 +45,7 @@ export type ChatMessageParam = {
     function: { name: string; arguments: string }
   }>
   reasoning_content?: string | null
+  reasoning_details?: Array<Record<string, unknown>>
   [key: string]: unknown
 }
 
@@ -98,6 +100,7 @@ export type ChatCompletionResponse = {
       role?: string
       content?: string | null
       reasoning_content?: string | null
+      reasoning_details?: Array<Record<string, unknown>>
       tool_calls?: unknown[]
     }
     finish_reason?: string | null
@@ -251,7 +254,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 60_000
 const MAX_ERROR_BODY_CHARS = 2000
 
 function getAssistantApiKey(): string {
-  const apiKey = trimmedEnv(process.env.DEEPSEEK_API_KEY)
+  const apiKey = trimmedEnv(process.env.OPENROUTER_API_KEY)
   if (!apiKey) {
     throw new Error('Missing assistant service credentials.')
   }
@@ -259,7 +262,7 @@ function getAssistantApiKey(): string {
 }
 
 function chatCompletionsUrl(): string {
-  return `${DEEPSEEK_BASE_URL}/chat/completions`
+  return `${OPENROUTER_BASE_URL}/chat/completions`
 }
 
 function headersToObject(headers: Headers): Record<string, string> {
@@ -272,7 +275,7 @@ function headersToObject(headers: Headers): Record<string, string> {
 
 function redactSecrets(text: string): string {
   let redacted = text.replace(/sk-[A-Za-z0-9_-]{12,}/g, '[redacted-api-key]')
-  const assistantKey = process.env.DEEPSEEK_API_KEY
+  const assistantKey = process.env.OPENROUTER_API_KEY
   if (assistantKey) {
     redacted = redacted.split(assistantKey).join('[redacted-assistant-key]')
   }
@@ -387,8 +390,8 @@ function createTimeoutError(timeoutMs: number): Error {
   return new Error(`Assistant request timed out after ${Math.round(timeoutMs / 1000)} seconds.`)
 }
 
-// DeepSeek includes token usage in completion responses and has no separate
-// generation lookup. Never send its credentials to another provider.
+// Completion responses include usage. Missing usage is estimated locally so
+// secondary generation lookups cannot delay customer task progress.
 export async function fetchGenerationUsage(
   _id: string | undefined,
   _signal?: AbortSignal,
@@ -424,12 +427,12 @@ function normalizeResponseUsage<T extends { model?: string; usage?: UsageWithCos
   }
 }
 
-function providerReasoningPayload(): Pick<ChatCompletionParams, 'thinking' | 'reasoning_effort'> {
-  // Every lane uses the requested preview with its lowest enabled thinking
-  // effort, including callers that ask to disable reasoning or use a fallback.
+function providerReasoningPayload(): Pick<ChatCompletionParams, 'reasoning' | 'provider'> {
+  // Gemini 3.8 Flash rejects minimal: low is its lowest supported effort.
+  // Sort each request dynamically by output tokens/second, with failover.
   return {
-    thinking: { type: 'enabled' },
-    reasoning_effort: ASSISTANT_REASONING_EFFORT,
+    reasoning: { effort: ASSISTANT_REASONING_EFFORT, exclude: false },
+    provider: { sort: 'throughput', allow_fallbacks: true, require_parameters: true },
   }
 }
 
@@ -455,6 +458,7 @@ function withPinnedModel(
     includeTemporalContext,
     stream: _stream,
     model: _model,
+    max_tokens,
     models: _models,
     provider: _provider,
     reasoning: _reasoning,
@@ -473,19 +477,14 @@ function withPinnedModel(
   void _parallelToolCalls
   return {
     ...rest,
-    // Thinking tool turns require reasoning_content on every assistant message.
-    // Old saved conversations may predate thinking support; preserve all content
-    // and supply an empty value only where no reasoning was recorded.
-    messages: compatibleMessages.messages.map(message =>
-      hasNativeTools && message.role === 'assistant'
-        ? { ...message, reasoning_content: message.reasoning_content ?? '' }
-        : message,
-    ) as ChatMessageParam[],
+    // Preserve Gemini reasoning_details, including tool-call thought signatures.
+    messages: compatibleMessages.messages as ChatMessageParam[],
     model: DEFAULT_MODEL,
+    ...(typeof max_tokens === 'number' ? { max_tokens: Math.min(max_tokens, DEFAULT_MODEL_PRICING.maxCompletionTokens) } : {}),
     stream,
     ...(stream ? { stream_options: { include_usage: true } } : {}),
-    // Keep native tool choice compatible with enabled thinking.
-    ...(hasNativeTools ? { tool_choice: 'auto' as const } : {}),
+    // Gemini supports required and named tool calls as well as automatic choice.
+    ...(hasNativeTools ? { tool_choice: _toolChoice ?? 'auto' } : {}),
     // AgentLoop controls whether it exposes one tool or a safe extraction batch,
     // and ToolPipeline executes eligible batches in parallel.
     ...providerReasoningPayload(),

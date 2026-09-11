@@ -268,6 +268,7 @@ function assistantHistoryMessageForStreamResult(
     role: 'assistant',
     content: content || null,
     reasoning_content: result.reasoningContent,
+    reasoning_details: result.reasoningDetails,
   }
   return message as ChatMessageParam
 }
@@ -4410,7 +4411,7 @@ export class AgentLoop {
             if (taskProgressDecision === 'redirect') {
               contextManager.push({
                 role: 'system',
-                content: 'PROGRESS REQUIRED: The last three turns produced no new successful results or changes. Repeated reads, cached results, status messages, and plan changes do not count as progress. Use the evidence already in context to perform the next missing action or finish the requested output. Read again only if the target changed or you need information not yet retrieved. If blocked, state the specific blocker; do not restart the plan. Only three further turns without progress remain.',
+                content: 'PROGRESS REQUIRED: Recent attempts are not producing enough new successful results or changes. Repeated reads, cached results, status messages, and plan changes do not count as progress. Reuse the evidence and files already available to perform the next missing action or finish the requested output. Read again only if the target changed or you need information not yet retrieved. If blocked, state the specific blocker; do not restart the plan. Four consecutive attempts without progress, or six unproductive attempts in the last eight, stop the task to protect the remaining credits.',
               } as ChatMessageParam)
             }
 
@@ -4723,6 +4724,9 @@ export class AgentLoop {
             }
             const actionSelectionRepairPrompt = pendingActionSelectionRepairPrompt
             pendingActionSelectionRepairPrompt = null
+            // Count every model attempt, including failures before streaming.
+            // Local retry/cadence resets must not renew the task-wide allowance.
+            taskProgressWatchdog.startTurn()
             const response = await this.callLLMWithRetry(
               model,
               modelRequestMessagesForUsage,
@@ -5300,7 +5304,6 @@ export class AgentLoop {
                   userDebitSkipped: nonBillableInternalTurn,
                 },
               )
-              taskProgressWatchdog.startTurn()
               pendingPaidTurnProgress = {
                 iteration: state.iterations,
                 stepIdxBefore: modelTurnStartStepIdx,
@@ -5766,6 +5769,7 @@ export class AgentLoop {
                   role: 'assistant',
                   content: lastStreamResult.assistantContent || null,
                   reasoning_content: lastStreamResult.reasoningContent,
+                  reasoning_details: lastStreamResult.reasoningDetails,
                   tool_calls: executedSiblingCalls.map(tc => ({
                     id: tc.id,
                     type: 'function' as const,
@@ -5800,8 +5804,8 @@ export class AgentLoop {
                 state.consecutiveNoToolCalls = 0
                 state.consecutiveNullStreams = 0
                 state.forceTextNextIteration = false
-                state.recentToolCalls = []
-                state.recentToolSequence = []
+                // Preserve repetition history while reusing the saved site.
+                // A malformed rebuild must not renew the loop allowance.
                 const planLength = state.currentPlanItems?.length || 0
                 if (planLength > 0 && state.currentStepIdx < planLength - 1) {
                   const stepBeforeAdvance = state.currentStepIdx
@@ -6061,6 +6065,7 @@ export class AgentLoop {
                 role: 'assistant',
                 content: lastStreamResult.assistantContent || null,
                 reasoning_content: lastStreamResult.reasoningContent,
+                reasoning_details: lastStreamResult.reasoningDetails,
                 tool_calls: executedToolCalls.map(tc => ({
                   id: tc.id,
                   type: 'function' as const,

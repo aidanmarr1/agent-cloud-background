@@ -1,7 +1,24 @@
 import { createHash } from 'node:crypto'
 
-const PRESENTATION_KEYS = new Set(['action_label', 'plan_step_index', 'durationMs', 'timestamp', 'observedAt'])
-const OBSERVATIONS = new Set(['read_file', 'list_files', 'read_document', 'web_search', 'browser_get_content', 'browser_screenshot', 'browser_find_text'])
+const PRESENTATION_KEYS = new Set([
+  'action_label', 'plan_step_index', 'progress_update',
+  'durationMs', 'elapsedMs', 'latencyMs', 'timestamp', 'observedAt', 'requestId',
+])
+const OBSERVATIONS = new Set(['read_file', 'list_files', 'read_document', 'web_search', 'image_search', 'browser_get_content', 'browser_screenshot', 'browser_find_text'])
+
+export const STALLED_TURN_REDIRECT_LIMIT = 2
+export const STALLED_TURN_STOP_LIMIT = 4
+const PROGRESS_WINDOW = 8
+const WINDOW_STALLED_STOP_LIMIT = 6
+
+export interface TaskProgressSnapshot {
+  seen: string[]
+  pending: boolean
+  progressed: boolean
+  stalledTurns: number
+  recentProgress?: boolean[]
+  redirected?: boolean
+}
 
 function stable(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stable)
@@ -18,21 +35,33 @@ export class TaskProgressWatchdog {
   private pending = false
   private progressed = false
   private stalledTurns = 0
+  private recentProgress: boolean[] = []
+  private redirected = false
 
-  constructor(snapshot?: { seen: string[]; pending: boolean; progressed: boolean; stalledTurns: number }) {
+  constructor(snapshot?: TaskProgressSnapshot) {
     if (snapshot) {
       this.seen = new Set(snapshot.seen)
       this.pending = snapshot.pending
       this.progressed = snapshot.progressed
       this.stalledTurns = snapshot.stalledTurns
+      this.recentProgress = [...(snapshot.recentProgress || [])].slice(-PROGRESS_WINDOW)
+      this.redirected = snapshot.redirected === true
     }
   }
 
-  snapshot(): { seen: string[]; pending: boolean; progressed: boolean; stalledTurns: number } {
-    return { seen: [...this.seen], pending: this.pending, progressed: this.progressed, stalledTurns: this.stalledTurns }
+  snapshot(): TaskProgressSnapshot {
+    return {
+      seen: [...this.seen], pending: this.pending, progressed: this.progressed,
+      stalledTurns: this.stalledTurns, recentProgress: [...this.recentProgress], redirected: this.redirected,
+    }
   }
 
-  startTurn(): void { this.pending = true; this.progressed = false }
+  startTurn(): void {
+    // Reopening a stream must not erase an unsettled turn's progress.
+    if (this.pending) return
+    this.pending = true
+    this.progressed = false
+  }
 
   record(results: ReadonlyArray<{
     tc: { name: string; arguments?: string }; result: unknown; isError: boolean
@@ -60,8 +89,23 @@ export class TaskProgressWatchdog {
     if (!this.pending) return 'continue'
     this.pending = false
     this.stalledTurns = this.progressed ? 0 : this.stalledTurns + 1
-    if (this.stalledTurns >= 6) return 'stop'
-    return this.stalledTurns === 3 ? 'redirect' : 'continue'
+    this.recentProgress.push(this.progressed)
+    if (this.recentProgress.length > PROGRESS_WINDOW) this.recentProgress.shift()
+    const stalledInWindow = this.recentProgress.filter(progress => !progress).length
+    // Occasional novel results cannot fund an otherwise repeating tool cycle.
+    if (
+      this.stalledTurns >= STALLED_TURN_STOP_LIMIT ||
+      (this.recentProgress.length === PROGRESS_WINDOW && stalledInWindow >= WINDOW_STALLED_STOP_LIMIT)
+    ) return 'stop'
+    if (this.progressed && stalledInWindow < STALLED_TURN_REDIRECT_LIMIT) this.redirected = false
+    if (!this.redirected && (
+      this.stalledTurns >= STALLED_TURN_REDIRECT_LIMIT ||
+      (this.recentProgress.length === PROGRESS_WINDOW && stalledInWindow >= STALLED_TURN_STOP_LIMIT)
+    )) {
+      this.redirected = true
+      return 'redirect'
+    }
+    return 'continue'
   }
 
   /** Only a new user instruction starts a fresh autonomous budget. */
@@ -69,6 +113,8 @@ export class TaskProgressWatchdog {
     this.pending = false
     this.progressed = false
     this.stalledTurns = 0
+    this.recentProgress = []
+    this.redirected = false
     this.seen.clear()
   }
 }

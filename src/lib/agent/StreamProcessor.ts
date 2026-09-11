@@ -40,6 +40,7 @@ export type MissingStreamUsageEstimator = (
 export interface StreamResult {
   assistantContent: string
   reasoningContent: string
+  reasoningDetails?: Array<Record<string, unknown>>
   toolCalls: Map<number, ToolCallData>
   finishReason?: string | null
   textOverflowSuppressed?: boolean
@@ -628,6 +629,7 @@ export class StreamProcessor {
     const filePreviewState: Map<number, { path: string; emittedChars: number; started: boolean }> = new Map()
     let assistantContent = ''
     let reasoningContent = ''
+    const reasoningDetails: Array<Record<string, unknown>> = []
     let contentBuffer = ''
     let visibleTextBuffer = ''
     const toolCalls: Map<number, ToolCallData> = new Map()
@@ -989,6 +991,16 @@ export class StreamProcessor {
 
         const delta = (chunk.choices[0]?.delta || {}) as Record<string, unknown>
 
+        // Preserve the provider's exact reasoning block sequence, including
+        // encrypted Gemini thought signatures needed after native tool calls.
+        if (Array.isArray(delta.reasoning_details)) {
+          for (const detail of delta.reasoning_details) {
+            if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+              reasoningDetails.push(detail as Record<string, unknown>)
+            }
+          }
+        }
+
         // Reasoning content (if model supports it)
         // Ollama gemma4 sends reasoning as `reasoning`, OpenAI/OpenRouter use `reasoning_content`
         if (delta.reasoning && !delta.reasoning_content) {
@@ -1110,7 +1122,7 @@ export class StreamProcessor {
                   }
                 } catch { /* stream may already be closed */ }
                 return {
-                  assistantContent, reasoningContent, toolCalls,
+                  assistantContent, reasoningContent, reasoningDetails, toolCalls,
                   stepAdvancedThisIteration, leakageDetected: false, timedOut: false,
                   contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
                 }
@@ -1144,7 +1156,7 @@ export class StreamProcessor {
                 this.emit(() => this.emitter.textDelta(deflection))
                 clearInterval(inactivityCheck)
                 return {
-                  assistantContent, reasoningContent, toolCalls,
+                  assistantContent, reasoningContent, reasoningDetails, toolCalls,
                   stepAdvancedThisIteration, leakageDetected: true, timedOut: false,
                   contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
                 }
@@ -1307,7 +1319,7 @@ export class StreamProcessor {
           const deflection = deflections[Math.floor(Math.random() * deflections.length)]
           this.emit(() => this.emitter.textDelta(deflection))
           return {
-            assistantContent, reasoningContent, toolCalls,
+            assistantContent, reasoningContent, reasoningDetails, toolCalls,
             stepAdvancedThisIteration, leakageDetected: true, timedOut: false,
             contentStreamingStartTime, usage: resolvedUsage(), usageEstimated,
           }
@@ -1427,6 +1439,7 @@ export class StreamProcessor {
     return {
       assistantContent,
       reasoningContent,
+      reasoningDetails,
       toolCalls,
       finishReason,
       textOverflowSuppressed: suppressTextOnlyOverflow,

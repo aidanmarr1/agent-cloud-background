@@ -11,9 +11,9 @@ const rootUrl = new URL('../', import.meta.url)
 const root = process.cwd()
 loadLocalEnvFiles(rootUrl)
 
-assert.ok(process.env.DEEPSEEK_API_KEY?.trim(), 'DEEPSEEK_API_KEY is required')
+assert.ok(process.env.OPENROUTER_API_KEY?.trim(), 'OPENROUTER_API_KEY is required')
 
-const workDir = await mkdtemp('/tmp/deepseek-live-route-smoke-')
+const workDir = await mkdtemp('/tmp/openrouter-live-route-smoke-')
 const bundlePath = join(workDir, 'llm.mjs')
 
 try {
@@ -58,12 +58,11 @@ try {
   })
   const elapsedMs = Date.now() - startedAt
 
-  assert.equal(response.model, 'deepseek-v4.1-flash-expires-on-0910')
-  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'DeepSeek V4.1 Flash must return the required native tool call')
+  assert.equal(response.model, 'google/gemini-3.8-flash')
+  assert.ok(response.choices?.[0]?.message?.tool_calls?.length, 'Gemini 3.8 Flash must return the required native tool call')
 
   const reasoningTokens = Number(response.usage?.completion_tokens_details?.reasoning_tokens || 0)
-  assert.ok(reasoningTokens > 0, 'thinking must stay enabled')
-  assert.ok(response.choices[0].message.reasoning_content, 'tool calls must include thinking history')
+  assert.ok(response.choices[0].message.reasoning_details?.length, 'tool calls must include Gemini thought signatures')
 
   const assistant = response.choices[0].message
   const call = assistant.tool_calls[0]
@@ -106,7 +105,8 @@ try {
 
   console.log(JSON.stringify({
     model: response.model,
-    thinking: 'enabled',
+    provider: response.provider,
+    providerSort: 'throughput',
     reasoningEffort: 'low',
     streamingToolFollowup: 'passed',
     vision: 'passed',

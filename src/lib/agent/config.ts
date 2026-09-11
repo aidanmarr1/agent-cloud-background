@@ -12,15 +12,14 @@ export const BASE_ITERATIONS = 48
 export const MAX_ITERATIONS = 180  // Hard runtime cap; dynamic budgets may grow up to this, not past it
 export const COMPLEXITY_ITERATION_BONUS = { 1: 0, 2: 40, 3: 96 } as const
 export const MIN_ITERATION_DELAY_MS = 0
-// DeepSeek V4.1 Flash exposes a 1,048,576-token context window. Keep
-// the product completion cap at 131,072 tokens, leaving 917,504 prompt tokens
-// for evidence while preserving the existing high-quality output ceiling.
+// Gemini 3.8 Flash exposes a 1,048,576-token context window and a 65,536
+// completion-token ceiling. Reserve the output allowance in the prompt limit.
 // Keep the complete bounded agent run in model context instead of discarding
 // all but eight messages. ContextManager still removes redundant file bodies
 // and stale screenshots, which preserves usable evidence without repeatedly
 // paying for content that already exists in the sandbox.
-export const MODEL_MAX_PROMPT_TOKENS = 917_504
-export const MODEL_MAX_COMPLETION_TOKENS = 131_072
+export const MODEL_MAX_PROMPT_TOKENS = 983_040
+export const MODEL_MAX_COMPLETION_TOKENS = 65_536
 export const MAX_CONTEXT_MESSAGES = 4_096
 // A single slow/stalled model turn is ordinary provider jitter, not a reason to
 // terminate an otherwise healthy task. Recovery changes the next request route

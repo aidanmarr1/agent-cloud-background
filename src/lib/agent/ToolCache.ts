@@ -18,7 +18,7 @@ interface CacheEntry {
   size: number  // approximate size in chars
 }
 
-const DISPLAY_ONLY_ARG_KEYS = new Set(['action_label', 'plan_step_index'])
+const DISPLAY_ONLY_ARG_KEYS = new Set(['action_label', 'plan_step_index', 'progress_update'])
 const TRACKING_QUERY_PARAMS = new Set([
   'fbclid',
   'gclid',
@@ -342,7 +342,7 @@ export class ToolCache {
 
     // Normalize search queries (lowercase, trim)
     if (toolName === 'web_search' && typeof sortedArgs.query === 'string') {
-      sortedArgs.query = sortedArgs.query.toLowerCase().trim()
+      sortedArgs.query = sortedArgs.query.toLowerCase().trim().replace(/\s+/g, ' ')
     }
     if (toolName === 'read_document') {
       const target = typeof sortedArgs.url === 'string'

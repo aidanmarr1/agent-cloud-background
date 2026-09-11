@@ -176,7 +176,10 @@ async function* stableDelayedReadChunks() {
   }] } }] }
 }
 
+const geminiReasoningDetails = [{ type: 'reasoning.encrypted', data: 'opaque-signature-part-a', id: 'cached-valid-sibling', format: 'google-gemini-v1', index: 0 }, { type: 'reasoning.encrypted', data: 'opaque-signature-part-b', id: 'cached-valid-sibling', format: 'google-gemini-v1', index: 0 }]
 async function* validAndMalformedReadChunks() {
+  yield { choices: [{ delta: { reasoning_details: [geminiReasoningDetails[0]] } }] }
+  yield { choices: [{ delta: { reasoning_details: [geminiReasoningDetails[1]] } }] }
   yield { choices: [{ delta: { tool_calls: [
     {
       index: 0,
@@ -263,7 +266,10 @@ pipelineState.currentPhase = 'research'
 pipelineState.currentPlanItems = ['Gather official latency evidence', 'Write final answer']
 pipelineState.currentStepIdx = 0
 pipelineState.stepSearchQueries.add(query.toLowerCase())
-const pipeline = new ToolPipeline(pipelineEmitter as any, 'malformed-tool-stream-smoke')
+const repairedSearchCache = new ToolCache()
+const repairedSearchEvidence = [{ title: 'Official latency evidence', url: source, snippet: 'Measured agent latency.' }]
+repairedSearchCache.set('web_search', { query }, repairedSearchEvidence)
+const pipeline = new ToolPipeline(pipelineEmitter as any, 'malformed-tool-stream-smoke', { cache: repairedSearchCache })
 const [pipelineResult] = await pipeline.executeAll(new Map([[0, {
   id: 'repair-integration',
   name: 'web_search',
@@ -271,11 +277,8 @@ const [pipelineResult] = await pipeline.executeAll(new Map([[0, {
 }]]), pipelineState)
 assert.equal(pipelineResult?.internalRecovery, undefined, 'a conservatively repaired object must enter normal preflight')
 assert.deepEqual(JSON.parse(pipelineResult!.tc.arguments), JSON.parse(repaired!))
-assert.match(
-  JSON.stringify(pipelineResult?.result || {}),
-  /already ran in the active phase/i,
-  'the repaired call must continue through ordinary duplicate-query preflight rather than malformed recovery',
-)
+assert.deepEqual(pipelineResult?.result, repairedSearchEvidence, 'a repaired duplicate must reuse existing evidence instead of repeating paid search')
+assert.equal(pipelineResult?.cached, true)
 assert.equal(
   pipelineState.lastLoopSignal?.type,
   'search_duplicate',
@@ -333,6 +336,7 @@ const validArgs = {
   plan_step_index: 1,
   url: source,
 }
+assert.deepEqual(mixedStream.reasoningDetails, geminiReasoningDetails, 'stream processing must preserve encrypted Gemini thought signatures exactly and in order')
 const cache = new ToolCache()
 cache.set('read_document', validArgs, {
   title: 'Official latency report',
