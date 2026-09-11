@@ -39,6 +39,8 @@ const smokePrompt = process.env.AGENT_DEBUG_SMOKE_PROMPT ||
 const smokeTimeoutMs = Number(process.env.AGENT_DEBUG_SMOKE_TIMEOUT_MS || 90_000)
 const smokeConversationId = process.env.AGENT_DEBUG_SMOKE_CONVERSATION_ID ||
   'debug-agent-loop-smoke'
+const smokeCheckpoint = process.env.AGENT_DEBUG_SMOKE_CHECKPOINT
+  ? JSON.parse(readFileSync(process.env.AGENT_DEBUG_SMOKE_CHECKPOINT, 'utf8')) : null
 
 const workDir = await mkdtemp(join(root, 'scripts/.agent-loop-debug-'))
 const runnerPath = join(workDir, 'runner.ts')
@@ -48,6 +50,7 @@ try {
   await writeFile(runnerPath, `
 import { AgentLoop } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
 import { DEFAULT_OPENROUTER_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
+import { pauseE2BSandbox } from ${JSON.stringify(join(root, 'src/lib/e2bSandbox.ts'))}
 
 type EventRecord = { type: string; [key: string]: unknown }
 
@@ -57,7 +60,10 @@ function makeEmitter() {
   return {
     events,
     textDelta(content: string) { events.push({ type: 'text_delta', content }) },
-    progressUpdate(content: string) { events.push({ type: 'progress_update', content }) },
+    progressUpdate(content: string, placement?: Record<string, unknown>) {
+      events.push({ type: 'progress_update', content, ...placement })
+      console.log('[smoke] progress_update', content)
+    },
     reasoningDelta(content: string) { events.push({ type: 'reasoning_delta', content }) },
     reasoningDone() { events.push({ type: 'reasoning_done' }) },
     toolStart(id: string, name: string, args: Record<string, unknown>) {
@@ -91,6 +97,7 @@ function makeEmitter() {
     },
     close() { closed = true },
     heartbeat() {},
+    async loadCheckpoint() { return ${JSON.stringify(smokeCheckpoint)} },
     get isClosed() { return closed },
     get terminalStatus() {
       const terminal = [...events].reverse().find(event => event.type === 'done' || event.type === 'error')
@@ -111,10 +118,12 @@ async function runSmoke() {
       model: DEFAULT_OPENROUTER_MODEL,
       conversationId: ${JSON.stringify(smokeConversationId)},
       signal: controller.signal,
+      recoveryAttempt: ${smokeCheckpoint ? 2 : 1},
     })
     await loop.run()
   } finally {
     clearTimeout(timeout)
+    await pauseE2BSandbox(${JSON.stringify(smokeConversationId)})
   }
 
   const toolStarts = emitter.events.filter(event => event.type === 'tool_start')
@@ -126,6 +135,8 @@ async function runSmoke() {
     .map(event => String(event.content).trim())
   const stepAdvances = emitter.events.filter(event => event.type === 'step_advance')
   const errors = emitter.events.filter(event => event.type === 'error')
+  const actionTimeline = emitter.events.filter(event => ['tool_start', 'progress_update', 'text_delta', 'step_advance'].includes(event.type))
+    .map(event => ({ type: event.type, name: event.name, beforeToolId: event.beforeToolId, content: typeof event.content === 'string' ? event.content.slice(0, 400) : undefined }))
   console.log('[smoke] summary', JSON.stringify({
     toolStarts: toolStarts.map(event => event.name),
     textDeltaCount: textDeltas.length,
@@ -136,6 +147,7 @@ async function runSmoke() {
     errors: errors.map(event => event.message),
     done: emitter.events.some(event => event.type === 'done'),
     eventCount: emitter.events.length,
+    actionTimeline,
   }))
 }
 

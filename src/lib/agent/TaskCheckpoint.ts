@@ -43,6 +43,8 @@ const checkpointSchema = z.object({
     pending: z.boolean(), progressed: z.boolean(), stalledTurns: count,
     recentProgress: z.array(z.boolean()).max(8).optional(),
     redirected: z.boolean().optional(),
+    completedStepCount: count.optional(),
+    newResultsSinceCompletion: z.boolean().optional(),
   }).optional(),
 }).refine(value => value.currentStepIdx <= value.plan.length && value.scopes.length === value.plan.length)
 
@@ -51,7 +53,8 @@ export const TASK_CHECKPOINT_MAX_BYTES = 256_000
 const SET_KEYS = ['createdFiles', 'searchQueries', 'visitedUrls', 'inputArtifactPathsRead', 'distinctSourceDomains',
   'stepSearchQueries', 'stepVisitedUrls', 'stepFailedSourceTargets'] as const
 const COUNT_KEYS = ['stepIterationCount', 'perStepBudget', 'deliverableStepBudget', 'stepToolCallCount',
-  'stepBrowseCount', 'stepResearchCallCount', 'replanCount', 'borrowedIterations', 'stepFailureCount'] as const
+  'stepBrowseCount', 'stepResearchCallCount', 'replanCount', 'borrowedIterations', 'stepFailureCount',
+  'visibleToolActionsSinceLastNarration'] as const
 const MAP_KEYS = ['stepSourceDomainCounts', 'stepOpenedSourceDomainCounts', 'stepToolTypeCounts',
   'taskToolTypeCounts', 'taskSuccessfulToolTypeCounts', 'fileCreateCounts'] as const
 
@@ -102,6 +105,9 @@ export function restoreTaskCheckpoint(state: AgentStateData, memory: WorkingMemo
   state.workLog = [...checkpoint.workLog]
   for (const key of SET_KEYS) state[key] = new Set(checkpoint.sets[key] || [])
   for (const key of COUNT_KEYS) if (checkpoint.counts[key] !== undefined) state[key] = checkpoint.counts[key]
+  // Older checkpoints lack the display clock; conservatively retain completed
+  // work so a worker restart cannot open another silent action window.
+  state.visibleToolActionsSinceLastNarration = checkpoint.counts.visibleToolActionsSinceLastNarration ?? state.stepToolCallCount
   for (const key of MAP_KEYS) state[key] = new Map(checkpoint.maps[key] || [])
   memory.restore(checkpoint.memory as WorkingMemorySnapshot)
   // Runtime/browser handles, visual verification, terminal flags and incomplete
@@ -128,7 +134,13 @@ export function reconcileTaskCheckpoint(checkpoint: TaskCheckpoint, events: impo
   memory.restore(checkpoint.memory)
   const starts = new Map<string, Record<string, unknown>>()
   for (const event of events) {
-    if (event.type === 'tool_start') starts.set(event.id, event.args)
+    if (event.type === 'tool_start' && !starts.has(event.id)) {
+      starts.set(event.id, event.args)
+      restored.counts.visibleToolActionsSinceLastNarration = (restored.counts.visibleToolActionsSinceLastNarration ?? restored.counts.stepToolCallCount ?? 0) + 1
+    }
+    if (event.type === 'progress_update' && event.content.trim()) {
+      restored.counts.visibleToolActionsSinceLastNarration = event.remainingVisibleActions ?? 0
+    }
     if (event.type === 'plan' && event.items.length) {
       restored.plan = [...event.items]
       restored.scopes = event.items.map(() => null)

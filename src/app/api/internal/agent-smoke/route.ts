@@ -3,6 +3,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { AgentLoop } from '@/lib/agent/AgentLoop'
 import { DEFAULT_MODEL } from '@/lib/llm'
 import type { SSEEmitter } from '@/lib/agent/SSEEmitter'
+import type { ProgressUpdatePlacement } from '@/types/events'
+import { pauseE2BSandbox } from '@/lib/e2bSandbox'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -69,8 +71,8 @@ function createSmokeEmitter(startedAt: number) {
       textDelta(content: string) {
         push({ type: 'text_delta', content: preview(content) })
       },
-      progressUpdate(content: string) {
-        push({ type: 'progress_update', content: preview(content) })
+      progressUpdate(content: string, placement?: ProgressUpdatePlacement) {
+        push({ type: 'progress_update', content: preview(content), ...placement })
       },
       reasoningDelta(content: string) {
         push({ type: 'reasoning_delta', content: preview(content) })
@@ -207,6 +209,7 @@ export async function GET(request: NextRequest) {
       plan: plans[0] || null,
       toolStarts,
       errors,
+      actionTimeline: events.filter(event => ['tool_start', 'progress_update', 'text_delta', 'step_advance'].includes(event.type)),
       textPreview: events
         .filter(event => event.type === 'text_delta')
         .map(event => String(event.content || ''))
@@ -237,5 +240,6 @@ export async function GET(request: NextRequest) {
   } finally {
     clearTimeout(timeout)
     emitter.close()
+    await pauseE2BSandbox(conversationId)
   }
 }

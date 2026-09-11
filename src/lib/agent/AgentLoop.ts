@@ -309,7 +309,7 @@ const INITIAL_STANDALONE_WEBSITE_INACTIVITY_TIMEOUT_MS = 90_000
 // tiny search JSON at the stream boundary, making the runtime pay for a full
 // repair turn. Keep this far below synthesis budgets while leaving enough room
 // for one complete action envelope (or the bounded three-source read batch).
-const FAST_SOURCE_ACTION_MAX_TOKENS = 384
+const FAST_SOURCE_ACTION_MAX_TOKENS = 768
 // Ordinary action-selection turns only need enough output for a complete
 // native tool envelope. Reserving the model's full 65k report budget here made
 // provider scheduling slower without adding useful capability. Full output
@@ -1936,26 +1936,24 @@ function sourceExtractionBatchConsumedForLatestSearch(state: AgentStateData): bo
 
 function shouldUseNaturalCadenceNarration(
   state: AgentStateData,
-  messages: Array<{ role: string; content: string }>,
 ): boolean {
   // Exact-extraction and compact-text guards may defer the preferred action-3
   // update, but they must not push a real visible action beyond the hard
   // action-4 window. Tool availability is finalized later; if a guarded turn
   // is genuinely text-only, the cadence attempt is released at this frontier.
   const hardWindowOpen =
-    state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
+    state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP
   if (
     (state.forceTextNextIteration || state.exactExtractionGuardPending) &&
     !hardWindowOpen
   ) return false
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return false
   if (state.narrationCadenceInFlight) return false
-  if (state.visibleToolActionsSinceLastNarration < state.narrationNextAttemptAt) return false
-  // Saved-file writes are still visible work. Long reports may require several
-  // create/append actions, so keep the same LLM-authored 3–4 action narration
-  // cadence active while those chunks stream. Only a single inline final answer
-  // has no intermediate action cluster to narrate.
-  if (finalInlineAnswerTurn(state, messages)) return false
+  if (state.visibleToolActionsSinceLastNarration < Math.min(
+    state.narrationNextAttemptAt, NARRATION_MAX_VISIBLE_ACTION_GAP,
+  )) return false
+  // Final phases may still select tools. Keep narration on their schemas while
+  // allowing a text-only completion through the ordinary completion audits.
   return true
 }
 
@@ -2857,11 +2855,11 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
     .filter(Boolean)
   const alreadyShown = recentNarrationPromptExclusions(state, 8)
   return [
-    'CADENCE ACTION TURN: make the next concrete native tool call immediately. Do not emit ordinary assistant prose before or after it.',
+    'CADENCE ACTION TURN: If work remains, make the next concrete native tool call with progress_update. If the phase is complete, state its concrete outcome and emit <next_step/> without another tool call; deliver the final answer when appropriate. Never add a tool call just to carry narration. Do not emit ordinary assistant prose alongside a tool call.',
     'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
     'Lead with a fact-dense outcome and make it continue naturally from the completed work immediately above. Carry forward only context needed to show what changed, and state material uncertainty, disagreement, or an evidence gap instead of smoothing it away. The visible action pills already show operations, so do not use an operation or vague purpose such as "to expand the evidence base" as the outcome. A concise source-action lead is valid when it immediately carries the concrete finding or important provenance. Avoid hype, praise, criticism, and unsupported evaluative adjectives. The current tool has not returned yet, so never invent what it will find.',
     'If work is continuing, add an immediate useful direction only when it helps orient the user; omit it at phase completion, when the next move is obvious, or when no concrete direction is selected. Vary the syntax to fit the result: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural. Do not copy a fixed opening, transition, or sentence count. Never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
-    'progress_update is display-only. The runtime will place it immediately before this native action starts. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
+    'Write progress_update as the FIRST argument, before action_label, path, and any long content. It is display-only. The runtime will place it immediately before this native action starts. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
     newWork.length ? `New completed work to synthesize (use its outcomes, not its action labels):\n- ${newWork.join('\n- ')}` : 'Use the concrete completed tool-result context already in the conversation. If evidence access failed, state that user-relevant blocker and the alternate evidence route—not that a search or page-open happened.',
     alreadyShown.length ? `Already shown — exclude these claims:\n- ${alreadyShown.join('\n- ')}` : '',
   ].filter(Boolean).join('\n\n')
@@ -2871,8 +2869,8 @@ function cadenceNarrationActionRetryMessage(reason: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
     'Retry the same active phase now in the ordinary action-selection turn.',
-    'Make exactly one concrete native tool call. In progress_update, summarize a genuinely new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown immediately before that action starts.',
-    'Do not output ordinary prose, planning, speculation, a future-only action fragment, or narration without a tool call.',
+    'If work remains, make exactly one concrete native tool call. In progress_update, summarize a new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown immediately before that action starts.',
+    'If the phase is complete, state its outcome and emit <next_step/> without another tool call, or deliver the verified final answer. Do not add a tool merely to carry narration.',
   ].join(' ')
 }
 
@@ -3213,7 +3211,7 @@ function compactFinalInlineAnswerMessages(state: AgentStateData, allMessages: Ch
   ]
 }
 
-function compactFinalDeliverableMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
+export function compactFinalDeliverableMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
   const request = state.originalUserRequest || latestUserMessageText(allMessages) || 'Create the requested deliverable.'
   const currentStep = state.currentPlanItems?.[state.currentStepIdx] || 'final deliverable'
   const pendingPartial = state.partialFileWriteRecoveryPending
@@ -3272,7 +3270,12 @@ function compactFinalDeliverableMessages(state: AgentStateData, allMessages: Cha
             'Do not emit <next_step/> until after a successful append clears the partial-file state.',
           ].join(' ')
         : existingPath
-          ? pendingRepairRead
+          ? !state.pendingDeliverableRevision && !state.fileWriteRepairPending
+            // Compaction must preserve the ordinary completion decision. The
+            // old branch demanded another edit solely because the file existed,
+            // causing read/edit loops after a complete report was already saved.
+            ? finalSavedDeliverablePrompt(state)
+            : pendingRepairRead
             ? [
                 'FINAL SAVED DELIVERABLE INSPECTION TOOL CALL ONLY.',
                 `Make exactly one native read_file call for "${state.fileWriteRepairPending!.path}" now; do not write visible prose before it.`,
@@ -3513,8 +3516,11 @@ const FINAL_INLINE_ANSWER_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_INLINE_REPORT_MAX_TOKENS = MODEL_MAX_COMPLETION_TOKENS
 const FINAL_SAVED_DELIVERABLE_REQUEST_TIMEOUT_MS = 60_000
 const FINAL_SAVED_DELIVERABLE_INITIAL_REQUEST_TIMEOUT_MS = 60_000
-const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 60_000
-const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 15_000
+// Native file arguments can remain buffered by a provider while it composes
+// the report. A 15s idle fence discarded healthy writes and restarted them.
+// Keep the wait bounded while allowing one complete report envelope to arrive.
+const FINAL_SAVED_DELIVERABLE_ITERATION_TIMEOUT_MS = 120_000
+const FINAL_SAVED_DELIVERABLE_INACTIVITY_TIMEOUT_MS = 60_000
 const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_TIMEOUT_MS = 1_500
 const FINAL_SAVED_DELIVERABLE_CONTENT_ONLY_MIN_CHARS = 350
 const FINAL_SAVED_DELIVERABLE_TEXT_REQUEST_TIMEOUT_MS = 60_000
@@ -4221,6 +4227,11 @@ export class AgentLoop {
     let lastToolResults: ToolExecutionResult[] = []
     let pendingPaidTurnProgress: PaidModelTurnProgressSnapshot | null = null
     const taskProgressWatchdog = new TaskProgressWatchdog(recoveredCheckpoint?.progressWatchdog)
+    if (recoveredCheckpoint?.findings.some(([stepIdx, note]) =>
+      stepIdx === recoveredCheckpoint.currentStepIdx - 1 && !note.startsWith('[INCOMPLETE]'),
+    )) {
+      taskProgressWatchdog.recordPhaseCompletion(recoveredCheckpoint.currentStepIdx)
+    }
     let pendingActionSelectionRepairPrompt: string | null = null
     let pendingCadenceTurnProgress: {
       attemptIteration: number
@@ -4406,6 +4417,12 @@ export class AgentLoop {
               log.info('Injected live user directive before model turn')
             }
 
+            // A reviewed research synthesis that advances its completed phase
+            // is progress too. Credit it once against new successful results;
+            // repeated narration and plan-only changes remain stalled turns.
+            if (pendingPaidTurnProgress?.visibleText && state.currentStepIdx > pendingPaidTurnProgress.stepIdxBefore) {
+              taskProgressWatchdog.recordPhaseCompletion(state.currentStepIdx)
+            }
             const taskProgressDecision = taskProgressWatchdog.boundary()
             if (taskProgressDecision === 'stop') {
               terminalReason = 'task_no_progress'
@@ -4719,7 +4736,7 @@ export class AgentLoop {
             // settled work and is released immediately before that action.
             // Keeping it in the work request avoids a competing provider call.
             const cadenceNarrationInMainTurn =
-              shouldUseNaturalCadenceNarration(state, this.options.messages) &&
+              shouldUseNaturalCadenceNarration(state) &&
               beginNarrationCadenceAttempt(state)
             let modelRequestMessagesForUsage = [...contextManager.getMessages()]
             let modelRequestToolsForUsage: unknown[] = []
@@ -7720,7 +7737,6 @@ export class AgentLoop {
           !state.exactExtractionGuardPending && !state.recoveryInspectionPending &&
           !state.fileWriteRepairPending && !state.pendingDeliverableRevision
         const effectiveCadenceNarrationInMainTurn =
-          !allowPhaseDecision &&
           cadenceNarrationInMainTurn &&
           activeTools.length > 0
         if (effectiveCadenceNarrationInMainTurn && !useCompactNarration) {
@@ -7756,7 +7772,7 @@ export class AgentLoop {
             )
           )
         let requiredToolIntent = shouldRequireToolCall
-        let fastActionTurn = !allowPhaseDecision && activeTools.length > 0 &&
+        let fastActionTurn = (!allowPhaseDecision || isFastSourceActionToolTurn(state, this.options.messages)) && activeTools.length > 0 &&
           !isPostCompletion &&
           isFastActionToolTurn(state, this.options.messages)
         let fastSourceActionTurn = !explicitTaskToolNeedsInitialAction &&
@@ -7793,11 +7809,13 @@ export class AgentLoop {
             ...requestMessages,
             {
               role: 'system',
-              content: fastSourceActionTurn
+              content: (allowPhaseDecision
+                ? 'If this phase is complete, state its concrete outcome and emit <next_step/> without another tool call. Otherwise follow the action guidance below. '
+                : '') + (fastSourceActionTurn
                 ? allowParallelSourceToolCalls
                 ? 'HOT PATH SOURCE ACTION TURN: decide immediately. Make one native tool call, or if recent search results already provide independent candidate URLs and no extraction batch has been used for that search set, make one parallel batch of up to 2 source extraction calls using read_document or http_request. Do not use parallel browser navigation/state tools or file tools. Do not write ordinary prose, status, plans, apologies, or hidden reasoning. Preserve depth; speed comes from acting quickly and reading independent sources together.'
                 : 'HOT PATH SOURCE ACTION TURN: decide immediately and make exactly one native evidence tool call. Cadence headroom is intentionally reserving the next source actions for the following ordinary turn. Do not write prose, status, plans, apologies, or hidden reasoning.'
-                : 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.',
+                : 'HOT PATH ACTION TURN: decide the next concrete action immediately and make exactly one native tool call. Do not write prose, status, plans, apologies, or hidden reasoning. Preserve the task depth/quality requirements; speed comes from choosing the next action quickly, not from doing less work.'),
             } as ChatMessageParam,
           ]
         }
@@ -7965,6 +7983,7 @@ export class AgentLoop {
           allowParallelSourceExtractionCalls: allowParallelSourceToolCalls,
           maxParallelSourceExtractionCalls,
           cadenceProgressUpdateEnabled: effectiveCadenceNarrationInMainTurn,
+          allowTextOnlyCompletion: allowPhaseDecision || isFinalInlineAnswerTurn || isFinalDeliverableHandoffTurn,
           // The generic prose cap is only a guard against non-action narration
           // loops. A final delivery or handoff must be allowed to reach the
           // provider's real stop marker; clipping it locally can turn half a

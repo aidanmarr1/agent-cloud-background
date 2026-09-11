@@ -1009,10 +1009,10 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(invalidCadenceState), true)
   const invalidCadenceResult = await new StreamProcessor(invalidCadenceEmitter as any, timeouts).processStream(invalidCadenceToolChunks() as any, invalidCadenceState, true)
   assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'future-only schema text must not emit')
-  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'invalid display text must stay invisible without blocking the model-selected action')
+  assert.equal(invalidCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'no fourth action may appear without accepted narration')
   assert.equal(invalidCadenceResult.cadenceProgressUpdate, undefined)
-  assert.equal(invalidCadenceResult.toolCalls.size, 1, 'invalid display narration must not discard a valid native tool call')
-  assert.equal(invalidCadenceResult.cadenceProgressViolation, undefined)
+  assert.equal(invalidCadenceResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
+  assert.equal(invalidCadenceResult.cadenceProgressViolation?.code, 'invalid_progress_update')
   assert.equal(invalidCadenceState.narrationNextAttemptAt, 4, 'cadence remains eligible after the accepted action without forcing a repair turn')
 
   const missingCadenceEmitter = makeEmitter()
@@ -1023,9 +1023,9 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(missingCadenceState), true)
   const missingCadenceResult = await new StreamProcessor(missingCadenceEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, missingCadenceState, true)
   assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0)
-  assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'a missing display field must not hold the fourth action')
-  assert.equal(missingCadenceResult.toolCalls.size, 1, 'a missing display field must fail open to concrete work')
-  assert.equal(missingCadenceResult.cadenceProgressViolation, undefined)
+  assert.equal(missingCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'no fourth action may appear without accepted narration')
+  assert.equal(missingCadenceResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
+  assert.equal(missingCadenceResult.cadenceProgressViolation?.code, 'missing_progress_update')
   assert.equal(missingCadenceState.narrationNextAttemptAt, 4)
 
   const emptyCadenceEmitter = makeEmitter()
@@ -1036,9 +1036,9 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(emptyCadenceState), true)
   const emptyCadenceResult = await new StreamProcessor(emptyCadenceEmitter as any, timeouts).processStream(emptyCadenceToolChunks() as any, emptyCadenceState, true)
   assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'progress_update').length, 0, 'an empty required cadence field must remain invisible')
-  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'an empty display field must remain invisible without blocking the action')
-  assert.equal(emptyCadenceResult.toolCalls.size, 1, 'an empty display field must not trigger a paid repair loop')
-  assert.equal(emptyCadenceResult.cadenceProgressViolation, undefined)
+  assert.equal(emptyCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'no fourth action may appear without accepted narration')
+  assert.equal(emptyCadenceResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
+  assert.equal(emptyCadenceResult.cadenceProgressViolation?.code, 'invalid_progress_update')
 
   const proseOnlyCadenceEmitter = makeEmitter()
   const proseOnlyCadenceState = createInitialState(false, timeouts)
@@ -1061,9 +1061,9 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(maxGapViolationState), true)
   const maxGapViolationResult = await new StreamProcessor(maxGapViolationEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, maxGapViolationState, true)
   assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'the runtime must not invent max-gap narration')
-  assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'the fourth-action narration preference must not hold concrete work')
-  assert.equal(maxGapViolationResult.toolCalls.size, 1)
-  assert.equal(maxGapViolationResult.cadenceProgressViolation, undefined)
+  assert.equal(maxGapViolationEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'no fourth action may appear without accepted narration')
+  assert.equal(maxGapViolationResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
+  assert.equal(maxGapViolationResult.cadenceProgressViolation?.code, 'missing_progress_update')
 
   const duplicateCadenceEmitter = makeEmitter()
   const duplicateCadenceState = createInitialState(false, timeouts)
@@ -1076,12 +1076,76 @@ export async function runSmoke() {
   assert.equal(beginNarrationCadenceAttempt(duplicateCadenceState), true)
   const duplicateResult = await new StreamProcessor(duplicateCadenceEmitter as any, timeouts).processStream(validCadenceToolChunks() as any, duplicateCadenceState, true)
   assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'text_delta').length, 0, 'duplicate schema text must not emit')
-  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 1, 'duplicate display text must stay hidden while the useful action continues')
+  assert.equal(duplicateCadenceEmitter.events.filter(event => event.type === 'tool_start').length, 0, 'no fourth action may appear without accepted narration')
   assert.equal(duplicateResult.cadenceProgressUpdate, undefined)
-  assert.equal(duplicateResult.toolCalls.size, 1, 'duplicate narration must not discard the native action')
-  assert.equal(duplicateResult.cadenceProgressViolation, undefined)
+  assert.equal(duplicateResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
+  assert.equal(duplicateResult.cadenceProgressViolation?.code, 'duplicate_progress_update')
   assert.equal(duplicateCadenceState.recentNarrations.length, 1, 'duplicate schema text must not reset or extend accepted narration memory')
   assert.equal(duplicateCadenceState.narrationNextAttemptAt, 4, 'duplicate attempt bookkeeping remains provisional until retry recovery')
+
+
+  // Eight real native envelopes must produce updates before actions four and seven.
+  const cadenceSequenceState = createInitialState(false, timeouts)
+  cadenceSequenceState.currentPlanItems = ['Compare official evidence']
+  const cadenceSequenceEmitter = makeEmitter()
+  const completedUpdates = [
+    'The first sources show cold initialization dominates startup latency, while warm starts remain stable.',
+    'The later measurements show cache reuse cuts repeat startup time, with mobile performance still uncertain.',
+  ]
+  for (let action = 1; action <= 8; action++) {
+    cadenceSequenceState.iterations = action
+    const due = beginNarrationCadenceAttempt(cadenceSequenceState)
+    const args: Record<string, unknown> = { action_label: 'Find official startup evidence ' + action, plan_step_index: 1, query: 'startup benchmark ' + action }
+    if (due) args.progress_update = completedUpdates[action === 4 ? 0 : 1]
+    async function* sequenceChunk() {
+      yield { choices: [{ delta: { tool_calls: [{ index: 0, id: 'sequence-' + action, function: { name: 'web_search', arguments: JSON.stringify(args) } }] } }] }
+    }
+    const processor = new StreamProcessor(cadenceSequenceEmitter as any, timeouts)
+    processor.beginBufferedEmission()
+    const result = await processor.processStream(sequenceChunk() as any, cadenceSequenceState, due, undefined, { allowParallelSourceExtractionCalls: false, maxParallelSourceExtractionCalls: 1, allowTextOnlyCompletion: true })
+    assert.equal(result.cadenceProgressViolation, undefined)
+    if (result.cadenceProgressUpdate) {
+      assert.equal(acceptProgressNarration(cadenceSequenceState, result.cadenceProgressUpdate, { requireSignal: false, resetCadence: true, remainingVisibleActions: carriedCadenceActionCount(result) }).status, 'accepted')
+      cadenceSequenceEmitter.events.push({ type: 'progress_update', content: result.cadenceProgressUpdate })
+    }
+    processor.commitBufferedEmission()
+  }
+  let sequenceGap = 0
+  const sequenceGaps: number[] = []
+  for (const event of cadenceSequenceEmitter.events) {
+    if (event.type === 'tool_start') assert.ok(++sequenceGap <= 3, 'at most three native actions may appear without narration')
+    if (event.type === 'progress_update') { sequenceGaps.push(sequenceGap); sequenceGap = 0 }
+  }
+  assert.deepEqual(sequenceGaps, [3, 3])
+  assert.equal(sequenceGap, 2)
+
+  // A due update must never force a fourth tool merely to finish the phase.
+  const completingState = createInitialState(false, timeouts)
+  completingState.currentPlanItems = ['Research', 'Deliver']
+  completingState.visibleToolActionsSinceLastNarration = 3
+  const completingEmitter = makeEmitter()
+  const completingResult = await new StreamProcessor(completingEmitter as any, timeouts).processStream(phaseEndNarrationChunks() as any, completingState, true, undefined, { allowParallelSourceExtractionCalls: false, maxParallelSourceExtractionCalls: 1, allowTextOnlyCompletion: true })
+  assert.equal(completingResult.cadenceProgressViolation, undefined)
+  assert.equal(completingResult.toolCalls.size, 0)
+  assert.equal(completingResult.stepAdvancedThisIteration, true)
+  assert.ok(completingEmitter.events.some(event => event.type === 'text_delta'))
+
+  const optionalActionState = createInitialState(false, timeouts)
+  optionalActionState.currentPlanItems = ['Research', 'Deliver']
+  optionalActionState.visibleToolActionsSinceLastNarration = 3
+  const optionalActionEmitter = makeEmitter()
+  const optionalActionResult = await new StreamProcessor(optionalActionEmitter as any, timeouts).processStream(missingCadenceToolChunks() as any, optionalActionState, true, undefined, { allowParallelSourceExtractionCalls: false, maxParallelSourceExtractionCalls: 1, allowTextOnlyCompletion: true })
+  assert.equal(optionalActionResult.cadenceProgressViolation?.code, 'missing_progress_update', 'allowing completion must not exempt a fourth tool from narration')
+  assert.equal(optionalActionEmitter.events.length, 0)
+
+  async function* delayedCompletionChunks() {
+    yield { choices: [{ delta: { content: 'The official benchmark confirms a 2.1-second median startup and stable warm starts.' } }] }
+    await new Promise(resolve => setTimeout(resolve, 220))
+    yield { choices: [{ delta: {}, finish_reason: 'stop' }] }
+  }
+  const delayedCompletion = await new StreamProcessor(makeEmitter() as any, { ...timeouts, contentOnlyTimeoutMs: 50, contentOnlyMinChars: 10, checkIntervalMs: 10 }).processStream(delayedCompletionChunks() as any, createInitialState(false, timeouts), false, undefined, { allowParallelSourceExtractionCalls: false, maxParallelSourceExtractionCalls: 1, allowTextOnlyCompletion: true })
+  assert.equal(delayedCompletion.timedOut, false, 'a permitted completion must not be cancelled by the tool-only text timeout while waiting for the stop marker')
+  assert.equal(delayedCompletion.finishReason, 'stop')
 
   const leakedCommandEmitter = makeEmitter()
   const leakedCommandState = createInitialState(false, timeouts)

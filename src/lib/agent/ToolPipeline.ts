@@ -737,7 +737,7 @@ function narrationCadenceBlockReason(
 ): string | null {
   if (!state.currentPlanItems || state.currentStepIdx >= state.currentPlanItems.length) return null
   if (!strictActionLabelFromArgs(args)) return null
-  // Cadence is display-only and never blocks execution. Crucially, ordinary
+  // Cadence is validated by StreamProcessor before execution. Ordinary
   // assistant prose carried beside a tool does not reset the action clock:
   // only the structured progress_update accepted in the stream release lane may
   // do that. Otherwise early prose after one or two actions can postpone the

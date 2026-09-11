@@ -18,6 +18,8 @@ export interface TaskProgressSnapshot {
   stalledTurns: number
   recentProgress?: boolean[]
   redirected?: boolean
+  completedStepCount?: number
+  newResultsSinceCompletion?: boolean
 }
 
 function stable(value: unknown): unknown {
@@ -37,6 +39,8 @@ export class TaskProgressWatchdog {
   private stalledTurns = 0
   private recentProgress: boolean[] = []
   private redirected = false
+  private completedStepCount = 0
+  private newResultsSinceCompletion = false
 
   constructor(snapshot?: TaskProgressSnapshot) {
     if (snapshot) {
@@ -46,6 +50,8 @@ export class TaskProgressWatchdog {
       this.stalledTurns = snapshot.stalledTurns
       this.recentProgress = [...(snapshot.recentProgress || [])].slice(-PROGRESS_WINDOW)
       this.redirected = snapshot.redirected === true
+      this.completedStepCount = snapshot.completedStepCount || 0
+      this.newResultsSinceCompletion = snapshot.newResultsSinceCompletion ?? snapshot.seen.length > 0
     }
   }
 
@@ -53,6 +59,7 @@ export class TaskProgressWatchdog {
     return {
       seen: [...this.seen], pending: this.pending, progressed: this.progressed,
       stalledTurns: this.stalledTurns, recentProgress: [...this.recentProgress], redirected: this.redirected,
+      completedStepCount: this.completedStepCount, newResultsSinceCompletion: this.newResultsSinceCompletion,
     }
   }
 
@@ -82,7 +89,17 @@ export class TaskProgressWatchdog {
       this.seen.add(fingerprint)
       if (this.seen.size > 512) this.seen.delete(this.seen.values().next().value!)
       this.progressed = true
+      this.newResultsSinceCompletion = true
     }
+  }
+
+  /** Credit a validated phase outcome once, backed by new successful results.
+   * Arbitrary narration, replanning, and empty phase jumps cannot renew it. */
+  recordPhaseCompletion(completedStepCount: number): void {
+    if (!this.pending || !this.newResultsSinceCompletion || completedStepCount <= this.completedStepCount) return
+    this.completedStepCount = completedStepCount
+    this.newResultsSinceCompletion = false
+    this.progressed = true
   }
 
   boundary(): 'continue' | 'redirect' | 'stop' {
@@ -116,5 +133,7 @@ export class TaskProgressWatchdog {
     this.recentProgress = []
     this.redirected = false
     this.seen.clear()
+    this.completedStepCount = 0
+    this.newResultsSinceCompletion = false
   }
 }

@@ -737,12 +737,9 @@ export function advanceStep(state: AgentStateData, finding?: string, forceAdvanc
   state.exactExtractionGuardPrompt = null
   state.exactExtractionGuardSourceUrl = null
   state.exactExtractionGuardAttempts = 0
-  // Narration cadence belongs to the active phase. Never inherit a partly
-  // consumed 3-4 action window from the phase that just completed.
-  state.visibleToolActionsSinceLastNarration = 0
-  state.narrationNextAttemptAt = NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS
+  // Only an accepted narration resets the visible-action clock. A phase
+  // transition by itself must not buy another silent three-action window.
   state.narrationCadenceInFlight = false
-  state.narrationWorkLogFrontier = state.workLog.at(-1) || state.narrationWorkLogFrontier
   state.stepToolTypeCounts = new Map()  // Rate limit counters reset per step
   state.iterationNewFactCounts = []     // Diminishing returns resets per step
   state.diminishingReturnsNudged = false

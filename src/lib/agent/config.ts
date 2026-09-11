@@ -65,7 +65,7 @@ export const NARRATION_THRESHOLD_BROWSER = 3
 // update that is released immediately before that action. This gives the UI a
 // truthful result -> "Next, I'll..." -> action sequence without a sidecar call.
 export const NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS = 3
-export const NARRATION_MAX_VISIBLE_ACTION_GAP = 4
+export const NARRATION_MAX_VISIBLE_ACTION_GAP = 3
 export const POST_COMPLETION_MAX_ITERATIONS = IS_OLLAMA ? 3 : 1
 export const NO_PLAN_RUNAWAY_LIMIT = 80
 

@@ -74,6 +74,26 @@ try {
   assert.equal(reopened.boundary(), 'continue', 'stream reopen cannot discard recorded evidence')
   assert.equal(reopened.snapshot().stalledTurns, 0)
 
+  // Production regression: two productive research phases reached delivery,
+  // but summaries/recovery turns filled the rolling window and stopped it.
+  let synthesis = new TaskProgressWatchdog({ seen: ['existing-evidence'], pending: true,
+    progressed: false, stalledTurns: 2, recentProgress: [true, false, true, false, false, true, false, false],
+    redirected: true, newResultsSinceCompletion: true })
+  synthesis.recordPhaseCompletion(2)
+  assert.equal(synthesis.boundary(), 'continue', 'validated research synthesis must be allowed to reach final delivery')
+  synthesis = new TaskProgressWatchdog(JSON.parse(JSON.stringify(synthesis.snapshot())))
+  assert.equal(synthesis.snapshot().completedStepCount, 2)
+  synthesis.startTurn()
+  synthesis.recordPhaseCompletion(3)
+  assert.equal(synthesis.boundary(), 'continue')
+  assert.equal(synthesis.snapshot().stalledTurns, 1, 'an empty phase jump cannot reuse evidence already synthesized')
+  for (let i = 0; i < 3; i++) {
+    synthesis.startTurn()
+    synthesis.recordPhaseCompletion(4 + i)
+    const decision = synthesis.boundary()
+    if (i === 2) assert.equal(decision, 'stop', 'phase-only loops must still stop')
+  }
+
   const cache = new ToolCache()
   const evidence = [{ url: 'https://example.com/report', title: 'Useful source' }]
   cache.set('web_search', { query: ' Useful  sources ', action_label: 'Find sources', progress_update: 'First update' }, evidence)

@@ -86,6 +86,7 @@ export interface StreamToolCallPolicy {
   allowParallelSourceExtractionCalls: boolean
   maxParallelSourceExtractionCalls: number
   cadenceProgressUpdateEnabled?: boolean
+  allowTextOnlyCompletion?: boolean
   allowLongAssistantText?: boolean
   textSavedDeliverable?: {
     id: string
@@ -663,12 +664,10 @@ export class StreamProcessor {
     let cadenceProgressUpdate: string | null = null
     let cadenceProgressToolCallId: string | null = null
     let cadenceProgressViolation: CadenceProgressViolation | null = null
-    const rejectedCadenceProgressToolCalls = new Set<number>()
-    // Once three visible actions exist, the next action is the preferred
-    // cadence boundary. A valid model-authored update is released before that
-    // action, but narration is display-only and must never block useful work.
+    // After three visible actions, release a valid model-authored update before
+    // admitting the fourth. Text-only completion remains independently allowed.
     const hardCadenceBoundary = cadenceProgressUpdateEnabled &&
-      state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP - 1
+      state.visibleToolActionsSinceLastNarration >= NARRATION_MAX_VISIBLE_ACTION_GAP
 
     const markCadenceProgressViolation = (
       code: CadenceProgressViolationCode,
@@ -680,9 +679,7 @@ export class StreamProcessor {
     const stageCadenceProgressUpdate = (text: string, toolCall: ToolCallData): void => {
       cadenceProgressUpdate = text
       cadenceProgressToolCallId = toolCall.id
-      assistantContent = assistantContent.trim()
-        ? `${assistantContent.trim()}\n\n${text}`
-        : text
+      assistantContent = text
       // Buffered actions are released after their model-usage debit commits.
       // An eligible live file preview releases this staged update later inside
       // emitProvisionalToolStart, after the same preview guards have passed and
@@ -690,32 +687,29 @@ export class StreamProcessor {
     }
 
     const prepareCadenceProgressUpdate = (
-      index: number,
+      _index: number,
       toolCall: ToolCallData,
-      allowMissing = false,
+      envelopeComplete = false,
     ): boolean => {
       if (!cadenceProgressUpdateEnabled) return true
       if (cadenceProgressUpdate) return true
-      if (rejectedCadenceProgressToolCalls.has(index)) return allowMissing
-
       const rawUpdate = extractCadenceProgressUpdate(toolCall.arguments)
       if (rawUpdate === undefined) {
-        // Keep holding the provisional action while the optional display field
-        // may still be streaming. Once the tool envelope is complete, fail
-        // open: the model's concrete action is more important than narration.
-        if (allowMissing) {
-          rejectedCadenceProgressToolCalls.add(index)
-          return true
+        // Wait for the complete envelope before rejecting a streamed field.
+        if (envelopeComplete && hardCadenceBoundary) {
+          markCadenceProgressViolation('missing_progress_update', 'the next action requires an LLM-written update on the preceding completed results')
         }
-        return false
+        return envelopeComplete && !hardCadenceBoundary
       }
       const review = reviewProgressNarration(state, rawUpdate, { requireSignal: false })
       if (review.status !== 'accepted') {
-        rejectedCadenceProgressToolCalls.add(index)
-        // Invalid or duplicate narration stays invisible. The native tool call
-        // remains executable, and cadence gets another natural opportunity on
-        // a later action instead of paying for a repair loop.
-        return allowMissing
+        if (envelopeComplete && hardCadenceBoundary) {
+          markCadenceProgressViolation(
+            review.status === 'duplicate' ? 'duplicate_progress_update' : 'invalid_progress_update',
+            review.status === 'duplicate' ? 'progress_update repeats an already shown result' : 'progress_update must state a concrete completed result or blocker',
+          )
+        }
+        return envelopeComplete && !hardCadenceBoundary
       }
 
       stageCadenceProgressUpdate(review.text, toolCall)
@@ -883,6 +877,7 @@ export class StreamProcessor {
         : Math.min(5_000, Math.max(150, this.tierTimeouts.contentOnlyTimeoutMs))
       const streamStalled = now - lastChunkTime > contentOnlyStallMs
       const contentOnlyExpired =
+        !toolCallPolicy?.allowTextOnlyCompletion &&
         this.tierTimeouts.contentOnlyTimeoutMs !== null &&
         contentStreamingStartTime !== null &&
         toolCalls.size === 0 &&
@@ -1015,7 +1010,7 @@ export class StreamProcessor {
         // Content delta
         if (delta.content) {
           contentDelta: {
-            if (cadenceProgressUpdateEnabled) {
+            if (cadenceProgressUpdateEnabled && !toolCallPolicy?.allowTextOnlyCompletion) {
               // Cadence text has exactly one model-authored lane: the required
               // progress_update field on the accompanying native tool call.
               // Ignore ordinary prose so a provider cannot satisfy or duplicate
@@ -1369,16 +1364,15 @@ export class StreamProcessor {
       }
     }
 
-    if (cadenceProgressUpdateEnabled && toolCalls.size === 0) {
+    if (cadenceProgressUpdateEnabled && toolCalls.size === 0 && !toolCallPolicy?.allowTextOnlyCompletion) {
       markCadenceProgressViolation(
         'missing_tool_call',
         'the cadence-enabled turn did not include a native tool call carrying progress_update',
       )
     }
 
-    // Stage valid narration for release immediately before the buffered next
-    // action. Missing/invalid narration stays invisible but cannot suppress the
-    // model-selected action.
+    // Stage narration immediately before the buffered next action. A missing
+    // update at the boundary is rejected before execution or customer billing.
     for (const [index, toolCall] of toolCalls) {
       const cadenceReady = prepareCadenceProgressUpdate(index, toolCall, true)
       if (!hardCadenceBoundary || cadenceReady) emitProvisionalToolStart(index, toolCall)
@@ -1408,8 +1402,8 @@ export class StreamProcessor {
     for (const toolCall of toolCalls.values()) {
       toolCall.arguments = stripCadenceProgressUpdateFromArguments(toolCall.arguments)
     }
-    // Text-only cadence turns can still be repaired. Native tool calls always
-    // fail open because the cadence lane is display-only.
+    // Rejected action turns use the existing bounded task-progress recovery;
+    // a valid text-only phase/final completion never needs a narration tool.
     if (cadenceProgressViolation && (toolCalls.size === 0 || hardCadenceBoundary)) toolCalls.clear()
 
     // Preserve all generated output in a missing-provider-usage estimate even

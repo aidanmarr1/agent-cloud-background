@@ -59,7 +59,7 @@ import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify
 import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
 import { analyzeTaskIntent } from ${JSON.stringify(join(root, 'src/lib/agent/TaskIntent.ts'))}
 import { requestedOutputFilePaths } from ${JSON.stringify(join(root, 'src/lib/agent/taskConstraints.ts'))}
-import { shouldRejectBuildTextOnlyEmission } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
+import { compactFinalDeliverableMessages, shouldRejectBuildTextOnlyEmission } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
 import {
   artifactPathSatisfiesFinalOutputContract,
   hasExistingInputArtifactEvidence,
@@ -108,6 +108,12 @@ recordWorkLedgerDeliverable(exactFileState, { path: 'release-check.txt', purpose
 assert.equal(shouldRejectBuildTextOnlyEmission(exactFileState, fileHandoff), true, 'a saved file still needs verification before a final handoff')
 exactFileState.deliverableVerificationDone = true
 assert.equal(shouldRejectBuildTextOnlyEmission(exactFileState, fileHandoff), false, 'verified completion prose must be released rather than discarded and retried')
+exactFileState.deadlineFinalizationStarted = true
+const compactSavedHandoff = compactFinalDeliverableMessages(exactFileState, [])
+assert.match(String(compactSavedHandoff[0].content), /SAVED DELIVERABLE VERIFICATION BOUNDARY/)
+assert.doesNotMatch(String(compactSavedHandoff[0].content), /REVISION TOOL CALL ONLY|Make exactly one native append_file or edit_file/, 'deadline compaction must not invent a revision for an already complete file')
+exactFileState.pendingDeliverableRevision = { path: 'hello.txt', failures: ['Missing requested content'], suggestions: [], createdAt: Date.now() }
+assert.match(String(compactFinalDeliverableMessages(exactFileState, [])[0].content), /REVISION TOOL CALL ONLY/, 'a real verification failure must still require a targeted repair')
 
 const conversion = createInitialState(true, timeouts)
 conversion.originalUserRequest = 'Cover to PDF, return it here.'

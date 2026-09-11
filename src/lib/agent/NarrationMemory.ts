@@ -31,7 +31,7 @@ interface ProgressNarrationOptions {
   recordStepIdx?: number
   recordIteration?: number
   /**
-   * Reset the 3–4 visible-action cadence only for a structured
+   * Reset the three-action cadence only for a structured
    * progress_update emitted on an actual due action turn. Ordinary assistant
    * prose may still be remembered for duplicate prevention, but must not
    * postpone the next required progress update.
@@ -401,10 +401,7 @@ export function acceptProgressNarration(
   if (options.resetCadence) {
     state.narrationCadenceInFlight = false
     state.narrationNextAttemptAt = NARRATION_REQUEST_AFTER_VISIBLE_ACTIONS
-    state.visibleToolActionsSinceLastNarration = options.remainingVisibleActions ?? Math.max(
-      0,
-      state.visibleToolActionsSinceLastNarration - NARRATION_MAX_VISIBLE_ACTION_GAP,
-    )
+    state.visibleToolActionsSinceLastNarration = options.remainingVisibleActions ?? 0
   }
   if (options.clearPhaseEndPending) state.phaseEndNarrationPending = false
   return review
@@ -425,7 +422,9 @@ export function recentNarrationPromptExclusions(state: AgentStateData, limit = 3
 
 export function beginNarrationCadenceAttempt(state: AgentStateData): boolean {
   if (state.narrationCadenceInFlight) return false
-  if (state.visibleToolActionsSinceLastNarration < state.narrationNextAttemptAt) return false
+  if (state.visibleToolActionsSinceLastNarration < Math.min(
+    state.narrationNextAttemptAt, NARRATION_MAX_VISIBLE_ACTION_GAP,
+  )) return false
   state.narrationCadenceInFlight = true
   // A missed/duplicate update never resets completed-action cadence. Retry on
   // the next visible action, not after another full cadence window.

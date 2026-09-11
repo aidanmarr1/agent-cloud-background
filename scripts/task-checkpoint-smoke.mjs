@@ -27,7 +27,7 @@ import assert from 'node:assert/strict'
 import { db, tursoExecute } from ${JSON.stringify(dbPath)}
 import { CheckpointTestEmitter } from ${JSON.stringify(join(root, 'src/lib/agent/taskJobs.ts'))}
 import { createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
-import { captureTaskCheckpoint } from ${JSON.stringify(join(root, 'src/lib/agent/TaskCheckpoint.ts'))}
+import { captureTaskCheckpoint, reconcileTaskCheckpoint, restoreTaskCheckpoint } from ${JSON.stringify(join(root, 'src/lib/agent/TaskCheckpoint.ts'))}
 import { WorkingMemory } from ${JSON.stringify(join(root, 'src/lib/agent/WorkingMemory.ts'))}
 import { sanitizeAgentEventEmitter } from ${JSON.stringify(join(root, 'src/lib/agent/SSEEmitter.ts'))}
 
@@ -41,9 +41,19 @@ state.currentPlanItems = ['Research', 'Deliver']
 state.currentPlanScopes = [null,null]
 state.originalUserRequest = 'Research and deliver a report'
 state.dynamicIterationLimit = 30
+state.visibleToolActionsSinceLastNarration = 3
 const memory = new WorkingMemory(state.originalUserRequest)
 memory.extractFromBrowse('https://example.com/research','The research project found a substantial improvement in measured performance.',0)
 const checkpoint = captureTaskCheckpoint(state, memory)!
+const narrationRecovery = createInitialState(false, timeouts)
+restoreTaskCheckpoint(narrationRecovery, new WorkingMemory(state.originalUserRequest), checkpoint)
+assert.equal(narrationRecovery.visibleToolActionsSinceLastNarration, 3, 'worker restart must preserve a due narration')
+const replayedNarration = reconcileTaskCheckpoint(checkpoint, [
+ { type: 'progress_update', content: 'The benchmark confirms repeat startup improved while cold starts remain unchanged.', remainingVisibleActions: 0 },
+ { type: 'tool_start', id: 'narrated-tool', name: 'web_search', args: { query: 'startup evidence', action_label: 'Find official startup measurements' } },
+ { type: 'tool_start', id: 'narrated-tool', name: 'web_search', args: { query: 'startup evidence', action_label: 'Find official startup measurements' } },
+])
+assert.equal(replayedNarration.counts.visibleToolActionsSinceLastNarration, 1, 'durable replay must reset on narration and deduplicate tool starts')
 checkpoint.progressWatchdog = { seen: [], pending: false, progressed: false, stalledTurns: 2, recentProgress: [false, false, true, false, false], redirected: true }
 const job: any = {runId:'run',userId:'user',conversationId:'conversation',queueName:'queue',claimWorkerId:'worker',claimAttempts:1,nextSeq:2,closed:false}
 const emitter = new CheckpointTestEmitter(job)
