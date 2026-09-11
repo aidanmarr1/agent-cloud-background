@@ -11,6 +11,7 @@ const bundlePath = join(workDir, 'runner.mjs')
 try {
   await writeFile(runnerPath, `
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { EventDispatcher, type StoreActions } from ${JSON.stringify(join(root, 'src/stream/client/eventDispatcher.ts'))}
 import {
   mergeSameCursorAssistantPresentation,
@@ -223,6 +224,7 @@ function storeBackedActions(): StoreActions {
     'Use the findings matrix to compare the onboarding and live-feedback recommendations. Open the Markdown report below for the full evidence and recommendations.',
   ].join('\\n')
   dispatcher.dispatch({ type: 'text_delta', content: personalized })
+  dispatcher.dispatch({ type: 'step_advance', status: 'done' })
   dispatcher.dispatch({ type: 'done' })
   dispatcher.flushPendingUpdates()
 
@@ -235,7 +237,7 @@ function storeBackedActions(): StoreActions {
   assert.doesNotMatch(finalMessage, /The completed file,.*is attached below/, 'the old canned attachment sentence must never replace the model handoff')
   assert.equal(
     finalAssistant?.taskGroups?.flatMap((group) => group.narrations || [])
-      .some((narration) => narration.includes('three-panel workspace')),
+      .some((narration) => narration.text.includes('three-panel workspace')),
     false,
     'the personalized handoff must render once, not repeat inside the final task group',
   )
@@ -290,11 +292,11 @@ function storeBackedActions(): StoreActions {
     /I finished synthesize/i,
     'an emergency final fallback must never splice an imperative plan label into broken completion grammar',
   )
-  assert.match(
-    finalMessage,
-    /requested deliverable is ready to open as .*global_warming_report\.md.* below/i,
-    'when the model handoff is unavailable, the UI should use a neutral artifact fallback without pretending it is model-authored task synthesis',
-  )
+  assert.doesNotMatch(finalMessage, /requested deliverable is ready to open/i,
+    'a missing model handoff must not be replaced with a canned final answer')
+  assert.ok(useChatStore.getState().conversations[0]?.messages[0]?.artifacts?.some(
+    artifact => artifact.fileName === 'global_warming_report.md'),
+    'the saved artifact must remain accessible even if a legacy stream has no handoff')
 }
 
 {
@@ -355,12 +357,37 @@ function storeBackedActions(): StoreActions {
   ].join('\\n')
   assert.ok(duplicatedReport.length > 4_000 && duplicatedReport.length < 6_000)
   dispatcher.dispatch({ type: 'text_delta', content: duplicatedReport })
+  dispatcher.dispatch({ type: 'step_advance', status: 'done' })
   dispatcher.dispatch({ type: 'done' })
   dispatcher.flushPendingUpdates()
 
   const finalMessage = useChatStore.getState().conversations[0]?.messages[0]?.content || ''
   assert.doesNotMatch(finalMessage, /## 2\. Architecture/, 'a structurally duplicated saved report must not be republished in chat')
-  assert.match(finalMessage, /final-research-report\.md/, 'duplicate report suppression must retain the concise artifact fallback')
+  assert.match(finalMessage, /Executive Summary/, 'a repeated report must retain the model-authored opening and useful findings')
+  assert.match(finalMessage, /Evidence, interpretation/, 'the client must not erase the actual model response')
+  assert.doesNotMatch(finalMessage, /requested deliverable is ready to open/, 'long handoffs must never collapse into canned prose')
+  assert.ok(finalMessage.length < 2_600, 'a repeated saved report should retain a concise excerpt of complete Markdown blocks')
+}
+
+// Replay an actual task locally without copying customer data into fixtures.
+const replayPath = ${JSON.stringify(process.env.AGENT_PRESENTATION_REPLAY || '')}
+if (replayPath) {
+  const conversationId = 'saved-presentation-replay'
+  useChatStore.setState({ conversations: [{
+    id: conversationId, title: 'Presentation replay', starred: false,
+    createdAt: now, updatedAt: now,
+    messages: [{ id: 'assistant-replay', role: 'assistant', content: '', timestamp: now }],
+  }], activeId: conversationId, folders: [] })
+  const dispatcher = new EventDispatcher(conversationId, storeBackedActions(), () => {})
+  for (const event of JSON.parse(readFileSync(replayPath, 'utf8'))) dispatcher.dispatch(event)
+  dispatcher.flushPendingUpdates()
+  const message = useChatStore.getState().conversations[0].messages[0]
+  assert.ok(message.taskGroups?.every(group => group.narrations.every(narration => narration.position > 0)),
+    'replayed progress updates cannot appear before the first phase action')
+  assert.match(message.content, /Apple/, 'the actual model handoff must retain the task topic')
+  assert.match(message.content, /Mac mini|silicon|hardware/, 'the actual model findings must survive')
+  assert.doesNotMatch(message.content, /requested deliverable is ready to open/, 'the reported generic ending must be gone')
+  assert.equal(message.taskGroups?.at(-1)?.narrations.length, 0, 'the final handoff must not duplicate into the last phase')
 }
 `, 'utf8')
 

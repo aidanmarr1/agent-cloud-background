@@ -48,6 +48,7 @@ const bundlePath = join(workDir, 'runner.mjs')
 
 try {
   await writeFile(runnerPath, `
+import { writeFileSync } from 'node:fs'
 import { AgentLoop } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
 import { DEFAULT_OPENROUTER_MODEL } from ${JSON.stringify(join(root, 'src/lib/modelPricing.ts'))}
 import { pauseE2BSandbox } from ${JSON.stringify(join(root, 'src/lib/e2bSandbox.ts'))}
@@ -126,6 +127,8 @@ async function runSmoke() {
     await pauseE2BSandbox(${JSON.stringify(smokeConversationId)})
   }
 
+  const eventsPath = ${JSON.stringify(process.env.AGENT_DEBUG_SMOKE_EVENTS || '')}
+  if (eventsPath) writeFileSync(eventsPath, JSON.stringify(emitter.events), { mode: 0o600 })
   const toolStarts = emitter.events.filter(event => event.type === 'tool_start')
   const textDeltas = emitter.events
     .filter(event => event.type === 'text_delta' && typeof event.content === 'string' && event.content.trim())
@@ -136,7 +139,7 @@ async function runSmoke() {
   const stepAdvances = emitter.events.filter(event => event.type === 'step_advance')
   const errors = emitter.events.filter(event => event.type === 'error')
   const actionTimeline = emitter.events.filter(event => ['tool_start', 'progress_update', 'text_delta', 'step_advance'].includes(event.type))
-    .map(event => ({ type: event.type, name: event.name, beforeToolId: event.beforeToolId, content: typeof event.content === 'string' ? event.content.slice(0, 400) : undefined }))
+    .map(event => ({ type: event.type, id: event.id, name: event.name, stepIndex: event.stepIndex, afterToolId: event.afterToolId, beforeToolId: event.beforeToolId, content: typeof event.content === 'string' ? event.content.slice(0, 400) : undefined }))
   console.log('[smoke] summary', JSON.stringify({
     toolStarts: toolStarts.map(event => event.name),
     textDeltaCount: textDeltas.length,

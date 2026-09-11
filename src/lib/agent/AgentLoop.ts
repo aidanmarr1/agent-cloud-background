@@ -48,6 +48,7 @@ import {
 import {
   acceptProgressNarration,
   beginNarrationCadenceAttempt,
+  cadenceNarrationStepIndex,
   deferNarrationCadenceAttempt,
   finishNarrationCadenceAttempt,
   recentNarrationPromptExclusions,
@@ -155,6 +156,7 @@ import {
 import { userErrorMessage } from '@/lib/errorMessages'
 import { cleanTaskSubjectText, humanTopicLabel } from './taskText'
 import { hasCredibleResearchRecoveryPacket, researchDepthProfileForState } from './ResearchDepth'
+import { requestedOutputFilePaths } from './taskConstraints'
 import {
   assessBriefInlineRunResearchEvidence,
   assessBriefInlineResearchEvidence,
@@ -352,6 +354,23 @@ function isSuccessfulContractDeliverableWrite(
 ): boolean {
   return isSuccessfulFinalDeliverableWrite(result) &&
     artifactPathSatisfiesFinalOutputContract(state, toolResultPath(result))
+}
+
+export function shouldAdvanceSynthesisToDeliverableVerification(
+  state: AgentStateData,
+  result: ToolExecutionResult,
+): boolean {
+  if (!state.currentPlanItems || state.currentStepIdx !== state.currentPlanItems.length - 2) return false
+  if (!isCurrentSynthesisStep(state) || !isSuccessfulContractDeliverableWrite(result, state)) return false
+  if (state.partialFileWriteRecoveryPending || state.pendingDeliverableRevision) return false
+  const shape = result.result as { partialWriteIncomplete?: boolean; partialWriteRecoveryLimitReached?: boolean }
+  if (shape?.partialWriteIncomplete || shape?.partialWriteRecoveryLimitReached) return false
+  const requestedPaths = requestedOutputFilePaths(state.originalUserRequest || '')
+  const path = toolResultPath(result).replace(/\\/g, '/').replace(/^\.\//, '')
+  // Only an explicitly named final output can complete synthesis early. Notes,
+  // other requested files, or remaining research phases retain their plan.
+  return requestedPaths.length === 1 &&
+    (path === requestedPaths[0] || path.endsWith('/' + requestedPaths[0]))
 }
 
 function isSuccessfulCompactFilePhaseWrite(
@@ -1580,6 +1599,8 @@ function finalSavedDeliverableToolCallInstruction(
   ].join(' ')
 }
 
+const SAVED_DELIVERABLE_HANDOFF_GUIDANCE = 'Give a concise, task-specific handoff: lead with the completed outcome, include the most useful concrete findings or usage detail, and identify the attached deliverable naturally. Usually 80–180 words is enough; use less for a simple task. Keep the full report, detailed tables, and section-by-section analysis in the saved file. Do not reproduce the report in chat or use a generic file-ready sentence as the whole response.'
+
 function finalDeliverableHandoffPrompt(state: AgentStateData): string {
   const pending = state.finalDeliverableHandoffPending
   const request = state.originalUserRequest?.trim()
@@ -1589,6 +1610,7 @@ function finalDeliverableHandoffPrompt(state: AgentStateData): string {
     request ? `Original request: ${request}` : '',
     `Completed artifact: ${target}.`,
     'Write the user-facing final response now with no tool call.',
+    SAVED_DELIVERABLE_HANDOFF_GUIDANCE,
     'Tailor it to this exact task: lead with the real outcome, then mention the most useful concrete findings, design choices, behavior, caveats, or usage detail from the completed work.',
     'If one or more files are attached below, make it clear in natural task-specific wording that the user can open those attachments, and identify what they contain when useful.',
     'Choose the length and structure from the task and completed context. A sentence, several paragraphs, headings, bullets, or another clear shape are all acceptable; do not force the same layout across tasks.',
@@ -1745,7 +1767,7 @@ function continueFinalPhaseAfterVerifiedArtifact(
   state.dynamicIterationLimit = Math.max(state.dynamicIterationLimit, state.iterations + 3)
   contextManager.push({
     role: 'system',
-    content: `VERIFIED OUTCOME: "${path}" is already saved and has passed whole-file integrity checks. Do not re-read it or run generic verification commands for work the runtime has already verified. Treat it as one completed outcome, then use the model-authored phase scope and latest user direction to decide naturally whether anything explicitly requested remains. If the requested phase is complete, give the user the task-specific final handoff now with no tool call; that natural handoff is the completion decision. If a distinct requested action, artifact, integration, or test remains, perform only that relevant work before the handoff.`,
+    content: `VERIFIED OUTCOME: "${path}" is already saved and has passed whole-file integrity checks. Do not re-read it or run generic verification commands for work the runtime has already verified. Treat it as one completed outcome, then use the model-authored phase scope and latest user direction to decide naturally whether anything explicitly requested remains. If the requested phase is complete, give the user the task-specific final handoff now with no tool call; that natural handoff is the completion decision. ${SAVED_DELIVERABLE_HANDOFF_GUIDANCE} If a distinct requested action, artifact, integration, or test remains, perform only that relevant work before the handoff.`,
   } as ChatMessageParam)
 }
 
@@ -1807,7 +1829,8 @@ function finalSavedDeliverablePrompt(state: AgentStateData): string {
         request ? `User request: ${request}.` : '',
         `Current final task: ${step}.`,
         'Do not rewrite, append, recreate, or inspect the file with another tool.',
-        'Write one brief, natural user-facing confirmation that the saved deliverable is ready, then stop.',
+        SAVED_DELIVERABLE_HANDOFF_GUIDANCE,
+        'Write the final response now, then stop.',
         'Do not mention internal verification, phases, ledgers, retries, or tool mechanics.',
       ].filter(Boolean).join(' ')
     }
@@ -1937,6 +1960,9 @@ function sourceExtractionBatchConsumedForLatestSearch(state: AgentStateData): bo
 function shouldUseNaturalCadenceNarration(
   state: AgentStateData,
 ): boolean {
+  // A requested phase-end paragraph itself closes the cadence gap. Keep it
+  // text-only instead of combining its short timeout with a native action.
+  if (state.forceTextNextIteration && state.phaseEndNarrationPending) return false
   // Exact-extraction and compact-text guards may defer the preferred action-3
   // update, but they must not push a real visible action beyond the hard
   // action-4 window. Tool availability is finalized later; if a guarded turn
@@ -1957,7 +1983,7 @@ function shouldUseNaturalCadenceNarration(
   return true
 }
 
-function tierTimeoutsForIteration(
+export function tierTimeoutsForIteration(
   state: AgentStateData,
   messages: Array<{ role: string; content: string }>,
   compactNarration = false,
@@ -2002,7 +2028,9 @@ function tierTimeoutsForIteration(
       contentOnlyMinChars: FINAL_SAVED_DELIVERABLE_TEXT_CONTENT_ONLY_MIN_CHARS,
     }
   }
-  if (finalSavedDeliverableTurn(state, messages)) {
+  if (finalSavedDeliverableTurn(state, messages) || (
+    isCurrentSynthesisStep(state) && taskNeedsSavedFinalArtifact(state, messages)
+  )) {
     return {
       ...state.tierTimeouts,
       // A saved report streams its body inside the native file arguments. The
@@ -2857,6 +2885,9 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   return [
     'CADENCE ACTION TURN: If work remains, make the next concrete native tool call with progress_update. If the phase is complete, state its concrete outcome and emit <next_step/> without another tool call; deliver the final answer when appropriate. Never add a tool call just to carry narration. Do not emit ordinary assistant prose alongside a tool call.',
     'Every available tool schema includes a required, non-empty progress_update. Use it to synthesize the newest useful outcome from the completed actions immediately above this call: a finding, comparison or implication, verified artifact/UI state, completed change, or real blocker.',
+    state.stepToolCallCount === 0
+      ? 'The active phase has not performed an action yet. This overdue update belongs at the END of the preceding phase. Summarize only that preceding completed work; do not introduce the new phase or claim its pending file, result, or action already exists.'
+      : 'This update follows completed actions within the active phase. Never write a phase-opening introduction.',
     'Lead with a fact-dense outcome and make it continue naturally from the completed work immediately above. Carry forward only context needed to show what changed, and state material uncertainty, disagreement, or an evidence gap instead of smoothing it away. The visible action pills already show operations, so do not use an operation or vague purpose such as "to expand the evidence base" as the outcome. A concise source-action lead is valid when it immediately carries the concrete finding or important provenance. Avoid hype, praise, criticism, and unsupported evaluative adjectives. The current tool has not returned yet, so never invent what it will find.',
     'If work is continuing, add an immediate useful direction only when it helps orient the user; omit it at phase completion, when the next move is obvious, or when no concrete direction is selected. Vary the syntax to fit the result: a direct factual subject, first-person confirmation, or concise review/finding lead can all be natural. Do not copy a fixed opening, transition, or sentence count. Never output future-only narration, promise an uncertain result, substitute a broad later-phase plan for the new completed result, or repeat/paraphrase an already-shown update. Do not mention providers, APIs, service names, retries, quotas, rate limits, action/tool/search counts, internal steps, or ask permission to continue.',
     'Write progress_update as the FIRST argument, before action_label, path, and any long content. It is display-only. The runtime will place it immediately before this native action starts. It summarizes only the preceding completed work, so do not claim that the current action succeeded or returned evidence. Still complete every normal required tool argument and make the tool call immediately.',
@@ -2865,13 +2896,14 @@ function cadenceNarrationMainTurnGuidance(state: AgentStateData): string {
   ].filter(Boolean).join('\n\n')
 }
 
-function cadenceNarrationActionRetryMessage(reason: string): string {
+function cadenceNarrationActionRetryMessage(reason: string, rejectedUpdate?: string): string {
   return [
     `CADENCE ACTION RETRY: ${reason}.`,
+    rejectedUpdate ? `Rejected update (quoted text to replace): ${JSON.stringify(rejectedUpdate)}.` : '',
     'Retry the same active phase now in the ordinary action-selection turn.',
     'If work remains, make exactly one concrete native tool call. In progress_update, summarize a new finding, verified state, completed change, or real blocker from the preceding completed actions; do not restate or claim a result from the current tool operation. It will be shown immediately before that action starts.',
     'If the phase is complete, state its outcome and emit <next_step/> without another tool call, or deliver the verified final answer. Do not add a tool merely to carry narration.',
-  ].join(' ')
+  ].filter(Boolean).join(' ')
 }
 
 function compactResearchTurnMessages(state: AgentStateData, allMessages: ChatMessageParam[]): ChatMessageParam[] {
@@ -4731,6 +4763,7 @@ export class AgentLoop {
             contextManager.trimIfNeeded(state)
 
             const cadenceVisibleActionFrontier = state.visibleToolActionsSinceLastNarration
+            const cadenceNarrationStepIdx = cadenceNarrationStepIndex(state)
             // Arm after three completed visible actions so the next native
             // tool call carries the LLM-authored update. It summarizes the
             // settled work and is released immediately before that action.
@@ -5081,13 +5114,14 @@ export class AgentLoop {
                   ? (text, toolCallId) => {
                       const acceptedNarration = acceptProgressNarration(state, text, {
                         requireSignal: false,
+                        recordStepIdx: cadenceNarrationStepIdx,
                         remainingVisibleActions: 0,
                         resetCadence: true,
                       })
                       if (acceptedNarration.status !== 'accepted') return
                       cadenceProgressReleasedDuringStream = true
                       this.emitter.progressUpdate(acceptedNarration.text, {
-                        stepIndex: state.currentStepIdx,
+                        stepIndex: cadenceNarrationStepIdx,
                         beforeToolId: toolCallId,
                         remainingVisibleActions: 0,
                       })
@@ -5268,6 +5302,7 @@ export class AgentLoop {
                       lastStreamResult.cadenceProgressUpdate,
                       {
                         requireSignal: false,
+                        recordStepIdx: cadenceNarrationStepIdx,
                         // Provisionally staged actions are already counted and
                         // become action one after this reset. Deferred tools are
                         // counted by ToolPipeline only after preflight succeeds.
@@ -5277,7 +5312,7 @@ export class AgentLoop {
                     )
                     if (acceptedNarration.status === 'accepted') {
                       this.emitter.progressUpdate(acceptedNarration.text, {
-                        stepIndex: state.currentStepIdx,
+                        stepIndex: cadenceNarrationStepIdx,
                         beforeToolId: lastStreamResult.cadenceProgressToolCallId,
                         remainingVisibleActions: 0,
                       })
@@ -5354,11 +5389,13 @@ export class AgentLoop {
             // LLM-authored progress update are rejected before execution. The
             // same ordinary action turn is repaired immediately.
             if (lastStreamResult.cadenceProgressViolation) {
+              pendingActionSelectionRepairPrompt = cadenceNarrationActionRetryMessage(
+                lastStreamResult.cadenceProgressViolation.reason,
+                lastStreamResult.cadenceProgressViolation.rejectedUpdate,
+              )
               contextManager.push({
                 role: 'system',
-                content: cadenceNarrationActionRetryMessage(
-                  lastStreamResult.cadenceProgressViolation.reason,
-                ),
+                content: pendingActionSelectionRepairPrompt,
               } as ChatMessageParam)
               state.lastIterationEnd = Date.now()
               phase = 'STREAMING'
@@ -6167,7 +6204,25 @@ export class AgentLoop {
             // during an implementation phase must advance to the next
             // model-authored phase; final handoff behavior belongs only to the
             // actual last step.
-            const isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
+            let isLastStep = state.currentPlanItems && state.currentStepIdx === state.currentPlanItems.length - 1
+            const savedDuringSynthesis = lastToolResults.find(result => (
+              shouldAdvanceSynthesisToDeliverableVerification(state, result)
+            ))
+            if (savedDuringSynthesis && state.currentPlanItems) {
+              const stepBeforeAdvance = state.currentStepIdx
+              const advanceMsg = planManager.handleStepAdvance(state)
+              if (state.currentStepIdx > stepBeforeAdvance) {
+                contextManager.compactForStepTransition(state)
+                this.emitter.stepAdvance(stepAdvanceStatusFor(state, stepBeforeAdvance))
+                if (goalTracker.isInitialized()) goalTracker.advanceToStep(state.currentStepIdx)
+              }
+              if (advanceMsg) contextManager.push(advanceMsg as ChatMessageParam)
+              // Continue through the normal whole-file verifier below. Saving
+              // the final file early is useful work, never permission to mark
+              // an unchecked artifact complete or create the same file again.
+              state.deliverableVerificationDone = false
+              isLastStep = state.currentStepIdx === state.currentPlanItems.length - 1
+            }
             const successfulPdfExport = lastToolResults.find(result => (
               result.tc.name === 'export_pdf' && !result.isError
             ))

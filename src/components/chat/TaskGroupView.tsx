@@ -228,6 +228,12 @@ export function TaskGroupView({ group, isCurrentGroup = false }: TaskGroupViewPr
                 narrationIdx++
               }
 
+              // Cached conversations can still contain old position-zero
+              // updates. A phase always opens with its first visible action.
+              const firstActionIndex = items.findIndex(item => item.kind === 'subtask')
+              if (firstActionIndex < 0) items.length = 0
+              else if (firstActionIndex > 0) items.splice(0, firstActionIndex)
+
               // Group consecutive subtasks into pill clusters
               const clusters: Array<{ kind: 'pills'; items: Subtask[] } | { kind: 'narration'; data: GroupNarration }> = []
               for (const item of items) {

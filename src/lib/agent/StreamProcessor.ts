@@ -80,6 +80,7 @@ export type CadenceProgressViolationCode =
 export interface CadenceProgressViolation {
   code: CadenceProgressViolationCode
   reason: string
+  rejectedUpdate?: string
 }
 
 export interface StreamToolCallPolicy {
@@ -708,6 +709,7 @@ export class StreamProcessor {
             review.status === 'duplicate' ? 'duplicate_progress_update' : 'invalid_progress_update',
             review.status === 'duplicate' ? 'progress_update repeats an already shown result' : 'progress_update must state a concrete completed result or blocker',
           )
+          if (cadenceProgressViolation) cadenceProgressViolation.rejectedUpdate = rawUpdate.slice(0, 400)
         }
         return envelopeComplete && !hardCadenceBoundary
       }

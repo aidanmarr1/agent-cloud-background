@@ -59,7 +59,7 @@ import { createInitialState, recordWorkLedgerDeliverable } from ${JSON.stringify
 import { auditAgentCompletion } from ${JSON.stringify(join(root, 'src/lib/agent/CompletionAudit.ts'))}
 import { analyzeTaskIntent } from ${JSON.stringify(join(root, 'src/lib/agent/TaskIntent.ts'))}
 import { requestedOutputFilePaths } from ${JSON.stringify(join(root, 'src/lib/agent/taskConstraints.ts'))}
-import { compactFinalDeliverableMessages, shouldRejectBuildTextOnlyEmission } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
+import { compactFinalDeliverableMessages, shouldAdvanceSynthesisToDeliverableVerification, shouldRejectBuildTextOnlyEmission, tierTimeoutsForIteration } from ${JSON.stringify(join(root, 'src/lib/agent/AgentLoop.ts'))}
 import {
   artifactPathSatisfiesFinalOutputContract,
   hasExistingInputArtifactEvidence,
@@ -75,6 +75,32 @@ const timeouts = {
   contentOnlyMinChars: 0,
   checkIntervalMs: 100,
 }
+
+const earlyReportState = createInitialState(false, timeouts)
+earlyReportState.originalUserRequest = 'Compare the evidence and save a report to deliverables/comparison.md.'
+earlyReportState.taskStrategy = 'research'
+earlyReportState.currentPlanItems = ['Gather evidence', 'Synthesize and compare approaches', 'Deliver comparison report']
+earlyReportState.currentPlanScopes = ['Gather sources', 'Compare findings and limitations', 'Save and deliver the report']
+earlyReportState.currentStepIdx = 1
+const earlyReportResult: any = {
+  tc: { id: 'early-report', name: 'create_file', arguments: JSON.stringify({ path: 'deliverables/comparison.md' }) },
+  isError: false, result: { action: 'created', path: 'deliverables/comparison.md', size: 7000 },
+}
+assert.equal(shouldAdvanceSynthesisToDeliverableVerification(earlyReportState, earlyReportResult), true,
+  'the explicitly requested report saved during penultimate synthesis must proceed to final verification without another create')
+assert.equal(earlyReportState.deliverableVerificationDone, false, 'phase routing must not mark the saved report verified')
+assert.equal(shouldAdvanceSynthesisToDeliverableVerification(earlyReportState, {
+  ...earlyReportResult, result: { ...earlyReportResult.result, partialWriteIncomplete: true },
+}), false, 'partial writes must remain in recovery')
+assert.equal(shouldAdvanceSynthesisToDeliverableVerification(earlyReportState, {
+  ...earlyReportResult, result: { ...earlyReportResult.result, path: 'notes/comparison.md' },
+}), false, 'intermediate notes must not complete synthesis')
+earlyReportState.currentStepIdx = 0
+assert.equal(shouldAdvanceSynthesisToDeliverableVerification(earlyReportState, earlyReportResult), false,
+  'saving a file must never skip outstanding research or analysis phases')
+earlyReportState.currentStepIdx = 1
+const synthesisTimeouts = tierTimeoutsForIteration(earlyReportState, [{ role: 'user', content: earlyReportState.originalUserRequest }])
+assert.ok(synthesisTimeouts.inactivityTimeoutMs >= 60000, 'native report arguments must not be cancelled by the short source-action timeout during synthesis')
 
 const exactFileRequest = 'Create release-check.txt containing exactly: The sum of squares from 1 to 20 is 2870. Use create_file, read the file back once to verify it, then finish with a concise handoff. Do not use research, web, or browser tools.'
 const exactFileIntent = analyzeTaskIntent([{ role: 'user', content: exactFileRequest }])

@@ -41,6 +41,17 @@ interface ProgressNarrationOptions {
 
 export const CADENCE_PROGRESS_UPDATE_FIELD = 'progress_update'
 
+/** Capture before streaming can provisionally start the next action. */
+export function cadenceNarrationStepIndex(
+  state: Pick<AgentStateData, 'currentStepIdx' | 'stepToolCallCount'>,
+): number {
+  // A carried update describes the preceding phase's work. It must never
+  // become an introduction above the first action in the new phase.
+  return state.stepToolCallCount === 0
+    ? Math.max(0, state.currentStepIdx - 1)
+    : state.currentStepIdx
+}
+
 /** Remaining visible actions before the cadence reaches its hard UI gap. */
 export function visibleNarrationActionHeadroom(
   state: Pick<AgentStateData, 'visibleToolActionsSinceLastNarration'>,

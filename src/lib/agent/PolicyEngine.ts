@@ -3017,6 +3017,9 @@ Then make your first tool call. Your plan will be remembered across iterations o
           })
           return actions
         }
+        if (shouldRequestPhaseEndNarration(state, assistantContent)) {
+          return [phaseEndNarrationAction(state)]
+        }
         advanceStep(
           state,
           `Synthesized prior evidence: ${assistantContent.replace(/\s+/g, ' ').trim().slice(0, 320)}`,

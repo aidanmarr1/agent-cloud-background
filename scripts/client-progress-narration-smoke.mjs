@@ -223,6 +223,31 @@ const doneSubtask = (id: string, label: string): Subtask => ({
 {
   const narrations: CapturedNarration[] = []
   const groups: unknown[] = []
+  const dispatcher = new EventDispatcher(
+    'no-phase-opening-narration', makeActions(narrations, groups), () => {},
+    startupMessage('assistant-no-phase-opening-narration'),
+  )
+  dispatcher.dispatch({ type: 'plan', items: ['Gather evidence', 'Save report'] })
+  dispatcher.dispatch({ type: 'progress_update', content: progressText, stepIndex: 0 })
+  assert.deepEqual(narrations, [], 'a phase cannot begin with narration before any action')
+  completeSearch(dispatcher, 'opening-a1', 'Find first comparison', 1)
+  completeSearch(dispatcher, 'opening-a2', 'Find second comparison', 1)
+  completeSearch(dispatcher, 'opening-a3', 'Find third comparison', 1)
+  dispatcher.dispatch({ type: 'step_advance', status: 'done' })
+  dispatcher.dispatch({
+    type: 'progress_update', content: progressText, stepIndex: 1,
+    beforeToolId: 'opening-b1', remainingVisibleActions: 0,
+  })
+  completeSearch(dispatcher, 'opening-b1', 'Check final comparison', 2)
+  dispatcher.flushPendingUpdates()
+  assert.deepEqual(narrations, [{ group: 0, text: progressText, position: 3 }],
+    'a carried legacy update belongs after prior work, never at the beginning of the next phase')
+  assert.equal((dispatcher as any).toolsSinceLastNarration, 1)
+}
+
+{
+  const narrations: CapturedNarration[] = []
+  const groups: unknown[] = []
   const initialMessage: Message = {
     id: 'assistant-running',
     role: 'assistant',

@@ -92,7 +92,7 @@ export function AgentMessage({ message, isStreaming, onFollowUp, onRegenerate, c
   // card in the main response belongs to the final handoff, though: rendering
   // it as soon as the last plan group advances leaves a card sitting alone
   // while the personalized completion message is still being generated.
-  const showFinalDeliverables = showFinalContent && Boolean(finalContent)
+  const showFinalDeliverables = showFinalContent && (Boolean(finalContent) || showCompletion)
 
   // Calculate total elapsed time for CompletionBanner
   const totalElapsed = (() => {

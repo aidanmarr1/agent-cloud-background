@@ -149,6 +149,33 @@ function looksLikeDuplicatedSavedReport(text: string, savedFileCount: number): b
     (trimmed.length > 4_000 && numberedSectionCount >= 3)
 }
 
+function savedDeliverableHandoff(text: string, savedFileCount: number): string {
+  if (!looksLikeDuplicatedSavedReport(text, savedFileCount)) return text
+
+  // Older streams can repeat the saved report in their final response. Keep
+  // complete model-authored opening blocks, including concrete findings, and
+  // its closing attachment guidance. Never replace them with canned prose.
+  const blocks = text.split(/\n{2,}/)
+  const selected: string[] = []
+  let length = 0
+  for (const block of blocks) {
+    if (length + block.length > 2_400 || /^\s*```/.test(block)) break
+    selected.push(block)
+    length += block.length + 2
+  }
+  while (selected.length && /^(?:#{1,6}\s+[^\n]+|[-*_]{3,})$/.test(selected.at(-1)!.trim())) {
+    selected.pop()
+  }
+  if (!selected.length) return text
+  const closing = blocks.at(-1)?.trim() || ''
+  if (
+    closing.length <= 600 &&
+    /\b(?:attached|attachment|download|saved|report below|file below)\b/i.test(closing) &&
+    !selected.includes(closing)
+  ) selected.push(closing)
+  return selected.join('\n\n')
+}
+
 function capStr(s: string, max: number): string {
   if (s.length <= max) return s
   return '[truncated]\n' + s.slice(s.length - (max - 12))
@@ -698,7 +725,7 @@ export class EventDispatcher {
     })
     if (!narrationText) return
 
-    const targetGroupIdx = this.progressUpdateGroupIndex(event.stepIndex)
+    let targetGroupIdx = this.progressUpdateGroupIndex(event.stepIndex)
     const targetGroup = this.parsedGroups[targetGroupIdx]
     if (!targetGroup) return
 
@@ -709,11 +736,21 @@ export class EventDispatcher {
     const beforeToolIndex = event.beforeToolId
       ? targetSubtasks.findIndex((subtask) => subtask.id === event.beforeToolId)
       : -1
-    const targetPosition = afterToolIndex >= 0
+    let targetPosition = afterToolIndex >= 0
       ? afterToolIndex + 1
       : beforeToolIndex >= 0
         ? beforeToolIndex
         : targetSubtasks.length
+    if (targetPosition === 0) {
+      // Legacy/replayed events may name the new phase even though their
+      // evidence belongs to the previous one. An update can follow work, but
+      // cannot introduce an empty phase or precede its first action.
+      do {
+        targetGroupIdx--
+        targetPosition = safeSubtasks(this.parsedGroups[targetGroupIdx]).length
+      } while (targetGroupIdx >= 0 && targetPosition === 0)
+      if (targetGroupIdx < 0) return
+    }
     const remainingVisibleActions = Number.isFinite(event.remainingVisibleActions)
       ? Math.max(0, Math.floor(event.remainingVisibleActions as number))
       : this.visibleActionsAfter(targetGroupIdx, targetPosition)
@@ -1474,7 +1511,13 @@ export class EventDispatcher {
   }
 
   private handleStepAdvance(event: { status?: 'done' | 'incomplete'; reason?: string }): void {
-    if (this.flushNarration(true)) this.pendingNarrationTools = []
+    const isFinalPhase = this.currentGroupIdx === this.parsedGroups.length - 1
+    if (isFinalPhase && event.status !== 'incomplete') {
+      // The final phase's text is the main Markdown handoff. Keep it out of
+      // the narration lane even when step_advance arrives before done.
+      this.discardNarrationBuffer()
+      this.clearPendingNarrationTools(true)
+    } else if (this.flushNarration(true)) this.pendingNarrationTools = []
     else {
       this.discardNarrationBuffer()
       if (event.status === 'incomplete') this.clearPendingNarrationTools(true)
@@ -1489,6 +1532,7 @@ export class EventDispatcher {
       return
     }
 
+    if (!isFinalPhase) this.postLastToolText = ''
     const status = 'done'
     if (this.currentGroupIdx >= 0 && this.currentGroupIdx < this.parsedGroups.length) {
       this.parsedGroups[this.currentGroupIdx] = {
@@ -1658,39 +1702,23 @@ export class EventDispatcher {
       const currentAck = this.cleanAcknowledgmentCandidate(currentContent)
       const ack = selectBestStartupAcknowledgment(this.startupAcknowledgment, currentAck)
 
-      // Build a short neutral fallback only when the model did not provide a
-      // usable final handoff. The model owns normal completion prose; this
-      // emergency path must not manufacture grammar from imperative plan
-      // labels such as "Synthesize findings".
-      let summary = ''
-      if (uniqueFiles.length > 0) {
-        const artifactLabel = uniqueFiles.length === 1
-          ? `\`${uniqueFiles[0]}\``
-          : uniqueFiles.map(fileName => `\`${fileName}\``).join(', ')
-        summary = uniqueFiles.length === 1
-          ? `The requested deliverable is ready to open as ${artifactLabel} below.`
-          : `The requested deliverables are ready to open as ${artifactLabel} below.`
-      }
-
       // Text after the last tool is the model's dedicated final handoff, not
       // progress narration. Preserve its usage instructions and Markdown;
       // narration cleaning can erase valid sentences such as "Use the filter".
-      const postToolAnswer = normalizeMarkdownForDisplay(cleanThinkingTags(this.postLastToolText))
-        .replace(/\n{3,}/g, '\n\n')
-        .trim()
-      const suppressDuplicateReportText = looksLikeDuplicatedSavedReport(postToolAnswer, uniqueFiles.length)
+      const postToolAnswer = savedDeliverableHandoff(
+        normalizeMarkdownForDisplay(cleanThinkingTags(this.postLastToolText))
+          .replace(/\n{3,}/g, '\n\n')
+          .trim(),
+        uniqueFiles.length,
+      )
 
-      // Set content cleanly: ACK + model synthesis when available; use the
-      // generated handoff only as a fallback for file-deliverable tasks.
+      // The model owns the handoff. If an old stream has none, the actual
+      // artifact cards remain available without manufacturing a final answer.
       let finalContent = ack
-      if (postToolAnswer && postToolAnswer !== ack && !suppressDuplicateReportText) {
+      if (postToolAnswer && postToolAnswer !== ack) {
         finalContent = ack
           ? `${ack}\n\n${TASK_FINAL_CONTENT_BOUNDARY}\n\n${postToolAnswer}`
           : postToolAnswer
-      } else if (summary) {
-        finalContent = ack
-          ? `${ack}\n\n${TASK_FINAL_CONTENT_BOUNDARY}\n\n${summary}`
-          : summary
       }
       const cleanedExistingContent = normalizeMarkdownForDisplay(cleanThinkingTags(currentContent)).trim()
       if (finalContent.trim()) {
@@ -1783,6 +1811,7 @@ export class EventDispatcher {
     const targetNarrations = safeNarrations(targetGroup)
     const targetSubtasks = safeSubtasks(targetGroup)
     const safePosition = Math.max(0, Math.min(Math.floor(position), targetSubtasks.length))
+    if (safePosition === 0) return false
     if (targetNarrations.some(narration => narration.position === safePosition)) {
       return false
     }

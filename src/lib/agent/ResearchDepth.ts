@@ -22,7 +22,7 @@ const CURRENT_RE = /\b(?:latest|current|recent|today|this\s+week|this\s+month|th
 const EVIDENCE_RE = /\b(?:source-backed|evidence-backed|sources?|citations?|cited?|references?|verified|verify|cross[-\s]?check|benchmark|data|numbers?|metrics?)\b/i
 const BROAD_SYNTHESIS_RE = /\b(?:current\s+state|state\s+of|overview|landscape|ecosystem|real[-\s]?world\s+applications?|applications?|use\s+cases?|core\s+technolog(?:y|ies)|capabilities|trends?|impact|implications?)\b/i
 const MULTI_ANGLE_RE = /\b(?:history|founding|team|funding|leadership|product|customers?|adoption|traction|financial|hiring|partnerships?|competitive position|pricing|reviews?|market sentiment|strengths?|weaknesses?|risks?|opportunities?|applications?|use cases?|technolog(?:y|ies)|capabilities|trends?|impact|implications?|ecosystem|landscape)\b/gi
-const ANALYTICAL_PHASE_RE = /^\s*(?:analy[sz]e|cross[-\s]?reference|evaluate|compare|assess|interpret)\b/i
+const ANALYTICAL_PHASE_RE = /^\s*(?:analy[sz]e|synthesi[sz]e|cross[-\s]?reference|evaluate|compare|assess|interpret)\b/i
 const EXPLICIT_SOURCE_COUNT_RE = /\b(?:at\s+least|minimum(?:\s+of)?|use|compare|consult|review|from)?\s*(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:credible|reliable|independent|primary|authoritative|quality|distinct|different)?\s*(?:web\s+)?sources?\b/i
 
 const SOURCE_COUNT_WORDS: Record<string, number> = {
@@ -237,6 +237,12 @@ export function researchDepthProfileForState(state: AgentStateData): ResearchDep
 
   const callCap = label === 'wide' ? 22 : label === 'deep' ? 16 : 14
   const allocated = perPhaseDepthBudget(state, requiredCalls, requiredSourceBreadth, label, complexity)
+  if (requestedSourceCount !== null && label !== 'wide') {
+    // Per-phase minimums must not expand an explicitly sized request (for
+    // example, three source-page reads) into four domains and extra retries.
+    allocated.calls = Math.min(allocated.calls, requiredCalls)
+    allocated.breadth = Math.min(allocated.breadth, requiredSourceBreadth)
+  }
   return {
     requiredCalls: Math.max(1, Math.min(callCap, allocated.calls)),
     requiredSourceBreadth: Math.max(1, Math.min(label === 'wide' ? 12 : 10, allocated.breadth)),

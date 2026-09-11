@@ -48,7 +48,7 @@ async function assertSourceContracts() {
   assert.match(dispatcher, /discardNarrationBuffer/, 'early narration buffers must be discarded instead of carried into later tool gaps')
   assert.doesNotMatch(dispatcher, /lastPosition \+ MAX_TOOLS_BETWEEN_NARRATION_FLUSHES/, 'late narration must never be backfilled at an old fourth-action boundary')
   assert.match(dispatcher, /if \(!force && !this\.isNarrationCadenceReady\(\)\) return false[\s\S]*?const text = this\.narrationBuf\.flush\(\)/, 'client must keep buffered model narration until the 3-action cadence is ready')
-  assert.match(dispatcher, /handleStepAdvance[\s\S]{0,180}this\.flushNarration\(true\)/, 'step transitions must flush required phase-end model narration even before the normal 3-action cadence')
+  assert.match(dispatcher, /private handleStepAdvance[\s\S]*?this\.flushNarration\(true\)/, 'step transitions must flush required phase-end model narration even before the normal 3-action cadence')
   assert.doesNotMatch(dispatcher, /handleStepAdvance[\s\S]{0,180}this\.toolsSinceLastNarration = 0/, 'normal step transitions must not reset the global narration cadence')
   assert.match(dispatcher, /setComputerPanelActiveItemId\(panelFocusIdForTool\(event\.name,\s*event\.id\)\)/, 'new tool starts must focus their live computer panel item')
   assert.match(computerPanel, /computerPanelActiveItemId/, 'computer panel must follow the explicit active item pointer')
@@ -85,6 +85,8 @@ async function assertSourceContracts() {
   assert.match(agentLoop, /if \(lastStreamResult\.cadenceProgressUpdate\)[\s\S]*carriedCadenceActionCount\(lastStreamResult\)[\s\S]*acceptProgressNarration[\s\S]*remainingVisibleActions: carriedVisibleActions[\s\S]*this\.emitter\.progressUpdate\(acceptedNarration\.text,[\s\S]*beforeToolId: lastStreamResult\.cadenceProgressToolCallId[\s\S]*remainingVisibleActions: 0[\s\S]*streamProcessor\.commitBufferedEmission\(\)[\s\S]*lastToolResults = await toolPipeline\.executeAll/, 'model-authored progress must release at the exact pre-action position while staged, exposed-file, and deferred paths each count that action once')
   assert.match(streamProcessor, /function carriedCadenceActionCount[\s\S]*cadenceProgressToolCallId[\s\S]*provisionalStartEmitted \? 1 : 0/, 'server cadence reset must carry only the exact action that was provisionally staged')
   assert.match(agentLoop, /retryNarrationCadenceAttemptWithoutNewAction\(state\)/, 'a failed cadence stream must stay due without blocking later work')
+  assert.match(agentLoop, /if \(lastStreamResult\.cadenceProgressViolation\) \{\s*pendingActionSelectionRepairPrompt = cadenceNarrationActionRetryMessage/,
+    'narration repair must survive context compaction instead of repeating the same failed model request')
   assert.doesNotMatch(agentLoop, /Distinct upcoming focus/, 'narration must not be seeded with a broad next-plan-phase cue')
   assert.match(narrationMemory, /Required neutral result from completed actions; never claim the pending action/, 'compact native cadence schema must distinguish completed evidence from the pending action')
   assert.match(agentLoop, /do not use an operation[\s\S]*as the outcome[\s\S]*source-action lead is valid/, 'shared turn guidance must distinguish concrete source-led findings from action bookkeeping')
@@ -173,7 +175,7 @@ import assert from 'node:assert/strict'
 import { cleanThinkingTags, sanitizeNarrationText, stripNarrationArtifacts, stripToolActionNarration } from ${JSON.stringify(join(root, 'src/lib/stream/cleaners.ts'))}
 import { strictActionLabelFromArgs } from ${JSON.stringify(join(root, 'src/lib/stream/ActivityDescriber.ts'))}
 import { advanceStep, createInitialState } from ${JSON.stringify(join(root, 'src/lib/agent/AgentState.ts'))}
-import { acceptProgressNarration, beginNarrationCadenceAttempt, deferNarrationCadenceAttempt, extractCadenceProgressUpdate, finishNarrationCadenceAttempt, narrationStructureSignature, retryNarrationCadenceAfterNoProgress, retryNarrationCadenceAttemptWithoutNewAction, reviewProgressNarration, stripCadenceProgressUpdateFromArguments, visibleNarrationActionHeadroom, withCadenceProgressUpdateSchemas, workLogSinceAcceptedNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
+import { acceptProgressNarration, beginNarrationCadenceAttempt, cadenceNarrationStepIndex, deferNarrationCadenceAttempt, extractCadenceProgressUpdate, finishNarrationCadenceAttempt, narrationStructureSignature, retryNarrationCadenceAfterNoProgress, retryNarrationCadenceAttemptWithoutNewAction, reviewProgressNarration, stripCadenceProgressUpdateFromArguments, visibleNarrationActionHeadroom, withCadenceProgressUpdateSchemas, workLogSinceAcceptedNarration } from ${JSON.stringify(join(root, 'src/lib/agent/NarrationMemory.ts'))}
 
 export function runNarrationSmoke() {
   const registryTool = {
@@ -230,6 +232,10 @@ export function runNarrationSmoke() {
   phaseResetState.workLog.push('[1] Finished the research phase')
   advanceStep(phaseResetState, 'Research evidence gathered')
   assert.equal(phaseResetState.currentStepIdx, 1)
+  assert.equal(cadenceNarrationStepIndex(phaseResetState), 0, 'carried narration remains with the preceding phase before the new phase has acted')
+  phaseResetState.stepToolCallCount = 1
+  assert.equal(cadenceNarrationStepIndex(phaseResetState), 1, 'after the first action, narration may follow work inside the new phase')
+  phaseResetState.stepToolCallCount = 0
   assert.equal(phaseResetState.visibleToolActionsSinceLastNarration, 3, 'phase advancement without narration must preserve the pending update')
   assert.equal(beginNarrationCadenceAttempt(phaseResetState), true, 'a phase transition must not defer a due update')
   finishNarrationCadenceAttempt(phaseResetState)

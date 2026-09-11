@@ -1453,7 +1453,7 @@ async function assertSourceContracts() {
   assert.match(contextManager, /assistant narration compacted|stale assistant narration compacted/, 'stale assistant prose should be compacted after tool evidence is captured')
   assert.doesNotMatch(eventDispatcher, /Done - I completed the task and prepared the deliverable/, 'completed task messages must not force a canned completion sentence')
   assert.doesNotMatch(eventDispatcher, /\*\*Deliverables\*\*[\s\S]*Below you can find:/, 'completed task messages must not force deliverables headings when artifact cards already exist')
-  assert.match(eventDispatcher, /a short neutral fallback only when the model did not provide/, 'client completion fallback must be neutral and only used when the LLM handoff is unavailable')
+  assert.doesNotMatch(eventDispatcher, /The requested deliverable is ready to open/, 'client must not replace model-authored handoffs with canned completion prose')
   assert.match(policyEngine, /Write a natural final response/, 'backend final prompts must request a natural final response')
   assert.match(planManager, /Write a natural final response/, 'plan completion prompts must request a natural final response')
   assert.match(policyEngine, /Do not mention how many searches, browses, checks, tool calls, sources, steps, or phases you completed/, 'backend final prompts must not report process metrics in final answers')
@@ -2168,6 +2168,17 @@ export async function runLedgerSmoke() {
   assert.ok(normalResearchDepth.requiredCalls >= 5, 'normal research phases must keep a real evidence floor: ' + JSON.stringify(normalResearchDepth))
   assert.ok(normalResearchDepth.requiredSourceBreadth >= 3, 'normal research phases need several source domains: ' + JSON.stringify(normalResearchDepth))
 
+  const explicitThreeSourceDepth = researchDepthProfileForState(makeDepthState(
+    'Compare three methods using three web searches and three source-page reads, then save a concise cited report.',
+    3,
+    ['Gather evidence', 'Synthesize and compare approaches', 'Deliver report'],
+    ['Read the requested sources', 'Compare the gathered evidence', 'Save report'],
+  ))
+  assert.ok(explicitThreeSourceDepth.requiredSourceBreadth <= 3,
+    'per-phase depth minimums must not expand the explicitly requested three source pages: ' + JSON.stringify(explicitThreeSourceDepth))
+  assert.ok(explicitThreeSourceDepth.requiredCalls <= 6,
+    'three searches and three reads must not require repeated completion turns')
+
   const explicitFiveSourceDepth = researchDepthProfileForState(makeDepthState(
     'Compare at least five credible sources and save a cited Markdown report.',
     3,
@@ -2634,6 +2645,28 @@ export async function runLedgerSmoke() {
   )
   assert.equal(synthesisAdvanceState.currentStepIdx, 2, 'a substantive evidence-reuse analysis must advance directly to the report step')
   assert.ok(synthesisAdvanceActions.some(action => action.type === 'step_advance'), 'analysis synthesis should advance without another search/read loop')
+
+  const synthesisCadenceState = createInitialState(false, timeouts)
+  synthesisCadenceState.originalUserRequest = synthesisAdvanceState.originalUserRequest
+  synthesisCadenceState.taskStrategy = 'research'
+  synthesisCadenceState.currentPlanItems = [...synthesisAdvanceState.currentPlanItems]
+  synthesisCadenceState.currentPlanScopes = [...synthesisAdvanceState.currentPlanScopes]
+  synthesisCadenceState.currentStepIdx = 1
+  synthesisCadenceState.stepFindings.set(0, 'Five independent sources were opened and their findings captured.')
+  synthesisCadenceState.visitedUrls = new Set(synthesisAdvanceState.visitedUrls)
+  synthesisCadenceState.distinctSourceDomains = new Set(synthesisAdvanceState.distinctSourceDomains)
+  synthesisCadenceState.stepToolCallCount = 3
+  synthesisCadenceState.visibleToolActionsSinceLastNarration = 3
+  updatePhase(synthesisCadenceState)
+  const synthesisCadenceActions = policy.evaluate(
+    synthesisCadenceState, new Map(),
+    'Across the independent trials, employee wellbeing improves consistently, while productivity is usually maintained rather than uniformly increased. Controlled trials provide stronger evidence than employer case studies because selection and reporting bias remain material limitations.',
+    true, 30,
+  )
+  assert.equal(synthesisCadenceState.currentStepIdx, 2, 'model-requested synthesis completion must advance: ' + JSON.stringify(synthesisCadenceActions))
+  assert.equal(synthesisCadenceState.visibleToolActionsSinceLastNarration, 0,
+    'the visible phase-end synthesis must satisfy cadence instead of forcing narration before the next phase action')
+  assert.equal(synthesisCadenceState.recentNarrations.at(-1)?.stepIdx, 1)
 
   const cadenceState = createInitialState(false, timeouts)
   cadenceState.currentPlanItems = ['Gather source evidence', 'Write final answer']

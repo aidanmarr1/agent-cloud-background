@@ -1013,6 +1013,8 @@ export async function runSmoke() {
   assert.equal(invalidCadenceResult.cadenceProgressUpdate, undefined)
   assert.equal(invalidCadenceResult.toolCalls.size, 0, 'invalid narration must be repaired before executing the fourth action')
   assert.equal(invalidCadenceResult.cadenceProgressViolation?.code, 'invalid_progress_update')
+  assert.ok(invalidCadenceResult.cadenceProgressViolation?.rejectedUpdate,
+    'the next compact model turn must receive the rejected update so it can correct the actual mistake')
   assert.equal(invalidCadenceState.narrationNextAttemptAt, 4, 'cadence remains eligible after the accepted action without forcing a repair turn')
 
   const missingCadenceEmitter = makeEmitter()
