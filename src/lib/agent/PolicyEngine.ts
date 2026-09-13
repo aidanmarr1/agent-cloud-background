@@ -371,7 +371,9 @@ function shouldAcceptFinalInlineText(state: AgentStateData, content: string): bo
   const explicitlyRequestsShortLiteralAnswer =
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:(?:with|using)\s+)?(?:exactly|only)\b/i.test(request) ||
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:only\s+)?(?:the\s+)?(?:word|string|text|phrase)\b/i.test(request)
-  if (text.length < 60 && !explicitlyRequestsShortLiteralAnswer) return false
+  // Correct final answers can be shorter than a sentence (for example a
+  // calculation result). Length is not evidence that another paid turn helps.
+  if (!text) return false
   if (looksLikeFinalStatusUpdate(text) || looksLikeProgressOrRecoveryOnly(text)) return false
   return explicitlyRequestsShortLiteralAnswer ||
     /[.!?)]\s*$/.test(text) ||

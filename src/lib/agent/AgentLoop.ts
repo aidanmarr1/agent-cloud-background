@@ -1302,7 +1302,9 @@ function shouldCompleteFinalInlineAnswerTurn(
   const explicitlyRequestsShortLiteralAnswer =
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:(?:with|using)\s+)?(?:exactly|only)\b/i.test(request) ||
     /\b(?:reply|respond|answer|output|return|say|write)\s+(?:only\s+)?(?:the\s+)?(?:word|string|text|phrase)\b/i.test(request)
-  if (text.length < 80 && !explicitlyRequestsShortLiteralAnswer) return false
+  // Correct final answers can be shorter than a sentence (for example a
+  // calculation result). Length is not evidence that another paid turn helps.
+  if (!text) return false
   const startsLikeStatus =
     /^(?:i(?:'|’)?ll|i will|i am going to|we(?:'|’)?ll|let me|next,?\s+i|now,?\s+i)\b/i.test(text) ||
     /\blet me\b/i.test(text.slice(0, 240)) ||

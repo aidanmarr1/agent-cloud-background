@@ -431,6 +431,20 @@ export function runCompletionAuditSmoke() {
   )
   assert.equal(inlineCodeExplanation.finalInlineAnswerDelivered, true)
 
+  const shortCalculation = createInitialState(false, timeouts)
+  shortCalculation.currentPlanItems = ['Calculate with Python and report the result']
+  shortCalculation.currentPlanScopes = [null]
+  shortCalculation.currentStepIdx = 0
+  shortCalculation.taskStrategy = 'general'
+  shortCalculation.originalUserRequest = 'Use the terminal to calculate 17 * 19. Reply with the result. Do not create files.'
+  shortCalculation.taskSuccessfulToolTypeCounts.execute_command = 1
+  const shortActions = new PolicyEngine().evaluate(
+    shortCalculation, new Map(), 'The result of 17 × 19 is **323**.', false, 40,
+  )
+  assert.ok(shortActions.some(action => action.type === 'terminate' && action.reason === 'inline_answer_complete'),
+    'a correct concise final answer must not be repeated until the no-progress guard fails the task')
+  assert.equal(shortCalculation.finalInlineAnswerDelivered, true)
+
   const missingInlineAnswer = createInitialState(false, timeouts)
   missingInlineAnswer.currentPlanItems = ['Research current evidence', 'Answer the user']
   missingInlineAnswer.currentPlanScopes = [null, null]
