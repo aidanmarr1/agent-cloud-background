@@ -72,6 +72,15 @@ const CLOUD_ENV = [
 
 loadLocalEnv()
 
+if (process.env.AGENT_TASK_DISPATCH_MODE?.trim() === 'e2b_job') {
+  CLOUD_ENV.find(entry => entry.name === 'AGENT_REQUIRE_TASK_WORKER_HEARTBEAT').value = 'false'
+  CLOUD_ENV.push(
+    { name: 'AGENT_TASK_DISPATCH_MODE', value: 'e2b_job' },
+    { name: 'E2B_TASK_RUNTIME_TEMPLATE', source: 'local', required: true },
+    { name: 'E2B_TASK_RUNTIME_REVISION', source: 'local', required: true },
+  )
+}
+
 function readArg(name) {
   const equalPrefix = `${name}=`
   const equalValue = args.find((arg) => arg.startsWith(equalPrefix))

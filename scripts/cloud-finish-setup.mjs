@@ -236,6 +236,9 @@ const skipWorkerReadyWait = hasFlag('--skip-worker-ready-wait')
 const skipDeployedPreflight = hasFlag('--skip-deployed-preflight')
 // The full-time Render worker is the production default. On-demand execution
 // remains opt-in and must be requested explicitly with render_job.
+if (env('AGENT_TASK_DISPATCH_MODE') === 'e2b_job') {
+  throw new Error('The Render rollout helper cannot deploy e2b_job. Follow docs/e2b-task-runtime.md; keep Render suspended and verify the E2B template before reopening intake.')
+}
 const onDemandDispatch = env('AGENT_TASK_DISPATCH_MODE') === 'render_job'
 
 const requiredLocalEnv = [

@@ -49,6 +49,9 @@ function envBoolEnabled(name: string, fallback = false): boolean {
 export function isLikelyLocalWorkerHostname(value: string | null | undefined): boolean {
   const host = (value || '').trim().toLowerCase()
   if (!host) return true
+  // E2B uses this exact hostname inside its hosted VMs. It is not an mDNS
+  // laptop name; keep the remaining .local/.localdomain exclusions intact.
+  if (host === 'e2b.local') return false
   if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
   if (host.endsWith('.local') || host.endsWith('.localdomain')) return true
   if (host.includes('macbook') || host.includes('imac') || host.includes('mac-mini')) return true

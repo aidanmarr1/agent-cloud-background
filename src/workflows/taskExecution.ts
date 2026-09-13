@@ -228,7 +228,7 @@ async function observeTaskExecutionProviderStep(input: {
 
   const [
     {
-      RENDER_DISPATCH_BACKEND,
+      taskDispatchBackend,
       listTaskDispatchProviderJobs,
       retrieveTaskDispatchProviderJob,
       validateTaskExecutionRunId,
@@ -344,7 +344,7 @@ async function observeTaskExecutionProviderStep(input: {
         await reconcileTaskDispatchAttempt(
           dispatch.dispatchId,
           runId,
-          RENDER_DISPATCH_BACKEND,
+          taskDispatchBackend(),
           job.providerJobId,
         )
         await recordTaskDispatchProviderStatus(

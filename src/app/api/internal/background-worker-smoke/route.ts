@@ -228,7 +228,7 @@ async function settleOnDemandProviderJobs(input: {
       )
       if (listed.outcome !== 'complete') {
         cleanObservations = 0
-        lastReason = `Render job listing was not authoritative (${listed.errorCode}).`
+        lastReason = `Task runtime listing was not authoritative (${listed.errorCode}).`
         await sleep(PROVIDER_SETTLE_POLL_MS)
         continue
       }
@@ -258,7 +258,7 @@ async function settleOnDemandProviderJobs(input: {
         } else {
           authoritative = false
           lastReason = observation.outcome === 'unknown'
-            ? `Render job retrieval was not authoritative (${observation.errorCode}).`
+            ? `Task runtime retrieval was not authoritative (${observation.errorCode}).`
             : 'A durable Render dispatch was not visible from the provider yet.'
         }
       }
@@ -293,11 +293,11 @@ async function settleOnDemandProviderJobs(input: {
           if (cancellation.outcome === 'accepted') {
             cancellationAccepted.add(job.providerJobId)
           } else if (cancellation.outcome === 'unknown') {
-            lastReason = `Render job cancellation was not authoritative (${cancellation.errorCode}).`
+            lastReason = `Task runtime cancellation was not authoritative (${cancellation.errorCode}).`
           } else {
             // A 404 can be eventual provider state. Require a subsequent
             // authoritative list/retrieve cycle before deleting durable rows.
-            lastReason = 'A Render job disappeared while cancellation was requested.'
+            lastReason = 'A Task runtime disappeared while cancellation was requested.'
           }
         }
       }
@@ -636,7 +636,7 @@ export async function GET(request: NextRequest) {
       queueName: taskQueueName(),
       workerCount: workers.length,
       hostedWorkerCount: cloudCapableWorkers.length,
-      executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
+      executorMode: onDemandDispatch ? (getTaskExecutionCoordinatorStatus().backend === 'e2b-task-runtime' ? 'e2b_job' : 'render_job') : 'persistent_worker',
       activeDiscovery: true,
       cleanedUp: cleanup.cleanedUp,
       providerExecutionStopped: cleanup.safeToCleanup,
@@ -678,7 +678,7 @@ export async function GET(request: NextRequest) {
       activeDiscovery: true,
       workerCount: workers.length,
       hostedWorkerCount: cloudCapableWorkers.length,
-      executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
+      executorMode: onDemandDispatch ? (getTaskExecutionCoordinatorStatus().backend === 'e2b-task-runtime' ? 'e2b_job' : 'render_job') : 'persistent_worker',
       cleanedUp: cleanup.cleanedUp,
       providerExecutionStopped: cleanup.safeToCleanup,
       providerJobsObserved: cleanup.observedProviderJobs,
@@ -707,7 +707,7 @@ export async function GET(request: NextRequest) {
     queueName: taskQueueName(),
     workerCount: workers.length,
     hostedWorkerCount: cloudCapableWorkers.length,
-    executorMode: onDemandDispatch ? 'render_job' : 'persistent_worker',
+    executorMode: onDemandDispatch ? (getTaskExecutionCoordinatorStatus().backend === 'e2b-task-runtime' ? 'e2b_job' : 'render_job') : 'persistent_worker',
     activeDiscovery: true,
     cleanedUp: cleanup.cleanedUp,
     providerExecutionStopped: cleanup.safeToCleanup,

@@ -3346,7 +3346,7 @@ export async function inspectTaskExecutionDispatchState(
       from agent_task_dispatches
       where run_id = ?
         and queue_name = ?
-        and backend = 'render-one-off'
+        and backend in ('render-one-off', 'e2b-task-runtime')
       order by created_at_ms asc, dispatch_id asc
     `,
     [runId, queueName],
@@ -3789,7 +3789,7 @@ export async function recordTaskDispatchProviderStatus(
       set status = 'terminal',
           reservation_token = null,
           error = case when ? = 'not_found'
-            then 'Render did not report an exact matching one-off job after the observation grace.'
+            then 'The provider did not report an exact matching task runtime after the observation grace.'
             else error
           end,
           updated_at_ms = ?
@@ -4503,7 +4503,7 @@ async function fenceAndFinalizeStaleTask(fence: StaleTaskTerminalFence): Promise
           from agent_task_dispatches
           where run_id = ?
             and queue_name = ?
-            and backend = 'render-one-off'
+            and backend in ('render-one-off', 'e2b-task-runtime')
             and status in ('creating', 'unknown', 'created')
             and (? is null or dispatch_id != ?)
           limit 1
@@ -4786,7 +4786,7 @@ export async function failTaskExecutionDispatch(
               from agent_task_dispatches
               where agent_task_dispatches.run_id = agent_task_jobs.run_id
                 and agent_task_dispatches.queue_name = agent_task_jobs.queue_name
-                and agent_task_dispatches.backend = 'render-one-off'
+                and agent_task_dispatches.backend in ('render-one-off', 'e2b-task-runtime')
                 and agent_task_dispatches.status in ('creating', 'unknown', 'created')
                 and (? is null or agent_task_dispatches.dispatch_id != ?)
             )

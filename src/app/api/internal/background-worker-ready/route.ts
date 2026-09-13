@@ -188,19 +188,24 @@ export async function GET(request: NextRequest) {
   let providerReadiness: TaskDispatchProviderReadiness | null = null
   if (onDemandDispatch && coordinatorStatus?.configured) {
     providerReadiness = await getTaskDispatchProviderReadiness()
-    checks.renderProviderReachable = providerReadiness.ok
-    checks.renderBaseIsBackgroundWorker = providerReadiness.ok &&
-      providerReadiness.serviceType === 'background_worker'
-    checks.renderBaseWorkerSuspended = providerReadiness.ok &&
-      providerReadiness.suspended === 'suspended'
-    if (!providerReadiness.ok) {
-      errors.push(`Render task executor readiness failed (${providerReadiness.errorCode}).`)
+    if (coordinatorStatus.backend === 'e2b-task-runtime') {
+      checks.e2bTaskRuntimeReachable = providerReadiness.ok
+      if (!providerReadiness.ok) errors.push(`E2B task runtime readiness failed (${providerReadiness.errorCode}).`)
     } else {
-      if (providerReadiness.serviceType !== 'background_worker') {
-        errors.push('RENDER_WORKER_SERVICE_ID must identify a Render background worker.')
-      }
-      if (providerReadiness.suspended !== 'suspended') {
-        errors.push('The Render base worker is not suspended; suspend it so idle compute is not billed.')
+      checks.renderProviderReachable = providerReadiness.ok
+      checks.renderBaseIsBackgroundWorker = providerReadiness.ok &&
+        providerReadiness.serviceType === 'background_worker'
+      checks.renderBaseWorkerSuspended = providerReadiness.ok &&
+        providerReadiness.suspended === 'suspended'
+      if (!providerReadiness.ok) {
+        errors.push(`Render task executor readiness failed (${providerReadiness.errorCode}).`)
+      } else {
+        if (providerReadiness.serviceType !== 'background_worker') {
+          errors.push('RENDER_WORKER_SERVICE_ID must identify a Render background worker.')
+        }
+        if (providerReadiness.suspended !== 'suspended') {
+          errors.push('The Render base worker is not suspended; suspend it so idle compute is not billed.')
+        }
       }
     }
   }
@@ -281,7 +286,7 @@ export async function GET(request: NextRequest) {
     warnings,
     workers,
     taskExecutor: {
-      mode: onDemandDispatch ? 'render_job' : 'persistent_worker',
+      mode: onDemandDispatch ? (coordinatorStatus?.backend === 'e2b-task-runtime' ? 'e2b_job' : 'render_job') : 'persistent_worker',
       provider: providerReadiness,
     },
     taskIntake: {

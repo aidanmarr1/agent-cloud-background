@@ -9,7 +9,7 @@ const srcPath = fileURLToPath(new URL('../src', import.meta.url))
 
 loadLocalEnvFiles(rootUrl)
 
-const jiti = createJiti(import.meta.url, {
+const jiti = createJiti(import.meta.url, { nativeModules: ['e2b'],
   alias: {
     '@': srcPath,
   },

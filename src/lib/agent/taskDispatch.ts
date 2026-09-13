@@ -1,4 +1,8 @@
 import 'server-only'
+import { TaskDispatchProviderError } from './taskDispatchError'
+export { TaskDispatchProviderError } from './taskDispatchError'
+import { usesE2BTaskRuntime, taskDispatchBackend, E2B_DISPATCH_BACKEND } from './taskRuntimeMode'
+export { taskDispatchBackend } from './taskRuntimeMode'
 
 import {
   completeTaskDispatchAttempt,
@@ -19,12 +23,15 @@ const SAFE_RENDER_PLAN_ID = /^plan-srv-[0-9a-z-]{3,64}$/
 const SAFE_PROVIDER_JOB_ID = /^job-[0-9a-z]{20}$/
 
 type TaskDispatchEnvironmentName =
+  | 'E2B_API_KEY'
+  | 'E2B_TASK_RUNTIME_TEMPLATE'
+  | 'E2B_TASK_RUNTIME_REVISION'
   | 'RENDER_API_KEY'
   | 'RENDER_WORKER_SERVICE_ID'
   | 'RENDER_ON_DEMAND_JOB_PLAN_ID'
 
 export interface TaskDispatchConfigurationStatus {
-  backend: typeof RENDER_DISPATCH_BACKEND
+  backend: typeof RENDER_DISPATCH_BACKEND | typeof E2B_DISPATCH_BACKEND
   configured: boolean
   apiKeyConfigured: boolean
   serviceIdConfigured: boolean
@@ -39,8 +46,9 @@ export type TaskDispatchProviderReadiness =
   | {
       ok: true
       serviceId: string
-      suspended: 'suspended' | 'not_suspended'
+      suspended: 'suspended' | 'not_suspended' | null
       serviceType:
+        | 'task_runtime'
         | 'static_site'
         | 'web_service'
         | 'private_service'
@@ -129,33 +137,13 @@ export type TaskDispatchProviderJobCancellation =
       providerJobId: string
     } & TaskDispatchProviderObservationFailure)
 
-export class TaskDispatchProviderError extends Error {
-  constructor(
-    readonly code:
-      | 'CONFIGURATION_MISSING'
-      | 'CONFIGURATION_INVALID'
-      | 'REQUEST_TIMEOUT'
-      | 'NETWORK_ERROR'
-      | 'RATE_LIMITED'
-      | 'PROVIDER_UNAVAILABLE'
-      | 'PROVIDER_REJECTED'
-      | 'INVALID_PROVIDER_RESPONSE',
-    message: string,
-    readonly retryable: boolean,
-    readonly status: number | null = null,
-    readonly launchDisposition: 'known_rejection' | 'ambiguous' | null = null,
-  ) {
-    super(message)
-    this.name = 'TaskDispatchProviderError'
-  }
-}
 
 function environmentValue(name: TaskDispatchEnvironmentName): string {
   return process.env[name]?.trim() || ''
 }
 
 export function usesOnDemandTaskDispatch(): boolean {
-  return process.env.AGENT_TASK_DISPATCH_MODE?.trim() === 'render_job'
+  return usesE2BTaskRuntime() || process.env.AGENT_TASK_DISPATCH_MODE?.trim() === 'render_job'
 }
 
 export function validateTaskExecutionRunId(runId: string): string {
@@ -167,6 +155,17 @@ export function validateTaskExecutionRunId(runId: string): string {
 }
 
 export function getTaskDispatchConfigurationStatus(): TaskDispatchConfigurationStatus {
+  if (usesE2BTaskRuntime()) {
+    const missing: TaskDispatchEnvironmentName[] = (['E2B_API_KEY', 'E2B_TASK_RUNTIME_TEMPLATE', 'E2B_TASK_RUNTIME_REVISION'] as const)
+      .filter(key => !environmentValue(key))
+    const invalid: TaskDispatchEnvironmentName[] = []
+    if (environmentValue('E2B_TASK_RUNTIME_REVISION') && !/^[a-f0-9]{64}$/.test(environmentValue('E2B_TASK_RUNTIME_REVISION'))) invalid.push('E2B_TASK_RUNTIME_REVISION')
+    return { backend: E2B_DISPATCH_BACKEND, configured: missing.length === 0 && invalid.length === 0,
+      apiKeyConfigured: !missing.includes('E2B_API_KEY'),
+      serviceIdConfigured: !missing.includes('E2B_TASK_RUNTIME_TEMPLATE'),
+      serviceIdValid: !missing.includes('E2B_TASK_RUNTIME_TEMPLATE'),
+      planIdConfigured: true, planIdValid: true, missing, invalid }
+  }
   const apiKeyConfigured = environmentValue('RENDER_API_KEY').length > 0
   const serviceId = environmentValue('RENDER_WORKER_SERVICE_ID')
   const serviceIdConfigured = serviceId.length > 0
@@ -486,6 +485,18 @@ function serviceReadinessFromResponse(
 
 export async function getTaskDispatchProviderReadiness():
   Promise<TaskDispatchProviderReadiness> {
+  if (usesE2BTaskRuntime()) {
+    try {
+      const { Sandbox } = await import('e2b')
+      const pager = Sandbox.list({ apiKey: process.env.E2B_API_KEY, requestTimeoutMs: 20_000, limit: 1,
+        query: { metadata: { app: 'agent', role: 'task-runtime' } } })
+      await pager.nextItems()
+      return { ok: true, serviceId: environmentValue('E2B_TASK_RUNTIME_TEMPLATE'), suspended: null, serviceType: 'task_runtime' }
+    } catch {
+      return { ok: false, serviceId: null, suspended: null, serviceType: null,
+        errorCode: 'PROVIDER_UNAVAILABLE', retryable: true, status: null }
+    }
+  }
   let serviceId: string | null = null
   try {
     const configuration = requireRenderServiceConfiguration()
@@ -531,6 +542,10 @@ export async function retrieveTaskDispatchProviderJob(
   providerJobId: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<TaskDispatchProviderJobObservation> {
+  if (providerJobId.startsWith('e2b:')) {
+    const { e2bTaskRuntimeProvider } = await import('./e2bTaskRuntime')
+    return e2bTaskRuntimeProvider().retrieve(providerJobId, options)
+  }
   const normalizedJobId = providerJobId.trim()
   if (!SAFE_PROVIDER_JOB_ID.test(normalizedJobId)) {
     throw new Error('Invalid task runtime job id.')
@@ -577,6 +592,10 @@ export async function cancelTaskDispatchProviderJob(
   providerJobId: string,
   options: { signal?: AbortSignal } = {},
 ): Promise<TaskDispatchProviderJobCancellation> {
+  if (providerJobId.startsWith('e2b:')) {
+    const { e2bTaskRuntimeProvider } = await import('./e2bTaskRuntime')
+    return e2bTaskRuntimeProvider().cancel(providerJobId, options)
+  }
   const normalizedJobId = providerJobId.trim()
   if (!SAFE_PROVIDER_JOB_ID.test(normalizedJobId)) {
     throw new Error('Invalid task runtime job id.')
@@ -616,6 +635,10 @@ export async function listTaskDispatchProviderJobs(input: {
 }, options: {
   signal?: AbortSignal
 } = {}): Promise<TaskDispatchProviderJobListObservation> {
+  if (usesE2BTaskRuntime()) {
+    const { e2bTaskRuntimeProvider } = await import('./e2bTaskRuntime')
+    return e2bTaskRuntimeProvider().list(input.runId, options)
+  }
   const runId = validateTaskExecutionRunId(input.runId)
   if (!Number.isFinite(input.createdAfterMs) || input.createdAfterMs < 0) {
     throw new Error('Invalid task runtime job observation time.')
@@ -760,7 +783,7 @@ export async function dispatchTaskExecution(input: {
   const reservation = await reserveTaskDispatchAttempt({
     runId,
     dispatchId,
-    backend: RENDER_DISPATCH_BACKEND,
+    backend: taskDispatchBackend(),
   })
 
   if (reservation.status === 'created' && reservation.providerJobId) {
@@ -795,7 +818,9 @@ export async function dispatchTaskExecution(input: {
 
   let providerJobId: string
   try {
-    providerJobId = await createRenderOneOffJob(runId)
+    providerJobId = usesE2BTaskRuntime()
+      ? await (await import('./e2bTaskRuntime')).e2bTaskRuntimeProvider().launch(runId, dispatchId)
+      : await createRenderOneOffJob(runId)
   } catch (error) {
     const classified = error instanceof TaskDispatchProviderError
       ? error
@@ -841,7 +866,7 @@ export async function dispatchTaskExecution(input: {
     await reconcileTaskDispatchAttempt(
       dispatchId,
       runId,
-      RENDER_DISPATCH_BACKEND,
+      taskDispatchBackend(),
       providerJobId,
     ).catch(() => undefined)
     return {
